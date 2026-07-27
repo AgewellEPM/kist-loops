@@ -1,0 +1,10 @@
+{
+  "_comment": "TEMPLATE — placeholder endpoints. Replace baseURL/paths with Scribe AI's REAL API (I have no spec for it yet), set SCRIBE_API_KEY in your env, then drop this as scribe.json into ~/.config/kist/connectors/.",
+  "name": "scribe",
+  "baseURL": "https://api.scribe.example/v1",
+  "auth": { "type": "bearer", "env": "SCRIBE_API_KEY" },
+  "actions": [
+    { "name": "create_document", "method": "POST", "path": "/documents", "description": "Create a Scribe document (placeholder path)" },
+    { "name": "get_document", "method": "GET", "path": "/documents/{id}", "description": "Fetch a document by id (placeholder path)" }
+  ]
+}

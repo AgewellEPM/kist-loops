@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fca": {
+      "command": "/Users/lukekist/Downloads/FloatingChatApp-save-complex-agent-state/mcp-server/.build/release/fca-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

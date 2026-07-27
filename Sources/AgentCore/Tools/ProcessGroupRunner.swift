@@ -1,0 +1,316 @@
+import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
+/// Spawn a child in its OWN process group and tear down the WHOLE group on timeout, output
+/// cap, or normal return — so a forked grandchild (`sh -c "sleep 30 &"`) can't orphan past
+/// the tool call. This closes the RunCommandTool KNOWN RESIDUAL where `terminate()` signalled
+/// only the direct child PID.
+///
+/// How: `posix_spawn` with `POSIX_SPAWN_SETPGROUP` + pgroup `0` makes the child the leader of
+/// a new group whose PGID == its PID, set atomically pre-exec (no setpgid race). Teardown is
+/// `killpg(pgid, SIGTERM)` → grace → `killpg(pgid, SIGKILL)`, which reaches every descendant
+/// still in the group. stdout/stderr are drained on two concurrent threads (no full-pipe
+/// deadlock) into a byte-capped collector.
+///
+/// Cross-platform: Darwin and Glibc expose the same `<spawn.h>`/`<signal.h>` surface; the only
+/// platform seam is the import above and the `Int16(...)` flags cast (Darwin's `setflags` arg
+/// is a `short`). `WIFEXITED`/`WEXITSTATUS`/`WTERMSIG` are C macros not imported into Swift, so
+/// the status bit math is reimplemented below.
+///
+/// KNOWN RESIDUAL (documented, not papered over): a descendant that calls `setsid()`/`daemon()`
+/// deliberately leaves the process group and survives `killpg`. Acceptable for a shell-exec
+/// tool; the race-free upgrade for untrusted/fork-heavy workloads is a cgroup-v2 `cgroup.kill`
+/// or a PID-namespace whose PID 1 is reaped (future hardening tier).
+enum ProcessGroupRunner {
+
+    struct Outcome {
+        let combined: String     // stdout then stderr, each capped per-stream
+        let exitCode: Int32      // process exit code, or 128+signal if signalled
+        let timedOut: Bool
+    }
+
+    /// Blocking — call OFF the main actor (RunCommandTool wraps it in a continuation on a
+    /// background queue). `env` is the already-scrubbed child environment.
+    static func run(launchPath: String,
+                    launchArgs: [String],
+                    cwd: String,
+                    env: [String: String],
+                    timeoutSeconds: Int,
+                    capPerStream: Int,
+                    graceSeconds: Int = 2) -> Outcome {
+
+        // --- pipes (parent reads [0], child writes [1]) ---
+        // Split so a failure of the 2nd/3rd pipe() closes the already-opened fds (no leak).
+        var outFds: [Int32] = [-1, -1]
+        var errFds: [Int32] = [-1, -1]
+        var stopFds: [Int32] = [-1, -1]   // self-pipe to wake drain poll() on shutdown
+        func pipeFailure() -> Outcome { Outcome(combined: "could not create pipe: \(Self.strerr())", exitCode: -1, timedOut: false) }
+        guard pipe(&outFds) == 0 else { return pipeFailure() }
+        guard pipe(&errFds) == 0 else {
+            close(outFds[0]); close(outFds[1]); return pipeFailure()
+        }
+        guard pipe(&stopFds) == 0 else {
+            close(outFds[0]); close(outFds[1]); close(errFds[0]); close(errFds[1]); return pipeFailure()
+        }
+
+        // --- file actions: dup write ends onto child stdout/stderr; close all inherited copies ---
+        // Darwin imports these opaque types as optional pointers; Glibc as structs.
+        #if canImport(Darwin)
+        var fa: posix_spawn_file_actions_t? = nil
+        #else
+        var fa = posix_spawn_file_actions_t()
+        #endif
+        // Accumulate the first failure of any spawn-setup call. If ANY fails we must NOT
+        // launch — a silently-dropped fd-lockdown or process-group action would run the child
+        // unconfined / un-killable, defeating the security guarantees.
+        var setupErr: Int32 = 0
+        func chk(_ rc: Int32) { if setupErr == 0 && rc != 0 { setupErr = rc } }
+
+        // Gate every add*/set* on a SUCCESSFUL *_init — calling them on an uninitialized
+        // object is undefined behavior. The defer below only destroys what was initialized.
+        let faInitRC = posix_spawn_file_actions_init(&fa)
+        let faInited = faInitRC == 0
+        chk(faInitRC)
+        if faInited {
+            // Lock down the child's fd table so NOTHING the long-lived parent has open (a log
+            // file, a provider socket, any other writable fd) leaks into the spawned command —
+            // an inherited fd would BYPASS the Seatbelt sandbox, whose kernel enforcement is
+            // acquisition-time (a pre-opened fd/socket stays usable). Actions run in order:
+            // stdin ← /dev/null, stdout/stderr → our pipes, then close everything ≥ 3 (which
+            // also closes our own pipe read/write ends and the stop self-pipe in the child).
+            chk("/dev/null".withCString { posix_spawn_file_actions_addopen(&fa, 0, $0, O_RDONLY, 0) })
+            chk(posix_spawn_file_actions_adddup2(&fa, outFds[1], 1))
+            chk(posix_spawn_file_actions_adddup2(&fa, errFds[1], 2))
+            #if !canImport(Darwin)
+            // Linux/glibc (2.34+): explicitly close every inherited fd ≥ 3. (Darwin uses the
+            // POSIX_SPAWN_CLOEXEC_DEFAULT attr flag below instead — addclosefrom_np isn't on its SDK.)
+            chk(posix_spawn_file_actions_addclosefrom_np(&fa, 3))
+            #endif
+            // Confined cwd (validated by the caller). addchdir_np: macOS 10.15+, glibc 2.29+.
+            chk(cwd.withCString { posix_spawn_file_actions_addchdir_np(&fa, $0) })
+        }
+
+        // --- attributes: new process group, leader == child PID ---
+        #if canImport(Darwin)
+        var attr: posix_spawnattr_t? = nil
+        #else
+        var attr = posix_spawnattr_t()
+        #endif
+        let attrInitRC = posix_spawnattr_init(&attr)
+        let attrInited = attrInitRC == 0
+        chk(attrInitRC)
+        if attrInited {
+            chk(posix_spawnattr_setpgroup(&attr, 0))
+            #if canImport(Darwin)
+            // POSIX_SPAWN_CLOEXEC_DEFAULT (Darwin): every inherited fd is closed at exec except
+            // those set by file actions (our /dev/null stdin + stdout/stderr pipes) — the fd
+            // lockdown that stops a parent fd/socket from bypassing the Seatbelt sandbox.
+            chk(posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP) | Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)))
+            #else
+            chk(posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP)))
+            #endif
+        }
+
+        // --- argv / envp (NULL-terminated C arrays) ---
+        var argv: [UnsafeMutablePointer<CChar>?] = ([launchPath] + launchArgs).map { strdup($0) }
+        argv.append(nil)
+        var envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") }
+        envp.append(nil)
+        defer {
+            for p in argv where p != nil { free(p) }
+            for p in envp where p != nil { free(p) }
+            if faInited { posix_spawn_file_actions_destroy(&fa) }
+            if attrInited { posix_spawnattr_destroy(&attr) }
+        }
+
+        // Fail CLOSED if any setup action failed — never launch a partially-configured child.
+        guard setupErr == 0 else {
+            close(outFds[0]); close(outFds[1]); close(errFds[0]); close(errFds[1])
+            close(stopFds[0]); close(stopFds[1])
+            return Outcome(combined: "spawn setup failed: \(String(cString: strerror(setupErr)))",
+                           exitCode: -1, timedOut: false)
+        }
+
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, launchPath, &fa, &attr, argv, envp)   // returns errno DIRECTLY
+        // Parent must close its copy of the write ends or reads never see EOF.
+        close(outFds[1]); close(errFds[1])
+        guard rc == 0 else {
+            close(outFds[0]); close(errFds[0]); close(stopFds[0]); close(stopFds[1])
+            return Outcome(combined: "could not launch \(launchPath): \(String(cString: strerror(rc)))",
+                           exitCode: -1, timedOut: false)
+        }
+        let pgid = pid   // we made the child its own group leader
+
+        // --- concurrent drains (main owns the read fds) feeding the capped collector ---
+        // GroupKiller guards every killpg behind a "still ours" flag so no signal can ever
+        // target a recycled PGID (the leader's PGID is reusable the instant it is reaped).
+        let killer = GroupKiller(pgid)
+        let collector = BoundedOutputCollector(capPerStream: capPerStream) {
+            killer.kill(SIGTERM)   // runaway output → tear the group down
+        }
+        let drains = DispatchGroup()
+        Self.drain(outFds[0], stop: stopFds[0], into: { collector.appendOut($0) }, group: drains)
+        Self.drain(errFds[0], stop: stopFds[0], into: { collector.appendErr($0) }, group: drains)
+
+        // --- detect leader exit WITHOUT reaping (waitid + WNOWAIT): the un-reaped zombie
+        //     keeps the PGID RESERVED through teardown, so the group sweep below is
+        //     guaranteed to hit only our group, never a recycled PGID. We record waitid's
+        //     result — if it FAILED (e.g. ECHILD because a host SIGCHLD=SIG_IGN/SA_NOCLDWAIT
+        //     auto-reaped the child), there is NO zombie reserving the PGID. ---
+        let exited = DispatchSemaphore(value: 0)
+        let detect = DetectBox()
+        DispatchQueue.global(qos: .userInitiated).async {
+            var info = siginfo_t()
+            var r: Int32
+            repeat { r = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) } while r == -1 && errno == EINTR
+            detect.set(r)
+            exited.signal()
+        }
+
+        // True while the leader is still alive OR an un-reaped zombie — i.e. it still RESERVES
+        // the PGID, so `killpg` is guaranteed to hit only our group. False only if the leader
+        // is gone/auto-reaped (ECHILD), where the PGID may be recycled. (Non-reaping probe.)
+        func leaderReservesPGID() -> Bool {
+            var info = siginfo_t()
+            let r = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT | WNOHANG)
+            return !(r == -1 && errno == ECHILD)
+        }
+
+        var timedOut = false
+        if exited.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut {
+            timedOut = true
+            // Gate each kill on the leader still reserving the PGID. For a normal host this is
+            // always true here (the un-detected child is alive); the guard only matters under a
+            // SIGCHLD=SIG_IGN auto-reap racing the timeout, where it avoids a recycled-PGID kill.
+            if leaderReservesPGID() { killer.kill(SIGTERM) }
+            if exited.wait(timeout: .now() + .seconds(graceSeconds)) == .timedOut {
+                if leaderReservesPGID() { killer.kill(SIGKILL) }
+                exited.wait()                                     // leader now a zombie (or ECHILD)
+            }
+        }
+
+        // Give legitimate late-flushing children (e.g. the swiftc processes under `swift test`) a
+        // bounded grace to FINISH WRITING before the runaway-reaping SIGKILL. Otherwise their stderr —
+        // the compile errors — is lost to the group teardown, which blinded the agent to build/test
+        // FAILURES while it still saw successes on stdout (dogfood finding). If the drains reach EOF
+        // within the grace, every group member has exited and closed its pipe end → nothing to reap.
+        // Only a child STILL holding the pipe past the grace is a real lingering member → THEN SIGKILL to
+        // reap it. Adds ZERO latency to the normal case (all children exit with the leader → instant EOF);
+        // the timeout path above already killed hard. Gated on detect.rc == 0 (a real zombie reserves the
+        // PGID) exactly as before, so no signal can hit a recycled PGID.
+        let drainedCleanly = drains.wait(timeout: .now() + .seconds(graceSeconds)) == .success
+        if !drainedCleanly, detect.rc == 0 {
+            killer.kill(SIGKILL)
+        }
+
+        // DISARM BEFORE reaping. The un-reaped zombie still reserves the PGID right now, so
+        // disarming here closes the window where a late output-cap callback (on a drain
+        // thread) could `killpg` the PGID AFTER waitpid frees it for reuse. After disarm no
+        // signal can fire; the reap then frees the PGID with nothing left to target it.
+        killer.disarm()
+
+        // Reap the leader (consumes the zombie, yields the wait status). Track whether we
+        // actually reaped: under a host SIGCHLD=SIG_IGN/SA_NOCLDWAIT the child is auto-reaped
+        // and waitpid returns -1/ECHILD — in that case we have NO status and must not report
+        // a fabricated exit 0.
+        var status: Int32 = 0
+        var reaped = false
+        while true {
+            let w = waitpid(pid, &status, 0)
+            if w == pid { reaped = true; break }
+            if w == -1 && errno == EINTR { continue }
+            break   // -1 / ECHILD (auto-reaped) or other — no usable status
+        }
+
+        // Flush the drains. On normal/timeout teardown the group is dead, write ends are
+        // closed, and poll() returns EOF promptly. If a setsid-escaped orphan still holds a
+        // write end past the bounded wait, signal the self-pipe so the drains' poll() wakes
+        // and the threads exit (a portable wakeup — cross-thread close() is NOT reliable on
+        // Linux). Main is the sole owner of all read fds.
+        if drains.wait(timeout: .now() + .seconds(graceSeconds + 1)) == .timedOut {
+            _ = write(stopFds[1], [UInt8(0)], 1)
+            drains.wait()
+        }
+        close(outFds[0]); close(errFds[0]); close(stopFds[0]); close(stopFds[1])
+
+        var combined = collector.combinedText()
+        if combined.utf8.count > capPerStream {
+            combined = String(combined.prefix(capPerStream)) + "\n…[output truncated]"
+        }
+        // If we couldn't reap (auto-reap host config), the exit status is unknown — report a
+        // non-zero/unknown code rather than a fabricated success.
+        let code: Int32 = reaped ? Self.exitCode(from: status) : -1
+        return Outcome(combined: combined, exitCode: code, timedOut: timedOut)
+    }
+
+    // MARK: - Internals
+
+    /// Read a pipe fd to EOF on a background thread into `sink`, multiplexed with a `stop`
+    /// self-pipe via `poll()` so the thread can be woken reliably on BOTH Darwin and Linux
+    /// (cross-thread `close()` is not a portable wakeup for a blocked `read`). The CALLER
+    /// owns and closes every fd; this thread closes nothing.
+    private static func drain(_ fd: Int32, stop: Int32, into sink: @escaping (Data) -> Void, group: DispatchGroup) {
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { group.leave() }
+            var buf = [UInt8](repeating: 0, count: 65_536)
+            while true {
+                var fds = [pollfd(fd: fd, events: Int16(POLLIN), revents: 0),
+                           pollfd(fd: stop, events: Int16(POLLIN), revents: 0)]
+                let pr = poll(&fds, nfds_t(2), -1)
+                if pr < 0 { if errno == EINTR { continue }; break }
+                if (fds[1].revents & Int16(POLLIN)) != 0 { break }   // shutdown requested
+                let rev = fds[0].revents
+                if (rev & Int16(POLLIN)) != 0 {
+                    let n = read(fd, &buf, buf.count)
+                    if n > 0 { sink(buf.withUnsafeBytes { Data($0.prefix(n)) }); continue }
+                    if n < 0 && errno == EINTR { continue }
+                    break                                           // EOF (0) or error
+                }
+                if (rev & Int16(POLLHUP | POLLERR | POLLNVAL)) != 0 {
+                    let n = read(fd, &buf, buf.count)               // drain any final bytes
+                    if n > 0 { sink(buf.withUnsafeBytes { Data($0.prefix(n)) }); continue }
+                    break
+                }
+            }
+        }
+    }
+
+    /// Reimplement the `<sys/wait.h>` macros (not imported into Swift): exited → exit code;
+    /// signalled → 128 + signal (shell convention).
+    private static func exitCode(from status: Int32) -> Int32 {
+        if (status & 0x7f) == 0 {            // WIFEXITED
+            return (status >> 8) & 0xff      // WEXITSTATUS
+        }
+        return 128 + (status & 0x7f)         // 128 + WTERMSIG
+    }
+
+    private static func strerr() -> String { String(cString: strerror(errno)) }
+}
+
+/// Serializes `killpg` against reaping: every group signal is gated on `live`, which is
+/// cleared (`disarm`) immediately after the leader is reaped. This guarantees no signal is
+/// ever sent to the leader's PGID once it becomes reusable — closing the PGID-reuse window
+/// for the timeout path, the final sweep, AND a late output-cap callback alike.
+private final class GroupKiller: @unchecked Sendable {
+    private let pgid: pid_t
+    private let lock = NSLock()
+    private var live = true
+    init(_ pgid: pid_t) { self.pgid = pgid }
+    func kill(_ sig: Int32) { lock.lock(); defer { lock.unlock() }; if live { killpg(pgid, sig) } }
+    func disarm() { lock.lock(); live = false; lock.unlock() }
+}
+
+/// Carries the detector thread's `waitid` return value across the semaphore handoff. The
+/// `exited` semaphore provides the happens-before ordering; the lock guards the read/write.
+private final class DetectBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _rc: Int32 = -1
+    func set(_ v: Int32) { lock.lock(); _rc = v; lock.unlock() }
+    var rc: Int32 { lock.lock(); defer { lock.unlock() }; return _rc }
+}

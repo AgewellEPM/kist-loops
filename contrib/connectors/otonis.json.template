@@ -1,0 +1,10 @@
+{
+  "_comment": "TEMPLATE — placeholder endpoints. Replace baseURL/paths with 'otonis' REAL API (I have no spec for it yet), set OTONIS_API_KEY in your env, then drop this as otonis.json into ~/.config/kist/connectors/.",
+  "name": "otonis",
+  "baseURL": "https://api.otonis.example/v1",
+  "auth": { "type": "header", "name": "X-Api-Key", "env": "OTONIS_API_KEY" },
+  "actions": [
+    { "name": "list_items", "method": "GET", "path": "/items", "description": "List items (placeholder path)" },
+    { "name": "run_action", "method": "POST", "path": "/actions/{action}", "description": "Trigger an action (placeholder path)" }
+  ]
+}

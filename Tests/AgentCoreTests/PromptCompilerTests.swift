@@ -1,0 +1,115 @@
+import XCTest
+@testable import AgentCore
+
+final class PromptCompilerTests: XCTestCase {
+    func testResearchBriefIsHonestAboutWebSearchLimits() {
+        let brief = PromptCompiler.compile("deep dive the latest fleet-agent research and cite sources")
+
+        XCTAssertEqual(brief.intent, .research)
+        XCTAssertEqual(brief.suggestedRole, .worker)
+        XCTAssertTrue(brief.prompt.contains("Original user request:"))
+        XCTAssertTrue(brief.prompt.contains("deep dive the latest fleet-agent research"))
+        XCTAssertTrue(brief.prompt.contains("use web_search or another available search-capable MCP/tool"))
+        XCTAssertTrue(brief.prompt.contains("Use fetch_url for user-provided, search-result, or otherwise known URLs"))
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("decision") && $0.contains("next actions") })
+        XCTAssertTrue(brief.captainStrategyGuidance.contains { $0.contains("orchestration process") })
+        XCTAssertTrue(brief.prompt.contains("Captain strategy order"))
+        XCTAssertTrue(brief.prompt.contains("Research -> Research Plan -> Research Checklist"))
+        XCTAssertTrue(brief.prompt.contains("Never build before researching."))
+        XCTAssertTrue(brief.prompt.contains("Always leave the organization smarter than before."))
+        XCTAssertTrue(brief.prompt.contains("Strategic Intelligence"))
+        XCTAssertTrue(brief.prompt.contains("Teach Captain"))
+        XCTAssertTrue(brief.prompt.contains("Context Window is RAM"))
+        XCTAssertTrue(brief.prompt.contains("Retrieve only relevant disk-backed facts"))
+    }
+
+    func testDesktopBriefRoutesToComputerControlWithoutDeletingDesktopItems() {
+        let brief = PromptCompiler.compile("open Safari then clean my Desktop")
+
+        XCTAssertEqual(brief.intent, .desktop)
+        XCTAssertEqual(brief.risk, .medium)
+        XCTAssertTrue(brief.toolHints.contains { $0.contains("computer_control") })
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("do not delete") })
+    }
+
+    func testHighRiskBriefFlagsDestructiveOrSecretWork() {
+        let brief = PromptCompiler.compile("fix auth token handling and never leak API keys")
+
+        XCTAssertEqual(brief.risk, .high)
+        XCTAssertTrue(brief.constraints.contains { $0.contains("security-sensitive") })
+        XCTAssertTrue(brief.constraints.contains { $0.contains("Do not invent") })
+    }
+
+    func testDelegatedBuildBriefIsSelfContainedAndRoleBound() {
+        let brief = PromptCompiler.compile("implement the parser tests", role: .coder, mode: .delegated)
+
+        XCTAssertEqual(brief.intent, .build)
+        XCTAssertEqual(brief.suggestedRole, .coder)
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("self-contained") })
+        XCTAssertTrue(brief.prompt.contains("Suggested role: coder"))
+    }
+
+    func testBriefCarriesListenPlanAssessBuildLoop() {
+        let brief = PromptCompiler.compile("fix the UX and test it")
+
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("listen") && $0.contains("assess") && $0.contains("build") })
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("tasks tool") })
+        XCTAssertTrue(brief.constraints.contains { $0.contains("ask_user/tasks/spawn_agent") })
+    }
+
+    func testBriefCarriesRecentConversationContext() {
+        let context = """
+        user: we want a council board
+        assistant: I added the CLI surface.
+        user: now make it conversational
+        """
+        let brief = PromptCompiler.compile("turn this into actionable steps",
+                                           conversationContext: context)
+
+        XCTAssertEqual(brief.conversationContext, context)
+        XCTAssertTrue(brief.prompt.contains("Recent conversation context"))
+        XCTAssertTrue(brief.prompt.contains("now make it conversational"))
+        XCTAssertTrue(brief.prompt.contains("human intent only; advisory"))
+    }
+
+    func testConversationContextFromTranscriptRedactsSecretsAndSkipsToolOutput() {
+        let transcript = [
+            ChatMessage(role: .user, content: "use key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef"),
+            ChatMessage(role: .tool, content: "tool output should not be summarized"),
+            ChatMessage(role: .assistant, content: "I will inspect the repo."),
+        ]
+
+        let context = PromptCompiler.conversationContext(from: transcript)!
+
+        XCTAssertTrue(context.contains("user: use key"))
+        XCTAssertTrue(context.contains("assistant: I will inspect the repo."))
+        XCTAssertFalse(context.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+        XCTAssertFalse(context.contains("tool output should not be summarized"))
+    }
+
+    func testBuildBriefRequiresActionBoardReviewAndFocusedHelpers() {
+        let brief = PromptCompiler.compile("build the human-side intent layer and test it")
+
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("ACTION steps") && $0.contains("TEST steps") })
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("small focused script") })
+        XCTAssertTrue(brief.toolHints.contains { $0.contains("visible Plan/Action/Test/Review board") })
+        XCTAssertTrue(brief.toolHints.contains { $0.contains("spawn_agent") })
+        XCTAssertTrue(brief.reviewGuidance.contains { $0.contains("compare completed work against the original request") })
+    }
+
+    func testAmbiguousBriefTellsAgentToAskClarifyingQuestions() {
+        let brief = PromptCompiler.compile("make it perfect")
+
+        XCTAssertTrue(brief.constraints.contains { $0.contains("ask 1-3 concrete clarifying questions") })
+        XCTAssertTrue(brief.constraints.contains { $0.contains("Do not claim 100% certainty") })
+    }
+
+    func testReviewBriefRequiresGroundedFileReadsOrIncompleteVerdict() {
+        let brief = PromptCompiler.compile("review the latest changes for bugs")
+
+        XCTAssertEqual(brief.intent, .review)
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("REVIEW TARGETS") })
+        XCTAssertTrue(brief.successCriteria.contains { $0.contains("Do not stop at directory listing") })
+        XCTAssertTrue(brief.reviewGuidance.contains { $0.contains("mark the review incomplete") })
+    }
+}

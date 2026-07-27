@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""kist-lsp — register LSP-over-MCP servers into ~/.mcp.json for kist.
+
+Wires isaacphi/mcp-language-server (a bridge that proxies any LSP server to MCP) so
+kist's model gets type-aware tools: go-to-definition, find-references, rename, diagnostics.
+
+kist READS ~/.mcp.json and never writes it — this helper is the out-of-band writer. Every
+entry is written to match kist's MCPClientConfig rules exactly, so kist accepts it:
+  - command is an ABSOLUTE path to a real executable
+  - no shell metacharacters ( ; & | ` $ < > ) and no `..` in command/args
+Existing servers are preserved; a timestamped backup is written before any change.
+
+Usage:
+  kist-lsp add <lang> [--workspace DIR]   register/refresh an LSP (default workspace: cwd)
+  kist-lsp remove <lang>                  drop the lsp-<lang> entry
+  kist-lsp status                         list lsp-* entries + whether binaries exist
+  kist-lsp doctor                         check prerequisites + print install commands
+
+Languages: swift | rust | go | python | typescript
+"""
+import json, os, shutil, subprocess, sys, time
+
+MCP_PATH = os.path.expanduser("~/.mcp.json")
+FORBIDDEN = set(";&|`$<>\n\r\0")
+BRIDGE = "mcp-language-server"
+
+# lang -> (lsp binary candidates, extra args passed to the LSP after `--`)
+LANGS = {
+    "swift":      (["sourcekit-lsp"], []),
+    "rust":       (["rust-analyzer"], []),
+    "go":         (["gopls"], []),
+    "python":     (["pyright-langserver", "pylsp"], ["--stdio"]),
+    "typescript": (["typescript-language-server"], ["--stdio"]),
+}
+
+def die(msg, code=1):
+    print(f"kist-lsp: {msg}", file=sys.stderr); sys.exit(code)
+
+def which_abs(name):
+    """Absolute path to an executable, preferring xcrun for sourcekit-lsp."""
+    if name == "sourcekit-lsp":
+        try:
+            p = subprocess.run(["xcrun", "--find", "sourcekit-lsp"], capture_output=True, text=True, timeout=10)
+            if p.returncode == 0 and p.stdout.strip():
+                return p.stdout.strip()
+        except Exception:
+            pass
+    p = shutil.which(name)
+    # abspath, NOT realpath: cargo/rustup shims dispatch by argv[0], so resolving the
+    # symlink to `rustup` would break the LSP. `which` already returns an absolute path.
+    return os.path.abspath(p) if p else None
+
+def check_token(s, what):
+    if any(c in FORBIDDEN for c in s) or ".." in s:
+        die(f"{what} contains a forbidden character or '..': {s!r} (kist would reject it)")
+
+def load_config():
+    if not os.path.exists(MCP_PATH):
+        return {"mcpServers": {}}
+    try:
+        with open(MCP_PATH) as f:
+            d = json.load(f)
+    except Exception as e:
+        die(f"~/.mcp.json is not valid JSON ({e}). Fix or move it before running.")
+    d.setdefault("mcpServers", {})
+    return d
+
+def save_config(d):
+    if os.path.exists(MCP_PATH):
+        bak = f"{MCP_PATH}.bak.{int(time.time())}"
+        shutil.copy2(MCP_PATH, bak)
+        print(f"  backup: {bak}")
+    tmp = MCP_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, MCP_PATH)
+
+def cmd_add(args):
+    if not args:
+        die("add needs a language: " + " | ".join(LANGS))
+    lang = args[0]
+    if lang not in LANGS:
+        die(f"unknown language {lang!r}. Supported: {', '.join(LANGS)}")
+    workspace = os.getcwd()
+    if "--workspace" in args:
+        i = args.index("--workspace")
+        if i + 1 >= len(args): die("--workspace needs a directory")
+        workspace = args[i + 1]
+    workspace = os.path.realpath(os.path.expanduser(workspace))
+    if not os.path.isdir(workspace):
+        die(f"workspace is not a directory: {workspace}")
+    check_token(workspace, "workspace")
+
+    bridge = which_abs(BRIDGE)
+    lsp_names, lsp_extra = LANGS[lang]
+    lsp = next((which_abs(n) for n in lsp_names if which_abs(n)), None)
+
+    if not bridge:
+        print(f"  ⚠ bridge '{BRIDGE}' not installed — writing the entry anyway; run `kist-lsp doctor` to install.")
+    if not lsp:
+        print(f"  ⚠ LSP server for {lang} ({'/'.join(lsp_names)}) not installed — run `kist-lsp doctor`.")
+
+    bridge_cmd = bridge or f"/opt/homebrew/bin/{BRIDGE}"   # placeholder abs path if missing (kist will skip until installed)
+    lsp_cmd = lsp or f"/usr/bin/{lsp_names[0]}"
+    check_token(bridge_cmd, "bridge command"); check_token(lsp_cmd, "lsp command")
+
+    server_args = ["--workspace", workspace, "--lsp", lsp_cmd]
+    if lsp_extra:
+        server_args += ["--"] + lsp_extra
+    for a in server_args: check_token(a, "arg")
+
+    d = load_config()
+    name = f"lsp-{lang}"
+    d["mcpServers"][name] = {"command": bridge_cmd, "args": server_args,
+                             "env": {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}}
+    save_config(d)
+    ready = "READY" if (bridge and lsp) else "PENDING install (see doctor)"
+    print(f"  ✓ wrote '{name}' → {bridge_cmd} (lsp: {lsp_cmd}) [{ready}]")
+    print(f"  kist will expose its tools namespaced as {name}__definition, {name}__references, etc.")
+
+def cmd_remove(args):
+    if not args: die("remove needs a language")
+    d = load_config(); name = f"lsp-{args[0]}"
+    if name in d["mcpServers"]:
+        del d["mcpServers"][name]; save_config(d); print(f"  ✓ removed {name}")
+    else:
+        print(f"  (no entry {name})")
+
+def cmd_status(_):
+    d = load_config()
+    lsp = {k: v for k, v in d["mcpServers"].items() if k.startswith("lsp-")}
+    other = [k for k in d["mcpServers"] if not k.startswith("lsp-")]
+    print(f"~/.mcp.json ({len(d['mcpServers'])} servers; {len(other)} non-LSP preserved: {', '.join(other) or 'none'})")
+    if not lsp: print("  no LSP servers configured. `kist-lsp add swift`"); return
+    bridge_ok = which_abs(BRIDGE) is not None
+    for name, cfg in sorted(lsp.items()):
+        cmd_ok = os.access(cfg.get("command", ""), os.X_OK)
+        print(f"  {name}: command={'OK' if cmd_ok else 'MISSING'} bridge={'OK' if bridge_ok else 'MISSING'} args={cfg.get('args')}")
+
+def cmd_doctor(_):
+    print("Prerequisites for LSP-over-MCP in kist:\n")
+    b = which_abs(BRIDGE)
+    print(f"  bridge  mcp-language-server : {b or 'NOT INSTALLED'}")
+    if not b:
+        print("     install: brew install go && go install github.com/isaacphi/mcp-language-server@latest")
+        print("     (ensure ~/go/bin is on PATH, or symlink it into /usr/local/bin)")
+    print("  LSP servers:")
+    for lang, (names, _) in LANGS.items():
+        p = next((which_abs(n) for n in names if which_abs(n)), None)
+        hint = {"swift": "ships with Xcode", "rust": "rustup component add rust-analyzer",
+                "go": "go install golang.org/x/tools/gopls@latest",
+                "python": "npm i -g pyright", "typescript": "npm i -g typescript typescript-language-server"}[lang]
+        print(f"    {lang:11} {'/'.join(names):28} {p or 'NOT INSTALLED — ' + hint}")
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__); return
+    cmd, rest = sys.argv[1], sys.argv[2:]
+    {"add": cmd_add, "remove": cmd_remove, "status": cmd_status, "doctor": cmd_doctor}.get(cmd, lambda _: die(f"unknown command {cmd!r}; see --help"))(rest)
+
+if __name__ == "__main__":
+    main()

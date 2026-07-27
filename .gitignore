@@ -1,0 +1,9 @@
+.build/
+.build-local/
+.swiftpm/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+*.pyc
+__pycache__/

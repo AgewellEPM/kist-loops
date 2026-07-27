@@ -1,0 +1,386 @@
+import Foundation
+
+/// Outcome of a plan→execute run.
+public struct PlanOutcome: Sendable {
+    public let success: Bool
+    public let plan: ExecutablePlan?      // the last plan that ran (nil if none could be produced)
+    public let execution: PlanExecution?  // the last execution (nil if aborted before executing)
+    public let message: String
+    public let replansUsed: Int           // how many times the loop revised the plan
+}
+
+/// The closed plan→execute loop: ask a PLANNER model for a typed DAG, validate it (re-prompting to
+/// repair invalid plans), get human approval to FREEZE it as the execution spine, run it with
+/// `PlanExecutor`, then — Phase 1.4b — **replan on failure** and gate completion behind a
+/// **verify-the-goal** check. This is the research's highest-confidence wedge: "plan it all out,
+/// then build off it," with the replan/verify nodes that make it robust rather than happy-path.
+public struct PlanExecuteLoop: Sendable {
+    private let providers: ProviderRegistry
+    private let roles: RoleBindings        // which vendor plays planner vs critic (the cross-vendor team)
+    private let tools: ToolRegistry        // base tools + the coder-bound `generate` tool (see effectiveTools)
+    private let context: ToolContext
+    private let sink: RuntimeEventSink
+    private let interactor: RuntimeInteractor
+    private let requireApproval: Bool
+    private let maxPlanRepairs: Int
+    private let maxReplans: Int
+    private let verifyGoal: Bool
+    private let recorder: TraceRecorder?     // observability: one span per LLM call (nil = off)
+    private let budget: BudgetLedger?        // cost ceiling: honest-fail at the cap (nil = uncapped)
+    private let memory: ProjectMemory?       // cross-run memory: inject facts/episodes, log the run (nil = off)
+
+    /// Single-vendor convenience init: planner and critic are the same provider/model.
+    public init(providers: ProviderRegistry, providerId: String, model: String?,
+                tools: ToolRegistry, context: ToolContext,
+                sink: RuntimeEventSink = NullEventSink(),
+                interactor: RuntimeInteractor = AutoApproveInteractor(),
+                requireApproval: Bool = true, maxPlanRepairs: Int = 2,
+                maxReplans: Int = 2, verifyGoal: Bool = true,
+                recorder: TraceRecorder? = nil, budget: BudgetLedger? = nil, memory: ProjectMemory? = nil) {
+        self.init(providers: providers,
+                  roles: RoleBindings(default: ProviderBinding(providerId: providerId, model: model)),
+                  tools: tools, context: context, sink: sink, interactor: interactor,
+                  requireApproval: requireApproval, maxPlanRepairs: maxPlanRepairs,
+                  maxReplans: maxReplans, verifyGoal: verifyGoal, recorder: recorder, budget: budget, memory: memory)
+    }
+
+    /// Cross-vendor init: bind planner / worker / coder / critic to specific vendors.
+    public init(providers: ProviderRegistry, roles: RoleBindings,
+                tools: ToolRegistry, context: ToolContext,
+                sink: RuntimeEventSink = NullEventSink(),
+                interactor: RuntimeInteractor = AutoApproveInteractor(),
+                requireApproval: Bool = true, maxPlanRepairs: Int = 2,
+                maxReplans: Int = 2, verifyGoal: Bool = true,
+                recorder: TraceRecorder? = nil, budget: BudgetLedger? = nil, memory: ProjectMemory? = nil) {
+        self.providers = providers; self.roles = roles
+        self.recorder = recorder; self.budget = budget; self.memory = memory
+        // Add the CODER-bound `generate` tool so a step can produce content via the coder vendor
+        // (the third teammate), metered + traced like the planner/critic. Built once; used for BOTH
+        // the planner prompt and execution.
+        self.tools = ToolRegistry(tools.all() + [GenerateTool(providers: providers, binding: roles.binding(for: .coder),
+                                                              recorder: recorder, budget: budget)])
+        self.context = context; self.sink = sink
+        self.interactor = interactor; self.requireApproval = requireApproval
+        self.maxPlanRepairs = maxPlanRepairs; self.maxReplans = maxReplans; self.verifyGoal = verifyGoal
+    }
+
+    /// A role-bound completion that RECORDS a span + METERS tokens (estimate fallback when the
+    /// provider omits usage). The single choke point for planner/critic model calls.
+    private func meteredComplete(role: AgentRole, messages: [ChatMessage], settings: ModelSettings) async throws -> String {
+        let binding = roles.binding(for: role)
+        let started = Date()
+        // Atomic reserve BEFORE the call (C2): under a shared fleet ledger, parallel workers can't both
+        // pass and both overspend. Denied ⇒ throw so this worker stops without spending.
+        let promptChars = messages.reduce(0) { $0 + $1.content.count }
+        let estPrompt = promptChars / 4, estCompletion = settings.maxTokens
+        let estUSD = CompetitiveBenchmark.priceUSD(vendor: binding.providerId,
+                                                   promptTokens: estPrompt, completionTokens: estCompletion) ?? 0
+        var reservationID: Int? = nil
+        if let budget {
+            reservationID = await budget.reserve(tokens: estPrompt + estCompletion, usd: estUSD)
+            if reservationID == nil { throw PlanBudgetDenied() }
+        }
+        let text: String, usage: TokenUsage
+        do {
+            (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
+                                                                  messages: messages, settings: settings)
+        } catch {
+            if let id = reservationID { await budget?.commit(reservation: id, actualTokens: 0, actualUSD: 0) }   // release on failure
+            throw error
+        }
+        let measured = usage.isZero
+            ? TokenUsage.estimate(promptChars: promptChars, completionChars: text.count)
+            : usage
+        if let recorder {
+            await recorder.record(AgentSpan(id: TraceID.make(), traceId: recorder.traceId, kind: .llmCall,
+                role: role.rawValue, vendor: binding.providerId, model: binding.model,
+                promptTokens: measured.promptTokens, completionTokens: measured.completionTokens,
+                finishReason: nil, startedAt: started, endedAt: Date(), status: .ok))
+        }
+        if let budget, let id = reservationID {
+            let usd = CompetitiveBenchmark.priceUSD(vendor: binding.providerId,
+                                                    promptTokens: measured.promptTokens,
+                                                    completionTokens: measured.completionTokens) ?? 0
+            // Commit the reservation with actuals (release est, book real spend).
+            await budget.commit(reservation: id, actualTokens: measured.total, actualUSD: usd)
+        }
+        return text
+    }
+
+    /// Thrown when the atomic reservation is denied — surfaces as an honest budget halt to the caller.
+    struct PlanBudgetDenied: Error {}
+
+    /// Run the goal, then LOG the run to cross-run memory (so the next run sees the outcome).
+    /// Approve a dangerous plan step. In a plain method body the `dangerous:` overload resolves
+    /// cleanly (it's ambiguous inside a capturing closure), so the PlanExecutor gate routes here.
+    func approveDangerousStep(_ tool: String) async -> Bool {
+        await interactor.requestApproval(planSummary: "⚠ dangerous plan step — \(tool)", dangerous: true)
+    }
+
+    public func run(goal: String) async -> PlanOutcome {
+        let outcome = await runCore(goal: goal)
+        memory?.recordEpisode(Episode(goal: goal, success: outcome.success, summary: outcome.message, at: Date()))
+        return outcome
+    }
+
+    private func runCore(goal: String) async -> PlanOutcome {
+        sink.emit(.stateChanged(.planning))
+        var messages: [ChatMessage] = []
+        let scopeDecision = AuthorizationScopeEngine.evaluate(goal)
+        let scopedContext = context.withAuthorizationScope(scopeDecision)
+        // Inject cross-run memory (project facts + recent run outcomes) as advisory context BEFORE the
+        // goal — explicitly not-instructions, so it can't be obeyed as commands.
+        if let ctx = memory?.planningContext() { messages.append(ChatMessage(role: .user, content: ctx)) }
+        if !scopeDecision.promptLines.isEmpty {
+            messages.append(ChatMessage(role: .user, content:
+                "AUTHORIZATION SCOPE POLICY (runtime-enforced; do not bypass):\n" +
+                scopeDecision.promptLines.joined(separator: "\n")))
+        }
+        messages.append(ChatMessage(role: .user, content: goal))
+        var replansUsed = 0
+        var lastPlan: ExecutablePlan?
+        var lastExecution: PlanExecution?
+
+        while true {
+            // 0) Cost ceiling: stop at the cap rather than discovering the overage afterward.
+            if let budget, await budget.isExceeded() {
+                let spent = await budget.spentTokens()
+                sink.emit(.failed("token budget exceeded (\(spent))"))
+                return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
+                                   message: "token budget exceeded after \(spent) tokens", replansUsed: replansUsed)
+            }
+            // 1) Obtain a VALID plan (propose or replan, with bounded repair).
+            switch await obtainPlan(&messages, context: scopedContext) {
+            case .providerError(let e):
+                sink.emit(.failed("planner error"))
+                return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
+                                   message: "planner error: \(e)", replansUsed: replansUsed)
+            case .budgetExceeded(let spent):
+                sink.emit(.failed("token budget exceeded (\(spent))"))
+                return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
+                                   message: "token budget exceeded after \(spent) tokens", replansUsed: replansUsed)
+            case .invalid:
+                sink.emit(.failed("could not produce a valid plan"))
+                return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
+                                   message: "could not produce a valid plan after \(maxPlanRepairs + 1) attempts",
+                                   replansUsed: replansUsed)
+            case .ok(let plan):
+                lastPlan = plan
+
+                // 2) Approve — freeze the plan as the execution spine.
+                let needsScopeApproval = plan.steps.contains {
+                    scopedContext.authorizationScope?.requiresExplicitApproval(tool: $0.tool, arguments: [:]) != nil
+                }
+                var planSummary = Self.render(plan)
+                if needsScopeApproval {
+                    planSummary += "\n\nAuthorization/scope approval required: \(scopeDecision.reason)"
+                }
+                sink.emit(.planReady(summary: planSummary, stepCount: plan.steps.count))
+                if (requireApproval || needsScopeApproval),
+                   !(await interactor.requestApproval(planSummary: planSummary, dangerous: needsScopeApproval)) {
+                    return PlanOutcome(success: false, plan: plan, execution: lastExecution,
+                                       message: "plan declined by user", replansUsed: replansUsed)
+                }
+
+                // 3) Execute. Dangerous steps are gated even inside the DAG (not an approval bypass);
+                // in --yolo (requireApproval=false) there's no human, so no hook (autonomous by design).
+                let executionContext = scopedContext.withScopeOverrideApproved(needsScopeApproval)
+                let gate = self
+                var approveDangerous: (@Sendable (String, [String: Any]) async -> Bool)? = nil
+                if requireApproval {
+                    approveDangerous = { tool, _ in await gate.approveDangerousStep(tool) }
+                }
+                let exec = await PlanExecutor(tools: tools, context: executionContext, sink: sink,
+                                              approveDangerous: approveDangerous).execute(plan)
+                lastExecution = exec
+
+                if exec.success {
+                    // 4) Verify-the-goal gate.
+                    let verdict = verifyGoal ? await verifyGoalMet(goal: goal, execution: exec) : (done: true, reason: "")
+                    if verdict.done {
+                        sink.emit(.completed(summary: "plan complete (\(plan.steps.count) steps)"))
+                        return PlanOutcome(success: true, plan: plan, execution: exec,
+                                           message: "plan complete", replansUsed: replansUsed)
+                    }
+                    // Goal not fully met → replan if budget remains.
+                    guard replansUsed < maxReplans else {
+                        return PlanOutcome(success: false, plan: plan, execution: exec,
+                                           message: "goal not fully met: \(verdict.reason)", replansUsed: replansUsed)
+                    }
+                    replansUsed += 1
+                    sink.emit(.replanStarted(reason: "goal not fully met: \(verdict.reason)"))
+                    messages.append(ChatMessage(role: .user, content: Self.replanFromVerify(goal: goal, reason: verdict.reason)))
+                } else {
+                    // 5) A step failed → replan if budget remains.
+                    let where_ = exec.failedStepId.map { "step \($0)" } ?? "validation"
+                    guard replansUsed < maxReplans else {
+                        sink.emit(.failed("plan failed at \(where_)"))
+                        return PlanOutcome(success: false, plan: plan, execution: exec,
+                                           message: "plan failed at \(where_)", replansUsed: replansUsed)
+                    }
+                    replansUsed += 1
+                    sink.emit(.replanStarted(reason: "\(where_) failed"))
+                    messages.append(ChatMessage(role: .user, content: Self.replanFromFailure(goal: goal, exec: exec)))
+                }
+            }
+        }
+    }
+
+    // MARK: - Planning (propose + repair)
+
+    private enum PlanResult { case ok(ExecutablePlan), invalid, providerError(String), budgetExceeded(Int) }
+
+    /// Stream a plan from the current message context and validate it, re-prompting to repair an
+    /// invalid/unparseable plan up to `maxPlanRepairs` times. Appends the conversation in place.
+    private func obtainPlan(_ messages: inout [ChatMessage], context: ToolContext) async -> PlanResult {
+        let settings = ModelSettings(temperature: 0.2, maxTokens: 4096,
+                                     systemPrompt: Self.plannerSystemPrompt(tools: tools,
+                                                                            projectRoot: context.projectRoot,
+                                                                            shellEnabled: context.shell.enabled))
+        for _ in 0...maxPlanRepairs {
+            if let budget, await budget.isExceeded() {
+                return .budgetExceeded(await budget.spentTokens())
+            }
+            let text: String
+            do { text = try await meteredComplete(role: .planner, messages: messages, settings: settings) }
+            catch is PlanBudgetDenied { return .budgetExceeded(await budget?.spentTokens() ?? 0) }
+            catch { return .providerError("\(error)") }
+            messages.append(ChatMessage(role: .assistant, content: text))
+
+            guard let parsed = PlanParser.parse(text) else {
+                messages.append(ChatMessage(role: .user, content:
+                    "That was not a parseable plan. Respond with ONLY the JSON plan object described above."))
+                continue
+            }
+            let errors = parsed.validate()
+            if errors.isEmpty { return .ok(parsed) }
+            messages.append(ChatMessage(role: .user, content:
+                "Your plan has these problems:\n\(Self.describe(errors))\nOutput a corrected JSON plan (same format)."))
+        }
+        return .invalid
+    }
+
+    // MARK: - Verify gate
+
+    /// Ask the model whether the goal is FULLY accomplished given what the steps produced. Verification
+    /// is a gate: if the critic errors or returns unparseable text, we fail closed instead of laundering
+    /// a mechanically-successful run into a verified success.
+    private func verifyGoalMet(goal: String, execution: PlanExecution) async -> (done: Bool, reason: String) {
+        let stepSummary = execution.stepResults
+            .map { "- \($0.stepId) (\($0.tool)): \(String($0.output.prefix(200)).replacingOccurrences(of: "\n", with: " "))" }
+            .joined(separator: "\n")
+        let messages = [ChatMessage(role: .user, content: Self.verifyPrompt(goal: goal, stepSummary: stepSummary))]
+        let settings = ModelSettings(temperature: 0, maxTokens: 512)
+        // The CRITIC verifies — can be a DIFFERENT vendor than the planner (clean-context reviewer,
+        // the research's highest-confidence cross-vendor win). Metered + traced like every model call.
+        guard let text = try? await meteredComplete(role: .critic, messages: messages, settings: settings),
+              let verdict = Self.parseVerdict(text) else {
+            return (done: false, reason: "verification unavailable or unparseable")
+        }
+        return verdict
+    }
+
+    /// Parse a `{"done":bool,"reason":string}` verdict, falling back to a DONE/NOT_DONE keyword scan.
+    /// Returns nil only when neither is present (caller fails closed).
+    static func parseVerdict(_ text: String) -> (done: Bool, reason: String)? {
+        if let json = ActionParser.extractJSONObject(text),
+           let data = json.data(using: .utf8),
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let done = obj["done"] as? Bool {
+            return (done, (obj["reason"] as? String) ?? "")
+        }
+        let upper = text.uppercased()
+        if upper.contains("NOT_DONE") || upper.contains("NOT DONE") { return (false, "goal not fully met") }
+        if upper.contains("DONE") { return (true, "") }
+        return nil
+    }
+
+    // MARK: - Prompts / rendering
+
+    static func plannerSystemPrompt(tools: ToolRegistry, projectRoot: String, shellEnabled: Bool = true) -> String {
+        """
+        You are the PLANNER for Mythos. Decompose the user's GOAL into a MINIMAL, acyclic DAG of \
+        concrete tool steps, then output it as ONE JSON object — no prose, no markdown fences.
+
+        Format:
+        {"goal":"<restate the goal>","steps":[
+          {"id":"E1","intent":"<one short line>","tool":"<tool_name>","arguments":{<args>},"dependsOn":[]},
+          {"id":"E2","intent":"...","tool":"...","arguments":{"key":"... ${E1} ..."},"dependsOn":["E1"]}
+        ]}
+
+        Rules:
+        - Each step runs EXACTLY ONE tool from the list below; put its args in "arguments".
+        - To PRODUCE content (code, prose, a summary, an answer), use the `generate` tool and reference
+          its output in a later step via ${id} — do NOT fetch content from the web or search for it.
+          Only use fetch_url/search_code when the goal genuinely needs live or repo-specific data.
+          (A short fixed string may be written directly in a tool's arguments without `generate`.)
+        - To use an earlier step's output, put ${id} inside an argument string (e.g. "${E1}"). A ${id}
+          reference automatically makes this step depend on that step.
+        - "dependsOn" lists prerequisite step ids. The DAG MUST be acyclic and every id unique.
+        - Keep the plan as small as possible. All file paths are relative to the project root: \(projectRoot)
+
+        Capability negotiation:
+        \(CapabilityRegistry.render(tools: tools, disabled: ToolContractBook.disabledMap(shellEnabled: shellEnabled)))
+
+        Available tools:
+        \(tools.descriptions())
+        """
+    }
+
+    static func verifyPrompt(goal: String, stepSummary: String) -> String {
+        """
+        The goal was: \(goal)
+
+        The plan ran these steps successfully:
+        \(stepSummary)
+
+        Has the goal been FULLY accomplished? Respond with ONE JSON object, no prose:
+        {"done": true or false, "reason": "<one short line>"}
+        """
+    }
+
+    static func replanFromFailure(goal: String, exec: PlanExecution) -> String {
+        let failed = exec.failedStepId ?? "validation"
+        let err = exec.failedStepId.flatMap { id in exec.stepResults.first { $0.stepId == id }?.output }
+            ?? exec.stepResults.last?.output
+            ?? "plan validation failed before any executable step"
+        let succeeded = exec.stepResults.filter { $0.success }.map { $0.stepId }.joined(separator: ", ")
+        return """
+        The previous plan FAILED at step \(failed): \(String(err.prefix(300))).
+        Steps that already succeeded: \(succeeded.isEmpty ? "(none)" : succeeded).
+        Produce a REVISED JSON plan (same format) that still accomplishes the original goal — \
+        "\(goal)" — given what has already been done. Avoid repeating completed work that had side effects.
+        """
+    }
+
+    static func replanFromVerify(goal: String, reason: String) -> String {
+        """
+        The plan ran but the goal is NOT yet fully met: \(reason).
+        Produce a REVISED JSON plan (same format) with the ADDITIONAL steps needed to fully \
+        accomplish the original goal: "\(goal)".
+        """
+    }
+
+    /// Human-readable validation errors for a repair re-prompt.
+    static func describe(_ errors: [PlanValidationError]) -> String {
+        errors.map { e in
+            switch e {
+            case .empty: return "- the plan has no steps"
+            case .duplicateId(let id): return "- duplicate step id '\(id)'"
+            case .emptyTool(let id): return "- step '\(id)' has no tool"
+            case .unknownDependency(let id, let missing): return "- step '\(id)' depends on unknown step '\(missing)'"
+            case .cycle(let ids): return "- there is a dependency cycle involving: \(ids.joined(separator: ", "))"
+            }
+        }.joined(separator: "\n")
+    }
+
+    /// A short, human-readable plan rendering for the approval prompt.
+    static func render(_ plan: ExecutablePlan) -> String {
+        var lines = ["Plan for: \(plan.goal)"]
+        for s in (try? plan.orderedSteps()) ?? plan.steps {
+            let deps = s.dependsOn.isEmpty ? "" : " (after \(s.dependsOn.joined(separator: ",")))"
+            lines.append("  \(s.id). \(s.intent) — \(s.tool)\(deps)")
+        }
+        return lines.joined(separator: "\n")
+    }
+}

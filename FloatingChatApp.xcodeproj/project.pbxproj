@@ -1,0 +1,1047 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		00C55422036F9E1DBCCA4CD0 /* HotkeyService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66971EFE2863D297A67E9AC3 /* HotkeyService.swift */; };
+		0D5FC39AC47EAA0A94FEEA21 /* PlanStepsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19DB9BFF63096F6C153094C9 /* PlanStepsView.swift */; };
+		18557D78BCF888F6A8EB59F5 /* AgentRuntimeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E06B5F53F1FB698510DB150 /* AgentRuntimeService.swift */; };
+		1886F1EBBDFEFA52DD1E5E8B /* AgentExecutionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5C0B173FFAB100CE57450C /* AgentExecutionView.swift */; };
+		1FD4813D87D191259AD1D586 /* ClipboardTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 416EE6A10CB1244D7C6C9B53 /* ClipboardTool.swift */; };
+		2361FE5BEFB4AEE483471D0C /* SystemControlTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAAA4848E24BE85148A12750 /* SystemControlTool.swift */; };
+		262C2C7DD0BBA57BA936C186 /* AgentLoopEngine+SubTeams.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39E052431DEAFB4277F7871C /* AgentLoopEngine+SubTeams.swift */; };
+		28D7FBA092977FC6336735DF /* AgentMessageBusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9017C4E1146D7E5AE707D1FE /* AgentMessageBusTests.swift */; };
+		291BD57924889AE015DB925D /* UnifiedAgentRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = F73566968A9A1F7C3B5310A3 /* UnifiedAgentRuntime.swift */; };
+		2DFD57F993E6DD41E500BD49 /* GeminiProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918CDA56FC5CA1BC77EF1767 /* GeminiProviderTests.swift */; };
+		2EDA04FBBD403AA5BFCA3CA9 /* AppPreviewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE03EDBE0C3275CE80E2C3 /* AppPreviewService.swift */; };
+		32CB06ED188DEA55CD8C9E00 /* ExecutionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BA9CC9028946812329D94C5 /* ExecutionPlan.swift */; };
+		3BA422731F2E741C98FBB2FA /* AgentLoopEngine+Resume.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D1873120A1BF8A79AE2835 /* AgentLoopEngine+Resume.swift */; };
+		3C23CB9A44DD50FA0EE9C805 /* ResumePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F12EA925E99B7DE5C08C2ED /* ResumePickerView.swift */; };
+		4654745AB867946091BF21F0 /* ResumePickerViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37DC62F17B6F2309A82CD305 /* ResumePickerViewModelTests.swift */; };
+		49569570C77C5BDD97BE4B1A /* AppLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9474238ED2AC7A572C443C8 /* AppLinkService.swift */; };
+		51AC65493896763EDAD88BE1 /* AgentCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C4A09D8D9F94B9AC955CED4 /* AgentCLI.swift */; };
+		540904EBE0FE681B78B16611 /* ZhipuProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 788DAFF61C440CE91306A96D /* ZhipuProvider.swift */; };
+		5A846DD8321F6097397996E4 /* AgentLoopEngine+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D74DA4561762A0F0D69AC41 /* AgentLoopEngine+Messaging.swift */; };
+		5E887103C61A0704FC3690C1 /* ProviderModelOverrideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D94D1A6624BDB0AF72C12FA2 /* ProviderModelOverrideTests.swift */; };
+		5FF0433CA19E6BEBF5C641E0 /* AgentOrchestrationResumeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09D9159448C1298A9D0242BE /* AgentOrchestrationResumeTests.swift */; };
+		6D6D53F063DD3488A11359ED /* AgentSubTeamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918C448C6A8FB1A662352D1A /* AgentSubTeamTests.swift */; };
+		76144A7038FEE6FC352FD80D /* CheckpointStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6BEAE969E7B063988FB6DF9 /* CheckpointStore.swift */; };
+		7734630F513323D93FAC25C0 /* AgentRuntimeStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC6F2C597AF37E27B070FF0B /* AgentRuntimeStateTests.swift */; };
+		7E9FF28F916E4E146948E680 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E279AF3A942A69606814F297 /* KeychainService.swift */; };
+		7ED7EEEFE82C4896958858F6 /* TokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 157775097F6B3C79547263DA /* TokenManager.swift */; };
+		867016E0B163CC987B5B968D /* OrchestrationCheckpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = B354EA9BEEC3702274FE7438 /* OrchestrationCheckpoint.swift */; };
+		8704E3E0B620FDAD9B1835A1 /* GrokProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC32E50CE25EAB1816C310BD /* GrokProvider.swift */; };
+		8D9A5DD294684256D8729BE6 /* AgentOrchestrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E520F1D33B3FDB13F3A90E8E /* AgentOrchestrator.swift */; };
+		8E1DB90754D2A977A0A61BEB /* AgentProjectBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1ED5B014BE38EFEA822EED6 /* AgentProjectBanner.swift */; };
+		96681491A4610DBC25F26989 /* AgentPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAEF3B01C433A4C54ECF1263 /* AgentPrompts.swift */; };
+		9AD9A05F971A968FEB70B887 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B003146009F12A6BE54121C8 /* Cocoa.framework */; };
+		9BCD5F6E08115CAC68E977CE /* ProjectFolderPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6D7919F251A3C304FFD7576 /* ProjectFolderPickerView.swift */; };
+		9D6C1A35484931CD914D0E99 /* MiMoProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 779453B4A74071552F1D79D6 /* MiMoProvider.swift */; };
+		A1000001 /* FloatingChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000001 /* FloatingChatApp.swift */; };
+		A1000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002 /* AppDelegate.swift */; };
+		A1000003 /* FloatingWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000003 /* FloatingWindow.swift */; };
+		A1000004 /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000004 /* ChatMessage.swift */; };
+		A1000005 /* ChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000005 /* ChatViewModel.swift */; };
+		A1000006 /* AIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000006 /* AIProvider.swift */; };
+		A1000007 /* AnthropicProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000007 /* AnthropicProvider.swift */; };
+		A1000008 /* OpenAIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000008 /* OpenAIProvider.swift */; };
+		A1000009 /* OllamaProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000009 /* OllamaProvider.swift */; };
+		A1000010 /* MLXProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000010 /* MLXProvider.swift */; };
+		A1000011 /* ProviderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000011 /* ProviderManager.swift */; };
+		A1000012 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000012 /* ChatView.swift */; };
+		A1000013 /* ChatHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000013 /* ChatHeaderView.swift */; };
+		A1000014 /* MessageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000014 /* MessageView.swift */; };
+		A1000015 /* MarkdownTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000015 /* MarkdownTextView.swift */; };
+		A1000016 /* ChatInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000016 /* ChatInputView.swift */; };
+		A1000017 /* ErrorBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000017 /* ErrorBannerView.swift */; };
+		A1000018 /* ProviderPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000018 /* ProviderPickerView.swift */; };
+		A1000019 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000019 /* SettingsView.swift */; };
+		A1000020 /* ColorExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000020 /* ColorExtensions.swift */; };
+		A1000021 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B1000021 /* Assets.xcassets */; };
+		A1000022 /* ModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000024 /* ModelSettings.swift */; };
+		A1000023 /* ConversationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000025 /* ConversationManager.swift */; };
+		A1000024 /* ScreenCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000026 /* ScreenCaptureService.swift */; };
+		A1000025 /* LibrarySidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000027 /* LibrarySidebarView.swift */; };
+		A1000026 /* AgentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000028 /* AgentModels.swift */; };
+		A1000027 /* DeepSeekProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000029 /* DeepSeekProvider.swift */; };
+		A1000028 /* AgentPipelineManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000030 /* AgentPipelineManager.swift */; };
+		A1000029 /* ConversationAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000031 /* ConversationAgent.swift */; };
+		A1000030 /* RequirementsAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000032 /* RequirementsAgent.swift */; };
+		A1000031 /* CodeAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000033 /* CodeAgent.swift */; };
+		A1000032 /* BuildAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000034 /* BuildAgent.swift */; };
+		A1000033 /* ProjectContextService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000035 /* ProjectContextService.swift */; };
+		A1000034 /* AgentStageIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000036 /* AgentStageIndicator.swift */; };
+		A1000035 /* AgentMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000037 /* AgentMessage.swift */; };
+		A1000036 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000038 /* AgentTools.swift */; };
+		A1000037 /* AgentLoopEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000039 /* AgentLoopEngine.swift */; };
+		A1000038 /* AgentChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000040 /* AgentChatView.swift */; };
+		A1000039 /* ReadFileTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000041 /* ReadFileTool.swift */; };
+		A1000040 /* WriteFileTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000042 /* WriteFileTool.swift */; };
+		A1000041 /* EditFileTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000043 /* EditFileTool.swift */; };
+		A1000042 /* ListFilesTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000044 /* ListFilesTool.swift */; };
+		A1000043 /* SearchCodeTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000045 /* SearchCodeTool.swift */; };
+		A1000044 /* RunBuildTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000046 /* RunBuildTool.swift */; };
+		A1000045 /* RunCommandTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000047 /* RunCommandTool.swift */; };
+		A1000046 /* GlobFilesTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000048 /* GlobFilesTool.swift */; };
+		A1000047 /* GetProjectStructureTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000049 /* GetProjectStructureTool.swift */; };
+		A1000048 /* WebSearchTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000050 /* WebSearchTool.swift */; };
+		A1000049 /* SystemSearchTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000051 /* SystemSearchTool.swift */; };
+		A1000050 /* MLXServerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000052 /* MLXServerManager.swift */; };
+		A1000051 /* TeamPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000053 /* TeamPickerView.swift */; };
+		A74E7C5E8F24919EB69DCDB5 /* IntentBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693F2EA5CD1DCCFCCC3FE7CA /* IntentBanner.swift */; };
+		AB16E313FC3DE2098F832BF1 /* ActionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3D3D401E15ED2BC52B6715D /* ActionCard.swift */; };
+		AF8C9AB26A197336F23800C0 /* JSONDirectoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44C5A6438CB7D37F67925869 /* JSONDirectoryStore.swift */; };
+		B69B7F84B67F0980C8BACA7D /* SpeechOutputService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 949E979BC3FF5359EF05B8D0 /* SpeechOutputService.swift */; };
+		BA6BF209BC982F97D4AC9E6C /* APIKeyWizardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7294128243B9997D740141F3 /* APIKeyWizardTests.swift */; };
+		BB22ADEDDDA7D37C289D2812 /* APIKeyWizardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 782CBC34A3B177E55D179883 /* APIKeyWizardView.swift */; };
+		C1707077A416ACE6C2B6DD93 /* AgentMessageBus.swift in Sources */ = {isa = PBXBuildFile; fileRef = E97C6FBBB75E5F765D5484D4 /* AgentMessageBus.swift */; };
+		CADD3613BA2B6C435F3B305A /* ExecutionTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 221F3FC84EB4EB41BF41BDD7 /* ExecutionTimeline.swift */; };
+		CB1A9D2EBA2C9FC1AEBDF5F4 /* AgentCheckpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3EE2A426EAD1F5A4E2B8F6C /* AgentCheckpoint.swift */; };
+		CBDACC5CB7F13291EA5A739D /* WindowManagementTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0678425230FF4731C55BD6 /* WindowManagementTool.swift */; };
+		CC735A783B7955A2EC525C80 /* AgentRuntimeEndToEndTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2315A6D71061E9235DA1B48A /* AgentRuntimeEndToEndTests.swift */; };
+		CD06C17631BFA28CBDD330CE /* GeminiProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1180DC61A84F0135C13B9480 /* GeminiProvider.swift */; };
+		CE2BEAB922F1F1E2B218C0BF /* InputControlTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A83873E63C53C5BAC72DBC8 /* InputControlTool.swift */; };
+		E0350A565992CADAF531DC17 /* UnifiedAgentRuntime+Resume.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21CAAD92248772BCCA2992FD /* UnifiedAgentRuntime+Resume.swift */; };
+		E09EA44BDED14F7989D5E637 /* GitHubTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55B78CC20F9305C494F8A990 /* GitHubTool.swift */; };
+		E7E307D83E56547E69ACBB11 /* MoonshotProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B413C644028E2FFD7C74B385 /* MoonshotProvider.swift */; };
+		E9C77E4883D8BE4AFE562009 /* AppleScriptTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2432466994D8F008597989D /* AppleScriptTool.swift */; };
+		EDA345512DE199B3E506A031 /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B24BE236E76BE7890AA0F332 /* ConversationStore.swift */; };
+		F455BB9688E1C1A2B00B631E /* ReplanEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C75C5C056AB8C2764E554943 /* ReplanEngine.swift */; };
+		M1000001 /* GitTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000001 /* GitTool.swift */; };
+		M1000002 /* MemoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000002 /* MemoryModels.swift */; };
+		M1000003 /* FrontalCortex.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000003 /* FrontalCortex.swift */; };
+		M1000004 /* ReflectionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000004 /* ReflectionModels.swift */; };
+		M1000005 /* AgentReflectionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000005 /* AgentReflectionEngine.swift */; };
+		M1000006 /* ChangeLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000006 /* ChangeLogStore.swift */; };
+		M1000007 /* RecentCaptureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000007 /* RecentCaptureStore.swift */; };
+		M1000008 /* VoiceInputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000008 /* VoiceInputManager.swift */; };
+		M1000009 /* MLXWhisperServerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000009 /* MLXWhisperServerManager.swift */; };
+		M1000010 /* CreateXcodeAppTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000010 /* CreateXcodeAppTool.swift */; };
+		M1000011 /* PlaywrightCaptureTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000011 /* PlaywrightCaptureTool.swift */; };
+		M1000012 /* ExtractVideoFramesTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000012 /* ExtractVideoFramesTool.swift */; };
+		M1000013 /* SetProjectPathTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000013 /* SetProjectPathTool.swift */; };
+		M1000014 /* FindProjectsTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000014 /* FindProjectsTool.swift */; };
+		M1000015 /* RunTestsTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000015 /* RunTestsTool.swift */; };
+		M1000016 /* TranscribeMediaTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000016 /* TranscribeMediaTool.swift */; };
+		M1000017 /* InstallDependenciesTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = M2000017 /* InstallDependenciesTool.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		7F78ACD73F35B7EFE1A01A71 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 089C1665FE841172C02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E1000001;
+			remoteInfo = FloatingChatApp;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		092F163695C71F3DE53E8036 /* FloatingChatAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FloatingChatAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		09D9159448C1298A9D0242BE /* AgentOrchestrationResumeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentOrchestrationResumeTests.swift; path = FloatingChatAppTests/AgentOrchestrationResumeTests.swift; sourceTree = SOURCE_ROOT; };
+		0D74DA4561762A0F0D69AC41 /* AgentLoopEngine+Messaging.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = "AgentLoopEngine+Messaging.swift"; path = "FloatingChatApp/Sources/Services/AgentLoop/AgentLoopEngine+Messaging.swift"; sourceTree = SOURCE_ROOT; };
+		1180DC61A84F0135C13B9480 /* GeminiProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = GeminiProvider.swift; path = FloatingChatApp/Sources/Services/Providers/GeminiProvider.swift; sourceTree = SOURCE_ROOT; };
+		157775097F6B3C79547263DA /* TokenManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TokenManager.swift; path = FloatingChatApp/Sources/Services/TokenManager.swift; sourceTree = SOURCE_ROOT; };
+		19DB9BFF63096F6C153094C9 /* PlanStepsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlanStepsView.swift; sourceTree = "<group>"; };
+		21CAAD92248772BCCA2992FD /* UnifiedAgentRuntime+Resume.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = "UnifiedAgentRuntime+Resume.swift"; path = "FloatingChatApp/Sources/Services/AgentLoop/UnifiedAgentRuntime+Resume.swift"; sourceTree = SOURCE_ROOT; };
+		221F3FC84EB4EB41BF41BDD7 /* ExecutionTimeline.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ExecutionTimeline.swift; sourceTree = "<group>"; };
+		2315A6D71061E9235DA1B48A /* AgentRuntimeEndToEndTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentRuntimeEndToEndTests.swift; path = FloatingChatAppTests/AgentRuntimeEndToEndTests.swift; sourceTree = SOURCE_ROOT; };
+		37DC62F17B6F2309A82CD305 /* ResumePickerViewModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ResumePickerViewModelTests.swift; path = FloatingChatAppTests/ResumePickerViewModelTests.swift; sourceTree = SOURCE_ROOT; };
+		39E052431DEAFB4277F7871C /* AgentLoopEngine+SubTeams.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = "AgentLoopEngine+SubTeams.swift"; path = "FloatingChatApp/Sources/Services/AgentLoop/AgentLoopEngine+SubTeams.swift"; sourceTree = SOURCE_ROOT; };
+		3A83873E63C53C5BAC72DBC8 /* InputControlTool.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = InputControlTool.swift; sourceTree = "<group>"; };
+		3BA9CC9028946812329D94C5 /* ExecutionPlan.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ExecutionPlan.swift; sourceTree = "<group>"; };
+		416EE6A10CB1244D7C6C9B53 /* ClipboardTool.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ClipboardTool.swift; sourceTree = "<group>"; };
+		44C5A6438CB7D37F67925869 /* JSONDirectoryStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = JSONDirectoryStore.swift; path = FloatingChatApp/Sources/Services/AgentLoop/JSONDirectoryStore.swift; sourceTree = SOURCE_ROOT; };
+		55B78CC20F9305C494F8A990 /* GitHubTool.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitHubTool.swift; sourceTree = "<group>"; };
+		5E5C0B173FFAB100CE57450C /* AgentExecutionView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentExecutionView.swift; sourceTree = "<group>"; };
+		5F0678425230FF4731C55BD6 /* WindowManagementTool.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowManagementTool.swift; sourceTree = "<group>"; };
+		66971EFE2863D297A67E9AC3 /* HotkeyService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HotkeyService.swift; sourceTree = "<group>"; };
+		693F2EA5CD1DCCFCCC3FE7CA /* IntentBanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = IntentBanner.swift; sourceTree = "<group>"; };
+		6C4A09D8D9F94B9AC955CED4 /* AgentCLI.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentCLI.swift; path = FloatingChatApp/Sources/CLI/AgentCLI.swift; sourceTree = SOURCE_ROOT; };
+		7294128243B9997D740141F3 /* APIKeyWizardTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = APIKeyWizardTests.swift; path = FloatingChatAppTests/APIKeyWizardTests.swift; sourceTree = SOURCE_ROOT; };
+		779453B4A74071552F1D79D6 /* MiMoProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MiMoProvider.swift; path = FloatingChatApp/Sources/Services/Providers/MiMoProvider.swift; sourceTree = SOURCE_ROOT; };
+		782CBC34A3B177E55D179883 /* APIKeyWizardView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = APIKeyWizardView.swift; path = FloatingChatApp/Sources/Views/APIKeyWizardView.swift; sourceTree = SOURCE_ROOT; };
+		788DAFF61C440CE91306A96D /* ZhipuProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ZhipuProvider.swift; path = FloatingChatApp/Sources/Services/Providers/ZhipuProvider.swift; sourceTree = SOURCE_ROOT; };
+		8E06B5F53F1FB698510DB150 /* AgentRuntimeService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentRuntimeService.swift; sourceTree = "<group>"; };
+		8F12EA925E99B7DE5C08C2ED /* ResumePickerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ResumePickerView.swift; path = FloatingChatApp/Sources/Views/ResumePickerView.swift; sourceTree = SOURCE_ROOT; };
+		9017C4E1146D7E5AE707D1FE /* AgentMessageBusTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentMessageBusTests.swift; path = FloatingChatAppTests/AgentMessageBusTests.swift; sourceTree = SOURCE_ROOT; };
+		918C448C6A8FB1A662352D1A /* AgentSubTeamTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentSubTeamTests.swift; path = FloatingChatAppTests/AgentSubTeamTests.swift; sourceTree = SOURCE_ROOT; };
+		918CDA56FC5CA1BC77EF1767 /* GeminiProviderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = GeminiProviderTests.swift; path = FloatingChatAppTests/GeminiProviderTests.swift; sourceTree = SOURCE_ROOT; };
+		949E979BC3FF5359EF05B8D0 /* SpeechOutputService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpeechOutputService.swift; sourceTree = "<group>"; };
+		A1EE03EDBE0C3275CE80E2C3 /* AppPreviewService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppPreviewService.swift; sourceTree = "<group>"; };
+		A8D1873120A1BF8A79AE2835 /* AgentLoopEngine+Resume.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = "AgentLoopEngine+Resume.swift"; path = "FloatingChatApp/Sources/Services/AgentLoop/AgentLoopEngine+Resume.swift"; sourceTree = SOURCE_ROOT; };
+		B003146009F12A6BE54121C8 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		B1000000 /* FloatingChatApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FloatingChatApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1000001 /* FloatingChatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingChatApp.swift; sourceTree = "<group>"; };
+		B1000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		B1000003 /* FloatingWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingWindow.swift; sourceTree = "<group>"; };
+		B1000004 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
+		B1000005 /* ChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModel.swift; sourceTree = "<group>"; };
+		B1000006 /* AIProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIProvider.swift; sourceTree = "<group>"; };
+		B1000007 /* AnthropicProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnthropicProvider.swift; sourceTree = "<group>"; };
+		B1000008 /* OpenAIProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIProvider.swift; sourceTree = "<group>"; };
+		B1000009 /* OllamaProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaProvider.swift; sourceTree = "<group>"; };
+		B1000010 /* MLXProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXProvider.swift; sourceTree = "<group>"; };
+		B1000011 /* ProviderManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderManager.swift; sourceTree = "<group>"; };
+		B1000012 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		B1000013 /* ChatHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatHeaderView.swift; sourceTree = "<group>"; };
+		B1000014 /* MessageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageView.swift; sourceTree = "<group>"; };
+		B1000015 /* MarkdownTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTextView.swift; sourceTree = "<group>"; };
+		B1000016 /* ChatInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatInputView.swift; sourceTree = "<group>"; };
+		B1000017 /* ErrorBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorBannerView.swift; sourceTree = "<group>"; };
+		B1000018 /* ProviderPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderPickerView.swift; sourceTree = "<group>"; };
+		B1000019 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B1000020 /* ColorExtensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorExtensions.swift; sourceTree = "<group>"; };
+		B1000021 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B1000022 /* FloatingChatApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FloatingChatApp.entitlements; sourceTree = "<group>"; };
+		B1000023 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B1000024 /* ModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettings.swift; sourceTree = "<group>"; };
+		B1000025 /* ConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationManager.swift; sourceTree = "<group>"; };
+		B1000026 /* ScreenCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureService.swift; sourceTree = "<group>"; };
+		B1000027 /* LibrarySidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibrarySidebarView.swift; sourceTree = "<group>"; };
+		B1000028 /* AgentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentModels.swift; sourceTree = "<group>"; };
+		B1000029 /* DeepSeekProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSeekProvider.swift; sourceTree = "<group>"; };
+		B1000030 /* AgentPipelineManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPipelineManager.swift; sourceTree = "<group>"; };
+		B1000031 /* ConversationAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAgent.swift; sourceTree = "<group>"; };
+		B1000032 /* RequirementsAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequirementsAgent.swift; sourceTree = "<group>"; };
+		B1000033 /* CodeAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAgent.swift; sourceTree = "<group>"; };
+		B1000034 /* BuildAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildAgent.swift; sourceTree = "<group>"; };
+		B1000035 /* ProjectContextService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectContextService.swift; sourceTree = "<group>"; };
+		B1000036 /* AgentStageIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentStageIndicator.swift; sourceTree = "<group>"; };
+		B1000037 /* AgentMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessage.swift; sourceTree = "<group>"; };
+		B1000038 /* AgentTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTools.swift; sourceTree = "<group>"; };
+		B1000039 /* AgentLoopEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentLoopEngine.swift; sourceTree = "<group>"; };
+		B1000040 /* AgentChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChatView.swift; sourceTree = "<group>"; };
+		B1000041 /* ReadFileTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadFileTool.swift; sourceTree = "<group>"; };
+		B1000042 /* WriteFileTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WriteFileTool.swift; sourceTree = "<group>"; };
+		B1000043 /* EditFileTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditFileTool.swift; sourceTree = "<group>"; };
+		B1000044 /* ListFilesTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListFilesTool.swift; sourceTree = "<group>"; };
+		B1000045 /* SearchCodeTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchCodeTool.swift; sourceTree = "<group>"; };
+		B1000046 /* RunBuildTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunBuildTool.swift; sourceTree = "<group>"; };
+		B1000047 /* RunCommandTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunCommandTool.swift; sourceTree = "<group>"; };
+		B1000048 /* GlobFilesTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobFilesTool.swift; sourceTree = "<group>"; };
+		B1000049 /* GetProjectStructureTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GetProjectStructureTool.swift; sourceTree = "<group>"; };
+		B1000050 /* WebSearchTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSearchTool.swift; sourceTree = "<group>"; };
+		B1000051 /* SystemSearchTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSearchTool.swift; sourceTree = "<group>"; };
+		B1000052 /* MLXServerManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXServerManager.swift; sourceTree = "<group>"; };
+		B1000053 /* TeamPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeamPickerView.swift; sourceTree = "<group>"; };
+		B2432466994D8F008597989D /* AppleScriptTool.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppleScriptTool.swift; sourceTree = "<group>"; };
+		B24BE236E76BE7890AA0F332 /* ConversationStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ConversationStore.swift; path = FloatingChatApp/Sources/Services/ConversationStore.swift; sourceTree = SOURCE_ROOT; };
+		B354EA9BEEC3702274FE7438 /* OrchestrationCheckpoint.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = OrchestrationCheckpoint.swift; path = FloatingChatApp/Sources/Services/AgentLoop/OrchestrationCheckpoint.swift; sourceTree = SOURCE_ROOT; };
+		B413C644028E2FFD7C74B385 /* MoonshotProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MoonshotProvider.swift; path = FloatingChatApp/Sources/Services/Providers/MoonshotProvider.swift; sourceTree = SOURCE_ROOT; };
+		B6BEAE969E7B063988FB6DF9 /* CheckpointStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CheckpointStore.swift; path = FloatingChatApp/Sources/Services/AgentLoop/CheckpointStore.swift; sourceTree = SOURCE_ROOT; };
+		C1ED5B014BE38EFEA822EED6 /* AgentProjectBanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FloatingChatApp/Sources/Views/Components/AgentProjectBanner.swift; sourceTree = SOURCE_ROOT; };
+		C75C5C056AB8C2764E554943 /* ReplanEngine.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ReplanEngine.swift; path = FloatingChatApp/Sources/Services/AgentLoop/ReplanEngine.swift; sourceTree = SOURCE_ROOT; };
+		D3D3D401E15ED2BC52B6715D /* ActionCard.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ActionCard.swift; sourceTree = "<group>"; };
+		D6D7919F251A3C304FFD7576 /* ProjectFolderPickerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FloatingChatApp/Sources/Views/Components/ProjectFolderPickerView.swift; sourceTree = SOURCE_ROOT; };
+		D9474238ED2AC7A572C443C8 /* AppLinkService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppLinkService.swift; sourceTree = "<group>"; };
+		D94D1A6624BDB0AF72C12FA2 /* ProviderModelOverrideTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProviderModelOverrideTests.swift; path = FloatingChatAppTests/ProviderModelOverrideTests.swift; sourceTree = SOURCE_ROOT; };
+		DC32E50CE25EAB1816C310BD /* GrokProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = GrokProvider.swift; path = GrokProvider.swift; sourceTree = "<group>"; };
+		E279AF3A942A69606814F297 /* KeychainService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = KeychainService.swift; path = FloatingChatApp/Sources/Services/KeychainService.swift; sourceTree = SOURCE_ROOT; };
+		E520F1D33B3FDB13F3A90E8E /* AgentOrchestrator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentOrchestrator.swift; sourceTree = "<group>"; };
+		E97C6FBBB75E5F765D5484D4 /* AgentMessageBus.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentMessageBus.swift; path = FloatingChatApp/Sources/Services/AgentLoop/AgentMessageBus.swift; sourceTree = SOURCE_ROOT; };
+		EAAA4848E24BE85148A12750 /* SystemControlTool.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemControlTool.swift; sourceTree = "<group>"; };
+		F3EE2A426EAD1F5A4E2B8F6C /* AgentCheckpoint.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentCheckpoint.swift; path = FloatingChatApp/Sources/Services/AgentLoop/AgentCheckpoint.swift; sourceTree = SOURCE_ROOT; };
+		F73566968A9A1F7C3B5310A3 /* UnifiedAgentRuntime.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UnifiedAgentRuntime.swift; sourceTree = "<group>"; };
+		FAEF3B01C433A4C54ECF1263 /* AgentPrompts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentPrompts.swift; sourceTree = "<group>"; };
+		FC6F2C597AF37E27B070FF0B /* AgentRuntimeStateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AgentRuntimeStateTests.swift; path = FloatingChatAppTests/AgentRuntimeStateTests.swift; sourceTree = SOURCE_ROOT; };
+		M2000001 /* GitTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitTool.swift; sourceTree = "<group>"; };
+		M2000002 /* MemoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryModels.swift; sourceTree = "<group>"; };
+		M2000003 /* FrontalCortex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrontalCortex.swift; sourceTree = "<group>"; };
+		M2000004 /* ReflectionModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReflectionModels.swift; sourceTree = "<group>"; };
+		M2000005 /* AgentReflectionEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentReflectionEngine.swift; sourceTree = "<group>"; };
+		M2000006 /* ChangeLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChangeLogStore.swift; sourceTree = "<group>"; };
+		M2000007 /* RecentCaptureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentCaptureStore.swift; sourceTree = "<group>"; };
+		M2000008 /* VoiceInputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputManager.swift; sourceTree = "<group>"; };
+		M2000009 /* MLXWhisperServerManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXWhisperServerManager.swift; sourceTree = "<group>"; };
+		M2000010 /* CreateXcodeAppTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateXcodeAppTool.swift; sourceTree = "<group>"; };
+		M2000011 /* PlaywrightCaptureTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaywrightCaptureTool.swift; sourceTree = "<group>"; };
+		M2000012 /* ExtractVideoFramesTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractVideoFramesTool.swift; sourceTree = "<group>"; };
+		M2000013 /* SetProjectPathTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetProjectPathTool.swift; sourceTree = "<group>"; };
+		M2000014 /* FindProjectsTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindProjectsTool.swift; sourceTree = "<group>"; };
+		M2000015 /* RunTestsTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunTestsTool.swift; sourceTree = "<group>"; };
+		M2000016 /* TranscribeMediaTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscribeMediaTool.swift; sourceTree = "<group>"; };
+		M2000017 /* InstallDependenciesTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallDependenciesTool.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		528442BBDE902CEF0F49B212 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9AD9A05F971A968FEB70B887 /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C1000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		06FFDF374B61A19651590866 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A73D1F81EDEA2DB6BEA2A6B8 /* OS X */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		3722EDF2B07D45927AF2116A /* CLI */ = {
+			isa = PBXGroup;
+			children = (
+				6C4A09D8D9F94B9AC955CED4 /* AgentCLI.swift */,
+			);
+			name = CLI;
+			path = FloatingChatApp/Sources/CLI;
+			sourceTree = "<group>";
+		};
+		A73D1F81EDEA2DB6BEA2A6B8 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				B003146009F12A6BE54121C8 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
+		D1000001 = {
+			isa = PBXGroup;
+			children = (
+				D1000002 /* FloatingChatApp */,
+				D1000003 /* Products */,
+				06FFDF374B61A19651590866 /* Frameworks */,
+				DAC40B3B1E9F267C0539810E /* FloatingChatAppTests */,
+			);
+			sourceTree = "<group>";
+		};
+		D1000002 /* FloatingChatApp */ = {
+			isa = PBXGroup;
+			children = (
+				D1000004 /* Sources */,
+				B1000021 /* Assets.xcassets */,
+				B1000022 /* FloatingChatApp.entitlements */,
+				B1000023 /* Info.plist */,
+			);
+			path = FloatingChatApp;
+			sourceTree = "<group>";
+		};
+		D1000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B1000000 /* FloatingChatApp.app */,
+				092F163695C71F3DE53E8036 /* FloatingChatAppTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D1000004 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				D1000005 /* App */,
+				D1000006 /* Models */,
+				D1000007 /* Views */,
+				D1000008 /* Services */,
+				D1000009 /* Utils */,
+				3722EDF2B07D45927AF2116A /* CLI */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		D1000005 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				B1000001 /* FloatingChatApp.swift */,
+				B1000002 /* AppDelegate.swift */,
+				B1000003 /* FloatingWindow.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		D1000006 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				B1000004 /* ChatMessage.swift */,
+				B1000005 /* ChatViewModel.swift */,
+				B1000024 /* ModelSettings.swift */,
+				B1000028 /* AgentModels.swift */,
+				B1000037 /* AgentMessage.swift */,
+				3BA9CC9028946812329D94C5 /* ExecutionPlan.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		D1000007 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B1000012 /* ChatView.swift */,
+				B1000019 /* SettingsView.swift */,
+				B1000040 /* AgentChatView.swift */,
+				D1000010 /* Components */,
+				8F12EA925E99B7DE5C08C2ED /* ResumePickerView.swift */,
+				782CBC34A3B177E55D179883 /* APIKeyWizardView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		D1000008 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				B1000006 /* AIProvider.swift */,
+				B1000011 /* ProviderManager.swift */,
+				B1000025 /* ConversationManager.swift */,
+				B1000026 /* ScreenCaptureService.swift */,
+				B1000035 /* ProjectContextService.swift */,
+				B1000052 /* MLXServerManager.swift */,
+				D1000011 /* Providers */,
+				D1000012 /* AgentPipeline */,
+				D1000013 /* AgentLoop */,
+				M3000001 /* Memory */,
+				M3000002 /* Reflection */,
+				E279AF3A942A69606814F297 /* KeychainService.swift */,
+				157775097F6B3C79547263DA /* TokenManager.swift */,
+				B24BE236E76BE7890AA0F332 /* ConversationStore.swift */,
+				M2000006 /* ChangeLogStore.swift */,
+				M2000007 /* RecentCaptureStore.swift */,
+				M2000008 /* VoiceInputManager.swift */,
+				M2000009 /* MLXWhisperServerManager.swift */,
+				D9474238ED2AC7A572C443C8 /* AppLinkService.swift */,
+				A1EE03EDBE0C3275CE80E2C3 /* AppPreviewService.swift */,
+				66971EFE2863D297A67E9AC3 /* HotkeyService.swift */,
+				949E979BC3FF5359EF05B8D0 /* SpeechOutputService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		D1000009 /* Utils */ = {
+			isa = PBXGroup;
+			children = (
+				B1000020 /* ColorExtensions.swift */,
+			);
+			path = Utils;
+			sourceTree = "<group>";
+		};
+		D1000010 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				B1000013 /* ChatHeaderView.swift */,
+				B1000014 /* MessageView.swift */,
+				B1000015 /* MarkdownTextView.swift */,
+				B1000016 /* ChatInputView.swift */,
+				B1000017 /* ErrorBannerView.swift */,
+				B1000018 /* ProviderPickerView.swift */,
+				B1000027 /* LibrarySidebarView.swift */,
+				B1000036 /* AgentStageIndicator.swift */,
+				B1000053 /* TeamPickerView.swift */,
+				D6D7919F251A3C304FFD7576 /* ProjectFolderPickerView.swift */,
+				C1ED5B014BE38EFEA822EED6 /* AgentProjectBanner.swift */,
+				693F2EA5CD1DCCFCCC3FE7CA /* IntentBanner.swift */,
+				19DB9BFF63096F6C153094C9 /* PlanStepsView.swift */,
+				D3D3D401E15ED2BC52B6715D /* ActionCard.swift */,
+				221F3FC84EB4EB41BF41BDD7 /* ExecutionTimeline.swift */,
+				5E5C0B173FFAB100CE57450C /* AgentExecutionView.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		D1000011 /* Providers */ = {
+			isa = PBXGroup;
+			children = (
+				B1000007 /* AnthropicProvider.swift */,
+				B1000008 /* OpenAIProvider.swift */,
+				B1000009 /* OllamaProvider.swift */,
+				B1000010 /* MLXProvider.swift */,
+				B1000029 /* DeepSeekProvider.swift */,
+				DC32E50CE25EAB1816C310BD /* GrokProvider.swift */,
+				1180DC61A84F0135C13B9480 /* GeminiProvider.swift */,
+				B413C644028E2FFD7C74B385 /* MoonshotProvider.swift */,
+				788DAFF61C440CE91306A96D /* ZhipuProvider.swift */,
+				779453B4A74071552F1D79D6 /* MiMoProvider.swift */,
+			);
+			path = Providers;
+			sourceTree = "<group>";
+		};
+		D1000012 /* AgentPipeline */ = {
+			isa = PBXGroup;
+			children = (
+				B1000030 /* AgentPipelineManager.swift */,
+				B1000031 /* ConversationAgent.swift */,
+				B1000032 /* RequirementsAgent.swift */,
+				B1000033 /* CodeAgent.swift */,
+				B1000034 /* BuildAgent.swift */,
+			);
+			path = AgentPipeline;
+			sourceTree = "<group>";
+		};
+		D1000013 /* AgentLoop */ = {
+			isa = PBXGroup;
+			children = (
+				B1000038 /* AgentTools.swift */,
+				B1000039 /* AgentLoopEngine.swift */,
+				D1000014 /* Tools */,
+				8E06B5F53F1FB698510DB150 /* AgentRuntimeService.swift */,
+				E520F1D33B3FDB13F3A90E8E /* AgentOrchestrator.swift */,
+				FAEF3B01C433A4C54ECF1263 /* AgentPrompts.swift */,
+				F73566968A9A1F7C3B5310A3 /* UnifiedAgentRuntime.swift */,
+				F3EE2A426EAD1F5A4E2B8F6C /* AgentCheckpoint.swift */,
+				B6BEAE969E7B063988FB6DF9 /* CheckpointStore.swift */,
+				21CAAD92248772BCCA2992FD /* UnifiedAgentRuntime+Resume.swift */,
+				C75C5C056AB8C2764E554943 /* ReplanEngine.swift */,
+				44C5A6438CB7D37F67925869 /* JSONDirectoryStore.swift */,
+				B354EA9BEEC3702274FE7438 /* OrchestrationCheckpoint.swift */,
+				A8D1873120A1BF8A79AE2835 /* AgentLoopEngine+Resume.swift */,
+				39E052431DEAFB4277F7871C /* AgentLoopEngine+SubTeams.swift */,
+				E97C6FBBB75E5F765D5484D4 /* AgentMessageBus.swift */,
+				0D74DA4561762A0F0D69AC41 /* AgentLoopEngine+Messaging.swift */,
+			);
+			path = AgentLoop;
+			sourceTree = "<group>";
+		};
+		D1000014 /* Tools */ = {
+			isa = PBXGroup;
+			children = (
+				B1000041 /* ReadFileTool.swift */,
+				B1000042 /* WriteFileTool.swift */,
+				B1000043 /* EditFileTool.swift */,
+				B1000044 /* ListFilesTool.swift */,
+				B1000045 /* SearchCodeTool.swift */,
+				B1000046 /* RunBuildTool.swift */,
+				B1000047 /* RunCommandTool.swift */,
+				B1000048 /* GlobFilesTool.swift */,
+				B1000049 /* GetProjectStructureTool.swift */,
+				B1000050 /* WebSearchTool.swift */,
+				B1000051 /* SystemSearchTool.swift */,
+				M2000001 /* GitTool.swift */,
+				M2000010 /* CreateXcodeAppTool.swift */,
+				M2000011 /* PlaywrightCaptureTool.swift */,
+				M2000012 /* ExtractVideoFramesTool.swift */,
+				M2000013 /* SetProjectPathTool.swift */,
+				M2000014 /* FindProjectsTool.swift */,
+				M2000015 /* RunTestsTool.swift */,
+				M2000016 /* TranscribeMediaTool.swift */,
+				M2000017 /* InstallDependenciesTool.swift */,
+				416EE6A10CB1244D7C6C9B53 /* ClipboardTool.swift */,
+				B2432466994D8F008597989D /* AppleScriptTool.swift */,
+				EAAA4848E24BE85148A12750 /* SystemControlTool.swift */,
+				5F0678425230FF4731C55BD6 /* WindowManagementTool.swift */,
+				3A83873E63C53C5BAC72DBC8 /* InputControlTool.swift */,
+				55B78CC20F9305C494F8A990 /* GitHubTool.swift */,
+			);
+			path = Tools;
+			sourceTree = "<group>";
+		};
+		DAC40B3B1E9F267C0539810E /* FloatingChatAppTests */ = {
+			isa = PBXGroup;
+			children = (
+				FC6F2C597AF37E27B070FF0B /* AgentRuntimeStateTests.swift */,
+				09D9159448C1298A9D0242BE /* AgentOrchestrationResumeTests.swift */,
+				37DC62F17B6F2309A82CD305 /* ResumePickerViewModelTests.swift */,
+				2315A6D71061E9235DA1B48A /* AgentRuntimeEndToEndTests.swift */,
+				918CDA56FC5CA1BC77EF1767 /* GeminiProviderTests.swift */,
+				918C448C6A8FB1A662352D1A /* AgentSubTeamTests.swift */,
+				9017C4E1146D7E5AE707D1FE /* AgentMessageBusTests.swift */,
+				D94D1A6624BDB0AF72C12FA2 /* ProviderModelOverrideTests.swift */,
+				7294128243B9997D740141F3 /* APIKeyWizardTests.swift */,
+			);
+			name = FloatingChatAppTests;
+			sourceTree = SOURCE_ROOT;
+		};
+		M3000001 /* Memory */ = {
+			isa = PBXGroup;
+			children = (
+				M2000002 /* MemoryModels.swift */,
+				M2000003 /* FrontalCortex.swift */,
+			);
+			path = Memory;
+			sourceTree = "<group>";
+		};
+		M3000002 /* Reflection */ = {
+			isa = PBXGroup;
+			children = (
+				M2000004 /* ReflectionModels.swift */,
+				M2000005 /* AgentReflectionEngine.swift */,
+			);
+			path = Reflection;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E1000001 /* FloatingChatApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F1000001 /* Build configuration list for PBXNativeTarget "FloatingChatApp" */;
+			buildPhases = (
+				C1000002 /* Sources */,
+				C1000001 /* Frameworks */,
+				C1000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FloatingChatApp;
+			productName = FloatingChatApp;
+			productReference = B1000000 /* FloatingChatApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+		F67A45FBE7024156183713CE /* FloatingChatAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 19E1502888E6547223260C71 /* Build configuration list for PBXNativeTarget "FloatingChatAppTests" */;
+			buildPhases = (
+				1B3CF76FF0CD53CFC97E39A7 /* Sources */,
+				528442BBDE902CEF0F49B212 /* Frameworks */,
+				283B3071DBD885610E793628 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6E373A2FB7BC672A2ABC9929 /* PBXTargetDependency */,
+			);
+			name = FloatingChatAppTests;
+			productName = FloatingChatAppTests;
+			productReference = 092F163695C71F3DE53E8036 /* FloatingChatAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		089C1665FE841172C02AAC07 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					E1000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = F1000003 /* Build configuration list for PBXProject "FloatingChatApp" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = D1000001;
+			productRefGroup = D1000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E1000001 /* FloatingChatApp */,
+				F67A45FBE7024156183713CE /* FloatingChatAppTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		283B3071DBD885610E793628 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C1000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000021 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1B3CF76FF0CD53CFC97E39A7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7734630F513323D93FAC25C0 /* AgentRuntimeStateTests.swift in Sources */,
+				5FF0433CA19E6BEBF5C641E0 /* AgentOrchestrationResumeTests.swift in Sources */,
+				4654745AB867946091BF21F0 /* ResumePickerViewModelTests.swift in Sources */,
+				CC735A783B7955A2EC525C80 /* AgentRuntimeEndToEndTests.swift in Sources */,
+				2DFD57F993E6DD41E500BD49 /* GeminiProviderTests.swift in Sources */,
+				6D6D53F063DD3488A11359ED /* AgentSubTeamTests.swift in Sources */,
+				28D7FBA092977FC6336735DF /* AgentMessageBusTests.swift in Sources */,
+				5E887103C61A0704FC3690C1 /* ProviderModelOverrideTests.swift in Sources */,
+				BA6BF209BC982F97D4AC9E6C /* APIKeyWizardTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C1000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000001 /* FloatingChatApp.swift in Sources */,
+				A1000002 /* AppDelegate.swift in Sources */,
+				A1000003 /* FloatingWindow.swift in Sources */,
+				A1000004 /* ChatMessage.swift in Sources */,
+				A1000005 /* ChatViewModel.swift in Sources */,
+				A1000006 /* AIProvider.swift in Sources */,
+				A1000007 /* AnthropicProvider.swift in Sources */,
+				A1000008 /* OpenAIProvider.swift in Sources */,
+				A1000009 /* OllamaProvider.swift in Sources */,
+				A1000010 /* MLXProvider.swift in Sources */,
+				A1000011 /* ProviderManager.swift in Sources */,
+				A1000012 /* ChatView.swift in Sources */,
+				A1000013 /* ChatHeaderView.swift in Sources */,
+				A1000014 /* MessageView.swift in Sources */,
+				A1000015 /* MarkdownTextView.swift in Sources */,
+				A1000016 /* ChatInputView.swift in Sources */,
+				A1000017 /* ErrorBannerView.swift in Sources */,
+				A1000018 /* ProviderPickerView.swift in Sources */,
+				A1000019 /* SettingsView.swift in Sources */,
+				A1000020 /* ColorExtensions.swift in Sources */,
+				A1000022 /* ModelSettings.swift in Sources */,
+				A1000023 /* ConversationManager.swift in Sources */,
+				A1000024 /* ScreenCaptureService.swift in Sources */,
+				A1000025 /* LibrarySidebarView.swift in Sources */,
+				A1000026 /* AgentModels.swift in Sources */,
+				A1000027 /* DeepSeekProvider.swift in Sources */,
+				A1000028 /* AgentPipelineManager.swift in Sources */,
+				A1000029 /* ConversationAgent.swift in Sources */,
+				A1000030 /* RequirementsAgent.swift in Sources */,
+				A1000031 /* CodeAgent.swift in Sources */,
+				A1000032 /* BuildAgent.swift in Sources */,
+				A1000033 /* ProjectContextService.swift in Sources */,
+				A1000034 /* AgentStageIndicator.swift in Sources */,
+				A1000035 /* AgentMessage.swift in Sources */,
+				A1000036 /* AgentTools.swift in Sources */,
+				A1000037 /* AgentLoopEngine.swift in Sources */,
+				A1000038 /* AgentChatView.swift in Sources */,
+				A1000039 /* ReadFileTool.swift in Sources */,
+				A1000040 /* WriteFileTool.swift in Sources */,
+				A1000041 /* EditFileTool.swift in Sources */,
+				A1000042 /* ListFilesTool.swift in Sources */,
+				A1000043 /* SearchCodeTool.swift in Sources */,
+				A1000044 /* RunBuildTool.swift in Sources */,
+				A1000045 /* RunCommandTool.swift in Sources */,
+				A1000046 /* GlobFilesTool.swift in Sources */,
+				A1000047 /* GetProjectStructureTool.swift in Sources */,
+				A1000048 /* WebSearchTool.swift in Sources */,
+				A1000049 /* SystemSearchTool.swift in Sources */,
+				A1000050 /* MLXServerManager.swift in Sources */,
+				A1000051 /* TeamPickerView.swift in Sources */,
+				7E9FF28F916E4E146948E680 /* KeychainService.swift in Sources */,
+				7ED7EEEFE82C4896958858F6 /* TokenManager.swift in Sources */,
+				51AC65493896763EDAD88BE1 /* AgentCLI.swift in Sources */,
+				EDA345512DE199B3E506A031 /* ConversationStore.swift in Sources */,
+				9BCD5F6E08115CAC68E977CE /* ProjectFolderPickerView.swift in Sources */,
+				8E1DB90754D2A977A0A61BEB /* AgentProjectBanner.swift in Sources */,
+				M1000001 /* GitTool.swift in Sources */,
+				M1000002 /* MemoryModels.swift in Sources */,
+				M1000003 /* FrontalCortex.swift in Sources */,
+				M1000004 /* ReflectionModels.swift in Sources */,
+				M1000005 /* AgentReflectionEngine.swift in Sources */,
+				M1000006 /* ChangeLogStore.swift in Sources */,
+				M1000007 /* RecentCaptureStore.swift in Sources */,
+				M1000008 /* VoiceInputManager.swift in Sources */,
+				M1000009 /* MLXWhisperServerManager.swift in Sources */,
+				M1000010 /* CreateXcodeAppTool.swift in Sources */,
+				M1000011 /* PlaywrightCaptureTool.swift in Sources */,
+				M1000012 /* ExtractVideoFramesTool.swift in Sources */,
+				M1000013 /* SetProjectPathTool.swift in Sources */,
+				M1000014 /* FindProjectsTool.swift in Sources */,
+				M1000015 /* RunTestsTool.swift in Sources */,
+				M1000016 /* TranscribeMediaTool.swift in Sources */,
+				M1000017 /* InstallDependenciesTool.swift in Sources */,
+				8704E3E0B620FDAD9B1835A1 /* GrokProvider.swift in Sources */,
+				49569570C77C5BDD97BE4B1A /* AppLinkService.swift in Sources */,
+				2EDA04FBBD403AA5BFCA3CA9 /* AppPreviewService.swift in Sources */,
+				00C55422036F9E1DBCCA4CD0 /* HotkeyService.swift in Sources */,
+				B69B7F84B67F0980C8BACA7D /* SpeechOutputService.swift in Sources */,
+				1FD4813D87D191259AD1D586 /* ClipboardTool.swift in Sources */,
+				E9C77E4883D8BE4AFE562009 /* AppleScriptTool.swift in Sources */,
+				2361FE5BEFB4AEE483471D0C /* SystemControlTool.swift in Sources */,
+				CBDACC5CB7F13291EA5A739D /* WindowManagementTool.swift in Sources */,
+				CE2BEAB922F1F1E2B218C0BF /* InputControlTool.swift in Sources */,
+				E09EA44BDED14F7989D5E637 /* GitHubTool.swift in Sources */,
+				18557D78BCF888F6A8EB59F5 /* AgentRuntimeService.swift in Sources */,
+				8D9A5DD294684256D8729BE6 /* AgentOrchestrator.swift in Sources */,
+				96681491A4610DBC25F26989 /* AgentPrompts.swift in Sources */,
+				32CB06ED188DEA55CD8C9E00 /* ExecutionPlan.swift in Sources */,
+				291BD57924889AE015DB925D /* UnifiedAgentRuntime.swift in Sources */,
+				A74E7C5E8F24919EB69DCDB5 /* IntentBanner.swift in Sources */,
+				0D5FC39AC47EAA0A94FEEA21 /* PlanStepsView.swift in Sources */,
+				AB16E313FC3DE2098F832BF1 /* ActionCard.swift in Sources */,
+				CADD3613BA2B6C435F3B305A /* ExecutionTimeline.swift in Sources */,
+				1886F1EBBDFEFA52DD1E5E8B /* AgentExecutionView.swift in Sources */,
+				CB1A9D2EBA2C9FC1AEBDF5F4 /* AgentCheckpoint.swift in Sources */,
+				76144A7038FEE6FC352FD80D /* CheckpointStore.swift in Sources */,
+				E0350A565992CADAF531DC17 /* UnifiedAgentRuntime+Resume.swift in Sources */,
+				F455BB9688E1C1A2B00B631E /* ReplanEngine.swift in Sources */,
+				AF8C9AB26A197336F23800C0 /* JSONDirectoryStore.swift in Sources */,
+				867016E0B163CC987B5B968D /* OrchestrationCheckpoint.swift in Sources */,
+				3BA422731F2E741C98FBB2FA /* AgentLoopEngine+Resume.swift in Sources */,
+				3C23CB9A44DD50FA0EE9C805 /* ResumePickerView.swift in Sources */,
+				CD06C17631BFA28CBDD330CE /* GeminiProvider.swift in Sources */,
+				262C2C7DD0BBA57BA936C186 /* AgentLoopEngine+SubTeams.swift in Sources */,
+				C1707077A416ACE6C2B6DD93 /* AgentMessageBus.swift in Sources */,
+				5A846DD8321F6097397996E4 /* AgentLoopEngine+Messaging.swift in Sources */,
+				E7E307D83E56547E69ACBB11 /* MoonshotProvider.swift in Sources */,
+				540904EBE0FE681B78B16611 /* ZhipuProvider.swift in Sources */,
+				BB22ADEDDDA7D37C289D2812 /* APIKeyWizardView.swift in Sources */,
+				9D6C1A35484931CD914D0E99 /* MiMoProvider.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6E373A2FB7BC672A2ABC9929 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = FloatingChatApp;
+			target = E1000001 /* FloatingChatApp */;
+			targetProxy = 7F78ACD73F35B7EFE1A01A71 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0FAC0698AB9F99E6D49D94E0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.floatingchat.appTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FloatingChatApp.app/Contents/MacOS/FloatingChatApp";
+			};
+			name = Release;
+		};
+		3FD141EF148ACEF4215F7724 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.floatingchat.appTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FloatingChatApp.app/Contents/MacOS/FloatingChatApp";
+			};
+			name = Debug;
+		};
+		G1000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		G1000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		G1000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = FloatingChatApp/FloatingChatApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = FloatingChatApp/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Floating Chat";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.floatingchat.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		G1000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = FloatingChatApp/FloatingChatApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = FloatingChatApp/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Floating Chat";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.floatingchat.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		19E1502888E6547223260C71 /* Build configuration list for PBXNativeTarget "FloatingChatAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0FAC0698AB9F99E6D49D94E0 /* Release */,
+				3FD141EF148ACEF4215F7724 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F1000001 /* Build configuration list for PBXNativeTarget "FloatingChatApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G1000003 /* Debug */,
+				G1000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F1000003 /* Build configuration list for PBXProject "FloatingChatApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G1000001 /* Debug */,
+				G1000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 089C1665FE841172C02AAC07 /* Project object */;
+}

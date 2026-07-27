@@ -1,0 +1,64 @@
+name: "kist Verification Receipt gate"
+description: >
+  Enforce that every content-bearing commit in a pull request carries a valid kist Verification Receipt (and, when
+  a trust root is pinned, a valid issuer signature). Run this as a REQUIRED status check so it cannot be bypassed
+  with `git commit --no-verify`.
+author: "kist"
+
+inputs:
+  kist-path:
+    description: "Path to a prebuilt `kist` binary. If empty, the action builds it from `kist-source` with SwiftPM."
+    required: false
+    default: ""
+  kist-source:
+    description: "Directory containing kist's Package.swift (used only when kist-path is empty)."
+    required: false
+    default: "."
+  receipt-key:
+    description: "The org shared HMAC sealing secret (KIST_RECEIPT_KEY). Pass a repository/org SECRET, never a literal."
+    required: true
+  base:
+    description: "Base ref of the range to gate. Defaults to the PR base (origin/<base_ref>)."
+    required: false
+    default: ""
+  head:
+    description: "Head ref of the range to gate. Defaults to the PR head SHA."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve kist binary
+      id: bin
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${{ inputs.kist-path }}" ]; then
+          echo "kist=${{ inputs.kist-path }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "Building kist from ${{ inputs.kist-source }} …"
+          ( cd "${{ inputs.kist-source }}" && swift build -c release --product kist )
+          echo "kist=$(cd "${{ inputs.kist-source }}" && swift build -c release --product kist --show-bin-path)/kist" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Enforce Verification Receipts
+      shell: bash
+      env:
+        KIST_RECEIPT_KEY: ${{ inputs.receipt-key }}
+      run: |
+        set -euo pipefail
+        BASE="${{ inputs.base }}"; HEAD="${{ inputs.head }}"
+        # Default to the PR range. `origin/<base_ref>..<pr_head_sha>` covers exactly the PR's commits.
+        if [ -z "$BASE" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then BASE="origin/${GITHUB_BASE_REF}"; fi
+        if [ -z "$HEAD" ]; then HEAD="${GITHUB_SHA}"; fi
+        if [ -z "${KIST_RECEIPT_KEY}" ]; then
+          echo "::error::KIST_RECEIPT_KEY is empty — set it as a repository/org secret. Failing closed."; exit 1
+        fi
+        echo "Gating ${BASE}..${HEAD}"
+        # Explicit refs when known; else let kist infer from GITHUB_BASE_REF/GITHUB_SHA (still fail-closed).
+        if [ -n "$BASE" ] && [ -n "$HEAD" ]; then
+          "${{ steps.bin.outputs.kist }}" --ci-guard "$BASE" "$HEAD"
+        else
+          "${{ steps.bin.outputs.kist }}" --ci-guard
+        fi

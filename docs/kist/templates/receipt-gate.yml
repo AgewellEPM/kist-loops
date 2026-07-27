@@ -1,0 +1,30 @@
+# Copy this to .github/workflows/receipt-gate.yml in your repo, then make "receipt-gate" a REQUIRED status check
+# in branch protection (Settings → Branches → Branch protection rules). Once required, a PR cannot merge unless the
+# gate passes — and `git commit --no-verify` at commit time is irrelevant because the gate runs server-side.
+name: receipt-gate
+on:
+  pull_request:
+    branches: ["**"]
+
+# Least privilege: the gate only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  verify-receipts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # REQUIRED: full history so the gate can diff base..head
+
+      # Provide a `kist` binary. Two options:
+      #  (a) if your repo builds kist (Swift): the action builds it from source (needs a Swift toolchain).
+      #  (b) otherwise, download a pinned kist release and pass its path via `kist-path`.
+      - uses: swift-actions/setup-swift@v2   # only for option (a); drop if you use kist-path
+
+      - name: Verification Receipt gate
+        uses: your-org/kist/.github/actions/kist-receipt-gate@<pinned-sha>
+        with:
+          # kist-path: ./bin/kist            # option (b): a prebuilt binary you vendored/downloaded
+          receipt-key: ${{ secrets.KIST_RECEIPT_KEY }}

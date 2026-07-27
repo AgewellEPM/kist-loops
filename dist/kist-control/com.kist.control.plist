@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LaunchAgent for the kist-control desktop broker (split-identity L2). Install to
+     ~/Library/LaunchAgents/com.kist.control.plist and `launchctl bootstrap gui/$(id -u) <path>`.
+     The user grants THIS agent (com.kist.control) Accessibility + Screen Recording — NOT kist.
+     Replace /usr/local/bin/kist-control + the --requirement with your SIGNED install path + client requirement. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.kist.control</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/kist-control</string>
+        <string>--requirement</string>
+        <string>identifier "com.kist.cli" and anchor apple generic</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
