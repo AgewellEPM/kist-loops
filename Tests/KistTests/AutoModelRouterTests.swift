@@ -169,6 +169,36 @@ final class AutoModelRouterTests: XCTestCase {
         XCTAssertEqual(StartupHeader.abbreviate(home + "/Downloads/mythos-stage2-mm"), "~/…/mythos-stage2-mm")
     }
 
+    // config.provider used to silently disable the Captain even with "autoRouting": true in the
+    // config file (the field wasn't parsed at all) — every session pinned to the default provider.
+    // One assertion per pin site: legacy default, config provider, config flag, picker, CLI flag.
+    func testRoutingEnabledHonorsConfigAutoRouting() {
+        // Legacy: nothing configured → routing on; config provider alone → pinned.
+        XCTAssertTrue(AutoModelRouter.routingEnabled(pickedInteractively: false, cliProvider: false,
+                                                     configProvider: false, configAutoRouting: nil))
+        XCTAssertFalse(AutoModelRouter.routingEnabled(pickedInteractively: false, cliProvider: false,
+                                                      configProvider: true, configAutoRouting: nil))
+        // The fix: default provider + "autoRouting": true → Captain keeps choosing per turn.
+        XCTAssertTrue(AutoModelRouter.routingEnabled(pickedInteractively: false, cliProvider: false,
+                                                     configProvider: true, configAutoRouting: true))
+        // Explicit "autoRouting": false pins even with no provider configured.
+        XCTAssertFalse(AutoModelRouter.routingEnabled(pickedInteractively: false, cliProvider: false,
+                                                      configProvider: false, configAutoRouting: false))
+        // Interactive picker and CLI --provider ALWAYS win over the config flag.
+        XCTAssertFalse(AutoModelRouter.routingEnabled(pickedInteractively: true, cliProvider: false,
+                                                      configProvider: false, configAutoRouting: true))
+        XCTAssertFalse(AutoModelRouter.routingEnabled(pickedInteractively: false, cliProvider: true,
+                                                      configProvider: false, configAutoRouting: true))
+    }
+
+    func testConfigParsesAutoRouting() {
+        let c = KistConfig.parse(["provider": "gemini", "autoRouting": true])
+        XCTAssertEqual(c.provider, "gemini")
+        XCTAssertEqual(c.autoRouting, true)
+        XCTAssertNil(KistConfig.parse([:]).autoRouting)
+        XCTAssertEqual(KistConfig.parse(["autoRouting": false]).autoRouting, false)
+    }
+
     func testStartupHeaderShowsModeAndHint() {
         let auto = StartupHeader.render(mode: "auto-routing", projectRoot: "/tmp/x", planMode: false, color: false)
         XCTAssertTrue(auto.contains("auto-routing"))

@@ -86,6 +86,18 @@ struct AutoModelRouter: Equatable {
         return Decision(binding: fallback, tier: .fast, reason: "staying on current model")
     }
 
+    /// Whether Captain auto-routing is ON for this session. An explicit pin (CLI --provider or the
+    /// interactive picker) always wins and turns routing off. `config.provider` alone also pins
+    /// (legacy "always use my model"), UNLESS the config explicitly says `"autoRouting": true` —
+    /// then the configured provider is only the STARTING model and the Captain keeps choosing per
+    /// turn. Before this existed the config flag was ignored entirely, so setting any default
+    /// provider silently disabled the Captain.
+    static func routingEnabled(pickedInteractively: Bool, cliProvider: Bool,
+                               configProvider: Bool, configAutoRouting: Bool?) -> Bool {
+        if pickedInteractively || cliProvider { return false }
+        return configAutoRouting ?? !configProvider
+    }
+
     /// Name/context heuristic the runner uses to tag a candidate as "fast" tier.
     static func isFastModel(_ modelId: String, contextTokens: Int) -> Bool {
         let m = modelId.lowercased()

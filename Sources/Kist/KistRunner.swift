@@ -366,8 +366,12 @@ enum KistRunner {
                 let providerId = pick?.providerId ?? providerId
                 let model = pick?.model ?? model
                 let chosen = registry.provider(id: providerId)
-                // Auto-route only when the user didn't pin a provider (explicit flag/config/picker = pinned).
-                let autoRouting = pick == nil && opts.providerId == nil && config.provider == nil
+                // Auto-route unless the user pinned a provider. CLI flag / picker always pin; a
+                // config default provider pins too UNLESS config says `"autoRouting": true` — then
+                // it's only the starting model and the Captain keeps choosing per turn.
+                let autoRouting = AutoModelRouter.routingEnabled(
+                    pickedInteractively: pick != nil, cliProvider: opts.providerId != nil,
+                    configProvider: config.provider != nil, configAutoRouting: config.autoRouting)
                 // Candidate models for the heuristic router: every configured/local provider's default
                 // model, tagged with capabilities. Vision engine (gemini) ordered first for the vision tier.
                 let preferredVision = registry.provider(id: "gemini").flatMap { registry.hasKey(for: $0) ? "gemini" : nil }
