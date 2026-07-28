@@ -17,7 +17,8 @@ final class R0UXHotfixTests: XCTestCase {
     }
 
     func testLoneESCInterrupts() {
-        XCTAssertEqual(scan([0x1B]), .interrupt, "a bare ESC press (follow-up read times out) must interrupt")
+        // R1 refined the action: a lone ESC (window expires with no second press) = interject.
+        XCTAssertEqual(scan([0x1B]), .interject, "a bare ESC press (follow-up read times out) must interrupt as interject")
     }
 
     func testArrowKeysDoNotInterrupt() {
@@ -42,8 +43,9 @@ final class R0UXHotfixTests: XCTestCase {
     }
 
     func testESCPlusNonSequenceByteStillInterrupts() {
-        XCTAssertEqual(scan([0x1B, 0x1B]), .interrupt, "ESC ESC is interrupt intent (double-ESC semantics land in R1)")
-        XCTAssertEqual(scan([0x1B, 0x61]), .interrupt, "Alt-chord (ESC+letter) treated as interrupt intent")
+        // R1: ESC ESC = hard cancel; an Alt-chord still counts as single-ESC intent.
+        XCTAssertEqual(scan([0x1B, 0x1B]), .cancel, "ESC ESC (one burst) is a hard cancel")
+        XCTAssertEqual(scan([0x1B, 0x61]), .interject, "Alt-chord (ESC+letter) treated as single-ESC intent")
     }
 
     func testRunawayCSIDrainIsBounded() {

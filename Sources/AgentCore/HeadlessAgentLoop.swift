@@ -280,7 +280,10 @@ public struct HeadlessAgentLoop: Sendable {
 
     /// Run ONE conversational turn (REPL): append the user input to `transcript`, drive the loop
     /// up to `maxIterations` for THIS turn, and write the grown transcript back so context carries
-    /// across turns. Does not persist (interactive sessions aren't checkpointed).
+    /// across turns. NOTE: this DOES persist — drive() checkpoints every iteration and an
+    /// interrupted turn is saved as `.paused` (R1's interject-keeps / double-ESC-abandons
+    /// semantics depend on that persistence; the old "interactive sessions aren't checkpointed"
+    /// comment here was wrong).
     public func turn(transcript: inout [ChatMessage], userInput: String,
                      attachments: [MediaAttachment] = []) async -> Outcome {
         await hooks?.fireNotification(.userPromptSubmit, detail: String(userInput.prefix(500)))

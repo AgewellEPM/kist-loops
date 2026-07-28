@@ -17,7 +17,10 @@ public struct PendingAction: Codable, Sendable {
 }
 
 public struct LoopCheckpoint: Codable, Sendable {
-    public enum Status: String, Codable, Sendable { case running, completed, failed, paused }
+    /// `abandoned` (R1, 2026-07-28): the user double-ESC'd the turn. Excluded from resumable()
+    /// so it never clutters --list, but the file is KEPT — an explicit `--resume <id>` can still
+    /// revive it (panic ESC-hammering must never destroy work irreversibly).
+    public enum Status: String, Codable, Sendable { case running, completed, failed, paused, abandoned }
 
     public let id: String
     public var goal: String
@@ -96,6 +99,14 @@ public struct LoopCheckpointStore: Sendable {
     public func delete(id: String) {
         guard let p = try? safePath(id) else { return }
         try? FileManager.default.removeItem(atPath: p)
+    }
+
+    /// Mark a checkpoint abandoned (double-ESC): hidden from resumable(), file kept so an explicit
+    /// `--resume <id>` can still revive it. A misread double-ESC must never be irreversible.
+    public func abandon(id: String) {
+        guard var cp = try? load(id: id) else { return }
+        cp.status = .abandoned
+        try? save(cp)
     }
 
     /// All checkpoints (any status), newest first.

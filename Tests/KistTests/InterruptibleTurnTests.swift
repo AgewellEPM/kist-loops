@@ -18,7 +18,7 @@ final class InterruptibleTurnTests: XCTestCase {
 
     func testDisabledDoesNotFireOnInterrupt() async {
         var interrupted = false
-        _ = await InterruptibleTurn.run(enabled: false, onInterrupt: { interrupted = true }) { "ok" }
+        _ = await InterruptibleTurn.run(enabled: false, onInterrupt: { _ in interrupted = true }) { "ok" }
         XCTAssertFalse(interrupted)
     }
 

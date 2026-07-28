@@ -61,6 +61,15 @@ public struct PlanExecutor: Sendable {
         sink.emit(.stateChanged(.executing))
 
         while !remaining.isEmpty {
+            // R1: ESC stops the DAG at the next WAVE boundary. Task cancellation propagates to the
+            // current wave's children: cancellation-OBLIVIOUS tools (run_command's blocking runner)
+            // finish; cancellation-AWARE tools (URLSession fetch/search, generate) abort and land
+            // as failed StepResults — partial side effects are possible mid-tool. No new wave
+            // launches. Completed step results are preserved.
+            if Task.isCancelled {
+                sink.emit(.cancelled)
+                return PlanExecution(success: false, stepResults: results, outputs: outputs, failedStepId: nil)
+            }
             let ready = ordered.filter { step in
                 remaining[step.id] != nil && plan.effectiveDependencies(of: step).isSubset(of: completed)
             }

@@ -19,11 +19,13 @@ import Glibc
 ///
 /// USAGE CONTRACT (correctness depends on it — verified by a 4-model panel; DeepSeek+MiMo traced every
 /// interleaving as correct under these, Codex/Gemini found defects ONLY when they are violated):
-///   1. SINGLE watcher at a time. Only the interactive REPL/TUI turn wraps in InterruptibleTurn and
-///      registers here; fleet/council/plan-execute turns do NOT. Turns are SEQUENTIAL — a new turn can't
-///      register until the current one (blocked on its interactor) returns. So `registerWatcher` is never
-///      called while a `withStdin` from a prior watcher is still in flight. `assertSingleWatcher()` traps
-///      a violation in debug builds.
+///   1. SINGLE watcher at a time. The interactive REPL/TUI chat turn AND (since R1, 2026-07-28) the
+///      REPL's plan-execute / council / research escalations wrap in InterruptibleTurn and register
+///      here; fleet does NOT (parallel workers, sentinel-file lifecycle). All registering turns are
+///      SEQUENTIAL — an escalation runs INSTEAD of a chat turn, never inside one — so a new turn
+///      can't register until the current one (blocked on its interactor) returns, and
+///      `registerWatcher` is never called while a `withStdin` from a prior watcher is still in
+///      flight. The assert below traps a violation in debug builds.
 ///   2. NON-REENTRANT bodies. An interactor `body()` (readLine / readApproval) must NOT itself call
 ///      `withStdin` — `bodyLock` is a plain NSLock, so re-entry would self-deadlock. The concrete bodies
 ///      (TerminalInteractor, TUIBridge) never recurse.

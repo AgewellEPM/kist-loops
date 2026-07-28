@@ -190,6 +190,10 @@ struct KistREPL {
             loop = perm.arm(loop)
         }
 
+        // R1: set by runTurnInterruptible when ESC stopped the turn; selfMonitor consults + resets
+        // it so a user interrupt never books a false "task failed" obstacle lesson.
+        var lastTurnInterrupted = false
+
         // The SINGLE safe path for every conversational turn: run it under the esc-interrupt watcher,
         // shuttling the inout transcript through a box (it can't cross the escaping work closure). The
         // caller MUST arm the loop first (armTurnLoop / perm.arm) — this is why direct `loop.turn(...)`
@@ -197,14 +201,36 @@ struct KistREPL {
         // the user left bypass (Codex CRITICAL). Source-pinned: the only `.turn(transcript:` is here.
         func runTurnInterruptible(loop l: HeadlessAgentLoop, userInput: String,
                                   attachments: [MediaAttachment] = []) async -> HeadlessAgentLoop.Outcome {
+            let preTurnTranscript = transcript
             let tBox = MutableBox(transcript)
-            let oc = await InterruptibleTurn.run(onInterrupt: { print("\n\u{001B}[33m⎋ interrupted — stopping after the current step\u{001B}[0m") }) {
+            // R1: single ESC = interject (take over, work stays resumable); double ESC = hard
+            // cancel (transcript restored + checkpoint marked ABANDONED — kept on disk so a
+            // panic ESC-hammer is never irreversible, but hidden from --list/--resume-last).
+            let reasonBox = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+            let oc = await InterruptibleTurn.run(onInterrupt: { reason in
+                reasonBox.value = reason
+                switch reason {
+                case .interject:
+                    print("\n\u{001B}[33m⎋ interrupted — stopping after the current step; your turn (progress saved)\u{001B}[0m")
+                case .cancel:
+                    print("\n\u{001B}[33m⎋⎋ cancelled — dropping this turn\u{001B}[0m")
+                }
+            }) {
                 var t = tBox.value
                 let outcome = await l.turn(transcript: &t, userInput: userInput, attachments: attachments)
                 tBox.value = t
                 return outcome
             }
-            transcript = tBox.value
+            // "Dropping this turn" must MEAN dropped: on cancel the cancelled turn's user message +
+            // partial output must not keep colouring future context (review catch).
+            transcript = (reasonBox.value == .cancel) ? preTurnTranscript : tBox.value
+            lastTurnInterrupted = reasonBox.value != nil
+            if reasonBox.value == .cancel, !oc.success, !oc.checkpointId.isEmpty {
+                LoopCheckpointStore().abandon(id: oc.checkpointId)
+            }
+            if reasonBox.value == .interject, !oc.success, !oc.checkpointId.isEmpty {
+                print("\u{001B}[2m· paused — resume later with: kist --resume \(oc.checkpointId)\u{001B}[0m")
+            }
             return oc
         }
 
@@ -319,6 +345,9 @@ struct KistREPL {
         // loop / failure spike / read-only spin) and learn an obstacle from anything unhealthy or
         // failed. Surfaced dimly; recorded as advisory memory for future briefs.
         func selfMonitor(goal: String, success: Bool) {
+            // R1: an ESC'd turn is a user decision, not a reliability signal — recording it as a
+            // failure/obstacle would teach kist that interrupted goals fail.
+            if lastTurnInterrupted { lastTurnInterrupted = false; return }
             var issueLabels: [String] = []
             if let recorder {
                 let report = TrajectoryAnalyzer.analyze(recorder.snapshot())

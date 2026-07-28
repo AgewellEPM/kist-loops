@@ -77,18 +77,31 @@ struct TUIConversation {
                 // esc-to-interrupt on --tui too: run under the keyboard watcher; transcript is inout so it
                 // rides through a box across the escaping work closure. (Allowlisted turn-site.)
                 let armed = loop
+                let preTurnTranscript = transcript
                 let tBox = MutableBox(transcript)
-                let outcome = await InterruptibleTurn.run(onInterrupt: {
-                    ui.appendTranscript("\r\n" + c("33", "⎋ interrupted — stopping after the current step") + "\r\n")
+                // R1: same interject/cancel split as the line-mode REPL (multi-site sibling).
+                let reasonBox = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                let outcome = await InterruptibleTurn.run(onInterrupt: { reason in
+                    reasonBox.value = reason
+                    ui.appendTranscript("\r\n" + c("33", reason == .cancel
+                        ? "⎋⎋ cancelled — dropping this turn"
+                        : "⎋ interrupted — stopping after the current step; your turn (progress saved)") + "\r\n")
                 }) {
                     var t = tBox.value
                     let o = await armed.turn(transcript: &t, userInput: prompt)
                     tBox.value = t
                     return o
                 }
-                transcript = tBox.value
+                // "Dropping this turn" must MEAN dropped (review catch): restore pre-turn context.
+                transcript = (reasonBox.value == .cancel) ? preTurnTranscript : tBox.value
+                if reasonBox.value == .cancel, !outcome.success, !outcome.checkpointId.isEmpty {
+                    LoopCheckpointStore().abandon(id: outcome.checkpointId)
+                }
                 ui.endTranscriptBlock()
-                selfMonitor(goal: input, success: outcome.success)
+                // An ESC'd turn is a user decision, not a reliability failure — don't learn from it.
+                if reasonBox.value == nil {
+                    selfMonitor(goal: input, success: outcome.success)
+                }
             }
         }
     }

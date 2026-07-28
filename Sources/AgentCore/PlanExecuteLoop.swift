@@ -7,6 +7,10 @@ public struct PlanOutcome: Sendable {
     public let execution: PlanExecution?  // the last execution (nil if aborted before executing)
     public let message: String
     public let replansUsed: Int           // how many times the loop revised the plan
+    /// R1: true when the run stopped because the USER interrupted (ESC), not because the goal
+    /// failed. Callers must not record failure lessons/episodes for interrupted runs — a user
+    /// cancel is zero evidence about the goal (structured flag, never sniff the message string).
+    public var interrupted: Bool = false
 }
 
 /// The closed plan→execute loop: ask a PLANNER model for a typed DAG, validate it (re-prompting to
@@ -80,6 +84,12 @@ public struct PlanExecuteLoop: Sendable {
             reservationID = await budget.reserve(tokens: estPrompt + estCompletion, usd: estUSD)
             if reservationID == nil { throw PlanBudgetDenied() }
         }
+        // R1: honor ESC before spending — release the reservation and surface as a cancellation
+        // (runCore's provider-error branch is cancellation-aware and returns "interrupted").
+        if Task.isCancelled {
+            if let budget, let id = reservationID { await budget.commit(reservation: id, actualTokens: 0, actualUSD: 0) }
+            throw CancellationError()
+        }
         let text: String, usage: TokenUsage
         do {
             (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
@@ -130,7 +140,11 @@ public struct PlanExecuteLoop: Sendable {
 
     public func run(goal: String) async -> PlanOutcome {
         let outcome = await runCore(goal: goal)
-        memory?.recordEpisode(Episode(goal: goal, success: outcome.success, summary: outcome.message, at: Date()))
+        // R1: a user interrupt is NOT evidence about the goal — recording it as a failed episode
+        // would teach future planning runs a false "this goal fails".
+        if !outcome.interrupted {
+            memory?.recordEpisode(Episode(goal: goal, success: outcome.success, summary: outcome.message, at: Date()))
+        }
         return outcome
     }
 
@@ -153,6 +167,15 @@ public struct PlanExecuteLoop: Sendable {
         var lastExecution: PlanExecution?
 
         while true {
+            // R1: ESC (via InterruptibleTurn's task cancellation) stops the plan loop at the next
+            // phase boundary — this plane was previously a cancellation DEAD ZONE, exactly where
+            // big chat requests auto-escalate.
+            if Task.isCancelled {
+                sink.emit(.cancelled)
+                return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
+                                   message: "interrupted by user (ESC)", replansUsed: replansUsed,
+                                   interrupted: true)
+            }
             // 0) Cost ceiling: stop at the cap rather than discovering the overage afterward.
             if let budget, await budget.isExceeded() {
                 let spent = await budget.spentTokens()
@@ -163,6 +186,15 @@ public struct PlanExecuteLoop: Sendable {
             // 1) Obtain a VALID plan (propose or replan, with bounded repair).
             switch await obtainPlan(&messages, context: scopedContext) {
             case .providerError(let e):
+                // R1: an ESC mid-planning surfaces as a provider error (CancellationError from
+                // meteredComplete or the provider's own URLSession cancellation) — report it as an
+                // interrupt, not a planner failure.
+                if Task.isCancelled {
+                    sink.emit(.cancelled)
+                    return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
+                                       message: "interrupted by user (ESC)", replansUsed: replansUsed,
+                                       interrupted: true)
+                }
                 sink.emit(.failed("planner error"))
                 return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
                                    message: "planner error: \(e)", replansUsed: replansUsed)
@@ -205,9 +237,30 @@ public struct PlanExecuteLoop: Sendable {
                                               approveDangerous: approveDangerous).execute(plan)
                 lastExecution = exec
 
+                // R1: an ESC during execution must not fall into the replan/verify branches
+                // (which would print "re-planning" and spend more tokens on a run the user killed).
+                // The executor's wave-boundary check already emitted .cancelled when it returned
+                // the cancelled shape (success=false, no failed step) — don't emit twice.
+                if Task.isCancelled {
+                    if exec.success || exec.failedStepId != nil { sink.emit(.cancelled) }
+                    return PlanOutcome(success: false, plan: plan, execution: exec,
+                                       message: "interrupted by user (ESC)", replansUsed: replansUsed,
+                                       interrupted: true)
+                }
+
                 if exec.success {
                     // 4) Verify-the-goal gate.
                     let verdict = verifyGoal ? await verifyGoalMet(goal: goal, execution: exec) : (done: true, reason: "")
+                    // R1 (review catch — the missed 5th site): an ESC DURING the critic call is
+                    // swallowed by verifyGoalMet's `try?` into "verification unavailable", which
+                    // would burn a replan slot or, with replans exhausted, report the user's ESC
+                    // as a real goal failure and poison the episode log.
+                    if Task.isCancelled {
+                        sink.emit(.cancelled)
+                        return PlanOutcome(success: false, plan: plan, execution: exec,
+                                           message: "interrupted by user (ESC)", replansUsed: replansUsed,
+                                           interrupted: true)
+                    }
                     if verdict.done {
                         sink.emit(.completed(summary: "plan complete (\(plan.steps.count) steps)"))
                         return PlanOutcome(success: true, plan: plan, execution: exec,

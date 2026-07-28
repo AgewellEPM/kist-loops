@@ -680,20 +680,45 @@ enum KistRunner {
                 }
                 repl.planExecute = { g, roles in
                     var o = opts; o.goal = g; o.planExecute = true
-                    _ = await runPlanExecute(o, goal: g, registry: registry, root: root, tools: tools,
+                    // R1: ESC works on the plan-execute plane too — previously this plane was a
+                    // dead zone (no watcher, no cancellation checks), exactly where big requests
+                    // auto-escalate. The watcher cancels the runner task; PlanExecuteLoop and
+                    // PlanExecutor stop cooperatively at phase/wave boundaries. Sequential with
+                    // the chat turn's watcher (single-watcher invariant preserved).
+                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                        print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
+                              + " — plan run stopped\u{001B}[0m")
+                    }) {
+                        await runPlanExecute(o, goal: g, registry: registry, root: root, tools: tools,
                                              context: context, providerId: providerId, model: model,
                                              rolesOverride: roles)
+                    }
                 }
                 repl.council = { g, roles, execute in
-                    _ = await runCouncil(opts, goal: g, execute: execute, registry: registry,
+                    // R1 sibling: council (and its execute=true hand-off into runPlanExecute) gets
+                    // the same ESC watcher — top-level + sequential, single-watcher invariant holds.
+                    // Coverage is partial (council's own model calls stop via provider cancellation);
+                    // honest partial beats a dead zone.
+                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                        print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
+                              + " — council run stopped\u{001B}[0m")
+                    }) {
+                        await runCouncil(opts, goal: g, execute: execute, registry: registry,
                                          root: root, tools: tools, context: context,
                                          providerId: providerId, model: model, rolesOverride: roles)
+                    }
                 }
                 repl.research = { g, roles in
-                    _ = await runResearch(opts, goal: g, registry: registry, root: root,
+                    // R1 sibling: same watcher for the research pipeline.
+                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                        print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
+                              + " — research run stopped\u{001B}[0m")
+                    }) {
+                        await runResearch(opts, goal: g, registry: registry, root: root,
                                           tools: tools, context: context,
                                           providerId: providerId, model: model,
                                           rolesOverride: roles)
+                    }
                 }
                 repl.forge = { description, roles in
                     // AgentForge: generate a specialist bounded by the loop's tool ceiling, validate, save.
@@ -1719,7 +1744,9 @@ enum KistRunner {
             if pOut.success {
                 store.record(Lesson(kind: .proven, text: "accomplished via plan→execute: \(goal.prefix(120))",
                                     source: "plan-execute", at: at))
-            } else {
+            } else if !pOut.interrupted {
+                // R1: an ESC'd run must NOT book an obstacle lesson — a user cancel is zero
+                // evidence the goal fails, and obstacle lessons outrank proven ones in retrieval.
                 store.record(Lesson(kind: .obstacle, text: "plan→execute failed: \(goal.prefix(120))", source: nil, at: at))
             }
         }
