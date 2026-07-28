@@ -203,6 +203,10 @@ struct KistREPL {
                                   attachments: [MediaAttachment] = []) async -> HeadlessAgentLoop.Outcome {
             let preTurnTranscript = transcript
             let tBox = MutableBox(transcript)
+            lastTurnInterrupted = false   // fresh turn; post-turn guards read it, next turn resets it
+            // R2a: collect keystrokes while the turn runs (rendered live; Enter queues a message).
+            TurnInputQueue.shared.begin()
+            defer { TurnInputQueue.shared.end() }
             // R1: single ESC = interject (take over, work stays resumable); double ESC = hard
             // cancel (transcript restored + checkpoint marked ABANDONED — kept on disk so a
             // panic ESC-hammer is never irreversible, but hidden from --list/--resume-last).
@@ -225,6 +229,13 @@ struct KistREPL {
             // partial output must not keep colouring future context (review catch).
             transcript = (reasonBox.value == .cancel) ? preTurnTranscript : tBox.value
             lastTurnInterrupted = reasonBox.value != nil
+            // R2a: interject = what you typed IS the next instruction (queued + drained right
+            // away); hard cancel = typed + queued input is dropped with the turn.
+            switch reasonBox.value {
+            case .interject: TurnInputQueue.shared.commitPending()
+            case .cancel:    TurnInputQueue.shared.clearAll()
+            case nil:        break
+            }
             if reasonBox.value == .cancel, !oc.success, !oc.checkpointId.isEmpty {
                 LoopCheckpointStore().abandon(id: oc.checkpointId)
             }
@@ -346,8 +357,9 @@ struct KistREPL {
         // failed. Surfaced dimly; recorded as advisory memory for future briefs.
         func selfMonitor(goal: String, success: Bool) {
             // R1: an ESC'd turn is a user decision, not a reliability signal — recording it as a
-            // failure/obstacle would teach kist that interrupted goals fail.
-            if lastTurnInterrupted { lastTurnInterrupted = false; return }
+            // failure/obstacle would teach kist that interrupted goals fail. (Read-only: the flag
+            // is reset at the START of the next turn so the other post-turn guards can read it too.)
+            if lastTurnInterrupted { return }
             var issueLabels: [String] = []
             if let recorder {
                 let report = TrajectoryAnalyzer.analyze(recorder.snapshot())
@@ -372,6 +384,9 @@ struct KistREPL {
         // working-tree diff. Advisory only — it prints findings and never edits/reverts. Skips silently when
         // copilot is off, the turn changed nothing, no completion seam is wired, or the diff is empty.
         func runCopilotReview(task: String) async {
+            // R2a (review catch): after an interject the user's typed instruction must run NEXT —
+            // not after a copilot model call they didn't ask for.
+            guard !lastTurnInterrupted else { return }
             guard copilot.enabled, let modelComplete else { return }
             guard Copilot.shouldReview(trajectory: recorder?.snapshot() ?? []) else { return }
             let diff = Self.workingTreeDiff(projectRoot: projectRoot)
@@ -527,7 +542,10 @@ struct KistREPL {
                                 insights: insights)
             }
             print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans, trajectory: trajectory))
-            if !success {
+            // R2a (review catch): an ESC'd turn is not a failure — auto-opening a repair mission
+            // (self-heal dispatch, token spend) before the user's queued instruction is the exact
+            // opposite of "your turn".
+            if !success, !lastTurnInterrupted {
                 let goal = humanTranscript.reversed().first { $0.role == .user }?.content ?? "unknown turn"
                 await openFailureAnalysis(goal: goal,
                                           summary: outcomeSummary ?? "turn failed without a model summary",
@@ -758,9 +776,13 @@ struct KistREPL {
                 : "\u{001B}[2m│ \u{001B}[0m\u{001B}[36;1m❯ \u{001B}[0m"
             let status = await renderStatusLine()
             let line: String
+            // R2a: a drained line was typed while the user may have WALKED AWAY — never block the
+            // backlog on an interactive y/N confirm for it (router guard below).
+            var lineFromQueue = false
             if let queued = await deferredInput?() {
                 FileHandle.standardOutput.write(Data(("\n" + status + "\n" + topBorder + "\n" + promptColor + queued + "\n").utf8))
                 line = queued
+                lineFromQueue = true
             } else {
                 FileHandle.standardOutput.write(Data(("\n" + status + "\n" + topBorder + "\n").utf8))
                 let read = inputReader.readLine(prompt: promptColor,
@@ -769,7 +791,9 @@ struct KistREPL {
                                                 commandNames: InputCompleter.builtInCommands + commands.names.map { "/\($0)" },
                                                 onPaste: { PasteboardReader.text() },
                                                 barHint: { perm.barHint(includeInterrupt: true) },
-                                                onCycle: { perm.cycle() })
+                                                onCycle: { perm.cycle() },
+                                                // R2a: half-typed text from during the turn lands here.
+                                                initialText: TurnInputQueue.shared.takePending())
                 switch read {
                 case .line(let l): line = l
                 case .interrupt: print("\u{001B}[37m(input cleared)\u{001B}[0m"); continue
@@ -1748,7 +1772,7 @@ struct KistREPL {
             // AUTO-ROUTE (Increment B): for a plain message, the router may PROPOSE an escalation to a
             // fleet / plan-DAG. It never spends big silently — we confirm first; a no falls through to a
             // normal turn. Slash commands above are the explicit path; this is the "just talk" path.
-            if let router, let proposal = await router.propose(messageText) {
+            if let router, !lineFromQueue, let proposal = await router.propose(messageText) {
                 FileHandle.standardOutput.write(Data(("\u{001B}[33m" + proposal.prompt + " \u{001B}[0m").utf8))
                 let ans = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
                 if ans == "y" || ans == "yes" {
@@ -1782,6 +1806,7 @@ struct KistREPL {
             let transcriptBeforeModelAttempt = transcript
             var oc = await runTurnInterruptible(loop: loop, userInput: enriched)
             if let loopFactory,
+               !lastTurnInterrupted,   // R2a: never re-run a turn the USER stopped (their queued instruction runs next)
                let substitution = Self.modelSubstitutionDecision(success: oc.success,
                                                                  summary: oc.summary,
                                                                  trajectory: recorder?.snapshot() ?? [],

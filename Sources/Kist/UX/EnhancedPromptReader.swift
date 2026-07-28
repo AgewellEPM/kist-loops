@@ -36,7 +36,8 @@ final class EnhancedPromptReader {
                   commandNames: [String] = [],
                   onPaste: () -> String? = { nil },
                   barHint: (() -> String)? = nil,
-                  onCycle: (() -> Void)? = nil) -> Outcome {
+                  onCycle: (() -> Void)? = nil,
+                  initialText: String = "") -> Outcome {
         guard enabled else {
             FileHandle.standardOutput.write(Data(prompt.utf8))
             if let line = Swift.readLine(strippingNewline: true) { return .line(line) }
@@ -54,6 +55,9 @@ final class EnhancedPromptReader {
             write("\u{001B}[?2004l")
             raw.disable()
         }
+        // R2a: text typed WHILE the previous turn ran (without Enter) survives into this prompt
+        // box — same as Claude Code's always-alive input.
+        if !initialText.isEmpty { editor.insert(initialText) }
         render(prompt: prompt, promptColumns: promptColumns)
         var bracketedPasteBuffer: [UInt8]? = nil
         while true {

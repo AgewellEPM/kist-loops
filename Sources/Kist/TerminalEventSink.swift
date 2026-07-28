@@ -39,15 +39,33 @@ struct TerminalEventSink: RuntimeEventSink {
     private let style: Style
     private let proofStore: TurnProofStore?
     private let state = State()
+    /// R2a: live snapshot of text typed DURING the turn (+ queued message count), appended to the
+    /// status line so the input is visibly alive 24/7. nil = feature off (non-REPL sinks).
+    private let typedInput: (@Sendable () -> (pending: String, queuedCount: Int))?
 
     init(color: Bool = isatty(fileno(stdout)) != 0,
          showReasoning: Bool = false,
          style: Style = .standard,
-         proofStore: TurnProofStore? = nil) {
+         proofStore: TurnProofStore? = nil,
+         typedInput: (@Sendable () -> (pending: String, queuedCount: Int))? = nil) {
         self.color = color
         self.showReasoning = showReasoning
         self.style = style
         self.proofStore = proofStore
+        self.typedInput = typedInput
+    }
+
+    /// R2a: re-render the live status line NOW (typing feedback must not wait for the 1s tick).
+    /// Safe from any thread. GUARD (review catch): during token/reasoning streaming the cursor
+    /// row holds PROSE, not the status line — liveStartedAt stays non-nil there by design
+    /// (clearOnly finish), so gating on it alone shredded the streamed answer one row per
+    /// keystroke. The timer is non-nil exactly while the spinner is actually on screen.
+    func refreshLiveStatus() {
+        state.withLock {
+            guard state.liveStartedAt != nil, state.timer != nil else { return }
+            FileHandle.standardOutput.write(Data(liveLine().utf8))
+            state.liveLineActive = true
+        }
     }
 
     private func c(_ code: String, _ s: String) -> String { Self.color(code, s, enabled: color) }
@@ -199,15 +217,42 @@ struct TerminalEventSink: RuntimeEventSink {
         guard state.timer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
-        timer.setEventHandler { [state, color] in
+        // Value capture (the sink is a struct sharing the same State reference). The
+        // state→timer→handler→state reference cycle is broken explicitly by finishLiveStatus
+        // (timer.cancel + nil), same as the pre-R2 [state] capture.
+        timer.setEventHandler { [self] in
             state.withLock {
                 guard state.liveStartedAt != nil else { return }
-                FileHandle.standardOutput.write(Data(Self.liveStatusLine(state: state, color: color).utf8))
+                FileHandle.standardOutput.write(Data(liveLine().utf8))
                 state.liveLineActive = true
             }
         }
         state.timer = timer
         timer.resume()
+    }
+
+    /// The live status line INCLUDING the R2a typed-input tail. Call with the state lock held.
+    private func liveLine() -> String {
+        var line = Self.liveStatusLine(state: state, color: color)
+        if let snapshot = typedInput?() {
+            let tail = Self.typedInputTail(pending: snapshot.pending, queuedCount: snapshot.queuedCount)
+            if !tail.isEmpty { line += Self.color("36", tail, enabled: color) + "\u{001B}[K" }
+        }
+        return line
+    }
+
+    /// Pure formatter for the typed-while-working tail (unit-tested): what's queued + what's
+    /// being typed right now, tail-truncated (the END is what the user is editing). `maxPending`
+    /// stays small so base-status + tail fits an 80-col terminal — a wrapped live line breaks
+    /// the whole \r + [K repaint scheme (review catch).
+    static func typedInputTail(pending: String, queuedCount: Int, maxPending: Int = 24) -> String {
+        var tail = ""
+        if queuedCount > 0 { tail += " · \(queuedCount) queued" }
+        if !pending.isEmpty {
+            let visible = pending.count > maxPending ? "…" + pending.suffix(maxPending - 1) : pending
+            tail += "  ▸ " + visible
+        }
+        return tail
     }
 
     private func finishLiveStatus(clearOnly: Bool = false) {
@@ -227,7 +272,7 @@ struct TerminalEventSink: RuntimeEventSink {
     }
 
     private func renderLiveStatus() {
-        write(Self.liveStatusLine(state: state, color: color))
+        write(liveLine())
         state.liveLineActive = true
     }
 

@@ -12,10 +12,11 @@ import Glibc
 /// Either way the turn's Task is cancelled; the loops' cooperative `Task.isCancelled` checks finish
 /// cleanly at the next boundary. The terminal is restored on every exit path.
 ///
-/// Caveat (documented, not a bug): while a turn runs the watcher owns stdin, so other keys typed mid-turn
-/// are consumed and discarded (only ESC is acted on; R2 adds buffering). Interrupt lands at the next
-/// loop-iteration boundary — after the in-flight model/tool step — not the instant ESC is pressed.
-/// Single-ESC classification waits out the double-press window (~0.3s) before firing.
+/// While a turn runs the watcher owns stdin. Per surface (R2a): REPL turns + escalations COLLECT
+/// typed keys into TurnInputQueue (rendered live, Enter queues a message); the TUI still discards
+/// them (no drain path there yet — R2b). Interrupt lands at the next loop-iteration boundary —
+/// after the in-flight model/tool step — not the instant ESC is pressed. Single-ESC classification
+/// waits out the double-press window (~0.3s) before firing.
 enum InterruptibleTurn {
     /// Why the turn was interrupted: take-over (single ESC) vs hard cancel (double ESC).
     enum InterruptReason: Equatable, Sendable { case interject, cancel }
@@ -28,11 +29,17 @@ enum InterruptibleTurn {
         guard enabled else { return await work() }
 
         let raw = RawMode()
-        raw.enableForWatch()
+        // Bracketed paste ON while the watcher owns stdin (R2a): a paste arrives as one
+        // CSI 200~ … 201~ span and is collected as TEXT — without it, a pasted blob containing
+        // ESC would hard-cancel the turn. Paired with every enable/disable transition below
+        // (the prompt readers manage their own ?2004 state).
+        func armWatch() { raw.enableForWatch(); FileHandle.standardOutput.write(Data("\u{001B}[?2004h".utf8)) }
+        func disarmWatch() { FileHandle.standardOutput.write(Data("\u{001B}[?2004l".utf8)); raw.disable() }
+        armWatch()
         let flag = InterruptFlag()
         // Hand stdin off to in-turn interactor prompts (approvals / clarifying questions): while an
         // interactor reads, the watcher pauses and stdin drops back to its pre-watch mode (Codex BLOCKER).
-        StdinArbiter.shared.registerWatcher(suspend: { raw.disable() }, resume: { raw.enableForWatch() })
+        StdinArbiter.shared.registerWatcher(suspend: { disarmWatch() }, resume: { armWatch() })
 
         let turn = Task { await work() }
         let watcher = Task.detached {
@@ -41,12 +48,13 @@ enum InterruptibleTurn {
             // raw must already be disabled or it reads in watch-raw mode (no echo) (Codex BLOCKER). And
             // unregister-in-defer (vs after the awaits below) is what prevents a post-cancel approval from
             // blocking forever on watcherPaused (Codex deadlock).
-            defer { raw.disable(); StdinArbiter.shared.unregisterWatcher() }
+            defer { disarmWatch(); StdinArbiter.shared.unregisterWatcher() }
             while !Task.isCancelled {
                 guard StdinArbiter.shared.watcherMayRead() else {   // an interactor owns stdin — yield
                     usleep(15_000); continue
                 }
-                switch scanOnce(readByte: { raw.readByteTimed() }) {
+                switch scanOnce(readByte: { raw.readByteTimed() },
+                                collect: { TurnInputQueue.shared.feed($0) }) {
                 case .interject:
                     await flag.set(.interject)
                     turn.cancel()
@@ -69,7 +77,7 @@ enum InterruptibleTurn {
         // (drain reads check Task.isCancelled, bounding the adversarial byte-trickle case).
         _ = await watcher.value
         StdinArbiter.shared.unregisterWatcher()
-        raw.disable()
+        disarmWatch()
         if let reason = await flag.reason { onInterrupt(reason) }
         return result
     }
@@ -96,14 +104,19 @@ enum InterruptibleTurn {
     /// counts as a SINGLE ESC with the arrow swallowed.
     enum WatchAction: Equatable { case none, swallowedSequence, interject, cancel }
 
-    static func scanOnce(readByte: () -> UInt8?) -> WatchAction {
+    /// `collect` (R2a): non-ESC bytes are no longer discarded — they feed the TurnInputQueue so
+    /// the user can TYPE while the turn runs (rendered live on the status line, Enter queues).
+    /// Bytes belonging to key sequences (CSI/SS3 tails) are still swallowed, never collected.
+    static func scanOnce(readByte: () -> UInt8?, collect: (UInt8) -> Void = { _ in }) -> WatchAction {
         guard let b = readByte() else { return .none }        // VTIME timeout — keep looping
-        guard b == 0x1B else { return .none }                 // other keys: consumed + discarded (documented)
+        guard b == 0x1B else { collect(b); return .none }     // typed key → the live input buffer
         guard let follow = readByte() else {                  // lone ESC so far → run the double window
-            return waitForSecondEsc(readByte: readByte)
+            return waitForSecondEsc(readByte: readByte, collect: collect)
         }
         if follow == 0x5B || follow == 0x4F {                 // '[' (CSI) or 'O' (SS3) → a KEY, not intent
-            drainSequence(readByte)
+            if drainSequence(readByte) == .pasteBegin {
+                collectPasteSpan(readByte, collect: collect)  // bracketed paste: payload is TEXT
+            }
             return .swallowedSequence
         }
         if follow == 0x1B { return .cancel }                  // ESC ESC in one burst → hard cancel
@@ -111,7 +124,7 @@ enum InterruptibleTurn {
     }
 
     /// The double-press window: ~3 VTIME ticks (~0.3s) after a lone ESC.
-    private static func waitForSecondEsc(readByte: () -> UInt8?) -> WatchAction {
+    private static func waitForSecondEsc(readByte: () -> UInt8?, collect: (UInt8) -> Void) -> WatchAction {
         for _ in 0..<3 {
             if Task.isCancelled { return .interject }
             guard let b = readByte() else { continue }        // tick with no byte — keep waiting
@@ -124,24 +137,65 @@ enum InterruptibleTurn {
                 guard let f2 = readByte() else { return .cancel }
                 if f2 == 0x1B { return .cancel }
                 if f2 == 0x5B || f2 == 0x4F {
-                    drainSequence(readByte)
+                    if drainSequence(readByte) == .pasteBegin {
+                        collectPasteSpan(readByte, collect: collect)
+                    }
                     return .interject
                 }
                 return .interject
             }
-            return .interject                                 // other key during the window → single ESC
+            collect(b)                                        // typed key during the window is KEPT
+            return .interject                                 // …and the ESC classifies as single
         }
         return .interject                                     // window expired → single ESC
     }
 
     /// Drain a CSI/SS3 sequence tail, bounded: CSI params end at a final byte 0x40–0x7E (SS3's
     /// single final byte is in the same range). The cancellation check keeps the watcher-join
-    /// latency bounded even under an adversarial byte-per-tick trickle.
-    private static func drainSequence(_ readByte: () -> UInt8?) {
+    /// latency bounded even under an adversarial byte-per-tick trickle. Returns `.pasteBegin`
+    /// when the sequence was the bracketed-paste opener (CSI 200~).
+    enum DrainResult: Equatable { case key, pasteBegin }
+
+    @discardableResult
+    private static func drainSequence(_ readByte: () -> UInt8?) -> DrainResult {
+        var params: [UInt8] = []
         var drained = 0
         while drained < 12, !Task.isCancelled, let nb = readByte() {
             drained += 1
-            if (0x40...0x7E).contains(nb) { break }
+            if (0x40...0x7E).contains(nb) {
+                return (nb == 0x7E && params == Array("200".utf8)) ? .pasteBegin : .key
+            }
+            params.append(nb)
+        }
+        return .key
+    }
+
+    /// R2a (review catch): a PASTE during a turn must be text, not keystrokes — without this, a
+    /// pasted blob containing ESC would hard-cancel the turn and wipe the queue. The watcher
+    /// enables bracketed paste (?2004h) while it owns stdin, so a paste arrives as
+    /// CSI 200~ <payload> CSI 201~. This feeds the payload to `collect` verbatim (feed() drops
+    /// control bytes like raw ESC; newlines commit lines) until the closing marker. Bounded by
+    /// bytes + consecutive-timeout count so a missing terminator can't wedge the watcher.
+    private static func collectPasteSpan(_ readByte: () -> UInt8?, collect: (UInt8) -> Void) {
+        let terminator: [UInt8] = [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]   // ESC [ 2 0 1 ~
+        var matched = 0
+        var total = 0
+        var emptyReads = 0
+        while total < 65_536, emptyReads < 20, !Task.isCancelled {
+            guard let b = readByte() else { emptyReads += 1; continue }
+            emptyReads = 0
+            total += 1
+            if b == terminator[matched] {
+                matched += 1
+                if matched == terminator.count { return }     // paste closed cleanly
+                continue
+            }
+            if matched > 0 {                                   // false partial match → flush it
+                for t in terminator[0..<matched] { collect(t) }
+                matched = (b == terminator[0]) ? 1 : 0
+                if matched == 1 { continue }
+            }
+            collect(b)
         }
     }
 }

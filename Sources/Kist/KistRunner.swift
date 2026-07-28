@@ -461,6 +461,16 @@ enum KistRunner {
                     return 0
                 }
                 let terminalInteractor = terminalInteractor(for: opts)
+                // R2a: ONE constructor for every REPL chat sink — both the initial loop and every
+                // loopFactory rebuild get the typed-input renderer + refresh hook. (Review catch:
+                // only the loopFactory site had it, so typing was captured INVISIBLY on fresh and
+                // pinned-model sessions — the exact missed-sibling shape.)
+                func makeReplSink(showReasoning: Bool) -> TerminalEventSink {
+                    let sink = TerminalEventSink(showReasoning: showReasoning, style: .calm, proofStore: proofStore,
+                                                 typedInput: { TurnInputQueue.shared.preview() })
+                    TurnInputQueue.shared.addOnChange { sink.refreshLiveStatus() }
+                    return sink
+                }
                 let loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
                                     tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
                                     budget: opts.makeBudget(),
@@ -468,7 +478,7 @@ enum KistRunner {
                                     planMode: opts.planMode, extendedThinking: opts.extendedThinking, toolMode: toolMode,
                                     roles: roleSelection.bindings, delegationDepth: opts.delegationDepth,
                                     showReasoning: opts.extendedThinking,   // --think → watch the reasoning inline
-                                    sinkOverride: TerminalEventSink(showReasoning: opts.extendedThinking, style: .calm, proofStore: proofStore),
+                                    sinkOverride: makeReplSink(showReasoning: opts.extendedThinking),
                                     recorder: recorder, traceRecorder: traceRecorder)
                 // CONVERSATIONAL ESCALATION: reach the fleet / plan-DAG from inside the chat, plus an
                 // auto-router that PROPOSES (never silently spends) when a plain message looks like a big build.
@@ -556,7 +566,13 @@ enum KistRunner {
                         defaultMaxIterations: opts.maxIterations, extendedThinking: opts.extendedThinking)
                     return await spawner.run(specialist: def, task: task, approvalTools: approval, planMode: planMode).summary
                 }
-                repl.deferredInput = { await terminalInteractor.takeDeferredInput() }
+                // R2a: the drain chain — approval-deferred prompts first, then messages the user
+                // TYPED while a turn was running (TurnInputQueue). Each drained line goes through
+                // the REPL's full input path (slash commands, intents, routing) as if typed fresh.
+                repl.deferredInput = {
+                    if let d = await terminalInteractor.takeDeferredInput() { return d }
+                    return TurnInputQueue.shared.popQueued()
+                }
                 repl.setAutopilot = { on in await terminalInteractor.setAutopilot(on) }
                 repl.saveTranscript = { transcript, path in
                     try ConversationExporter.writeMarkdown(transcript: transcript, path: path, projectRoot: root)
@@ -590,14 +606,15 @@ enum KistRunner {
                 // Rebuilt on /model (new default provider+model) and /roles (new team). The default
                 // binding drives the conversational turn AND the spawn-tool default; roles drive the team.
                 repl.loopFactory = { defaultBinding, roles, planMode, showReasoning, extendedThinking in
-                    makeLoop(registry: registry, providerId: defaultBinding.providerId, model: defaultBinding.model,
+                    // R2a: same shared constructor as the initial loop (typed-input render + hook).
+                    return makeLoop(registry: registry, providerId: defaultBinding.providerId, model: defaultBinding.model,
                              context: context,
                              tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
                                     budget: opts.makeBudget(),
                              interactor: terminalInteractor, approvalTools: opts.yolo ? [] : sensitiveTools,
                              planMode: planMode, extendedThinking: extendedThinking, toolMode: toolMode, roles: roles,
                              delegationDepth: opts.delegationDepth, showReasoning: showReasoning,
-                             sinkOverride: TerminalEventSink(showReasoning: showReasoning, style: .calm, proofStore: proofStore),
+                             sinkOverride: makeReplSink(showReasoning: showReasoning),
                              recorder: recorder,
                              traceRecorder: traceRecorder)
                 }
@@ -685,7 +702,11 @@ enum KistRunner {
                     // auto-escalate. The watcher cancels the runner task; PlanExecuteLoop and
                     // PlanExecutor stop cooperatively at phase/wave boundaries. Sequential with
                     // the chat turn's watcher (single-watcher invariant preserved).
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
                     _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                        if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                        else { TurnInputQueue.shared.commitPending() }
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
                               + " — plan run stopped\u{001B}[0m")
                     }) {
@@ -699,7 +720,11 @@ enum KistRunner {
                     // the same ESC watcher — top-level + sequential, single-watcher invariant holds.
                     // Coverage is partial (council's own model calls stop via provider cancellation);
                     // honest partial beats a dead zone.
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
                     _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                        if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                        else { TurnInputQueue.shared.commitPending() }
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
                               + " — council run stopped\u{001B}[0m")
                     }) {
@@ -710,7 +735,11 @@ enum KistRunner {
                 }
                 repl.research = { g, roles in
                     // R1 sibling: same watcher for the research pipeline.
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
                     _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                        if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                        else { TurnInputQueue.shared.commitPending() }
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
                               + " — research run stopped\u{001B}[0m")
                     }) {
@@ -1724,8 +1753,13 @@ enum KistRunner {
         let runReplay = RunReplayStore(projectRoot: root, provider: providerId, model: model)
         let proofStore = TurnProofStore(replayStore: runReplay)
         proofStore.startTurn(goal: goal)
+        // R2a: plan-execute is the LONGEST-running surface — typing must render there too, not
+        // just queue invisibly (review catch: "my typing disappeared" for a 20-minute plan run).
+        let planSink = TerminalEventSink(style: .calm, proofStore: proofStore,
+                                         typedInput: { TurnInputQueue.shared.preview() })
+        TurnInputQueue.shared.addOnChange { planSink.refreshLiveStatus() }
         let pxl = PlanExecuteLoop(providers: registry, roles: roles, tools: tools, context: context,
-                                  sink: TerminalEventSink(style: .calm, proofStore: proofStore),
+                                  sink: planSink,
                                   interactor: opts.yolo ? AutoApproveInteractor() : terminalInteractor(for: opts),
                                   requireApproval: !opts.yolo, recorder: recorder, budget: budget, memory: memory)
         // Fold cortex (who Luke is + this project) into the planner's goal so plan→execute (and
