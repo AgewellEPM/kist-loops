@@ -40,7 +40,11 @@ public enum PlanExecuteFleetSpawner {
         verifyGoal: Bool = true,
         autoCommit: Bool = true,
         budget: BudgetLedger? = nil,
-        audit: Bool = true
+        audit: Bool = true,
+        // The user's --allow-read grant (read-only, fail-closed) — propagated so fleet workers
+        // don't silently lose read access the top-level session has, which previously made the
+        // denial steer give FALSE advice ("relaunch with --allow-read" when the user already had).
+        externalReadRoots: [String] = []
     ) -> InProcessAgentSpawner {
         // The SAME ledger is captured by the closure, so EVERY fleet agent draws from one global cap —
         // closing the hole the council flagged (the fleet path doesn't go through makeLoop, so without
@@ -48,7 +52,8 @@ public enum PlanExecuteFleetSpawner {
         InProcessAgentSpawner { task, worktree in
             // Per-worktree audit trail so fleet workers' tool calls are recorded too (Codex HIGH —
             // the fleet path doesn't go through the CLI context, so audit must be wired here).
-            let context = ToolContext(projectRoot: worktree.path, shell: shell, sandbox: sandbox)
+            let context = ToolContext(projectRoot: worktree.path, shell: shell, sandbox: sandbox,
+                                      externalReadRoots: externalReadRoots)
                 .withAuditLog(audit ? AuditLog.forProject(root: worktree.path) : nil)
             let loop = PlanExecuteLoop(
                 providers: providers, roles: roles, tools: tools, context: context,
@@ -78,12 +83,14 @@ public enum PlanExecuteFleetSpawner {
         maxReplans: Int = 2,
         verifyGoal: Bool = true,
         autoCommit: Bool = true,
-        budget: BudgetLedger? = nil
+        budget: BudgetLedger? = nil,
+        externalReadRoots: [String] = []
     ) -> AssignedPlanExecuteSpawner {
         AssignedPlanExecuteSpawner(providers: providers, defaultRoles: defaultRoles, tools: tools,
                                    shell: shell, sandbox: sandbox,
                                    maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans,
-                                   verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget)
+                                   verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget,
+                                   externalReadRoots: externalReadRoots)
     }
 
     public struct AssignedPlanExecuteSpawner: AssignedAgentSpawner {
@@ -97,13 +104,15 @@ public enum PlanExecuteFleetSpawner {
         let verifyGoal: Bool
         let autoCommit: Bool
         let budget: BudgetLedger?
+        let externalReadRoots: [String]
 
         public func spawn(task: String, worktree: GitWorktree) async -> Bool {
             Task.detached(priority: .userInitiated) {
                 let summary = await runWorker(task: task, worktree: worktree, providers: providers,
                                               roles: defaultRoles, tools: tools, shell: shell, sandbox: sandbox,
                                               maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans,
-                                              verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget)
+                                              verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget,
+                                              externalReadRoots: externalReadRoots)
                 FleetSentinel.markDone(inWorktree: worktree.path, summary: summary)
             }
             return true
@@ -114,7 +123,8 @@ public enum PlanExecuteFleetSpawner {
                 let summary = await runWorker(task: task, worktree: worktree, providers: providers,
                                               roles: assignment.roles, tools: tools, shell: shell, sandbox: sandbox,
                                               maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans,
-                                              verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget)
+                                              verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget,
+                                              externalReadRoots: externalReadRoots)
                 FleetSentinel.markDone(inWorktree: worktree.path, summary: summary)
             }
             return true
@@ -125,8 +135,10 @@ public enum PlanExecuteFleetSpawner {
                                   providers: ProviderRegistry, roles: RoleBindings, tools: ToolRegistry,
                                   shell: ShellPolicy, sandbox: SandboxPolicy,
                                   maxPlanRepairs: Int, maxReplans: Int, verifyGoal: Bool,
-                                  autoCommit: Bool, budget: BudgetLedger?) async -> String {
-        let context = ToolContext(projectRoot: worktree.path, shell: shell, sandbox: sandbox)
+                                  autoCommit: Bool, budget: BudgetLedger?,
+                                  externalReadRoots: [String] = []) async -> String {
+        let context = ToolContext(projectRoot: worktree.path, shell: shell, sandbox: sandbox,
+                                  externalReadRoots: externalReadRoots)
         let loop = PlanExecuteLoop(
             providers: providers, roles: roles, tools: tools, context: context,
             interactor: AutoApproveInteractor(), requireApproval: false,

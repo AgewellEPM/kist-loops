@@ -12,7 +12,7 @@ public struct ReadSpreadsheetTool: AgentTool {
     the figures. Use when the user drops or references a spreadsheet/CSV.
     """
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Project-relative path to the spreadsheet or CSV."),
+        ToolParameter(name: "path", type: "string", description: "Project-relative path to the spreadsheet or CSV. Absolute paths under a session-armed read-only root (--allow-read) also work."),
         ToolParameter(name: "sheet", type: "string", description: "Optional sheet name/number for xlsx (default: all sheets).", required: false),
         ToolParameter(name: "max_rows", type: "number", description: "Max rows to preview per sheet (default 50).", required: false),
     ]
@@ -21,15 +21,22 @@ public struct ReadSpreadsheetTool: AgentTool {
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let path = try requireString("path", from: arguments)
-        let resolved = try context.resolvedPath(path, mustExist: true)
+        // Read-only consumer: absolute paths under an armed external read root also resolve.
+        let resolved = try context.resolvedPathForReading(path, mustExist: true)
         let maxRows = optionalInt("max_rows", from: arguments) ?? 50
         let ext = (resolved as NSString).pathExtension.lowercased()
         let name = (resolved as NSString).lastPathComponent
 
         switch ext {
         case "csv", "tsv":
-            return readCSV(resolved, name: name, maxRows: maxRows, delimiter: ext == "tsv" ? "\t" : ",")
+            // TOCTOU-safe read on the openat/O_NOFOLLOW layer (never reopen-by-name).
+            guard let text = try? context.readStringForReading(path) else {
+                return .failure("couldn't read \(name) as UTF-8 text")
+            }
+            return readCSV(text: text, name: name, maxRows: maxRows, delimiter: ext == "tsv" ? "\t" : ",")
         case "xlsx", "xlsm", "xlsb":
+            // XLSX opens BY PATH (CoreXLSX zip reader needs a filepath) — accepted residual
+            // reopen-by-name window, same class as the pre-existing project-root behavior.
             return try readXLSX(resolved, name: name, maxRows: maxRows, wantSheet: arguments["sheet"] as? String)
         default:
             return .failure("read_spreadsheet handles .xlsx/.xlsm/.csv/.tsv; '\(path)' isn't one")
@@ -38,10 +45,7 @@ public struct ReadSpreadsheetTool: AgentTool {
 
     // MARK: CSV
 
-    private func readCSV(_ path: String, name: String, maxRows: Int, delimiter: Character) -> ToolResult {
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
-            return .failure("couldn't read \(name) as UTF-8 text")
-        }
+    private func readCSV(text: String, name: String, maxRows: Int, delimiter: Character) -> ToolResult {
         let rows = Self.parseCSV(text, delimiter: delimiter)
         guard !rows.isEmpty else { return ToolResult(success: true, output: "\(name): empty") }
         let cols = rows.map(\.count).max() ?? 0

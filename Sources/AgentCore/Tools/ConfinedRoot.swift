@@ -27,6 +27,11 @@ public final class ConfinedRoot: Sendable {
 
     /// Canonical absolute path to the confinement root (symlinks already resolved).
     public let rootPath: String
+    /// When true, every mutating operation (write/move/remove/mkdir) throws — the root is
+    /// readable only. Used for explicitly-armed external read roots (e.g. `--allow-read
+    /// /Volumes`): reads route here, writes stay confined to the project root. Enforced at
+    /// the primitive level so no future tool can write through a read root by accident.
+    public let readOnly: Bool
     /// A trusted directory fd for the root, opened ONCE with `O_NOFOLLOW`. Every descendant
     /// `openat` dups this fd instead of reopening `rootPath` by name, so the root and its
     /// ancestors are resolved a single time — a pathname swapped to a symlink after
@@ -35,7 +40,7 @@ public final class ConfinedRoot: Sendable {
     /// init open is still resolved by name once — out of scope, same as realpath.)
     private let rootFD: Int32
 
-    public init(root: String) throws {
+    public init(root: String, readOnly: Bool = false) throws {
         guard let real = ToolContext.canonicalize(root) else {
             throw ToolError.configuration("project root does not exist: \(root)")
         }
@@ -50,6 +55,16 @@ public final class ConfinedRoot: Sendable {
         }
         self.rootPath = real
         self.rootFD = fd
+        self.readOnly = readOnly
+    }
+
+    /// Throws unless mutation is allowed on this root. Called by EVERY mutating primitive
+    /// (per-site, not per-caller — a new caller can't forget it).
+    private func requireWritable(_ op: String, _ path: String) throws {
+        if readOnly {
+            throw ToolError.execution("\(op) refused: \(rootPath) is an external READ-ONLY root — writes are confined to the project root")
+        }
+        _ = path   // reserved for richer messages; keeps the call sites uniform
     }
 
     deinit { close(rootFD) }
@@ -130,6 +145,7 @@ public final class ConfinedRoot: Sendable {
 
     /// Atomic confined binary write: write to a temp in the SAME confined dir, then `renameat`.
     public func writeData(_ path: String, _ data: Data, createParents: Bool) throws {
+        try requireWritable("write", path)
         let comps = try relativeComponents(path)
         guard !comps.isEmpty else { throw ToolError.execution("cannot write to the root directory") }
         let (parent, leafOpt) = try openParentDir(comps, createIntermediates: createParents)
@@ -155,6 +171,7 @@ public final class ConfinedRoot: Sendable {
     /// trusted root fd, then `renameat` swaps the leaves atomically — a symlinked dir mid-path yields ELOOP
     /// and is refused, so neither side can escape. Destination parents are created if `createParents`.
     public func move(_ from: String, _ to: String, createParents: Bool = true) throws {
+        try requireWritable("move", from)
         let fromComps = try relativeComponents(from)
         guard !fromComps.isEmpty else { throw ToolError.execution("cannot move the root directory") }
         let toComps = try relativeComponents(to)
@@ -173,6 +190,7 @@ public final class ConfinedRoot: Sendable {
     /// Remove a file (not a directory), confined + O_NOFOLLOW. A symlinked leaf is unlinked as the LINK,
     /// never its target.
     public func removeFile(_ path: String) throws {
+        try requireWritable("remove", path)
         let comps = try relativeComponents(path)
         guard !comps.isEmpty else { throw ToolError.execution("cannot remove the root directory") }
         let (parent, leafOpt) = try openParentDir(comps, createIntermediates: false)
@@ -183,6 +201,7 @@ public final class ConfinedRoot: Sendable {
 
     /// Create a directory (and parents) confined to the root, O_NOFOLLOW the whole way.
     public func makeDirectory(_ path: String) throws {
+        try requireWritable("make_dir", path)
         let comps = try relativeComponents(path)
         guard !comps.isEmpty else { return }   // root already exists
         let (parent, leafOpt) = try openParentDir(comps, createIntermediates: true)

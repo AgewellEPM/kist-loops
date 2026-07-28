@@ -150,7 +150,8 @@ public struct SpecialistSpawner: Sendable {
             // the worktree. (Enforcement is Seatbelt on macOS; a platform without it is a known limitation.)
             let isoSandbox = context.sandbox.confineWrites ? context.sandbox
                                                            : SandboxPolicy.confined(denyNetwork: false, confineWrites: true)
-            runContext = ToolContext(projectRoot: wt.path, shell: context.shell, sandbox: isoSandbox)
+            runContext = ToolContext(projectRoot: wt.path, shell: context.shell, sandbox: isoSandbox,
+                                     externalReadRoots: context.externalReadRoots)
         }
 
         let loop = HeadlessAgentLoop(

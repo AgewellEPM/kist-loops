@@ -10,7 +10,7 @@ public struct SearchCodeTool: AgentTool {
     public let description = "Search file contents by regex (ripgrep-backed when available; .gitignore-aware). Works WITHOUT shell. Returns path:line: text by default."
     public let parameters = [
         ToolParameter(name: "pattern", type: "string", description: "Regular expression to search for", required: true),
-        ToolParameter(name: "path", type: "string", description: "Directory to search from (default: project root)", required: false),
+        ToolParameter(name: "path", type: "string", description: "Directory to search from (default: project root). Absolute paths under a session-armed read-only root (--allow-read) also work.", required: false),
         ToolParameter(name: "glob", type: "string", description: "Filename glob filter, e.g. *.swift", required: false),
         ToolParameter(name: "type", type: "string", description: "Ripgrep file type filter, e.g. swift, js, py (rg only)", required: false),
         ToolParameter(name: "output_mode", type: "string", description: "content (default, path:line:text) | files (paths only) | count (matches per file)", required: false),
@@ -32,27 +32,34 @@ public struct SearchCodeTool: AgentTool {
         let mode = ((arguments["output_mode"] as? String)?.lowercased()).map(Mode.init) ?? .content
 
         // Validate + canonicalize the search dir UNDER the root (throws pathEscape on `..`/symlink escape).
-        let confined = try context.confinedRoot()
-        let baseComps = try confined.relativeComponents(base)
+        // The READING resolver also admits absolute bases under an armed external read root (--allow-read).
+        let (confined, searchBase) = try context.confinedRootForReading(base)
+        let baseComps = try confined.relativeComponents(searchBase)
         let relDir = baseComps.isEmpty ? "." : baseComps.joined(separator: "/")
+        // External base → emit ABSOLUTE paths (searchDir) so follow-up read_file calls resolve to
+        // the right root — a root-relative path would silently resolve against the PROJECT root
+        // (wrong-file on a name collision). Project base keeps the historical relative contract.
+        let searchDir = confined.readOnly
+            ? (relDir == "." ? confined.rootPath : confined.rootPath + "/" + relDir)
+            : relDir
 
         // Single-file target → search ONLY that file (engine-independent, works with or without ripgrep),
         // honoring an optional filename glob. Without this, walk()/rg treat a regular file as a dir → ENOTDIR.
-        if !baseComps.isEmpty, (try? confined.fileMetadata(base).isRegular) == true {
-            return try searchSingleFile(pattern: pattern, rootRel: relDir, glob: arguments["glob"] as? String,
+        if !baseComps.isEmpty, (try? confined.fileMetadata(searchBase).isRegular) == true {
+            return try searchSingleFile(pattern: pattern, rootRel: searchDir, glob: arguments["glob"] as? String,
                                         caseInsensitive: optionalBool("case_insensitive", from: arguments) ?? false,
                                         mode: mode, limit: limit, confined: confined)
         }
 
         if let rg = Self.ripgrepPath() {
-            return Self.runRipgrep(rg: rg, pattern: pattern, cwd: confined.rootPath, relDir: relDir, mode: mode,
+            return Self.runRipgrep(rg: rg, pattern: pattern, cwd: confined.rootPath, relDir: searchDir, mode: mode,
                                    context: optionalInt("context", from: arguments),
                                    caseInsensitive: optionalBool("case_insensitive", from: arguments),
                                    multiline: optionalBool("multiline", from: arguments),
                                    type: arguments["type"] as? String, glob: arguments["glob"] as? String, limit: limit)
         }
         // No ripgrep → pure-Foundation fallback (content mode only; modes degrade gracefully).
-        return try swiftWalkSearch(pattern: pattern, base: base, glob: arguments["glob"] as? String,
+        return try swiftWalkSearch(pattern: pattern, base: searchBase, glob: arguments["glob"] as? String,
                                    caseInsensitive: optionalBool("case_insensitive", from: arguments) ?? false,
                                    limit: limit, confined: confined)
     }
@@ -177,7 +184,9 @@ public struct SearchCodeTool: AgentTool {
         catch { return .failure("invalid regex: \(error.localizedDescription)") }
         let nameFilter = try glob.map { try GlobFilesTool.globToRegex($0) }
         let baseComps = try confined.relativeComponents(base)
-        let basePrefix = baseComps.isEmpty ? "" : baseComps.joined(separator: "/") + "/"
+        let relPrefix = baseComps.isEmpty ? "" : baseComps.joined(separator: "/") + "/"
+        // External root → absolute output paths (see execute); readString accepts them under its root.
+        let basePrefix = confined.readOnly ? confined.rootPath + "/" + relPrefix : relPrefix
         var hits: [String] = []
         var filesScanned = 0
         struct StopSearch: Error {}

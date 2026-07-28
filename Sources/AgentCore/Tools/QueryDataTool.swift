@@ -12,7 +12,7 @@ public struct QueryDataTool: AgentTool {
     Requires the duckdb binary and shell access.
     """
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Project-relative path to the data file (.csv/.parquet/.json)."),
+        ToolParameter(name: "path", type: "string", description: "Project-relative path to the data file (.csv/.parquet/.json). Absolute paths under a session-armed read-only root (--allow-read, e.g. /Volumes) also work."),
         ToolParameter(name: "sql", type: "string", description: "SQL querying the view `data`. SELECT-only."),
     ]
 
@@ -24,7 +24,9 @@ public struct QueryDataTool: AgentTool {
         guard Self.isReadOnly(sql) else {
             return .failure("query_data is read-only — only a single SELECT/WITH/SHOW/DESCRIBE statement is allowed")
         }
-        let input = try context.resolvedPath(path, mustExist: true)
+        // Read-only by construction (SELECT-only gate + duckdb -readonly + external access off),
+        // so absolute paths under an armed external read root (--allow-read) also resolve.
+        let input = try context.resolvedPathForReading(path, mustExist: true)
 
         guard let duckdb = RunCommandTool.resolveExecutable("duckdb", env: ProcessInfo.processInfo.environment) else {
             return .failure("duckdb not found on PATH — install it (brew install duckdb) to query data at scale")

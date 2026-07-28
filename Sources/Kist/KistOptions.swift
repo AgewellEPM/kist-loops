@@ -9,6 +9,9 @@ struct KistOptions {
     var project: String
     var maxIterations: Int = 12
     var allowShell = false          // run_command is OFF by default (file/search tools are safe)
+    var allowReadPaths: [String] = []  // --allow-read <dir>: extra READ-ONLY roots for the file tools
+                                    // (e.g. /Volumes for a CD/USB drive). Repeatable. Writes stay
+                                    // project-confined; nested kist never inherits it (stripped below).
     var sandbox = false             // opt-in macOS Seatbelt OS sandbox
     var trustWorktreeTests = false  // --trust-worktree-tests: let the fleet verifier trust an IN-REPO test
                                     // harness (base-trusted test.sh / structural swift-test/npm). OFF by
@@ -166,6 +169,8 @@ struct KistOptions {
             case "--max-cycles":            if let v = next(), let n = Int(v) { o.maxCycles = n }
             case "--ship":                  o.ship = true
             case "--allow-shell":           o.allowShell = true
+            case "--allow-read":            if let v = next() { o.allowReadPaths.append(v) }
+                                            else { o.optionErrors.append("--allow-read requires <dir>") }
             case "--sandbox":               o.sandbox = true
             case "--trust-worktree-tests":  o.trustWorktreeTests = true
             case "--yolo":                  o.yolo = true
@@ -273,6 +278,9 @@ struct KistOptions {
             o.enableComputerUse = false
             o.auto = false
             o.yolo = false
+            // A nested kist must not self-widen its READ surface either (an agent spawning
+            // `kist --allow-read /` would un-confine reads). Same fail-closed strip as arming.
+            o.allowReadPaths = []
             o.nestedRefusedEscalation = true   // surfaced by the runner as a visible note, never silent
         }
         return o
@@ -340,6 +348,10 @@ struct KistOptions {
       -C, --project <path>          Project root the agent is confined to (default: current dir).
           --max-iterations <n>      Max plan→act steps (default: 12).
           --allow-shell             Enable the run_command tool (OFF by default).
+          --allow-read <dir>        ALSO allow the file/search tools to READ under <dir> (repeatable),
+                                    e.g. --allow-read /Volumes to browse a mounted CD/USB drive.
+                                    Read-only: write/edit/move/delete stay confined to the project
+                                    root. Never inherited by a nested kist. "/" is refused.
           --sandbox                 Run shell commands inside the macOS Seatbelt OS sandbox.
           --trust-worktree-tests    Let the fleet verifier trust an IN-REPO test harness (base-trusted
                                     test.sh / swift-test / npm). OFF by default: only a held-out operator

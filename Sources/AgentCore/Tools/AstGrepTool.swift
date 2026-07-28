@@ -71,7 +71,7 @@ public struct AstGrepTool: AgentTool {
         ToolParameter(name: "pattern", type: "string", description: "ast-grep structural pattern, e.g. \"console.log($A)\" or \"foo($$$ARGS)\"", required: true),
         ToolParameter(name: "rewrite", type: "string", description: "Optional replacement pattern; when set, returns a DIFF PREVIEW (no files changed)", required: false),
         ToolParameter(name: "lang", type: "string", description: "Language: swift, js, ts, tsx, py, rust, go, java, c, cpp… (inferred from file extensions if omitted)", required: false),
-        ToolParameter(name: "path", type: "string", description: "File or directory under the project root to scan (default: whole project)", required: false),
+        ToolParameter(name: "path", type: "string", description: "File or directory under the project root to scan (default: whole project). Absolute paths under a session-armed read-only root (--allow-read) also work.", required: false),
         ToolParameter(name: "limit", type: "integer", description: "Max output lines (default 300)", required: false),
     ]
     public var usageExamples: [String] {
@@ -86,14 +86,20 @@ public struct AstGrepTool: AgentTool {
         let lang = arguments["lang"] as? String
         let limit = max(1, optionalInt("limit", from: arguments) ?? 300)
 
-        let confined = try context.confinedRoot()
+        // READ-ONLY search → armed external read roots also resolve (ast_grep_apply stays
+        // project-only: it mutates via a spawned process the readOnly backstop can't gate).
         let base = (arguments["path"] as? String) ?? "."
-        let comps = try confined.relativeComponents(base)     // lexical: rejects ../ and absolute escapes
+        let (confined, resolvedBase) = try context.confinedRootForReading(base)
+        let comps = try confined.relativeComponents(resolvedBase)   // lexical: rejects ../ and absolute escapes
         let relPath = comps.isEmpty ? "." : comps.joined(separator: "/")
         try AstGrep.assertConfined(relPath: relPath, rootPath: confined.rootPath)   // symlink-escape guard
 
         guard let bin = AstGrep.binaryPath() else { return .failure(AstGrep.installHint) }
-        let args = AstGrep.runArgs(pattern: pattern, rewrite: rewrite, lang: lang, relPath: relPath, apply: false)
+        // External base → give ast-grep the ABSOLUTE target so emitted paths are absolute and
+        // directly consumable by follow-up read_file calls (relative would resolve against the
+        // PROJECT root — silent wrong-file on a name collision).
+        let target = confined.readOnly ? (relPath == "." ? confined.rootPath : confined.rootPath + "/" + relPath) : relPath
+        let args = AstGrep.runArgs(pattern: pattern, rewrite: rewrite, lang: lang, relPath: target, apply: false)
         let (out, timedOut) = SearchCodeTool.runProcess(bin, args, cwd: confined.rootPath, maxBytes: 300_000, timeout: 30)
 
         var lines = out.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)

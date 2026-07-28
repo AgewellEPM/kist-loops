@@ -13,7 +13,7 @@ public struct SymbolsTool: AgentTool {
     public let description = "Structural code navigation (read-only). action=outline lists a file's declarations (types/functions) with line numbers; action=find locates where a symbol is DEFINED across the repo. Use it to understand structure or jump to a definition without reading whole files."
     public let parameters = [
         ToolParameter(name: "action", type: "string", description: "outline | find", required: true),
-        ToolParameter(name: "path", type: "string", description: "File to outline (action=outline), or a directory to scope find (default: whole project)", required: false),
+        ToolParameter(name: "path", type: "string", description: "File to outline (action=outline), or a directory to scope find (default: whole project). Absolute paths under a session-armed read-only root (--allow-read) also work.", required: false),
         ToolParameter(name: "name", type: "string", description: "Symbol name to locate (action=find). Exact by default; set contains=true for substring.", required: false),
         ToolParameter(name: "contains", type: "boolean", description: "find: match names CONTAINING `name` instead of exact (default false)", required: false),
         ToolParameter(name: "limit", type: "integer", description: "Max results (default 200)", required: false),
@@ -34,11 +34,14 @@ public struct SymbolsTool: AgentTool {
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let action = try requireString("action", from: arguments).lowercased()
-        let confined = try context.confinedRoot()
         let limit = clampedLimit(optionalInt("limit", from: arguments))
+        // Both actions are READ-ONLY → resolve the caller's path through the reading resolver so
+        // absolute paths under an armed external read root (--allow-read) also work.
+        let base = (arguments["path"] as? String) ?? "."
+        let (confined, resolvedBase) = try context.confinedRootForReading(base)
         switch action {
-        case "outline": return try outline(arguments: arguments, confined: confined, limit: limit)
-        case "find":    return try find(arguments: arguments, confined: confined, limit: limit)
+        case "outline": return try outline(arguments: arguments, path: resolvedBase, confined: confined, limit: limit)
+        case "find":    return try find(arguments: arguments, base: resolvedBase, confined: confined, limit: limit)
         default:        return .failure("symbols: unknown action '\(action)'. Use outline | find.")
         }
     }
@@ -47,8 +50,8 @@ public struct SymbolsTool: AgentTool {
 
     // MARK: - outline one file
 
-    private func outline(arguments: [String: Any], confined: ConfinedRoot, limit: Int) throws -> ToolResult {
-        let path = try requireString("path", from: arguments)
+    private func outline(arguments: [String: Any], path: String, confined: ConfinedRoot, limit: Int) throws -> ToolResult {
+        guard arguments["path"] is String else { throw ToolError.missingParameter("path") }
         guard let lang = SymbolExtractor.language(forPath: path) else {
             return .failure("symbols: unsupported file type for \(path). Supported: swift, ts/js, py, rust, go, java, kotlin, ruby, c/c++.")
         }
@@ -67,17 +70,20 @@ public struct SymbolsTool: AgentTool {
 
     // MARK: - find a definition repo-wide
 
-    private func find(arguments: [String: Any], confined: ConfinedRoot, limit: Int) throws -> ToolResult {
+    private func find(arguments: [String: Any], base: String, confined: ConfinedRoot, limit: Int) throws -> ToolResult {
         let name = try requireString("name", from: arguments)
         let contains = optionalBool("contains", from: arguments) ?? false
-        let base = (arguments["path"] as? String) ?? "."
 
         var hits: [String] = []
         var filesScanned = 0
         var filesCapped = false
         struct Stop: Error {}
         let basePrefixComps = try confined.relativeComponents(base)
-        let basePrefix = basePrefixComps.isEmpty ? "" : basePrefixComps.joined(separator: "/") + "/"
+        // External base → emit ABSOLUTE hit paths so follow-up read_file calls resolve to the
+        // right root (relative would silently resolve against the PROJECT root).
+        let basePrefix = confined.readOnly
+            ? confined.rootPath + "/" + (basePrefixComps.isEmpty ? "" : basePrefixComps.joined(separator: "/") + "/")
+            : (basePrefixComps.isEmpty ? "" : basePrefixComps.joined(separator: "/") + "/")
         do {
             try confined.walk(base, skipDirs: Self.skipDirs) { rel, isDir in
                 if isDir { return }

@@ -290,6 +290,24 @@ enum KistRunner {
         let shellDeny = opts.enableComputerUse ? ShellPolicy.baseDeny : ShellPolicy.defaultDeny
         let shell: ShellPolicy = opts.allowShell ? ShellPolicy(enabled: true, autoApprove: true, deny: shellDeny) : .denied
         let sandbox: SandboxPolicy = opts.sandbox ? .confined() : .disabled
+        // External READ-ONLY roots (--allow-read). Warn loudly on a root that doesn't resolve —
+        // ToolContext drops it silently (fail-closed), and the user should know their CD/USB
+        // path granted nothing rather than discover it mid-run.
+        for dir in opts.allowReadPaths where ToolContext.canonicalize(dir) == nil {
+            err("warning: --allow-read path does not exist (granting nothing): \(dir)")
+        }
+        if opts.allowReadPaths.contains(where: { ToolContext.canonicalize($0) == "/" }) {
+            err("warning: --allow-read / is refused — arm specific trees (e.g. /Volumes) instead")
+        }
+        // Broad-ancestor warning: arming $HOME (or an ancestor of it, e.g. /Users) makes every
+        // secret under it (~/.ssh, ~/.aws, browser data) readable evidence for the model. Allowed
+        // — explicit user grant — but never silent.
+        let home = NSHomeDirectory()
+        for dir in opts.allowReadPaths {
+            if let real = ToolContext.canonicalize(dir), real == home || home.hasPrefix(real + "/") {
+                err("warning: --allow-read \(dir) exposes your ENTIRE home tree (incl. ~/.ssh, ~/.aws) read-only to the model — prefer a narrower path like /Volumes")
+            }
+        }
         // L2 GUARDRAIL (council 2026-07-03): warn loudly if this UNARMED coding binary already holds a
         // host-control TCC grant — the state where an agent could drive the desktop via in-language APIs that
         // no deny-list stops. The complete fix is a separately-signed computer-use binary (documented).
@@ -310,7 +328,8 @@ enum KistRunner {
             guard let root = ToolContext.canonicalize(cp.projectRoot) else {
                 err("error: the run's project path no longer exists: \(cp.projectRoot)"); return 2
             }
-            let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox)
+            let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
+                                      externalReadRoots: opts.allowReadPaths)
             note("kist · resuming \(cp.title) · \(cp.providerId) · iter \(cp.iteration)")
             // Resume with the SAME full tool set as a fresh run (previously it lost cortex/browse/tasks/etc.).
             let resumeExtraTools = Self.buildExtraTools(root: root, fetchAllowedHosts: fetchAllowedHosts, opts: opts, registry: registry)
@@ -340,7 +359,8 @@ enum KistRunner {
         guard let root = ToolContext.canonicalize(opts.project) else {
             err("error: project path does not exist: \(opts.project)"); return 2
         }
-        let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox)
+        let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
+                                  externalReadRoots: opts.allowReadPaths)
         let chosen = registry.provider(id: providerId)
 
         // Full tool set (media/data/memory/vision + agent-writable Cortex). Extracted so the
@@ -1073,7 +1093,8 @@ enum KistRunner {
                 note("  ⑃ best-of-\(effort.searchWidth) · isolated worktrees")
                 let attemptBudget = perCycle.map { max(20_000, $0 / effort.searchWidth) }
                 let won = await WorktreeBestOfN.run(root: root, width: effort.searchWidth, nowEpoch: Date().timeIntervalSince1970) { wtPath, _ in
-                    let wtCtx = ToolContext(projectRoot: wtPath, shell: context.shell, sandbox: context.sandbox)
+                    let wtCtx = ToolContext(projectRoot: wtPath, shell: context.shell, sandbox: context.sandbox,
+                                            externalReadRoots: context.externalReadRoots)
                     let rec = TrajectoryRecorder()
                     let wtLoop = makeLoop(registry: registry, providerId: cycleProvider, model: cycleModel, context: wtCtx,
                                           tools: loopTools, checkpoints: checkpoints, maxIterations: effort.iterationBudget,
@@ -1463,7 +1484,8 @@ enum KistRunner {
         // 2. LAUNCH — one heterogeneous in-process agent per subtask, each in its own worktree.
         let fleetRoot = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".mythos/fleet", isDirectory: true)
         let spawner = PlanExecuteFleetSpawner.make(providers: registry, roles: roles, tools: tools,
-                                                   budget: fleetBudget)
+                                                   budget: fleetBudget,
+                                                   externalReadRoots: opts.allowReadPaths)
         let orch = CaptainOrchestrator(spawner: spawner)
         let launch = await orch.launchFleet(goal: goal, repo: root, subtasks: subtasks, maxAgents: agents,
                                             baseDir: fleetRoot, nowEpoch: Date().timeIntervalSince1970)

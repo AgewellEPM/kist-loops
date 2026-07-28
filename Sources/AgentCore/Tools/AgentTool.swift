@@ -227,6 +227,12 @@ public struct ShellPolicy: Sendable {
 public struct ToolContext: Sendable {
     /// The confinement root. All tool filesystem access is restricted to this subtree.
     public let projectRoot: String
+    /// Explicitly-armed EXTERNAL READ-ONLY roots (canonicalized; e.g. `/Volumes` for a CD/USB
+    /// drive via `--allow-read /Volumes`). READ tools may resolve absolute paths under these
+    /// via `confinedRootForReading`/`resolvedPathForReading`; write/move/remove/mkdir stay
+    /// confined to `projectRoot` (and the `ConfinedRoot.readOnly` flag enforces it again at
+    /// the primitive level). Empty by default — fail-closed, exactly as before.
+    public let externalReadRoots: [String]
     public let shell: ShellPolicy
     /// Opt-in OS-level sandbox for `run_command` (kernel-enforced egress-deny + write
     /// confinement). Disabled by default; in-process gates always apply regardless.
@@ -251,7 +257,7 @@ public struct ToolContext: Sendable {
     public init(projectRoot: String, shell: ShellPolicy = .denied, sandbox: SandboxPolicy = .disabled,
                 authorizationScope: ScopeDecision? = nil, scopeOverrideApproved: Bool = false,
                 skillLocations: [String: String] = [:], skillTracker: SkillTracker? = nil,
-                auditLog: AuditLog? = nil) {
+                auditLog: AuditLog? = nil, externalReadRoots: [String] = []) {
         self.projectRoot = projectRoot
         self.shell = shell
         self.sandbox = sandbox
@@ -260,32 +266,41 @@ public struct ToolContext: Sendable {
         self.skillLocations = skillLocations
         self.skillTracker = skillTracker
         self.auditLog = auditLog
+        // Canonicalize once, drop non-existent entries (fail-closed: a bogus root grants nothing).
+        // "/" is refused outright — it would un-confine every read; arm specific trees instead.
+        self.externalReadRoots = externalReadRoots
+            .compactMap { Self.canonicalize($0) }
+            .filter { $0 != "/" }
     }
 
     public func withAuthorizationScope(_ decision: ScopeDecision?) -> ToolContext {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: decision, scopeOverrideApproved: false,
-                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog)
+                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
+                    externalReadRoots: externalReadRoots)
     }
 
     public func withScopeOverrideApproved(_ approved: Bool) -> ToolContext {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: authorizationScope, scopeOverrideApproved: approved,
-                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog)
+                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
+                    externalReadRoots: externalReadRoots)
     }
 
     /// Attach a discovered skill set to this context (used by the loop after discovery).
     public func withSkills(locations: [String: String], tracker: SkillTracker?) -> ToolContext {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: authorizationScope, scopeOverrideApproved: scopeOverrideApproved,
-                    skillLocations: locations, skillTracker: tracker, auditLog: auditLog)
+                    skillLocations: locations, skillTracker: tracker, auditLog: auditLog,
+                    externalReadRoots: externalReadRoots)
     }
 
     /// Attach an audit log (used by the CLI when constructing the run's context).
     public func withAuditLog(_ log: AuditLog?) -> ToolContext {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: authorizationScope, scopeOverrideApproved: scopeOverrideApproved,
-                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: log)
+                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: log,
+                    externalReadRoots: externalReadRoots)
     }
 
     /// TOCTOU-safe filesystem confinement for this context's root (Codex HIGH#2). File
@@ -294,6 +309,74 @@ public struct ToolContext: Sendable {
     /// (e.g. validating a working directory before spawn).
     public func confinedRoot() throws -> ConfinedRoot {
         try ConfinedRoot(root: projectRoot)
+    }
+
+    /// Route a caller path to the right confinement root FOR READING. Relative paths and
+    /// absolute paths inside the project resolve exactly as `confinedRoot()` always has. An
+    /// ABSOLUTE path under one of the explicitly-armed `externalReadRoots` returns a
+    /// READ-ONLY `ConfinedRoot` on that external root instead (same openat/O_NOFOLLOW
+    /// enforcement — the string check below only CHOOSES the root; containment is enforced
+    /// at open time). Anything else throws `.pathEscape` naming what IS readable, so the
+    /// model gets an actionable error instead of a dead end.
+    ///
+    /// WRITE tools must keep using `confinedRoot()` — and even if one slips, the returned
+    /// root's `readOnly` flag refuses the mutation at the primitive level.
+    public func confinedRootForReading(_ path: String) throws -> (confined: ConfinedRoot, path: String) {
+        guard path.hasPrefix("/") else { return (try confinedRoot(), path) }
+        guard let rootReal = Self.canonicalize(projectRoot) else {
+            throw ToolError.configuration("project root does not exist: \(projectRoot)")
+        }
+        let resolved = Self.canonicalizeAllowingMissing(path)
+        // Project root wins: identical behavior to the historical single-root path.
+        if resolved == rootReal || resolved.hasPrefix(rootReal + "/") {
+            return (try confinedRoot(), path)
+        }
+        for ext in externalReadRoots where resolved == ext || resolved.hasPrefix(ext + "/") {
+            return (try ConfinedRoot(root: ext, readOnly: true), resolved)
+        }
+        throw ToolError.pathEscape(path: path, root: readableRootsDescription(projectReal: rootReal))
+    }
+
+    /// Like `resolvedPath(_:mustExist:)` but for READ-ONLY consumers (view_image,
+    /// analyze_media, read_spreadsheet): an absolute path under an armed external read
+    /// root is also accepted. Never use for a path that will be written.
+    public func resolvedPathForReading(_ path: String, mustExist: Bool) throws -> String {
+        do { return try resolvedPath(path, mustExist: mustExist) }
+        catch let escape as ToolError {
+            guard case .pathEscape = escape else { throw escape }
+            let resolved = Self.canonicalizeAllowingMissing(path)
+            for ext in externalReadRoots where resolved == ext || resolved.hasPrefix(ext + "/") {
+                if mustExist && !FileManager.default.fileExists(atPath: resolved) {
+                    throw ToolError.notFound(path)
+                }
+                return resolved
+            }
+            let rootReal = Self.canonicalize(projectRoot) ?? projectRoot
+            throw ToolError.pathEscape(path: path, root: readableRootsDescription(projectReal: rootReal))
+        }
+    }
+
+    /// TOCTOU-safe byte read honoring external read roots: resolve via `confinedRootForReading`
+    /// and read on the SAME openat/O_NOFOLLOW layer as the core file tools — never a
+    /// resolve-then-reopen-by-name window (the exact pattern ConfinedRoot exists to close,
+    /// which matters MORE on other-process-writable external media).
+    public func readDataForReading(_ path: String, maxBytes: Int? = nil) throws -> Data {
+        let (confined, p) = try confinedRootForReading(path)
+        return try confined.readData(p, maxBytes: maxBytes)
+    }
+
+    /// TOCTOU-safe UTF-8 read honoring external read roots (see `readDataForReading`).
+    public func readStringForReading(_ path: String) throws -> String {
+        let (confined, p) = try confinedRootForReading(path)
+        return try confined.readString(p)
+    }
+
+    /// "…escapes the project root (<this>) — refused": name the armed read roots so the
+    /// error itself tells the model where reads ARE allowed.
+    private func readableRootsDescription(projectReal: String) -> String {
+        externalReadRoots.isEmpty
+            ? projectReal
+            : projectReal + "; also readable read-only: " + externalReadRoots.joined(separator: ", ")
     }
 
     /// Resolve a caller-supplied path to an absolute path GUARANTEED to live inside

@@ -11,7 +11,7 @@ public struct MediaClipTool: AgentTool {
     Requires the ffmpeg binary and shell access.
     """
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Project-relative path to the source video."),
+        ToolParameter(name: "path", type: "string", description: "Project-relative path to the source video. Absolute paths under a session-armed read-only root (--allow-read) also work."),
         ToolParameter(name: "at", type: "string", description: "Timestamp: MM:SS, HH:MM:SS, or seconds."),
         ToolParameter(name: "kind", type: "string", description: "frame | clip (default frame)", required: false),
         ToolParameter(name: "seconds", type: "number", description: "Clip length in seconds (default 6, clip only).", required: false),
@@ -27,7 +27,9 @@ public struct MediaClipTool: AgentTool {
         let kind = (arguments["kind"] as? String ?? "frame").lowercased()
         guard kind == "frame" || kind == "clip" else { return .failure("kind must be 'frame' or 'clip'") }
         let seconds = min(max(optionalInt("seconds", from: arguments) ?? 6, 1), 60)
-        let input = try context.resolvedPath(path, mustExist: true)
+        // INPUT is read-only (ffmpeg -i) → armed external read roots also resolve.
+        // The output path below stays project-confined via resolvedPath — never widen it.
+        let input = try context.resolvedPathForReading(path, mustExist: true)
 
         let stem = ((input as NSString).lastPathComponent as NSString).deletingPathExtension
         let safeAt = at.replacingOccurrences(of: ":", with: "-")

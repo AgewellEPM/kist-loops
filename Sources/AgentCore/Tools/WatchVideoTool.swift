@@ -10,7 +10,7 @@ public struct WatchVideoTool: AgentTool {
     for transcript/audio and watch_video for visual frame understanding.
     """
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Project-relative video path.", required: true),
+        ToolParameter(name: "path", type: "string", description: "Project-relative video path. Absolute paths under a session-armed read-only root (--allow-read) also work.", required: true),
         ToolParameter(name: "every_seconds", type: "integer", description: "Sample one frame every N seconds (default 5, min 1, max 60).", required: false),
         ToolParameter(name: "max_frames", type: "integer", description: "Maximum frames to inspect (default 12, max 40).", required: false),
         ToolParameter(name: "question", type: "string", description: "Optional focused question, e.g. 'what UI changed?'.", required: false),
@@ -43,7 +43,9 @@ public struct WatchVideoTool: AgentTool {
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let path = try requireString("path", from: arguments)
-        let input = try context.resolvedPath(path, mustExist: true)
+        // INPUT is read-only (ffmpeg -i) → armed external read roots also resolve.
+        // The output dir below stays project-confined via resolvedPath — never widen it.
+        let input = try context.resolvedPathForReading(path, mustExist: true)
         let ext = (input as NSString).pathExtension.lowercased()
         guard let (kind, _) = MediaAttachment.kindAndMime(forExtension: ext), kind == .video else {
             return .failure("watch_video handles video files; '\(path)' is not recognized as video")

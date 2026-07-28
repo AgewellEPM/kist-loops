@@ -13,7 +13,7 @@ public struct ReadFileTool: AgentTool {
     public let name = "read_file"
     public let description = "Read a numbered file window. Defaults to the first 400 lines; use start_line/end_line to page through large files."
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "File path relative to the project root", required: true),
+        ToolParameter(name: "path", type: "string", description: "File path relative to the project root. Absolute paths under a session-armed read-only root (--allow-read, e.g. /Volumes) are also readable.", required: true),
         ToolParameter(name: "start_line", type: "integer", description: "Starting line (1-indexed)", required: false),
         ToolParameter(name: "end_line", type: "integer", description: "Ending line (inclusive). If omitted, reads a 400-line window.", required: false),
     ]
@@ -46,7 +46,10 @@ public struct ReadFileTool: AgentTool {
 
         // Ordinary file: unchanged windowed behavior.
         // TOCTOU-safe read: openat/O_NOFOLLOW via ConfinedRoot (throws .notFound if absent).
-        let content = try context.confinedRoot().readString(path)
+        // Routes through the READING resolver so an absolute path under an armed external
+        // read root (e.g. --allow-read /Volumes for a CD) is readable; writes never are.
+        let (confined, readPath) = try context.confinedRootForReading(path)
+        let content = try confined.readString(readPath)
         let lines = content.components(separatedBy: "\n")
 
         let start = max(0, (optionalInt("start_line", from: arguments) ?? 1) - 1)

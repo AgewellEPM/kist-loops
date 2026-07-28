@@ -12,7 +12,7 @@ public struct ViewImageTool: AgentTool {
     screenshots, mockups, browser/app captures, visual diffs, PDFs, and "look at this" evidence.
     """
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Project-relative path to an image/PDF file."),
+        ToolParameter(name: "path", type: "string", description: "Project-relative path to an image/PDF file. Absolute paths under a session-armed read-only root (--allow-read) also work."),
         ToolParameter(name: "question", type: "string", description: "Optional focused question for the visual inspection.", required: false),
     ]
 
@@ -41,21 +41,25 @@ public struct ViewImageTool: AgentTool {
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let path = try requireString("path", from: arguments)
-        let resolved = try context.resolvedPath(path, mustExist: true)
+        // Read-only consumer: absolute paths under an armed external read root also resolve.
+        let resolved = try context.resolvedPathForReading(path, mustExist: true)
         let ext = (resolved as NSString).pathExtension.lowercased()
         guard let (kind, mime) = MediaAttachment.kindAndMime(forExtension: ext), kind == .image || kind == .pdf else {
             return .failure("view_image handles images/PDFs; '\(path)' is not a recognized image/PDF file")
         }
+        // TOCTOU-safe read on the openat/O_NOFOLLOW layer (never reopen-by-name — matters on
+        // other-process-writable external media). The maxBytes cap is enforced on the SAME fd.
         let data: Data
+        let cap = inlineCap
         do {
-            data = try await Task.detached(priority: .utility) {
-                try Data(contentsOf: URL(fileURLWithPath: resolved))
+            data = try await Task.detached(priority: .utility) { [context] in
+                try context.readDataForReading(path, maxBytes: cap)
             }.value
         } catch {
+            if "\(error)".contains("exceeds") {
+                return .failure("view_image refuses inline files over \(inlineCap) bytes; shrink or split '\(path)' first")
+            }
             return .failure("couldn't read \(path)")
-        }
-        guard data.count <= inlineCap else {
-            return .failure("view_image refuses inline files over \(inlineCap) bytes; shrink or split '\(path)' first")
         }
 
         let question = (arguments["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

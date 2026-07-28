@@ -11,7 +11,7 @@ public struct AnalyzeMediaTool: AgentTool {
     watching. Optionally search for when something happens. Use for .mp4/.mov/.webm/.mp3/.wav/etc.
     """
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Project-relative path to the media file."),
+        ToolParameter(name: "path", type: "string", description: "Project-relative path to the media file. Absolute paths under a session-armed read-only root (--allow-read) also work."),
         ToolParameter(name: "want", type: "string", description: "summary | scenes | transcript | all (default all)", required: false),
         ToolParameter(name: "query", type: "string", description: "Optional: find the moments matching this, e.g. 'when do they discuss pricing'.", required: false),
     ]
@@ -29,12 +29,14 @@ public struct AnalyzeMediaTool: AgentTool {
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let path = try requireString("path", from: arguments)
-        let resolved = try context.resolvedPath(path, mustExist: true)
+        // Read-only consumer: absolute paths under an armed external read root also resolve.
+        let resolved = try context.resolvedPathForReading(path, mustExist: true)
         let ext = (resolved as NSString).pathExtension.lowercased()
         guard let (kind, mime) = MediaAttachment.kindAndMime(forExtension: ext), kind == .video || kind == .audio else {
             return .failure("analyze_media handles video/audio; '\(path)' isn't a recognized media file")
         }
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: resolved)) else {
+        // TOCTOU-safe read on the openat/O_NOFOLLOW layer (never reopen-by-name).
+        guard let data = try? context.readDataForReading(path) else {
             return .failure("couldn't read \(path)")
         }
 

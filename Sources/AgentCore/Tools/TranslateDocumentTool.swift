@@ -15,7 +15,7 @@ public struct TranslateDocumentTool: AgentTool {
     (.txt/.md/.html/.csv/.json/.xml). Use for "translate this doc and keep its layout/styles".
     """
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Project-relative path to the document (pdf/image/text)."),
+        ToolParameter(name: "path", type: "string", description: "Project-relative path to the document (pdf/image/text). Absolute paths under a session-armed read-only root (--allow-read) also work."),
         ToolParameter(name: "to", type: "string", description: "Target language, e.g. 'Spanish', 'French', 'Japanese'."),
         ToolParameter(name: "output", type: "string", description: "Optional output path. Default <name>.<lang>.md", required: false),
         ToolParameter(name: "format", type: "string", description: "markdown (default) or html", required: false),
@@ -92,7 +92,10 @@ public struct TranslateDocumentTool: AgentTool {
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let path = try requireString("path", from: arguments)
         let to = try requireString("to", from: arguments)
-        let resolved = try context.resolvedPath(path, mustExist: true)
+        // INPUT is read-only → armed external read roots (--allow-read) also resolve. NOTE: the
+        // inner byte reads below MUST use the ForReading helpers too — resolving here alone
+        // would pass then fail at each confinedRoot() read (same-data sequential-consumption trap).
+        let resolved = try context.resolvedPathForReading(path, mustExist: true)
         let ext = (resolved as NSString).pathExtension.lowercased()
         let format = (arguments["format"] as? String ?? "markdown").lowercased()
         let asHTML = format == "html" || format == "htm"
@@ -105,7 +108,7 @@ public struct TranslateDocumentTool: AgentTool {
                 return .failure("fidelity=file supports pdf/docx/pptx/xlsx; '\(path)' is not one of those")
             }
             guard let translateFile else { return .failure("fidelity=file (Cloud Translation v3) is not available here") }
-            guard let data = try? context.confinedRoot().readData(path) else { return .failure("couldn't read \(path)") }
+            guard let data = try? context.readDataForReading(path) else { return .failure("couldn't read \(path)") }
             let translated = try await translateFile(data, docMime, Self.langCode(to))
             guard !translated.bytes.isEmpty else { return .failure("translation returned no file for \(path)") }
             let stem = (base as NSString).deletingPathExtension
@@ -123,7 +126,7 @@ public struct TranslateDocumentTool: AgentTool {
         var inlineText = ""
         var uploadedURI: String? = nil   // a large-file Files API upload to clean up afterwards
         if let (kind, mime) = MediaAttachment.kindAndMime(forExtension: ext), kind == .pdf || kind == .image {
-            guard let data = try? context.confinedRoot().readData(path) else {
+            guard let data = try? context.readDataForReading(path) else {
                 return .failure("couldn't read \(path)")
             }
             if data.count <= inlineCap {
@@ -137,7 +140,7 @@ public struct TranslateDocumentTool: AgentTool {
                 return .failure("\(path) is over \(inlineCap / 1_048_576)MB and needs the Gemini Files API — no Gemini key is configured")
             }
         } else if Self.textExtensions.contains(ext) {
-            guard let text = try? context.confinedRoot().readString(path) else {
+            guard let text = try? context.readStringForReading(path) else {
                 return .failure("couldn't read \(path) as UTF-8 text")
             }
             inlineText = text

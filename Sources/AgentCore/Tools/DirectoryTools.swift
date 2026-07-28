@@ -9,7 +9,7 @@ public struct ListFilesTool: AgentTool {
     public let name = "list_files"
     public let description = "List files and directories directly inside a directory (non-recursive)."
     public let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Directory relative to the project root (default: root)", required: false),
+        ToolParameter(name: "path", type: "string", description: "Directory relative to the project root (default: root). Absolute paths under a session-armed read-only root (--allow-read, e.g. /Volumes) are also listable.", required: false),
     ]
     public init() {}
 
@@ -17,7 +17,9 @@ public struct ListFilesTool: AgentTool {
         let path = (arguments["path"] as? String) ?? "."
         // entries() opens with O_NOFOLLOW and tags each child dir/not via fstatat(NOFOLLOW);
         // a non-directory or escape attempt throws → normalized to a failure by the registry.
-        let entries = try context.confinedRoot().entries(path)
+        // The READING resolver also admits absolute paths under an armed external read root.
+        let (confined, dirPath) = try context.confinedRootForReading(path)
+        let entries = try confined.entries(dirPath)
         let lines = entries.map { $0.isDir ? "\($0.name)/" : $0.name }
         return ToolResult(success: true, output: lines.joined(separator: "\n"), metadata: [
             "path": path, "count": String(entries.count),
@@ -31,7 +33,7 @@ public struct GlobFilesTool: AgentTool {
     public let description = "Recursively find files whose path matches a glob pattern like **/*.swift."
     public let parameters = [
         ToolParameter(name: "pattern", type: "string", description: "Glob pattern, e.g. **/*.swift or src/*.ts", required: true),
-        ToolParameter(name: "path", type: "string", description: "Directory to search from (default: root)", required: false),
+        ToolParameter(name: "path", type: "string", description: "Directory to search from (default: root). Absolute paths under a session-armed read-only root (--allow-read) also work.", required: false),
         ToolParameter(name: "limit", type: "integer", description: "Max results (default 500)", required: false),
     ]
     public init() {}
@@ -45,11 +47,16 @@ public struct GlobFilesTool: AgentTool {
         var matches: [String] = []
         // walk() confines traversal (O_NOFOLLOW; never descends a symlinked dir) and skips
         // noise dirs by name. relPath is relative to `base` — same as the old enumerator.
+        // The READING resolver also admits absolute bases under an armed external read root.
+        let (confined, walkBase) = try context.confinedRootForReading(base)
+        // External base → emit ABSOLUTE paths so follow-up read_file calls resolve to the right
+        // root (a relative path would silently resolve against the PROJECT root on collision).
+        let matchPrefix = confined.readOnly ? walkBase + "/" : ""
         struct StopGlob: Error {}
         do {
-            try context.confinedRoot().walk(base, skipDirs: [".git", ".build", "node_modules"]) { rel, _ in
+            try confined.walk(walkBase, skipDirs: [".git", ".build", "node_modules"]) { rel, _ in
                 if regex.firstMatch(in: rel, range: NSRange(rel.startIndex..., in: rel)) != nil {
-                    matches.append(rel)
+                    matches.append(matchPrefix + rel)
                     if matches.count >= limit { throw StopGlob() }
                 }
             }

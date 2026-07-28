@@ -233,7 +233,8 @@ extension KistRunner {
                 // (osascript/screencapture/…) is DENIED by default even for evolve candidates (no opt-out here).
                 let wtContext = ToolContext(projectRoot: wt.path,
                                             shell: ShellPolicy(enabled: true, autoApprove: true, approval: { _ in true }),
-                                            sandbox: .confined(denyNetwork: false, confineWrites: true))
+                                            sandbox: .confined(denyNetwork: false, confineWrites: true),
+                                            externalReadRoots: opts.allowReadPaths)
                 let memory = opts.noMemory ? nil : ProjectMemory(root: wt.path)
                 let recorder = TraceRecorder(traceId: TraceID.make())
                 let pxl = PlanExecuteLoop(providers: registry, roles: roles, tools: safeTools, context: wtContext,
