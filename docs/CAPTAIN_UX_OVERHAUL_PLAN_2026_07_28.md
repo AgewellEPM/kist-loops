@@ -71,15 +71,27 @@ Luke's asks, verbatim intent:
 - Tests: router unit tests (key routing per registered consumer); queued-message FIFO; approval-during-streaming pin (prompt visible after 500 output lines); no-regression pin for plain `kist "goal"` one-shot (no REPL).
 - Exit: bar never disappears; typing mid-turn works; prompts physically cannot be buried. **PILOT-READY** (this is the R most likely to need a live-terminal shakedown before calling it more).
 
-## R3 — MICRO-TASK PROGRESS (kill the lump)
+## R3 — MISSIONS + MICRO-TASKS AS SINGULAR LOOPS (kill the lump)
+
+**The unit-of-work contract (Luke's rule, verbatim intent: "minify tasks into individual
+singular loops, not 1 big-ass request"):**
+- A **mission** = one coherent chunk of the goal (maps to a DAG wave / task-board card).
+- A **micro-task** = ONE singular action (one tool, one intent, ~≤2 min) and it executes as its
+  **own bounded loop invocation** — its own small iteration budget, its own verify-before-done
+  check, its own visible start/finish line — not as an anonymous slice of one giant turn.
+- Rendering hierarchy is always on screen: `Mission 2/3 · E3/E8 · <micro-task> · 12s · 4.1k tok`.
+- A micro-task that fails verify retries or escalates ON ITS OWN, without restarting the mission;
+  the mission card shows which micro-task is red. This is also the granularity the watchdog (R5)
+  and tag-team (R4) hook into — per micro-task, not per mega-request.
 
 - **Always-visible step line**: during execution the status line reads `E3/E8 · <step title> · 12s · 4.1k tok` (extend `.stateChanged`/`actionStarted` payloads + sink).
 - **Plan DAG print at execution start** (compact E1..EN list with tool names — same list the approval banner shows in R0.1).
 - **Planning-phase streaming**: switch `meteredComplete` to the streaming completion path so tokens tick during planning (R0.4 shows totals; this makes it live).
 - **Sub-step progress for long tools**: a `ToolProgressSink` seam in `tools.execute` — RunCommandTool streams child stdout lines as progress events; generate-style tools stream LLM deltas. Sink renders as dim sub-lines under the current step.
-- **Decomposition pressure**: planner prompt gains a hard rule — no step may bundle unrelated actions; target ≤ ~2 min of work per step; steps must be singular ("one tool, one intent"). Enforced softly by a plan-lint that warns on >N-tool steps.
+- **Decomposition pressure**: planner prompt gains a hard rule — no step may bundle unrelated actions; target ≤ ~2 min of work per step; steps must be singular ("one tool, one intent"). Enforced by a plan-lint that REJECTS (not just warns on) a plan whose steps bundle >N tools, sending it back to the planner to split — a lumpy plan never reaches execution.
+- **Micro-task = own loop invocation**: PlanExecutor runs each step through a bounded per-step loop (small iteration cap + per-step verify) instead of a bare `tools.execute` — failures retry/escalate at step granularity and every step gets a start/finish line. Missions = DAG waves, surfaced as task-board cards (`/tasks` and the status line agree).
 - **Phase watchdog hook**: any spinner phase >5 min with zero tokens AND zero tool events emits a visible `⚠ no progress for 5m — <what we're waiting on>` line (feeds R5).
-- Tests: event-payload tests; sink render snapshots; plan-lint tests.
+- Tests: event-payload tests; sink render snapshots; plan-lint reject/split tests; per-step-loop bound + verify tests; mission/card ↔ status-line consistency pin.
 - Exit: at any moment the terminal answers "which micro-step are we on and what is it doing". **PILOT-READY.**
 
 ## R4 — TAG-TEAM AUTO-LOOP ("bring in X")
