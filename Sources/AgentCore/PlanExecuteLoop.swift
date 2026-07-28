@@ -58,7 +58,7 @@ public struct PlanExecuteLoop: Sendable {
         // (the third teammate), metered + traced like the planner/critic. Built once; used for BOTH
         // the planner prompt and execution.
         self.tools = ToolRegistry(tools.all() + [GenerateTool(providers: providers, binding: roles.binding(for: .coder),
-                                                              recorder: recorder, budget: budget)])
+                                                              recorder: recorder, budget: budget, sink: sink)])
         self.context = context; self.sink = sink
         self.interactor = interactor; self.requireApproval = requireApproval
         self.maxPlanRepairs = maxPlanRepairs; self.maxReplans = maxReplans; self.verifyGoal = verifyGoal
@@ -91,6 +91,11 @@ public struct PlanExecuteLoop: Sendable {
         let measured = usage.isZero
             ? TokenUsage.estimate(promptChars: promptChars, completionChars: text.count)
             : usage
+        // R0.4 (2026-07-28): surface planner/critic token usage to the sink — the planning spinner
+        // previously showed "~0 tok" for the ENTIRE planning window because this non-streaming call
+        // never emitted usage, making a healthy long plan look like a hung session.
+        sink.emit(.usage(promptTokens: measured.promptTokens, completionTokens: measured.completionTokens,
+                         estimated: usage.isZero))
         if let recorder {
             await recorder.record(AgentSpan(id: TraceID.make(), traceId: recorder.traceId, kind: .llmCall,
                 role: role.rawValue, vendor: binding.providerId, model: binding.model,
@@ -114,7 +119,13 @@ public struct PlanExecuteLoop: Sendable {
     /// Approve a dangerous plan step. In a plain method body the `dangerous:` overload resolves
     /// cleanly (it's ambiguous inside a capturing closure), so the PlanExecutor gate routes here.
     func approveDangerousStep(_ tool: String) async -> Bool {
-        await interactor.requestApproval(planSummary: "⚠ dangerous plan step — \(tool)", dangerous: true)
+        // R0.2 (2026-07-28): emit BEFORE blocking on the prompt — the sink's awaitingApproval
+        // handler stops the live spinner, whose 1s timer otherwise overwrites the prompt line
+        // (the second burial site alongside the previously-unhandled planReady). The periodic
+        // spinner stays off for the rest of this plan's execution — same as the pre-existing
+        // post-first-action state (actionStarted never restarts it); R3 adds the per-step line.
+        sink.emit(.awaitingApproval(planSummary: "⚠ dangerous plan step — \(tool)"))
+        return await interactor.requestApproval(planSummary: "⚠ dangerous plan step — \(tool)", dangerous: true)
     }
 
     public func run(goal: String) async -> PlanOutcome {

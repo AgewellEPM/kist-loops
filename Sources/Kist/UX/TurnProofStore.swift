@@ -7,6 +7,10 @@ final class TurnProofStore: @unchecked Sendable {
     struct Entry: Equatable {
         enum Kind: String {
             case assistant, reasoning, actionStarted, actionFinished, replan, awaitingApproval, awaitingInput, completed, failed
+            // Distinct from awaitingApproval: planReady fires on EVERY plan (incl. --yolo where no
+            // prompt ever runs) — recording it as "waiting for approval" put a phantom approval
+            // wait into /logs and the durable replay ledger (R0 review catch 2026-07-28).
+            case planReady
         }
         let kind: Kind
         let tool: String?
@@ -75,6 +79,8 @@ final class TurnProofStore: @unchecked Sendable {
                 lines.append("replan: \(Self.oneLine(entry.text, max: 240))")
             case .awaitingApproval:
                 lines.append("waiting for approval: \(Self.oneLine(entry.text, max: 240))")
+            case .planReady:
+                lines.append("plan ready: \(Self.oneLine(entry.text, max: 240))")
             case .awaitingInput:
                 lines.append("waiting for answer: \(Self.oneLine(entry.text, max: 240))")
             case .completed:

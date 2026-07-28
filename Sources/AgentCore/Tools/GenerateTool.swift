@@ -24,11 +24,13 @@ public struct GenerateTool: AgentTool {
     private let maxTokens: Int
     private let recorder: TraceRecorder?     // record a coder LLM-call span
     private let budget: BudgetLedger?        // meter tokens + refuse when over the cap
+    private let sink: RuntimeEventSink?      // surface usage live (R0.4 sibling — see execute)
 
     public init(providers: ProviderRegistry, binding: ProviderBinding, maxTokens: Int = 2048,
-                recorder: TraceRecorder? = nil, budget: BudgetLedger? = nil) {
+                recorder: TraceRecorder? = nil, budget: BudgetLedger? = nil,
+                sink: RuntimeEventSink? = nil) {
         self.providers = providers; self.binding = binding; self.maxTokens = maxTokens
-        self.recorder = recorder; self.budget = budget
+        self.recorder = recorder; self.budget = budget; self.sink = sink
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
@@ -51,6 +53,11 @@ public struct GenerateTool: AgentTool {
                                                                       settings: settings)
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             let measured = usage.isZero ? TokenUsage.estimate(promptChars: prompt.count, completionChars: text.count) : usage
+            // R0.4 sibling (review catch 2026-07-28): coder `generate` steps are often the LONGEST
+            // calls in a plan and previously contributed nothing to the live token line — the same
+            // "~0 tok looks hung" lie meteredComplete had, relocated to execution.
+            sink?.emit(.usage(promptTokens: measured.promptTokens, completionTokens: measured.completionTokens,
+                              estimated: usage.isZero))
             if let recorder {
                 await recorder.record(AgentSpan(id: TraceID.make(), traceId: recorder.traceId, kind: .llmCall,
                     role: AgentRole.coder.rawValue, vendor: binding.providerId, model: binding.model,

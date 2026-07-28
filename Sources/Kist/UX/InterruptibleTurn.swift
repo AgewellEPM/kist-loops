@@ -39,7 +39,7 @@ enum InterruptibleTurn {
                 guard StdinArbiter.shared.watcherMayRead() else {   // an interactor owns stdin — yield
                     usleep(15_000); continue
                 }
-                if raw.readByteTimed() == 0x1B {   // ESC
+                if scanOnce(readByte: { raw.readByteTimed() }) == .interrupt {
                     await flag.set()
                     turn.cancel()
                     return
@@ -51,7 +51,8 @@ enum InterruptibleTurn {
         watcher.cancel()
         // Join the watcher BEFORE restoring the terminal — otherwise a watcher still blocked in
         // readByteTimed() could swallow the first byte the user types into the next prompt (Codex HIGH).
-        // It exits within one VTIME tick (~0.1s) of the cancel.
+        // Typical exit is 1-2 VTIME ticks (~0.1-0.2s); a scanOnce mid-sequence can take a few more
+        // (drain reads check Task.isCancelled, bounding the adversarial byte-trickle case).
         _ = await watcher.value
         StdinArbiter.shared.unregisterWatcher()
         raw.disable()
@@ -65,6 +66,34 @@ enum InterruptibleTurn {
         #else
         return false
         #endif
+    }
+
+    /// One watcher scan step, PURE over an injected byte reader so it's unit-testable.
+    ///
+    /// R0.3 (2026-07-28): the old watcher compared the RAW FIRST BYTE to 0x1B — but arrow and
+    /// function keys are ESC-prefixed sequences (Up = ESC '[' 'A'), so pressing an arrow key
+    /// CANCELLED the running turn. Disambiguate: after an ESC, read the follow-up byte within
+    /// the VTIME window (~0.1s — terminal sequences arrive in one burst, humans can't type that
+    /// fast). '['/'O' introduces a CSI/SS3 key sequence → swallow it, do NOT interrupt. A lone
+    /// ESC (timeout) or ESC+anything-else (incl. ESC ESC, Alt-key chords) → interrupt.
+    enum WatchAction: Equatable { case none, swallowedSequence, interrupt }
+
+    static func scanOnce(readByte: () -> UInt8?) -> WatchAction {
+        guard let b = readByte() else { return .none }        // VTIME timeout — keep looping
+        guard b == 0x1B else { return .none }                 // other keys: consumed + discarded (documented)
+        guard let follow = readByte() else { return .interrupt }   // lone ESC → interrupt
+        if follow == 0x5B || follow == 0x4F {                 // '[' (CSI) or 'O' (SS3) → a KEY, not intent
+            // Drain the rest of the sequence, bounded: CSI params end at a final byte 0x40–0x7E
+            // (SS3's single final byte is in the same range). The cancellation check keeps the
+            // watcher-join latency bounded even under an adversarial byte-per-tick trickle.
+            var drained = 0
+            while drained < 12, !Task.isCancelled, let nb = readByte() {
+                drained += 1
+                if (0x40...0x7E).contains(nb) { break }
+            }
+            return .swallowedSequence
+        }
+        return .interrupt                                     // ESC+other (ESC ESC, Alt-chord) → interrupt
     }
 }
 

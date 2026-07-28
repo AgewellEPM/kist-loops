@@ -167,6 +167,17 @@ struct TerminalEventSink: RuntimeEventSink {
         case .cancelled:
             finishLiveStatus()
             print("\n" + c("33;1", "●") + c("33", " stopped"))
+        case .planReady(let summary, let stepCount):
+            // R0.1 (2026-07-28): this event was previously UNHANDLED (fell into `default: break`),
+            // so the planning spinner's 1s timer kept overwriting the approval prompt's input line —
+            // a plan-approval prompt could sit invisible for over an hour at "~0 tok". Stop the
+            // spinner FIRST; the interactor prints the full plan + [Enter]/[n] options right after.
+            finishLiveStatus()
+            // Kind is .planReady, NOT .awaitingApproval: this event fires on every plan (incl.
+            // --yolo where no prompt follows) — the approval kind here wrote phantom "waiting for
+            // approval" entries into the fact-only replay ledger.
+            proofStore?.record(.init(kind: .planReady, tool: nil, success: nil, text: summary))
+            print("\n" + c("36;1", "▤ plan ready") + c("37", " · \(stepCount) step(s)"))
         default:
             break
         }
