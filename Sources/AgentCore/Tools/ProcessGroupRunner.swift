@@ -31,17 +31,35 @@ enum ProcessGroupRunner {
         let combined: String     // stdout then stderr, each capped per-stream
         let exitCode: Int32      // process exit code, or 128+signal if signalled
         let timedOut: Bool
+        // Separated streams (same capped bytes the combined text is built from). Defaulted so
+        // the many pre-existing error-path `Outcome(combined:exitCode:timedOut:)` returns keep
+        // compiling unchanged; only the success path fills them in.
+        var stdout: String = ""
+        var stderr: String = ""
     }
 
     /// Blocking — call OFF the main actor (RunCommandTool wraps it in a continuation on a
     /// background queue). `env` is the already-scrubbed child environment.
+    /// `stdinData`: optional bytes for the child's stdin. Staged pre-spawn into an unlinked
+    /// owner-private 0600 file (never a pipe), so a slow/non-reading child can't wedge the
+    /// parent on a pipe write and there is no SIGPIPE surface. nil → stdin ← /dev/null (the
+    /// previous behavior for every existing call site).
     static func run(launchPath: String,
                     launchArgs: [String],
                     cwd: String,
                     env: [String: String],
                     timeoutSeconds: Int,
                     capPerStream: Int,
-                    graceSeconds: Int = 2) -> Outcome {
+                    graceSeconds: Int = 2,
+                    stdinData: Data? = nil,
+                    stdinByteLimit: Int = 16 * 1_024 * 1_024) -> Outcome {
+
+        // --- staged stdin (before any pipe so one defer covers every exit path) ---
+        guard let stdinFD = Self.stagedInputDescriptor(stdinData, byteLimit: stdinByteLimit) else {
+            return Outcome(combined: "stdin exceeds its byte limit or could not be staged",
+                           exitCode: -1, timedOut: false)
+        }
+        defer { if stdinFD >= 0 { close(stdinFD) } }
 
         // --- pipes (parent reads [0], child writes [1]) ---
         // Split so a failure of the 2nd/3rd pipe() closes the already-opened fds (no leak).
@@ -80,9 +98,13 @@ enum ProcessGroupRunner {
             // file, a provider socket, any other writable fd) leaks into the spawned command —
             // an inherited fd would BYPASS the Seatbelt sandbox, whose kernel enforcement is
             // acquisition-time (a pre-opened fd/socket stays usable). Actions run in order:
-            // stdin ← /dev/null, stdout/stderr → our pipes, then close everything ≥ 3 (which
-            // also closes our own pipe read/write ends and the stop self-pipe in the child).
-            chk("/dev/null".withCString { posix_spawn_file_actions_addopen(&fa, 0, $0, O_RDONLY, 0) })
+            // stdin ← staged bytes or /dev/null, stdout/stderr → our pipes, then close everything ≥ 3
+            // (which also closes our own pipe read/write ends and the stop self-pipe in the child).
+            if stdinFD >= 0 {
+                chk(posix_spawn_file_actions_adddup2(&fa, stdinFD, 0))
+            } else {
+                chk("/dev/null".withCString { posix_spawn_file_actions_addopen(&fa, 0, $0, O_RDONLY, 0) })
+            }
             chk(posix_spawn_file_actions_adddup2(&fa, outFds[1], 1))
             chk(posix_spawn_file_actions_adddup2(&fa, errFds[1], 2))
             #if !canImport(Darwin)
@@ -245,7 +267,8 @@ enum ProcessGroupRunner {
         // If we couldn't reap (auto-reap host config), the exit status is unknown — report a
         // non-zero/unknown code rather than a fabricated success.
         let code: Int32 = reaped ? Self.exitCode(from: status) : -1
-        return Outcome(combined: combined, exitCode: code, timedOut: timedOut)
+        return Outcome(combined: combined, exitCode: code, timedOut: timedOut,
+                       stdout: collector.stdoutText(), stderr: collector.stderrText())
     }
 
     // MARK: - Internals
@@ -291,6 +314,39 @@ enum ProcessGroupRunner {
     }
 
     private static func strerr() -> String { String(cString: strerror(errno)) }
+
+    /// `nil` input means the child gets `/dev/null` and is represented by descriptor -1. Non-nil
+    /// input is written before spawn to an unlinked 0600 file, so neither a slow/non-reading child
+    /// nor a descendant holding fd 0 open can wedge the parent on a pipe write.
+    private static func stagedInputDescriptor(_ data: Data?, byteLimit: Int) -> Int32? {
+        guard let data else { return -1 }
+        guard byteLimit >= 0, data.count <= byteLimit else { return nil }
+        var template = Array("/tmp/kist-process-stdin.XXXXXX".utf8CString)
+        let fd = template.withUnsafeMutableBufferPointer { buffer -> Int32 in
+            guard let base = buffer.baseAddress else { return -1 }
+            let descriptor = mkstemp(base)
+            if descriptor >= 0 { _ = unlink(base) }
+            return descriptor
+        }
+        guard fd >= 0 else { return nil }
+        guard fchmod(fd, S_IRUSR | S_IWUSR) == 0 else { close(fd); return nil }
+        let flags = fcntl(fd, F_GETFD)
+        guard flags >= 0, fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+            close(fd); return nil
+        }
+        var offset = 0
+        let wroteAll = data.withUnsafeBytes { raw -> Bool in
+            while offset < raw.count {
+                let written = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if written > 0 { offset += written; continue }
+                if written < 0 && errno == EINTR { continue }
+                return false
+            }
+            return true
+        }
+        guard wroteAll, lseek(fd, 0, SEEK_SET) == 0 else { close(fd); return nil }
+        return fd
+    }
 }
 
 /// Serializes `killpg` against reaping: every group signal is gated on `live`, which is

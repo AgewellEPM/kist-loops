@@ -304,4 +304,14 @@ final class BoundedOutputCollector: @unchecked Sendable {
         if !e.isEmpty { s += (s.isEmpty ? "" : "\n") + e }
         return s
     }
+
+    func stdoutText() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return String(data: out, encoding: .utf8) ?? ""
+    }
+
+    func stderrText() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return String(data: err, encoding: .utf8) ?? ""
+    }
 }

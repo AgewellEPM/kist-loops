@@ -105,9 +105,11 @@ public enum ProviderCatalog {
             requiresAPIKey: false, isLocal: true),
     ]
 
-    /// All built-in providers: OpenAI-compatible providers plus distinct-shape adapters.
+    /// All built-in providers: OpenAI-compatible providers plus distinct-shape adapters, plus the
+    /// subscription-backed CLI providers (Claude Code / Codex — no key, use the local CLI's auth).
     public static let all: [any ChatProvider] =
-        openAICompatible + [AnthropicProvider(), GeminiProvider(), OllamaProvider()]
+        openAICompatible + [AnthropicProvider(), GeminiProvider(), OllamaProvider(),
+                            CLIChatProvider.claudeCode(), CLIChatProvider.codexCLI()]
 }
 
 /// Thread-safe per-provider retry tally. Lock-guarded so a `let` reference to it keeps `ProviderRegistry`

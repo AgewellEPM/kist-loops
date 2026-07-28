@@ -200,8 +200,45 @@ final class AgentCoreTests: XCTestCase {
             "mimo", "zhipu", "moonshot", "deepseek", "qwen", "doubao", "hunyuan", "ernie",
             "yi", "stepfun", "baichuan", "minimax", "openai", "grok", "mlx",
             "anthropic", "gemini", "ollama",
+            "claude-cli", "codex-cli",
         ])
-        XCTAssertEqual(ProviderCatalog.all.count, 18)
+        XCTAssertEqual(ProviderCatalog.all.count, 20)
+    }
+
+    func testCLIProviders_needNoKeyAndStayOffNativeTools() {
+        // Subscription CLIs must never demand a key (the CLI holds the auth) and must never
+        // claim native tool-calling (kist speaks the text protocol to them).
+        for id in ["claude-cli", "codex-cli"] {
+            let p = ProviderCatalog.all.first { $0.id == id }
+            XCTAssertNotNil(p, "\(id) missing from catalog")
+            XCTAssertFalse(p!.requiresAPIKey, "\(id) must not require an API key")
+            XCTAssertFalse(p!.supportsNativeTools, "\(id) must use the text-protocol path")
+        }
+    }
+
+    func testCLIProviderFlatten_preservesSystemPromptAndRoles() {
+        let msgs = [ChatMessage(role: .user, content: "hi"),
+                    ChatMessage(role: .assistant, content: "hello")]
+        let flat = CLIChatProvider.flatten(msgs, systemPrompt: "be terse")
+        XCTAssertTrue(flat.hasPrefix("[System]\nbe terse"), "settings systemPrompt must lead the prompt")
+        XCTAssertTrue(flat.contains("[User]\nhi"))
+        XCTAssertTrue(flat.contains("[Assistant]\nhello"))
+    }
+
+    func testProcessGroupRunner_stagedStdinReachesChild() {
+        // The CLI providers deliver the whole prompt on stdin — pin that staged stdin actually
+        // arrives (and that nil stdin still yields instant EOF, the pre-existing contract).
+        let fed = ProcessGroupRunner.run(
+            launchPath: "/bin/cat", launchArgs: [], cwd: "/",
+            env: ["PATH": "/usr/bin:/bin"], timeoutSeconds: 10, capPerStream: 64 * 1024,
+            stdinData: Data("stdin round-trip proof".utf8))
+        XCTAssertEqual(fed.exitCode, 0)
+        XCTAssertEqual(fed.stdout, "stdin round-trip proof")
+        let empty = ProcessGroupRunner.run(
+            launchPath: "/bin/cat", launchArgs: [], cwd: "/",
+            env: ["PATH": "/usr/bin:/bin"], timeoutSeconds: 10, capPerStream: 64 * 1024)
+        XCTAssertEqual(empty.exitCode, 0)
+        XCTAssertEqual(empty.stdout, "")
     }
 
     func testCatalogDefaultsArePremiumTier() {
