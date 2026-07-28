@@ -77,6 +77,26 @@ public struct CLIChatProvider: ChatProvider {
         return outcome.exitCode == 0 && !outcome.timedOut
     }
 
+    /// Whether the backing CLI binary exists at all (pure file checks — no subprocess, safe to call
+    /// at catalog construction). Distinct from `isLocallyAvailable`, which additionally proves the
+    /// cached subscription login with a bounded subprocess probe.
+    public func isInstalled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        Self.executableURL(binaryName: binaryName, environment: environment) != nil
+    }
+
+    /// Well-known install directories tried BEFORE the PATH walk (Codex review 532fa03 issue 2): an
+    /// entry injected ahead of the real install location in a less-controlled environment (CI, shell
+    /// wrapper) must not be able to impersonate a trusted CLI. PATH remains only the fallback for
+    /// unconventional installs.
+    private static func wellKnownDirectories(environment: [String: String]) -> [String] {
+        var dirs = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+        if let home = environment["HOME"], (home as NSString).isAbsolutePath {
+            // Claude Code's default user install location, then generic user bins.
+            dirs = ["\(home)/.local/bin", "\(home)/bin"] + dirs
+        }
+        return dirs
+    }
+
     private static func executableURL(binaryName: String, environment: [String: String]) -> URL? {
         let fm = FileManager.default
         if (binaryName as NSString).isAbsolutePath {
@@ -85,8 +105,9 @@ public struct CLIChatProvider: ChatProvider {
         }
         guard !binaryName.contains("/") else { return nil }
         let path = environment["PATH"] ?? ""
-        for component in path.split(separator: ":", omittingEmptySubsequences: false) {
-            let directory = String(component)
+        // Allowlisted install locations first; PATH order only breaks ties among unknown dirs.
+        let pathDirs = path.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        for directory in wellKnownDirectories(environment: environment) + pathDirs {
             // Ignore relative/empty PATH components. The environment launcher would honor them, but doing
             // so would let a project-local executable impersonate a trusted CLI during auto-routing.
             guard (directory as NSString).isAbsolutePath else { continue }

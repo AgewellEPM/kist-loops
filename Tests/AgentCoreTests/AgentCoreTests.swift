@@ -196,23 +196,37 @@ final class AgentCoreTests: XCTestCase {
 
     func testCatalogAll_hasExpectedProviders() {
         let ids = Set(ProviderCatalog.all.map { $0.id })
-        XCTAssertEqual(ids, [
+        // The 18 HTTP providers are unconditional; the two subscription-CLI providers appear
+        // iff their binary is installed on this machine (the catalog gates on isInstalled so
+        // enumeration-driven selection can never pick a provider that cannot run).
+        var expected: Set<String> = [
             "mimo", "zhipu", "moonshot", "deepseek", "qwen", "doubao", "hunyuan", "ernie",
             "yi", "stepfun", "baichuan", "minimax", "openai", "grok", "mlx",
             "anthropic", "gemini", "ollama",
-            "claude-cli", "codex-cli",
-        ])
-        XCTAssertEqual(ProviderCatalog.all.count, 20)
+        ]
+        if CLIChatProvider.claudeCode().isInstalled() { expected.insert("claude-cli") }
+        if CLIChatProvider.codexCLI().isInstalled() { expected.insert("codex-cli") }
+        XCTAssertEqual(ids, expected)
+        XCTAssertEqual(ProviderCatalog.all.count, expected.count)
     }
 
     func testCLIProviders_needNoKeyAndStayOffNativeTools() {
         // Subscription CLIs must never demand a key (the CLI holds the auth) and must never
-        // claim native tool-calling (kist speaks the text protocol to them).
-        for id in ["claude-cli", "codex-cli"] {
-            let p = ProviderCatalog.all.first { $0.id == id }
-            XCTAssertNotNil(p, "\(id) missing from catalog")
-            XCTAssertFalse(p!.requiresAPIKey, "\(id) must not require an API key")
-            XCTAssertFalse(p!.supportsNativeTools, "\(id) must use the text-protocol path")
+        // claim native tool-calling (kist speaks the text protocol to them). Asserted on the
+        // constructors directly so the pin holds on machines without the CLIs installed.
+        for p in [CLIChatProvider.claudeCode(), CLIChatProvider.codexCLI()] {
+            XCTAssertFalse(p.requiresAPIKey, "\(p.id) must not require an API key")
+            XCTAssertFalse(p.supportsNativeTools, "\(p.id) must use the text-protocol path")
+        }
+    }
+
+    func testCatalogGatesCLIProvidersOnInstallation() {
+        // Per-provider: in the catalog ⟺ binary installed. Catches a future edit that
+        // re-registers a CLI provider unconditionally (or drops an installed one).
+        for p in [CLIChatProvider.claudeCode(), CLIChatProvider.codexCLI()] {
+            let inCatalog = ProviderCatalog.all.contains { $0.id == p.id }
+            XCTAssertEqual(inCatalog, p.isInstalled(),
+                           "\(p.id): catalog membership must track binary installation")
         }
     }
 
