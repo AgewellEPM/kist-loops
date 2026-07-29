@@ -290,7 +290,27 @@ public struct PlanExecuteLoop: Sendable {
                 }
 
                 if exec.success {
-                    // 4) Verify-the-goal gate.
+                    // 4a) SYMBOLIC done-gate FIRST (R6, 2026-07-29): if the plan mutated code, a
+                    // build/test must have PASSED after the last edit — a deterministic, execution-
+                    // grounded check (the same CompletionVerifier the great-loop gates on). The LLM
+                    // critic below is advisory ON TOP, never the sole gate: an unverified code change
+                    // can no longer be laundered into "done" by a confident critic. Only enforced when
+                    // verifying AND shell is available (can't demand a build the run can't execute).
+                    if verifyGoal, context.shell.enabled {
+                        let traj = Self.verifyTrajectory(plan: plan, exec: exec)
+                        if case .needsVerification(let reason) = CompletionVerifier().check(trajectory: traj, canRunCommands: true) {
+                            guard replansUsed < maxReplans else {
+                                sink.emit(.failed("unverified: \(reason)"))
+                                return PlanOutcome(success: false, plan: plan, execution: exec,
+                                                   message: "unverified — \(reason)", replansUsed: replansUsed)
+                            }
+                            replansUsed += 1
+                            sink.emit(.replanStarted(reason: "unverified — a build/test must confirm the change"))
+                            messages.append(ChatMessage(role: .user, content: CompletionVerifier.steering(reason: reason)))
+                            continue
+                        }
+                    }
+                    // 4b) Verify-the-goal gate (LLM critic — semantic "does this meet the goal", on top).
                     let verdict = verifyGoal ? await verifyGoalMet(goal: goal, execution: exec) : (done: true, reason: "")
                     // R1 (review catch — the missed 5th site): an ESC DURING the critic call is
                     // swallowed by verifyGoalMet's `try?` into "verification unavailable", which
@@ -390,6 +410,38 @@ public struct PlanExecuteLoop: Sendable {
     }
 
     // MARK: - Verify gate
+
+    /// R6: reconstruct the execution trajectory (in order) as `ActionRecord`s so the deterministic
+    /// `CompletionVerifier` can gate the plan's "done". CRITICAL for a run_command step (the build/test
+    /// the gate looks for): the args are RESOLVED first (`${id}` refs → the real command via the same
+    /// `resolveArguments` the executor used — so a `${E1}`-chained `swift test` is recognized) and its
+    /// command fingerprint is UNTRUNCATED (the generic 40-char repeat-detection fingerprint clips the
+    /// build verb off `cd <long path> && swift build` and wrongly fails a genuinely-built run). Both
+    /// were review-caught false-negatives that over-blocked done runs.
+    static func verifyTrajectory(plan: ExecutablePlan, exec: PlanExecution) -> [ActionRecord] {
+        let stepById = Dictionary(plan.steps.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return exec.stepResults.map { r in
+            let resolved: [String: Any] = stepById[r.stepId]
+                .map { ExecutablePlan.resolveArguments($0.argumentsJSON, outputs: exec.outputs) } ?? [:]
+            let fingerprint = r.tool == "run_command"
+                ? Self.commandFingerprint(resolved)                       // full command, classifiable
+                : TrajectoryAnalyzer.fingerprint(resolved)
+            return ActionRecord(tool: r.tool, argsFingerprint: fingerprint, success: r.success)
+        }
+    }
+
+    /// Untruncated `run_command` fingerprint in the exact shapes `CommandClassifier.isBuildOrTest`
+    /// accepts (`command=<full>` or `executable=<e>&args=[...]&cwd=<c>`) so a real build/test verb is
+    /// never clipped away before classification.
+    static func commandFingerprint(_ args: [String: Any]) -> String {
+        if let cmd = (args["command"] as? String ?? args["cmd"] as? String) { return "command=\(cmd)" }
+        if let exe = args["executable"] as? String {
+            let argv = (args["args"] as? [Any])?.compactMap { $0 as? String } ?? []
+            let cwd = (args["cwd"] as? String).map { "&cwd=\($0)" } ?? ""
+            return "executable=\(exe)&args=\(argv)\(cwd)"
+        }
+        return TrajectoryAnalyzer.fingerprint(args)
+    }
 
     /// Ask the model whether the goal is FULLY accomplished given what the steps produced. Verification
     /// is a gate: if the critic errors or returns unparseable text, we fail closed instead of laundering

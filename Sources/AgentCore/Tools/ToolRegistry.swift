@@ -38,6 +38,7 @@ public struct ToolRegistry: Sendable {
             ContextBrainTool(),
             CustomTool(),
             ResearchRunTool(),
+            JeevesResearchTool(),   // R6: symbolic link-wheel grounding, reachable by every loop
             RunCommandTool(),
             ManageJobsTool(),
         ])

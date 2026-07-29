@@ -66,6 +66,30 @@ public enum ReversibilityClassifier {
     /// verb. This closes the "read-first + <novel mutating verb>" class without an exhaustive blocklist.
     static let mcpConjunctions: Set<String> = ["and", "or", "then", "plus", "with"]
 
+    /// R6 (2026-07-29): read-only tools of the LOCAL SYMBOLIC BRAIN (jeeves-floor) whose READ intent
+    /// lives in the SECOND leaf token — `symbolic_QUERY`, `proof_SCORE`, `check_CONTRADICTION`,
+    /// `ibm_cobol_ORACLE`, `engineering_RULES`, `explain`. The first-token verb gate (`isReadOnlyMCPTool`)
+    /// only trusts the FIRST token, so it mis-classified all of these `.dangerous` — which SILENTLY
+    /// DENIED the symbolic brain in autonomous `--loop` (NonDestructiveInteractor rejects dangerous),
+    /// the exact mode that needs it. This is a tight PER-SERVER allowlist of proven-read leaves, NOT a
+    /// loosening of the general verb sets. `teach_relation` MUTATES the floor and is deliberately
+    /// ABSENT (stays gated). Keyed by the trusted local server id from `~/.mcp.json`.
+    static let trustedReadOnlyServerLeaves: [String: Set<String>] = [
+        "jeeves-floor": ["symbolic_query", "proof_score", "check_contradiction",
+                         "explain", "ibm_cobol_oracle", "engineering_rules"],
+    ]
+
+    /// True iff `name` is a known read-only tool of a trusted local server (see above). Matches the
+    /// server prefix (before the FIRST `__`) AND the leaf (after the LAST `__`) — so a foreign server
+    /// can't borrow the trust by reusing a leaf name, and `teach_relation` is never trusted.
+    static func isTrustedReadOnlyMCPTool(_ name: String) -> Bool {
+        guard let sep = name.range(of: MCPClientManager.namespaceSeparator) else { return false }
+        let server = String(name[..<sep.lowerBound]).lowercased()
+        guard let leaves = trustedReadOnlyServerLeaves[server],
+              let leaf = mcpLeaf(name)?.lowercased() else { return false }
+        return leaves.contains(leaf)
+    }
+
     /// A namespaced external MCP tool (`server__leaf` — separator is `__`).
     public static func isMCPTool(_ name: String) -> Bool { name.contains(MCPClientManager.namespaceSeparator) }
 
@@ -104,6 +128,7 @@ public enum ReversibilityClassifier {
     /// Read-only iff: FIRST token is a read verb, NO conjunction (two-action name), NO mutating
     /// token, and it isn't a bare generic verb. Fail-safe: anything ambiguous stays gated.
     public static func isReadOnlyMCPTool(_ name: String) -> Bool {
+        if isTrustedReadOnlyMCPTool(name) { return true }   // R6: symbolic-brain read tools (2nd-token read verb)
         guard let leaf = mcpLeaf(name) else { return false }
         // A legit read-tool name is ASCII. ANY non-ASCII letter is a homoglyph-disguise vector
         // (a mutating verb after a separator can't be exact-matched against the ASCII verb sets),
@@ -162,12 +187,14 @@ public enum ReversibilityClassifier {
             return .dangerous
         case "ask_user":
             return .safe   // a clarifying question needs no approval gate
-        case "fetch_url", "web_search":
+        case "fetch_url", "web_search", "jeeves_research":
             // Research is normally safe — BUT an outbound request that EXFILTRATES (a URL embedding a
             // secret, or a long opaque data blob that looks like stolen file contents) is the lethal-
             // trifecta exfil channel and must be gated. Low false-positive: real research URLs/queries
             // don't carry your API keys or 80+ chars of base64.
             // Gate EVERY outbound-data field, not just url/query — `site` (web_search) is an exfil channel too.
+            // jeeves_research (R6) sends its `query` to the Tavily-backed symbolic wheel — same exfil
+            // surface, same gate, so it's freely reachable by autonomous loops unless the query looks stolen.
             let target = [args["url"] as? String, args["query"] as? String, args["site"] as? String]
                 .compactMap { $0 }.joined(separator: " ")
             return urlLooksLikeExfil(target) ? .dangerous : .safe

@@ -525,7 +525,7 @@ final class ToolsTests: XCTestCase {
             "read_file", "write_file", "edit_file", "notebook_edit", "apply_patch",
             "move_file", "make_dir", "list_files", "glob_files", "search_code",
             "ast_grep", "ast_grep_apply", "git", "symbols", "context_brain",
-            "custom_tool", "research_run", "run_command", "job"
+            "custom_tool", "research_run", "jeeves_research", "run_command", "job"
         ])
         // Desktop/AppKit tools must never be in the headless set.
         XCTAssertFalse(names.contains("clipboard"))
@@ -540,7 +540,7 @@ final class ToolsTests: XCTestCase {
 
     func testRegistry_jsonSchemaShape() {
         let json = ToolRegistry.headless().asJSON()
-        XCTAssertEqual(json.count, 19)
+        XCTAssertEqual(json.count, 20)   // R6: + jeeves_research
         let first = json.first { ($0["function"] as? [String: Any])?["name"] as? String == "read_file" }
         XCTAssertNotNil(first)
         let fn = first!["function"] as! [String: Any]
