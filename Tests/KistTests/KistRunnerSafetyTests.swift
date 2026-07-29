@@ -167,6 +167,66 @@ final class KistRunnerSafetyTests: XCTestCase {
         XCTAssertTrue(seeded.tasks.contains { $0.owner == "risk-model-critic" })
     }
 
+    // MARK: - one-shot plan-execute preflight judges its OWN trials (2026-07-29 dogfood catch)
+    // Preflight runs only `git diff --check`, but incomplete-ness demanded the interactive
+    // suite's evidence — so every high-risk one-shot goal scored threshold-1 and bricked
+    // (one-shot mode has no /simulate to attach evidence). High risk now judges preflight's
+    // own trials; FLEET (pinned above) and CRITICAL risk keep the strict full-suite demand.
+
+    @discardableResult
+    private func git(_ args: [String], cwd: String) -> Int32? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["git"] + args
+        p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        p.standardOutput = Pipe(); p.standardError = Pipe()
+        do { try p.run(); p.waitUntilExit(); return p.terminationStatus } catch { return nil }
+    }
+
+    private func makeCleanGitRoot() throws -> String {
+        let root = tempRoot()
+        try "print(1)\n".write(toFile: root + "/main.swift", atomically: true, encoding: .utf8)
+        guard git(["init", "-q"], cwd: root) == 0 else { throw XCTSkip("git unavailable") }
+        git(["-c", "user.email=t@t", "-c", "user.name=t", "add", "."], cwd: root)
+        git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], cwd: root)
+        return root
+    }
+
+    func testPlanExecutePreflightPassesWhenItsOwnTrialsPass() throws {
+        let root = try makeCleanGitRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let objective = "build the helper and write the report file"
+        XCTAssertEqual(CaptainSimulationEnforcer.riskLevel(mode: .planExecute, objective: objective), .high)
+        let result = CaptainSimulationEnforcer.preflight(mode: .planExecute, objective: objective,
+                                                         projectRoot: root,
+                                                         now: { Date(timeIntervalSince1970: 1_700_002_200) })
+        XCTAssertTrue(result.canExecute,
+                      "a passing preflight trial must not be judged 'incomplete' against commands preflight never runs: \(result.terminalLines)")
+    }
+
+    func testPlanExecutePreflightStillBlocksCriticalRisk() throws {
+        let root = try makeCleanGitRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let objective = "deploy the billing service to production"
+        XCTAssertEqual(CaptainSimulationEnforcer.riskLevel(mode: .planExecute, objective: objective), .critical)
+        let result = CaptainSimulationEnforcer.preflight(mode: .planExecute, objective: objective,
+                                                         projectRoot: root,
+                                                         now: { Date(timeIntervalSince1970: 1_700_002_300) })
+        XCTAssertFalse(result.canExecute, "critical risk keeps the strict full-suite demand")
+    }
+
+    func testPlanExecutePreflightBlocksWhenItsOwnTrialFails() throws {
+        let root = try makeCleanGitRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        // Unstaged trailing-whitespace change → `git diff --check` exits nonzero → trial FAILS.
+        try "print(1) \n".write(toFile: root + "/main.swift", atomically: true, encoding: .utf8)
+        let result = CaptainSimulationEnforcer.preflight(mode: .planExecute,
+                                                         objective: "build the helper and write the report file",
+                                                         projectRoot: root,
+                                                         now: { Date(timeIntervalSince1970: 1_700_002_400) })
+        XCTAssertFalse(result.canExecute, "a FAILED preflight trial still blocks — leniency is about coverage, not failures")
+    }
+
     func testRunnerKeepsFleetSimulationPreflightBeforeSideEffects() throws {
         let source = try runnerSource()
         let fleetStart = try XCTUnwrap(source.range(of: "private static func runFleet"))

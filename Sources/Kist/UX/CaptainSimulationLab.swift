@@ -79,6 +79,12 @@ struct CaptainSimulationRun: Codable, Sendable, Equatable {
     var decision: String
     var acceptanceThreshold: Int
     var generatedAt: Double
+    /// How the verdict JUDGES trial coverage. `.interactive` demands the recommended strategy's
+    /// full verification suite (REPL /simulate, fleet, critical risk). `.preflight` judges only
+    /// the trials preflight actually runs — demanding interactive-suite evidence from a mode
+    /// that never executes it made every high-risk one-shot plan-execute a deterministic
+    /// threshold-1 block (2026-07-29 dogfood catch), which is a brick, not safety.
+    var judgedTrialMode: CaptainSimulationMeasuredTrialMode = .interactive
 
     var executedMeasuredTrials: [CaptainSimulationMeasuredTrial] {
         measuredTrials.filter(\.executed)
@@ -95,10 +101,14 @@ struct CaptainSimulationRun: Codable, Sendable, Equatable {
     }
 
     var measuredTrialsIncomplete: Bool {
-        let required = Set(requiredVerificationCommands)
-        if !required.isEmpty && !required.isSubset(of: passedMeasuredCommands) {
-            return true
+        if judgedTrialMode == .interactive {
+            let required = Set(requiredVerificationCommands)
+            if !required.isEmpty && !required.isSubset(of: passedMeasuredCommands) {
+                return true
+            }
         }
+        // Preflight judging: coverage = the trials preflight attempted. A skipped trial still
+        // blocks; trials that were never part of this mode cannot be "missing evidence".
         return measuredTrials.contains { $0.status == .skipped }
     }
 

@@ -823,13 +823,17 @@ struct OrganizationalLearningStore: Sendable {
                            objective: String = "",
                            artifactObjective: String? = nil,
                            measuredTrialMode: CaptainSimulationMeasuredTrialMode = .preflight,
+                           judgedTrialMode: CaptainSimulationMeasuredTrialMode = .interactive,
                            persist: Bool = true) -> CaptainSimulationGateReport {
         let evidence = CaptainProjectEvidence.capture(projectRoot: projectRoot)
-        let draftRun = CaptainSimulationLab.build(objective: objective,
+        var draftRun = CaptainSimulationLab.build(objective: objective,
                                                   artifactObjective: artifactObjective,
                                                   plan: plan,
                                                   evidence: evidence,
                                                   generatedAt: now())
+        // How coverage is JUDGED (full interactive suite vs preflight's own trials) — set before
+        // any verdict is computed; attachingMeasuredTrials copies it forward on the run value.
+        draftRun.judgedTrialMode = judgedTrialMode
         // NO-WRITE path (`--no-memory`, persist == false): compute + enforce the gate DECISION from the pure
         // `draftRun`, but WRITE nothing and RUN no measured trials. Measured trials call simulationEnvironment(),
         // which durably creates `.kist/simulation-{home,tmp}` under the project — so they MUST be skipped here or

@@ -118,6 +118,13 @@ enum CaptainSimulationEnforcer {
                                              mode: mode,
                                              projectRoot: projectRoot,
                                              risk: risk)
+        // One-shot plan-execute below critical risk is judged on the trials preflight actually
+        // RUNS. Demanding the interactive suite's evidence from a mode that never executes it
+        // made every high-risk one-shot goal a deterministic threshold-1 block (there is no
+        // /simulate in one-shot mode to attach it) — a brick, not safety. Fleet and critical
+        // risk keep the strict full-suite demand (pinned by KistRunnerSafetyTests).
+        let judged: CaptainSimulationMeasuredTrialMode =
+            (mode == .planExecute && risk < .critical) ? .preflight : .interactive
         // `--no-memory` must not leave board tasks / specialists / disk artifacts behind (the gate
         // decision is still computed and enforced; only persistence is suppressed).
         let report = store.runSimulationGate(plan: plan,
@@ -125,6 +132,7 @@ enum CaptainSimulationEnforcer {
                                              objective: normalized,
                                              artifactObjective: artifactObjective,
                                              measuredTrialMode: .preflight,
+                                             judgedTrialMode: judged,
                                              persist: !noMemory)
         guard shouldBlock(report: report, risk: risk) else {
             return CaptainSimulationPreflightResult(
