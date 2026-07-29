@@ -21,6 +21,11 @@ final class RawMode {
     /// Captured so the C signal handler (which can't capture context) can still restore.
     nonisolated(unsafe) static var restoreOnSignal: (() -> Void)?
 
+    /// R2b: when a pinned scroll region (DECSTBM) is active, the signal handler must ALSO release it
+    /// or a SIGTERM/SIGHUP leaves the user's shell with a frozen bottom strip. Set by PinnedBar while
+    /// pinned; the handler writes `ESC[r` + show-cursor via async-signal-safe `write(2)` on death.
+    nonisolated(unsafe) static var scrollRegionActiveOnSignal = false
+
     func enable() {
         guard isatty(fd) != 0, !active else { return }   // !active: don't re-capture original / double-stack
         tcgetattr(fd, &original)
@@ -92,6 +97,12 @@ final class RawMode {
 
     private func installSignalHandlers() {
         let handler: @convention(c) (Int32) -> Void = { _ in
+            // R2b: release a pinned scroll region first (raw write(2) is async-signal-safe), else a
+            // killed kist leaves the shell with a frozen bottom strip. "\u{1B}[r\u{1B}[?25h".
+            if RawMode.scrollRegionActiveOnSignal {
+                let reset: [UInt8] = [0x1B, 0x5B, 0x72, 0x1B, 0x5B, 0x3F, 0x32, 0x35, 0x68]
+                _ = reset.withUnsafeBytes { write(STDOUT_FILENO, $0.baseAddress, $0.count) }
+            }
             RawMode.restoreOnSignal?()
             // Restore default disposition and re-raise so the process still terminates.
             signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL)

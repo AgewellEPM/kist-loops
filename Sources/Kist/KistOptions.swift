@@ -92,6 +92,8 @@ struct KistOptions {
                                     // browse/pentest/research/workflow extras) → far smaller prompt, cheaper, faster.
     var toolMode: String = "auto"   // tool acquisition: auto (capability-routed) | native | text
     var tui = false                 // --tui: raw-mode persistent-input TUI (PROTOTYPE; off by default)
+    var pinnedBar = true            // R2b: input bar glued to the bottom (scroll-region pinned). Default
+                                    // ON for interactive TTYs; `--no-pinned-bar` reverts to the inline box.
     var fetchAllowedHosts: [String] = []  // --fetch-host <host>: restrict fetch_url to exact/wildcard hosts
     var providerHealth = false     // --health: offline provider/model/router health report
     var probeProviders = false     // --probe-providers: live one-token provider probes
@@ -238,6 +240,8 @@ struct KistOptions {
             case "--no-memory":             o.noMemory = true
             case "--fast", "--solo":        o.fast = true
             case "--tui":                   o.tui = true
+            case "--no-pinned-bar":         o.pinnedBar = false
+            case "--pinned-bar":            o.pinnedBar = true
             case "--tools":                 if let v = next()?.lowercased(), ["auto", "native", "text"].contains(v) { o.toolMode = v }
             case "--fetch-host":            if let v = next() { o.fetchAllowedHosts.append(v) }
             case "--health":                o.providerHealth = true

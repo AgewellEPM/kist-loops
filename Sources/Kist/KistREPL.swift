@@ -79,6 +79,8 @@ struct KistREPL {
     var visionProviderId: String? = nil
     /// Autopilot may send clipboard media without a per-paste prompt. Normal REPL still asks once.
     var autoApproveClipboardVision = false
+    /// R2b: pin the input bar to the bottom via a scroll region (default on for TTYs; --no-pinned-bar off).
+    var pinnedBarEnabled = true
     /// Whether a given (provider, model) can interpret images/media — drives one-turn media routing.
     var providerSupportsVision: ((ProviderBinding) -> Bool)? = nil
     /// Upload over-cap media to the Gemini Files API, returning fileURI attachments (set by the
@@ -153,6 +155,12 @@ struct KistREPL {
                ?? Self.render(roleSelection.fallback))
         print(StartupHeader.render(mode: headerMode, projectRoot: projectRoot, planMode: loop.isPlanMode))
         if loop.isPlanMode { print("\u{001B}[33m⚑ plan mode ON — read-only; the agent proposes a plan. /plan off to execute.\u{001B}[0m") }
+        // R2b: pin the input panel to the bottom (scroll-region). Activated AFTER the header so the
+        // header lands in normal scrollback; deactivated on EVERY exit path so the shell is never left
+        // with a stuck region. When disabled/non-TTY the leads below are byte-identical to the old inline box.
+        let pinnedBar = PinnedBar(enabled: pinnedBarEnabled)
+        pinnedBar.activate()
+        defer { pinnedBar.deactivate() }
         var transcript: [ChatMessage] = []
         var humanTranscript: [ChatMessage] = []
         let inputReader = EnhancedPromptReader()
@@ -775,16 +783,23 @@ struct KistREPL {
                 ? "\u{001B}[2m│ \u{001B}[0m\u{001B}[33;1m⚑ ❯ \u{001B}[0m"
                 : "\u{001B}[2m│ \u{001B}[0m\u{001B}[36;1m❯ \u{001B}[0m"
             let status = await renderStatusLine()
+            // R2b: re-pin if the terminal was resized since the last prompt, then draw the panel in the
+            // pinned strip. `panelLead()` is "\n" when the bar is off ⇒ identical to the old inline box.
+            pinnedBar.refreshSizeIfNeeded()
+            // Size the reserved strip to the ACTUAL status height (1 line, or 2 when a task board is
+            // active) so the box never overflows the pinned region and corrupts the panel mid-plan.
+            let statusRows = status.isEmpty ? 1 : status.split(separator: "\n", omittingEmptySubsequences: false).count
+            let panelLead = pinnedBar.panelLead(statusRows: statusRows)
             let line: String
             // R2a: a drained line was typed while the user may have WALKED AWAY — never block the
             // backlog on an interactive y/N confirm for it (router guard below).
             var lineFromQueue = false
             if let queued = await deferredInput?() {
-                FileHandle.standardOutput.write(Data(("\n" + status + "\n" + topBorder + "\n" + promptColor + queued + "\n").utf8))
+                FileHandle.standardOutput.write(Data((panelLead + status + "\n" + topBorder + "\n" + promptColor + queued + "\n").utf8))
                 line = queued
                 lineFromQueue = true
             } else {
-                FileHandle.standardOutput.write(Data(("\n" + status + "\n" + topBorder + "\n").utf8))
+                FileHandle.standardOutput.write(Data((panelLead + status + "\n" + topBorder + "\n").utf8))
                 let read = inputReader.readLine(prompt: promptColor,
                                                 promptColumns: promptPlain.count,
                                                 completionCandidates: completionCandidates,
@@ -802,6 +817,14 @@ struct KistREPL {
             }
             let input = Self.collapseFloodedPaths(line.trimmingCharacters(in: .whitespacesAndNewlines))
             if input.isEmpty { continue }
+            // R2b: park the cursor on the band's last row so this turn's output scrolls ABOVE the pinned
+            // panel. The panel is overwritten each turn, so echo the committed prompt into the band too —
+            // otherwise the scrollback would lose the record of what you typed. No-op when the bar is off
+            // (transcriptLead == "" and the inline box already IS the scrollback record).
+            if pinnedBar.active {
+                FileHandle.standardOutput.write(Data((pinnedBar.transcriptLead()
+                    + "\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
+            }
             recorder?.reset()                 // fresh trajectory per turn for self-monitoring
 
             // Slash commands: built-ins, /commands, then any custom .kist/commands/<name>.md.

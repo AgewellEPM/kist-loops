@@ -485,6 +485,7 @@ enum KistRunner {
                 var repl = KistREPL(loop: loop, commands: KistCommands.load(projectRoot: root))
                 repl.defaultAgents = opts.agents
                 repl.autoApproveClipboardVision = opts.auto
+                repl.pinnedBarEnabled = opts.pinnedBar   // R2b: bottom-glued input bar (default on for TTYs)
                 // Permission bar (shift+tab): the tool classification + the tier the session launched in.
                 repl.sensitiveTools = sensitiveTools
                 repl.editTools = editTools
