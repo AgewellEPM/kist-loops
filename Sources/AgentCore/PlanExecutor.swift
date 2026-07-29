@@ -7,6 +7,9 @@ public struct StepResult: Sendable, Equatable {
     public let success: Bool
     public let output: String        // success output, or the error text (bounded)
     public let error: String?
+    /// The user said no at the approval gate — a structured flag, not an error-string sniff.
+    /// Declined steps are never self-repaired (the decline was a decision, not a malfunction).
+    public var declinedAtGate: Bool = false
 }
 
 /// Result of running a whole plan: per-step results, the captured outputs (id → text) usable for
@@ -36,12 +39,21 @@ public struct PlanExecutor: Sendable {
     /// that classifies dangerous (unconfined MCP mutation, escaping write, run_command) is gated
     /// here just like the main loop. nil ⇒ autonomous/no-gate (fleet, sandboxed by design).
     private let approveDangerous: (@Sendable (String, [String: Any]) async -> Bool)?
+    /// R3: per-step self-repair. When a step fails, ask for corrected arguments and retry ONCE —
+    /// the failure stays micro-task-sized instead of failing the wave and replanning the whole
+    /// mission. The middle parameter is the RESOLVED arguments the step actually ran with
+    /// (`${id}` references substituted) — the repairer must diagnose what executed, not the
+    /// template. nil ⇒ no repair (old behavior). Bounded to `maxStepRepairs` per plan run.
+    private let repairStep: (@Sendable (PlanStep, [String: Any], StepResult) async -> [String: Any]?)?
+    private static let maxStepRepairs = 3
 
     public init(tools: ToolRegistry, context: ToolContext,
                 sink: RuntimeEventSink = NullEventSink(), maxOutputBytes: Int = 8_000,
-                approveDangerous: (@Sendable (String, [String: Any]) async -> Bool)? = nil) {
+                approveDangerous: (@Sendable (String, [String: Any]) async -> Bool)? = nil,
+                repairStep: (@Sendable (PlanStep, [String: Any], StepResult) async -> [String: Any]?)? = nil) {
         self.tools = tools; self.context = context; self.sink = sink
         self.maxOutputBytes = maxOutputBytes; self.approveDangerous = approveDangerous
+        self.repairStep = repairStep
     }
 
     public func execute(_ plan: ExecutablePlan) async -> PlanExecution {
@@ -58,6 +70,8 @@ public struct PlanExecutor: Sendable {
         var completed = Set<String>()
         var remaining = Dictionary(uniqueKeysWithValues: ordered.map { ($0.id, $0) })
         let orderIndex = Dictionary(uniqueKeysWithValues: ordered.enumerated().map { ($0.element.id, $0.offset) })
+        var wave = 0
+        var stepRepairsUsed = 0
         sink.emit(.stateChanged(.executing))
 
         while !remaining.isEmpty {
@@ -77,6 +91,8 @@ public struct PlanExecutor: Sendable {
                 sink.emit(.failed("plan invalid: no executable DAG frontier"))
                 return PlanExecution(success: false, stepResults: results, outputs: outputs, failedStepId: nil)
             }
+            wave += 1
+            sink.emit(.stepWave(wave: wave, stepIds: ready.map(\.id)))   // R3: mission-slice marker
 
             let outputSnapshot = outputs
             let waveResults = await withTaskGroup(of: (Int, String, String, StepResult).self) { group in
@@ -91,7 +107,10 @@ public struct PlanExecutor: Sendable {
                        ReversibilityClassifier.assess(tool: step.tool, args: args, projectRoot: context.projectRoot) == .dangerous,
                        await approve(step.tool, args) == false {
                         let sr = StepResult(stepId: step.id, tool: step.tool, success: false,
-                                            output: "", error: "declined at approval gate (dangerous step)")
+                                            output: "", error: "declined at approval gate (dangerous step)",
+                                            declinedAtGate: true)
+                        // Emitted INLINE (immediate feedback at the prompt); the merge loop skips
+                        // declined entries so one decline never prints two ✗ lines.
                         sink.emit(.actionStarted(index: idx, tool: step.tool, description: step.intent))
                         sink.emit(.actionFinished(index: idx, success: false, output: "", error: sr.error))
                         preempted.append((idx, step.id, "", sr))
@@ -112,15 +131,57 @@ public struct PlanExecutor: Sendable {
             }
 
             for (idx, stepId, body, stepResult) in waveResults {
-                sink.emit(.actionFinished(index: idx, success: stepResult.success,
-                                          output: stepResult.success ? body : "", error: stepResult.error))
+                if !stepResult.declinedAtGate {   // declined steps already emitted inline at the gate
+                    sink.emit(.actionFinished(index: idx, success: stepResult.success,
+                                              output: stepResult.success ? body : "", error: stepResult.error))
+                }
                 outputs[stepId] = body
                 results.append(stepResult)
                 completed.insert(stepId)
                 remaining.removeValue(forKey: stepId)
             }
 
-            if let failed = waveResults.first(where: { !$0.3.success })?.3.stepId {
+            // R3: FAILURES STAY SMALL — a failed step gets ONE corrected-arguments retry before it
+            // can fail the mission (never for gate-declined steps: the user said no). Bounded per
+            // plan run so a hopeless step can't loop the repairer.
+            for (_, stepId, _, stepResult) in waveResults where !stepResult.success {
+                guard let repairStep, stepRepairsUsed < Self.maxStepRepairs,
+                      !stepResult.declinedAtGate,
+                      !Task.isCancelled,
+                      let step = ordered.first(where: { $0.id == stepId }) else { continue }
+                stepRepairsUsed += 1
+                // The repairer diagnoses the RESOLVED args that actually ran (same pre-wave
+                // snapshot the launch used), not the ${id} template.
+                let ranArgs = ExecutablePlan.resolveArguments(step.argumentsJSON, outputs: outputSnapshot)
+                guard let fixedArgs = await repairStep(step, ranArgs, stepResult) else { continue }
+                if Task.isCancelled { continue }   // ESC landed during the repair model call
+                let idx = (orderIndex[stepId] ?? 0) + 1
+                sink.emit(.actionStarted(index: idx, tool: step.tool, description: "retry (repaired args): \(step.intent)"))
+                // GATE: the retry runs MODEL-invented arguments — it must clear the same approval
+                // gate as the launch, re-classified on the NEW args (repair can change danger).
+                if let approve = approveDangerous,
+                   ReversibilityClassifier.assess(tool: step.tool, args: fixedArgs, projectRoot: context.projectRoot) == .dangerous,
+                   await approve(step.tool, fixedArgs) == false {
+                    sink.emit(.actionFinished(index: idx, success: false, output: "",
+                                              error: "retry declined at approval gate (dangerous step)"))
+                    continue
+                }
+                let retry = await tools.execute(name: step.tool, arguments: fixedArgs, context: context)
+                let body = String((retry.success ? retry.output : (retry.error ?? retry.output)).prefix(maxOutputBytes))
+                sink.emit(.actionFinished(index: idx, success: retry.success,
+                                          output: retry.success ? body : "", error: retry.error))
+                if let i = results.lastIndex(where: { $0.stepId == stepId }) {
+                    // Record the retry's FINAL state either way — a stale original error would
+                    // misdirect the replan prompt and hide that a repair was attempted.
+                    outputs[stepId] = body
+                    results[i] = retry.success
+                        ? StepResult(stepId: stepId, tool: step.tool, success: true, output: body, error: nil)
+                        : StepResult(stepId: stepId, tool: step.tool, success: false, output: body,
+                                     error: "repaired-args retry also failed: \(retry.error ?? body)")
+                }
+            }
+
+            if let failed = results.first(where: { !$0.success })?.stepId {
                 // Same-wave siblings may already have completed; no downstream work runs.
                 return PlanExecution(success: false, stepResults: results, outputs: outputs, failedStepId: failed)
             }

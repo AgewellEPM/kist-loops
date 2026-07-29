@@ -1,46 +1,43 @@
-# FloatingChatApp — Project Context (CLAUDE.md)
+# kist-loops — Project Context (CLAUDE.md)
 
 ## What this is
-A macOS SwiftUI floating-chat agent app — a Claude-Code-style autonomous coding/desktop agent.
-Goal of current work: make it behave like a **full open-source agent-orchestration runtime**
-(plan → act → observe → self-correct → re-plan → persist/resume → multi-provider).
+**The live kist captain.** A Swift Package (SPM, NOT Xcode) building the `kist` CLI —
+an agent shell (REPL + one-shot goals + plan→execute + fleet/council/research) that runs
+on any model (BYOK cloud, local Ollama, keyless claude-cli/codex-cli subscription providers).
+This repo is what runs when Luke types `kist`. Treat every change as production.
 
-## Build / run
-- **Build system:** Xcode project (NO SPM). `FloatingChatApp.xcodeproj`, target+scheme `FloatingChatApp`.
-- **Bundle id:** `com.floatingchat.app`.
-- **Compile check:** `xcodebuild -project FloatingChatApp.xcodeproj -scheme FloatingChatApp -configuration Debug build`
-- **Tests:** target `FloatingChatAppTests` (`xcodebuild test ...`).
-- **Adding source files:** classic Xcode groups — new `.swift` files MUST be added to the target.
-  The `xcodeproj` ruby gem is installed; use a ruby script (see `Tools/`, `add_*.rb` in root for the pattern).
-  A new file on disk that isn't in `project.pbxproj` will NOT compile into the app.
+- Remote: private `github.com/AgewellEPM/kist-loops` (branch `main`).
+- ⚠️ `/Volumes/PRO-G40/Downloads/kist-loops` is a DEAD worktree of a different ancestor —
+  never build from or sync to it.
 
-## Architecture (agent runtime)
-- `Sources/Services/AgentLoop/UnifiedAgentRuntime.swift` — **the core loop.** ⚠️ MONOLITH (1452 LOC, RED zone).
-  Mixes orchestration + action dispatch + parsing + recovery + state + UI binding. Do NOT grow it;
-  extract into sibling files / extensions. New runtime logic goes in its own file.
-- `Sources/Services/AgentLoop/AgentLoopEngine.swift` — multi-agent loop + sub-agent orchestration (sequential/parallel/collaborative/debate).
-- `Sources/Services/AgentLoop/AgentOrchestrator.swift` — orchestration modes + `ExecutionState`.
-- `Sources/Models/ExecutionPlan.swift` — plan/step/action/result models + `AnyCodableValue` + `ExecutionPlanBuilder`.
-- `Sources/Services/AgentRuntimeService.swift` — auto-build, error parsing, retry prompt, project-state persistence.
-- `Sources/Services/Providers/*` + `AIProvider.swift` + `ProviderManager.swift` — pluggable provider protocol (6 providers).
-- `Sources/Services/Reflection/*` — POST-HOC reflection only (writes lessons for future sessions; NOT live re-plan).
-- `Sources/Services/ConversationStore.swift` — saves conversation + agents (NOT execution cursor).
+## Build / test / deploy (the only sanctioned path)
+```
+swift test                                   # full suite must be green (3300+)
+swift build -c release --product kist
+cp .build/release/kist ~/bin/kist-current
+codesign -f -s - ~/bin/kist-current          # cp BREAKS the signature → SIGKILL 137; ALWAYS re-sign
+```
+Wrapper `~/bin/kist` arms `--enable-computer-use --allow-shell --allow-read /Volumes` and
+sources `~/.config/kist/secrets.env`, then execs `~/bin/kist-current`.
+A running kist session does NOT pick up a redeploy — start a new session to test.
+If the release module cache goes stale: `rm -rf .build/*/release/ModuleCache && find .build -name '*.pch' -delete`.
 
-## Known gaps being closed (this work)
-1. **True mid-loop resume** — the iterative loop's `conversationHistory`/`iterationCount` are LOCAL vars in
-   `process()` → die on return/crash. New: `AgentCheckpoint` (Codable) + `CheckpointStore`, checkpoint after
-   every iteration, `resume(from:)` entry point.
-2. **Live re-plan on failure** — nothing rebuilds a failing plan mid-run. New: `ReplanEngine`.
+## Architecture (where things live)
+- `Sources/AgentCore/` — provider-agnostic engine: `PlanExecuteLoop` (plan→execute→replan→verify),
+  `PlanExecutor` (DAG waves, approval gate at BOTH launch and repaired-retry sites), `PlanLint`
+  (singular-step contract), `RuntimeEvent`/sinks, tools + `ReversibilityClassifier`,
+  `ToolContext.externalReadRoots` (read-only /Volumes).
+- `Sources/Kist/` — the terminal host: `KistREPL` (slash commands), `KistRunner`,
+  `TerminalEventSink` (calm renderer, live status line, stall alarm), `TUI/`.
+- `Sources/Kist/UX/` — REPL UX units: `InterruptibleTurn` (ESC semantics), `TurnInputQueue`
+  (type-while-working), `EnhancedPromptReader`, `StdinArbiter`, `TurnProofStore`.
+- UX roadmap: `docs/CAPTAIN_UX_OVERHAUL_PLAN_2026_07_28.md` (R0-R2a+R3 shipped; R2b bottom bar,
+  R4 tag-team, R5 watchdog, R6 wheels remain). Trust its recon notes over intuition.
 
-## Serialization rules (important)
-- `ExecutableAction.parameters` is `[String: Any]` → NOT Codable. Round-trip via `AnyCodableValue`
-  (`.value` gives `[String:Any]`; use the `AnyCodableValue(any:)` init to go the other way).
-- `ExecutionPlan`/`PlanStep`/`ExecutableAction`/`ActionExecutionResult` are NOT Codable — mirror them with
-  Codable DTOs in `AgentCheckpoint.swift`; do not bolt Codable onto the live models.
-
-## Rules of the road (inherits global CLAUDE.md)
-- Files ≤1000 lines target; UnifiedAgentRuntime is already RED — split, don't pile on.
-- Commit each tested increment to its own branch. Work branch: `feat/runtime-orchestration`.
-- Label deliverables honestly (PROTOTYPE / PILOT-READY / PRODUCTION-READY).
-- This is a real product, not a demo: build foundation-to-ship, verify with `xcodebuild`.
-- Codex review gate before declaring done.
+## Rules of the road (inherits ~/.claude/CLAUDE.md)
+- New RuntimeEvent cases: audit EVERY sink/switch (TerminalEventSink previously dropped
+  `.planReady` via `default: break` → 78-min silent hang). A dropped event is a UX lie.
+- Multi-site fixes need per-site regression assertions (see R3MicroTaskTests gate-site pins).
+- Commit each tested increment; push to origin. Files ≤1000 lines target.
+- MCP servers come from `~/.mcp.json` (`kist --protocols` to verify; perslis = legacy-systems limb).
+- Codex/adversarial review before declaring done; label deliverables honestly.

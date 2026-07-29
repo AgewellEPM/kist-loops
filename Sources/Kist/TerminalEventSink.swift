@@ -24,6 +24,17 @@ struct TerminalEventSink: RuntimeEventSink {
         var usageEstimated = false
         var liveLineActive = false
         var timer: DispatchSourceTimer?
+        // R3: mission/micro-task context for the live line (`w2 · E3/8 write_file`).
+        var planStepCount = 0         // >0 = executing a plan; set by planReady, cleared on end
+        var currentWave = 0
+        var liveDetail: String?       // step-position detail shown instead of the spinner word
+        // R3: stall alarm — any 5 minutes with zero events gets a visible warning + bell.
+        var lastProgressAt = Date()
+        var stallWarned = false
+        // R3 (review catch): the watchdog is DECOUPLED from the cosmetic live-line `timer` —
+        // real stalls (hung repair model call, hung stream, hung tool) happen exactly when the
+        // spinner may not be running. Armed on activity events, disarmed at terminal/prompt ones.
+        var stallTimer: DispatchSourceTimer?
 
         func withLock<T>(_ body: () -> T) -> T {
             lock.lock()
@@ -31,7 +42,7 @@ struct TerminalEventSink: RuntimeEventSink {
             return body()
         }
 
-        deinit { timer?.cancel() }
+        deinit { timer?.cancel(); stallTimer?.cancel() }
     }
 
     private let color: Bool
@@ -79,6 +90,18 @@ struct TerminalEventSink: RuntimeEventSink {
     }
 
     private func emitLocked(_ event: RuntimeEvent) {
+        // R3: every event is progress — feed the stall alarm.
+        state.lastProgressAt = Date()
+        state.stallWarned = false
+        // R3: watchdog lifecycle — terminal events and interactive prompts stop the clock (the
+        // user is deciding; that's not the run stalling), everything else keeps it armed.
+        switch event {
+        case .completed, .failed, .cancelled, .awaitingApproval, .awaitingInput,
+             .stateChanged(.idle), .stateChanged(.completed), .stateChanged(.failed), .stateChanged(.cancelled):
+            stopStallWatchdog()
+        default:
+            startStallWatchdog()
+        }
         switch event {
         case .stateChanged(let runtimeState):
             switch runtimeState {
@@ -108,6 +131,9 @@ struct TerminalEventSink: RuntimeEventSink {
             guard showReasoning else { break }
             finishLiveStatus(clearOnly: true)
             write(c("37;3", r))                                            // readable + italic scratch thought
+        case .stepWave(let wave, _):
+            // R3: mission-slice marker — remembered for the per-step live line.
+            state.currentWave = wave
         case .actionStarted(let index, let tool, let desc):
             finishLiveStatus(clearOnly: true)
             let label = tool ?? "action"
@@ -117,8 +143,18 @@ struct TerminalEventSink: RuntimeEventSink {
             proofStore?.record(.init(kind: .actionStarted, tool: label, success: nil, text: detail))
             if style == .calm {
                 var line = "\n" + c("36", "│ ") + c("36;1", glyph(for: label) + " " + label) + c("37", " working")
+                if state.planStepCount > 0 {
+                    line = "\n" + c("36", "│ ") + c("35;1", Self.stepPosition(wave: state.currentWave, index: index, total: state.planStepCount))
+                        + " " + c("36;1", glyph(for: label) + " " + label) + c("37", " working")
+                }
                 if !detail.isEmpty, detail != label { line += c("2", " · " + truncate(detail, 110)) }
                 print(line)
+                // R3: the spinner LIVES during plan steps — elapsed + tokens + step position tick
+                // every second instead of going dark after the first action (the old lump feel).
+                if state.planStepCount > 0 {
+                    state.liveDetail = Self.stepPosition(wave: state.currentWave, index: index, total: state.planStepCount) + " " + label
+                    beginLiveStatus("working")
+                }
                 break
             }
             // A tool block opens its own lane: a bright gutter + the tool, dimmed detail on the side.
@@ -127,6 +163,7 @@ struct TerminalEventSink: RuntimeEventSink {
             print(line)
         case .actionFinished(let index, let ok, let output, let error):
             finishLiveStatus(clearOnly: true)
+            state.liveDetail = nil   // R3: step done — next live line reverts to spinner words
             // Attribute to the tool that STARTED this action index (parallel-wave safe); fall back to
             // the most-recent tool only if the start wasn't seen. Clear the entry to bound the map.
             let finishedTool = state.toolByIndex.removeValue(forKey: index) ?? state.lastTool
@@ -169,6 +206,7 @@ struct TerminalEventSink: RuntimeEventSink {
             }
         case .completed(let summary):
             finishLiveStatus()
+            state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             proofStore?.record(.init(kind: .completed, tool: nil, success: true, text: summary))
             // The final answer was ALREADY streamed live (tokenDelta). Don't reprint the whole thing on the
             // "done" line — only surface the summary when nothing visible was streamed (e.g. a tool-only
@@ -177,6 +215,7 @@ struct TerminalEventSink: RuntimeEventSink {
             print("\n" + c("32;1", "●") + c("32", " done") + tail)
         case .failed(let reason):
             finishLiveStatus()
+            state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             proofStore?.record(.init(kind: .failed, tool: nil, success: false, text: reason))
             print("\n" + c("31;1", "●") + c("31", " failed") + c("37", " · " + ErrorHumanizer.humanize(reason)))
         case .contextCompacted(let omitted):
@@ -184,6 +223,7 @@ struct TerminalEventSink: RuntimeEventSink {
             print(c("2", "⟢ compacted \(omitted) earlier step(s) into a summary — staying within context"))
         case .cancelled:
             finishLiveStatus()
+            state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             print("\n" + c("33;1", "●") + c("33", " stopped"))
         case .planReady(let summary, let stepCount):
             // R0.1 (2026-07-28): this event was previously UNHANDLED (fell into `default: break`),
@@ -195,7 +235,14 @@ struct TerminalEventSink: RuntimeEventSink {
             // --yolo where no prompt follows) — the approval kind here wrote phantom "waiting for
             // approval" entries into the fact-only replay ledger.
             proofStore?.record(.init(kind: .planReady, tool: nil, success: nil, text: summary))
+            state.planStepCount = stepCount   // R3: arms the per-step live line for execution
+            state.currentWave = 0
+            state.liveDetail = nil            // a replan's fresh planReady re-baselines the line
             print("\n" + c("36;1", "▤ plan ready") + c("37", " · \(stepCount) step(s)"))
+            // R3: the micro-task map in one dim line — the user sees the whole mission shape.
+            if let compact = Self.compactPlanLine(summary: summary) {
+                print(c("2", "  " + compact))
+            }
         default:
             break
         }
@@ -229,6 +276,42 @@ struct TerminalEventSink: RuntimeEventSink {
         }
         state.timer = timer
         timer.resume()
+    }
+
+    /// R3 stall watchdog: independent of the live-line repaint timer, so a hung repair model
+    /// call, hung token stream, or hung tool warns even when no spinner is on screen. Coarse 15s
+    /// tick — the threshold is 5 minutes, second-precision is not the point.
+    private func startStallWatchdog() {
+        guard state.stallTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 15.0, repeating: 15.0)
+        timer.setEventHandler { [self] in
+            state.withLock {
+                let what = state.liveDetail ?? state.liveLabel
+                guard let warning = Self.stallWarning(lastProgressAt: state.lastProgressAt, now: Date(),
+                                                      alreadyWarned: state.stallWarned, what: what) else { return }
+                state.stallWarned = true
+                let prefix = state.liveLineActive ? "\r\u{001B}[K" : "\n"
+                FileHandle.standardOutput.write(Data((prefix + "\u{0007}"
+                    + Self.color("33;1", "⚠ ", enabled: color)
+                    + Self.color("33", warning, enabled: color) + "\n").utf8))
+            }
+        }
+        state.stallTimer = timer
+        timer.resume()
+    }
+
+    private func stopStallWatchdog() {
+        state.stallTimer?.cancel()
+        state.stallTimer = nil
+    }
+
+    /// Pure stall decision (unit-tested): >5 minutes without any event AND not yet warned this
+    /// stretch → the warning line; else nil. The copy says "no progress signal" honestly — a long
+    /// healthy planning call emits nothing by design and deserves a heads-up, not an accusation.
+    static func stallWarning(lastProgressAt: Date, now: Date, alreadyWarned: Bool, what: String) -> String? {
+        guard now.timeIntervalSince(lastProgressAt) > stallThresholdSeconds, !alreadyWarned else { return nil }
+        return "no progress signal for 5m — still on '\(what)'. ESC to interject, ESC ESC to cancel."
     }
 
     /// The live status line INCLUDING the R2a typed-input tail. Call with the state lock held.
@@ -279,13 +362,48 @@ struct TerminalEventSink: RuntimeEventSink {
     private static func liveStatusLine(state: State, color: Bool) -> String {
         let started = state.liveStartedAt ?? Date()
         let elapsed = Date().timeIntervalSince(started)
-        let word = ThinkingWords.word(phase: ThinkingWords.phase(from: state.liveLabel),
-                                      elapsed: elapsed, seed: state.liveSeed)
+        // R3: during a plan step the position (`w2 · E3/8 write_file`) replaces the spinner word —
+        // the user always knows WHERE the mission is, not just that something spins.
+        let word = state.liveDetail
+            ?? ThinkingWords.word(phase: ThinkingWords.phase(from: state.liveLabel),
+                                  elapsed: elapsed, seed: state.liveSeed)
         return "\r"
             + Self.color("35;1", "◇ \(word)", enabled: color)
             + Self.color("37", " · \(formatElapsed(elapsed)) · \(tokenText(promptTokens: state.promptTokens, completionTokens: state.completionTokens, streamedCharacters: state.streamedChars, estimated: state.usageEstimated))", enabled: color)
             + "\u{001B}[K"
     }
+
+    /// R3 pure helpers (unit-tested).
+    /// `w2 · step 3/8` — wave (mission slice) + step position. Deliberately NOT "E3/8": the
+    /// index is the topological position, and fabricating an "E" id from it can contradict the
+    /// plan's real step ids shown in the plan map (review catch).
+    static func stepPosition(wave: Int, index: Int, total: Int) -> String {
+        (wave > 0 ? "w\(wave) · " : "") + "step \(index)/\(total)"
+    }
+
+    /// One dim line mapping the whole mission: `E1 read_file → E2 generate → …` from the plan
+    /// summary produced by PlanExecuteLoop.render ("  E1. intent — tool (after …)" lines).
+    /// Parsing is defensive: the tool split searches BACKWARDS (a model-written intent may itself
+    /// contain " — "), and only id-shaped lines count (appended prose like scope/lint warnings has
+    /// spaces before its first "." and is skipped). Cross-pinned against the real render output.
+    static func compactPlanLine(summary: String, maxSteps: Int = 8) -> String? {
+        let steps: [String] = summary.split(separator: "\n").dropFirst().compactMap { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard let dot = line.firstIndex(of: "."),
+                  let dash = line.range(of: " — ", options: .backwards) else { return nil }
+            let id = String(line[line.startIndex..<dot])
+            guard !id.isEmpty, !id.contains(" ") else { return nil }   // step lines only
+            var tool = String(line[dash.upperBound...])
+            if let paren = tool.range(of: " (") { tool = String(tool[tool.startIndex..<paren.lowerBound]) }
+            return "\(id) \(tool)"
+        }
+        guard !steps.isEmpty else { return nil }
+        let shown = steps.prefix(maxSteps).joined(separator: " → ")
+        return steps.count > maxSteps ? shown + " → … +\(steps.count - maxSteps)" : shown
+    }
+
+    /// R3 stall alarm threshold: 5 minutes with zero events = say something, don't just spin.
+    static let stallThresholdSeconds: TimeInterval = 300
 
     static func liveStatusText(label: String, elapsed: TimeInterval, streamedCharacters: Int,
                                promptTokens: Int = 0, completionTokens: Int = 0,

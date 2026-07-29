@@ -128,14 +128,31 @@ public struct PlanExecuteLoop: Sendable {
     /// Run the goal, then LOG the run to cross-run memory (so the next run sees the outcome).
     /// Approve a dangerous plan step. In a plain method body the `dangerous:` overload resolves
     /// cleanly (it's ambiguous inside a capturing closure), so the PlanExecutor gate routes here.
-    func approveDangerousStep(_ tool: String) async -> Bool {
+    func approveDangerousStep(_ tool: String, args: [String: Any]) async -> Bool {
         // R0.2 (2026-07-28): emit BEFORE blocking on the prompt — the sink's awaitingApproval
         // handler stops the live spinner, whose 1s timer otherwise overwrites the prompt line
         // (the second burial site alongside the previously-unhandled planReady). The periodic
         // spinner stays off for the rest of this plan's execution — same as the pre-existing
         // post-first-action state (actionStarted never restarts it); R3 adds the per-step line.
-        sink.emit(.awaitingApproval(planSummary: "⚠ dangerous plan step — \(tool)"))
-        return await interactor.requestApproval(planSummary: "⚠ dangerous plan step — \(tool)", dangerous: true)
+        let summary = Self.dangerousStepSummary(tool: tool, args: args)
+        sink.emit(.awaitingApproval(planSummary: summary))
+        return await interactor.requestApproval(planSummary: summary, dangerous: true)
+    }
+
+    /// The human must SEE what they approve — repaired retries run model-invented args nobody has
+    /// reviewed (a repair can silently repoint a write outside the project). Bounded, sorted
+    /// key:value preview; approving on the tool name alone is uninformed consent.
+    static func dangerousStepSummary(tool: String, args: [String: Any]) -> String {
+        "⚠ dangerous plan step — \(tool)\(compactArgs(args))"
+    }
+
+    static func compactArgs(_ args: [String: Any], limit: Int = 200) -> String {
+        guard !args.isEmpty else { return "" }
+        let body = args.keys.sorted()
+            .map { "\($0): \(args[$0].map { String(describing: $0) } ?? "nil")" }
+            .joined(separator: ", ")
+            .replacingOccurrences(of: "\n", with: " ")
+        return " · {" + (body.count > limit ? String(body.prefix(limit)) + "…" : body) + "}"
     }
 
     public func run(goal: String) async -> PlanOutcome {
@@ -207,7 +224,7 @@ public struct PlanExecuteLoop: Sendable {
                 return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
                                    message: "could not produce a valid plan after \(maxPlanRepairs + 1) attempts",
                                    replansUsed: replansUsed)
-            case .ok(let plan):
+            case .ok(let plan, let lintWarnings):
                 lastPlan = plan
 
                 // 2) Approve — freeze the plan as the execution spine.
@@ -215,12 +232,20 @@ public struct PlanExecuteLoop: Sendable {
                     scopedContext.authorizationScope?.requiresExplicitApproval(tool: $0.tool, arguments: [:]) != nil
                 }
                 var planSummary = Self.render(plan)
+                if !lintWarnings.isEmpty {
+                    planSummary += "\n\n⚠ lumpy steps accepted after \(maxPlanRepairs + 1) re-split attempts:\n- "
+                        + lintWarnings.joined(separator: "\n- ")
+                }
                 if needsScopeApproval {
                     planSummary += "\n\nAuthorization/scope approval required: \(scopeDecision.reason)"
                 }
                 sink.emit(.planReady(summary: planSummary, stepCount: plan.steps.count))
                 if (requireApproval || needsScopeApproval),
                    !(await interactor.requestApproval(planSummary: planSummary, dangerous: needsScopeApproval)) {
+                    // Terminal event REQUIRED: planReady armed the sink's per-step state; a silent
+                    // return leaves the live line claiming a plan is executing (missed 4th/5th
+                    // end-shape — sibling of the R0 planReady drop).
+                    sink.emit(.cancelled)
                     return PlanOutcome(success: false, plan: plan, execution: lastExecution,
                                        message: "plan declined by user", replansUsed: replansUsed)
                 }
@@ -231,10 +256,23 @@ public struct PlanExecuteLoop: Sendable {
                 let gate = self
                 var approveDangerous: (@Sendable (String, [String: Any]) async -> Bool)? = nil
                 if requireApproval {
-                    approveDangerous = { tool, _ in await gate.approveDangerousStep(tool) }
+                    approveDangerous = { tool, args in await gate.approveDangerousStep(tool, args: args) }
+                }
+                // R3: per-step self-repair — a failed micro-task gets ONE corrected-arguments retry
+                // (coder model, metered) so the mission doesn't fall back to a whole-plan replan for
+                // an arg-shaped mistake. Failures stay micro-task-sized.
+                let me = self
+                let stepRepairer: (@Sendable (PlanStep, [String: Any], StepResult) async -> [String: Any]?) = { step, ranArgs, failure in
+                    let prompt = Self.stepRepairPrompt(step: step, ranArgs: ranArgs, failure: failure)
+                    guard let text = try? await me.meteredComplete(
+                        role: .coder,
+                        messages: [ChatMessage(role: .user, content: prompt)],
+                        settings: ModelSettings(temperature: 0.1, maxTokens: 1024)) else { return nil }
+                    return Self.parseArgumentsObject(text)
                 }
                 let exec = await PlanExecutor(tools: tools, context: executionContext, sink: sink,
-                                              approveDangerous: approveDangerous).execute(plan)
+                                              approveDangerous: approveDangerous,
+                                              repairStep: stepRepairer).execute(plan)
                 lastExecution = exec
 
                 // R1: an ESC during execution must not fall into the replan/verify branches
@@ -268,6 +306,9 @@ public struct PlanExecuteLoop: Sendable {
                     }
                     // Goal not fully met → replan if budget remains.
                     guard replansUsed < maxReplans else {
+                        // Terminal event REQUIRED (mirrors the step-failed sibling below): without
+                        // it the sink's plan state stays armed and the run ends with no verdict line.
+                        sink.emit(.failed("goal not fully met: \(verdict.reason)"))
                         return PlanOutcome(success: false, plan: plan, execution: exec,
                                            message: "goal not fully met: \(verdict.reason)", replansUsed: replansUsed)
                     }
@@ -292,7 +333,13 @@ public struct PlanExecuteLoop: Sendable {
 
     // MARK: - Planning (propose + repair)
 
-    private enum PlanResult { case ok(ExecutablePlan), invalid, providerError(String), budgetExceeded(Int) }
+    private enum PlanResult {
+        /// `lintWarnings` non-empty ⇒ the plan is structurally valid but still violates the
+        /// SINGULAR-STEP lint after all re-split attempts — executed anyway (advisory), with the
+        /// findings surfaced in the plan summary. A lint false positive must never brick a run.
+        case ok(ExecutablePlan, lintWarnings: [String])
+        case invalid, providerError(String), budgetExceeded(Int)
+    }
 
     /// Stream a plan from the current message context and validate it, re-prompting to repair an
     /// invalid/unparseable plan up to `maxPlanRepairs` times. Appends the conversation in place.
@@ -301,6 +348,7 @@ public struct PlanExecuteLoop: Sendable {
                                      systemPrompt: Self.plannerSystemPrompt(tools: tools,
                                                                             projectRoot: context.projectRoot,
                                                                             shellEnabled: context.shell.enabled))
+        var lastLintRejected: (plan: ExecutablePlan, findings: [String])?
         for _ in 0...maxPlanRepairs {
             if let budget, await budget.isExceeded() {
                 return .budgetExceeded(await budget.spentTokens())
@@ -317,10 +365,24 @@ public struct PlanExecuteLoop: Sendable {
                 continue
             }
             let errors = parsed.validate()
-            if errors.isEmpty { return .ok(parsed) }
+            if errors.isEmpty {
+                // R3: a lumpy plan is re-split before it executes — violations fed back for a
+                // bounded repair (same budget as validation). Lint is ADVISORY at exhaustion.
+                let lint = PlanLint.findings(for: parsed)
+                if lint.isEmpty { return .ok(parsed, lintWarnings: []) }
+                lastLintRejected = (parsed, lint)
+                messages.append(ChatMessage(role: .user, content:
+                    "Your plan violates the SINGULAR-STEP contract:\n- " + lint.joined(separator: "\n- ")
+                    + "\nOutput a corrected JSON plan (same format) where each step does exactly ONE thing."))
+                continue
+            }
             messages.append(ChatMessage(role: .user, content:
                 "Your plan has these problems:\n\(Self.describe(errors))\nOutput a corrected JSON plan (same format)."))
         }
+        // Repairs exhausted. A structurally-VALID plan that only failed the singular-step lint is
+        // degraded, not useless — execute it with the findings surfaced instead of failing the
+        // goal (protects real missions from lint false positives, e.g. exotic quoting).
+        if let last = lastLintRejected { return .ok(last.plan, lintWarnings: last.findings) }
         return .invalid
     }
 
@@ -381,6 +443,10 @@ public struct PlanExecuteLoop: Sendable {
         - To use an earlier step's output, put ${id} inside an argument string (e.g. "${E1}"). A ${id}
           reference automatically makes this step depend on that step.
         - "dependsOn" lists prerequisite step ids. The DAG MUST be acyclic and every id unique.
+        - SINGULAR STEPS (hard rule, lint-enforced): each step does exactly ONE thing (~2 minutes of
+          work max). Never chain several shell commands with &&, ;, ||, or newlines in one
+          run_command step — at most two chained commands per step (e.g. `cd X && make`). A step
+          that "does X and Y" must become two steps. Lumpy plans are rejected and sent back to you.
         - Keep the plan as small as possible. All file paths are relative to the project root: \(projectRoot)
 
         Capability negotiation:
@@ -389,6 +455,43 @@ public struct PlanExecuteLoop: Sendable {
         Available tools:
         \(tools.descriptions())
         """
+    }
+
+    /// R3: the per-step repair ask — corrected arguments ONLY, literal values (the retry runs the
+    /// returned object verbatim; ${id} references are not re-resolved). `ranArgs` is the RESOLVED
+    /// argument set the step actually executed with — the repairer diagnoses what ran, never the
+    /// `${id}` template (which may bear no resemblance to the failing values).
+    static func stepRepairPrompt(step: PlanStep, ranArgs: [String: Any], failure: StepResult) -> String {
+        let ran = JSONSerialization.isValidJSONObject(ranArgs)
+            ? ((try? JSONSerialization.data(withJSONObject: ranArgs, options: [.sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? step.argumentsJSON)
+            : step.argumentsJSON
+        return """
+        A plan step failed. Produce CORRECTED arguments for a single retry of the SAME tool.
+
+        Step: \(step.id) — \(step.intent)
+        Tool: \(step.tool)
+        Arguments it ran with: \(ran)
+        Error: \(String((failure.error ?? failure.output).prefix(600)))
+
+        Respond with ONLY a JSON object of the corrected arguments for \(step.tool) — no prose, no
+        fences, LITERAL values only (no ${...} references). If the failure cannot be fixed by
+        changing arguments, respond with exactly: {}
+        """
+    }
+
+    /// Extract the first JSON object from a model reply as an arguments dictionary; nil when the
+    /// reply is empty/`{}`/unparseable (⇒ no retry). A reply echoing `${id}` references is ALSO an
+    /// abstain: the retry executes the object verbatim with no re-resolution, so a leftover
+    /// placeholder would run literally (write the string "${E1}" into a file, etc.).
+    static func parseArgumentsObject(_ text: String) -> [String: Any]? {
+        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}"), start < end else { return nil }
+        let json = String(text[start...end])
+        guard !json.contains("${"),
+              let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              !obj.isEmpty else { return nil }
+        return obj
     }
 
     static func verifyPrompt(goal: String, stepSummary: String) -> String {

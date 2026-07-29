@@ -15,11 +15,12 @@ final class PlanExecuteLoopTests: XCTestCase {
     override func tearDownWithError() throws { if let root { try? FileManager.default.removeItem(atPath: root) } }
 
     private func loop(_ responses: [String], interactor: RuntimeInteractor = AutoApproveInteractor(),
-                      requireApproval: Bool = false, maxReplans: Int = 2, verifyGoal: Bool = false) -> PlanExecuteLoop {
+                      requireApproval: Bool = false, maxReplans: Int = 2, verifyGoal: Bool = false,
+                      sink: RuntimeEventSink = NullEventSink()) -> PlanExecuteLoop {
         let registry = ProviderRegistry(providers: [PlanScriptedProvider(responses)], keyStore: PXLNullKeys())
         return PlanExecuteLoop(providers: registry, providerId: "planscript", model: nil,
                                tools: .headless(), context: ToolContext(projectRoot: root),
-                               interactor: interactor, requireApproval: requireApproval,
+                               sink: sink, interactor: interactor, requireApproval: requireApproval,
                                maxReplans: maxReplans, verifyGoal: verifyGoal)
     }
 
@@ -64,12 +65,60 @@ final class PlanExecuteLoopTests: XCTestCase {
     }
 
     func testDeclinedPlanIsNotExecuted() async {
-        let out = await loop([validPlan], interactor: PXLDeclining(), requireApproval: true).run(goal: "x")
+        let sink = PXLRecordingSink()
+        let out = await loop([validPlan], interactor: PXLDeclining(), requireApproval: true, sink: sink).run(goal: "x")
         XCTAssertFalse(out.success)
         XCTAssertNotNil(out.plan)                          // a plan WAS produced…
         XCTAssertNil(out.execution)                        // …but never executed
         XCTAssertTrue(out.message.contains("declined"), out.message)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/a.txt"))
+        // R3 (review catch): planReady armed the sink's per-step state — a silent return left the
+        // live line claiming a plan was executing. The decline is a TERMINAL event.
+        XCTAssertTrue(sink.saw { if case .cancelled = $0 { return true }; return false },
+                      "declining the plan must emit a terminal event")
+    }
+
+    // MARK: - R3: the singular-step lint drives a re-split through the loop (behavioral, not grep)
+
+    func testLumpyPlanIsResplitThroughTheLoop() async {
+        // Attempt 1 chains 4 commands → lint feedback → attempt 2 is singular and EXECUTES.
+        let lumpy = #"{"steps":[{"id":"E1","intent":"do everything","tool":"run_command","arguments":{"command":"mkdir x && cd x && npm init && npm test"}}]}"#
+        let capt = CapturingProvider(id: "capt", responses: [lumpy, validPlan])
+        let registry = ProviderRegistry(providers: [capt], keyStore: PXLNullKeys())
+        let out = await PlanExecuteLoop(providers: registry, providerId: "capt", model: nil,
+                                        tools: .headless(), context: ToolContext(projectRoot: root),
+                                        requireApproval: false, verifyGoal: false).run(goal: "do it")
+        XCTAssertTrue(out.success, out.message)
+        XCTAssertEqual(out.plan?.steps.map(\.id), ["E1", "E2"], "the RE-SPLIT plan executed, not the lumpy one")
+        let feedback = capt.lastMessages.contains {
+            $0.content.contains("SINGULAR-STEP contract") && $0.content.contains("chains 4 shell commands")
+        }
+        XCTAssertTrue(feedback, "the planner must be told WHICH step was lumpy and why")
+    }
+
+    func testLintExhaustionExecutesLastValidPlanWithVisibleWarning() async {
+        // ADVISORY at exhaustion (review catch): a lint false positive must never brick a run.
+        // Every attempt trips the empty-intent lint; the plan is structurally valid — after the
+        // repair budget it executes anyway, with the findings surfaced on the planReady summary.
+        let lintOnly = #"{"steps":[{"id":"E1","intent":"  ","tool":"write_file","arguments":{"path":"ok.txt","content":"done"}}]}"#
+        let sink = PXLRecordingSink()
+        let out = await loop([lintOnly, lintOnly, lintOnly], sink: sink).run(goal: "write ok.txt")
+        XCTAssertTrue(out.success, "lint-only findings must degrade, not fail: \(out.message)")
+        XCTAssertEqual(try? String(contentsOfFile: root + "/ok.txt", encoding: .utf8), "done")
+        XCTAssertTrue(sink.planReadySummaries.contains { $0.contains("lumpy steps accepted") },
+                      "the degraded acceptance must be VISIBLE, not silent")
+    }
+
+    func testGoalNotMetWithReplansExhaustedEmitsFailed() async {
+        // R3 (review catch): this exit returned silently while its step-failed sibling emitted
+        // .failed — the sink's plan state stayed armed and the run ended with no verdict line.
+        let sink = PXLRecordingSink()
+        let notDone = #"{"done":false,"reason":"missing tests"}"#
+        let out = await loop([validPlan, notDone], maxReplans: 0, verifyGoal: true, sink: sink).run(goal: "x")
+        XCTAssertFalse(out.success)
+        XCTAssertTrue(out.message.contains("goal not fully met"), out.message)
+        XCTAssertTrue(sink.saw { if case .failed(let r) = $0 { return r.contains("goal not fully met") }; return false },
+                      "replans-exhausted must emit the same terminal .failed as its step-failed sibling")
     }
 
     func testApprovedPlanExecutes() async {
@@ -100,10 +149,11 @@ final class PlanExecuteLoopTests: XCTestCase {
     // MARK: - Phase 1.4b: replan on failure + verify-the-goal gate
 
     func testReplanAfterFailureSucceeds() async {
-        // Plan A reads a missing file (runtime failure) → replan → Plan B writes a real file.
+        // Plan A reads a missing file (runtime failure) → R3 step-repair abstains ("{}") → replan →
+        // Plan B writes a real file. Each failed step consumes one repair response from the script.
         let planA = #"{"steps":[{"id":"E1","intent":"read missing","tool":"read_file","arguments":{"path":"missing.txt"}}]}"#
         let planB = writePlan(id: "E1", path: "ok.txt", content: "recovered")
-        let out = await loop([planA, planB]).run(goal: "produce ok.txt")
+        let out = await loop([planA, "{}", planB]).run(goal: "produce ok.txt")
         XCTAssertTrue(out.success, out.message)
         XCTAssertEqual(out.replansUsed, 1)                                  // recovered after one replan
         XCTAssertEqual(try? String(contentsOfFile: root + "/ok.txt", encoding: .utf8), "recovered")
@@ -123,10 +173,11 @@ final class PlanExecuteLoopTests: XCTestCase {
     }
 
     func testReplanBudgetExhaustedReturnsFailure() async {
-        // Both attempts fail at runtime; maxReplans=1 → one replan, then give up.
+        // Both attempts fail at runtime (each followed by an abstaining "{}" R3 step-repair);
+        // maxReplans=1 → one replan, then give up.
         let failA = #"{"steps":[{"id":"E1","intent":"read","tool":"read_file","arguments":{"path":"nope1.txt"}}]}"#
         let failB = #"{"steps":[{"id":"E1","intent":"read","tool":"read_file","arguments":{"path":"nope2.txt"}}]}"#
-        let out = await loop([failA, failB], maxReplans: 1).run(goal: "x")
+        let out = await loop([failA, "{}", failB, "{}"], maxReplans: 1).run(goal: "x")
         XCTAssertFalse(out.success)
         XCTAssertEqual(out.replansUsed, 1)
         XCTAssertTrue(out.message.contains("plan failed"), out.message)
@@ -345,6 +396,19 @@ private struct PXLNullKeys: KeyStore {
 private struct PXLDeclining: RuntimeInteractor {
     func requestApproval(planSummary: String) async -> Bool { false }
     func requestInput(question: String) async -> String { "" }
+}
+
+/// Thread-safe event recorder — lets tests pin TERMINAL events (the sink contract), not just outcomes.
+private final class PXLRecordingSink: RuntimeEventSink, @unchecked Sendable {
+    private let lock = NSLock(); private var _events: [RuntimeEvent] = []
+    func emit(_ event: RuntimeEvent) { lock.lock(); _events.append(event); lock.unlock() }
+    func saw(_ predicate: (RuntimeEvent) -> Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }; return _events.contains(where: predicate)
+    }
+    var planReadySummaries: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _events.compactMap { if case .planReady(let s, _) = $0 { return s }; return nil }
+    }
 }
 
 private final class PlanScriptedProvider: ChatProvider {

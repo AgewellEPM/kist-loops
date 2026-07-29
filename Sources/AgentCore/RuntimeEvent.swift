@@ -23,6 +23,8 @@ public enum RuntimeEvent: Sendable {
     case usage(promptTokens: Int, completionTokens: Int, estimated: Bool)
     /// A streamed chunk of hidden reasoning (display-dimmed; never re-injected verbatim).
     case reasoningDelta(String)
+    /// R3: a plan DAG wave (mission slice) is about to launch — hosts render `w2 · E3/8 …`.
+    case stepWave(wave: Int, stepIds: [String])
     /// An action/tool began executing.
     case actionStarted(index: Int, tool: String?, description: String)
     /// An action/tool finished (success + captured output + optional error).
