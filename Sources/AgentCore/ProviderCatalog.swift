@@ -8,7 +8,11 @@ public enum ProviderCatalog {
     public static let openAICompatible: [OpenAICompatibleProvider] = [
         OpenAICompatibleProvider(
             id: "mimo", name: "MiMo (Xiaomi)", iconName: "cpu", keyAccount: "mimo_api_key",
-            endpoint: "https://api.xiaomimimo.com/v1/chat/completions", defaultModel: "mimo-v2.5-pro",
+            // Public pay-per-token API by default. A "Token Plan" subscription (tp-… key) is served
+            // from a per-account DEDICATED base URL (e.g. token-plan-sgp.xiaomimimo.com) and 401s on
+            // the public host — set MIMO_BASE_URL to that base (…/v1) to use it. Mirrors MOONDREAM_BASE_URL.
+            endpoint: (ProcessInfo.processInfo.environment["MIMO_BASE_URL"].map { $0.hasSuffix("/chat/completions") ? $0 : $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/chat/completions" })
+                ?? "https://api.xiaomimimo.com/v1/chat/completions", defaultModel: "mimo-v2.5-pro",
             availableModels: [AIModel(id: "mimo-v2.5-pro", displayName: "MiMo V2.5 Pro", contextWindowTokens: 1_000_000),
                               AIModel(id: "mimo-v2.5", displayName: "MiMo V2.5 (Omni)", contextWindowTokens: 1_000_000)],
             // MiMo's native tools work for round 1 then 400 on tool-call history (XiaomiMiMo/MiMo#44,
