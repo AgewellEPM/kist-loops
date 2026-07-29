@@ -5,14 +5,25 @@ import Foundation
 /// MiniMax), plus OpenAI, Grok, and local MLX. Anthropic, Gemini, and Ollama keep distinct wire shapes.
 /// All remote providers are BYOK; set the matching *_API_KEY through env or Keychain.
 public enum ProviderCatalog {
+    /// Resolve a chat-completions endpoint from an optional base-URL override. When `base` is nil (or
+    /// blank), fall back to `fallback`. Otherwise normalize `base` to a `…/chat/completions` URL: pass
+    /// through if it already ends in that suffix, else trim trailing slashes and append it. Pure so the
+    /// override contract is unit-testable — the live catalog reads the env once at static-init time.
+    public static func resolveEndpoint(base: String?, fallback: String) -> String {
+        guard let base = base?.trimmingCharacters(in: .whitespaces), !base.isEmpty else { return fallback }
+        if base.hasSuffix("/chat/completions") { return base }
+        return base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/chat/completions"
+    }
+
     public static let openAICompatible: [OpenAICompatibleProvider] = [
         OpenAICompatibleProvider(
             id: "mimo", name: "MiMo (Xiaomi)", iconName: "cpu", keyAccount: "mimo_api_key",
             // Public pay-per-token API by default. A "Token Plan" subscription (tp-… key) is served
             // from a per-account DEDICATED base URL (e.g. token-plan-sgp.xiaomimimo.com) and 401s on
             // the public host — set MIMO_BASE_URL to that base (…/v1) to use it. Mirrors MOONDREAM_BASE_URL.
-            endpoint: (ProcessInfo.processInfo.environment["MIMO_BASE_URL"].map { $0.hasSuffix("/chat/completions") ? $0 : $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/chat/completions" })
-                ?? "https://api.xiaomimimo.com/v1/chat/completions", defaultModel: "mimo-v2.5-pro",
+            endpoint: resolveEndpoint(base: ProcessInfo.processInfo.environment["MIMO_BASE_URL"],
+                                      fallback: "https://api.xiaomimimo.com/v1/chat/completions"),
+            defaultModel: "mimo-v2.5-pro",
             availableModels: [AIModel(id: "mimo-v2.5-pro", displayName: "MiMo V2.5 Pro", contextWindowTokens: 1_000_000),
                               AIModel(id: "mimo-v2.5", displayName: "MiMo V2.5 (Omni)", contextWindowTokens: 1_000_000)],
             // MiMo's native tools work for round 1 then 400 on tool-call history (XiaomiMiMo/MiMo#44,

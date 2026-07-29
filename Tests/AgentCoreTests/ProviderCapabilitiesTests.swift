@@ -112,6 +112,30 @@ final class ProviderCapabilitiesTests: XCTestCase {
         XCTAssertNil(ToolMode(rawValue: "bogus"))
         XCTAssertEqual(Set(ToolMode.allCases), [.auto, .native, .text])
     }
+
+    // MARK: - MIMO_BASE_URL override contract (Token-Plan dedicated endpoints)
+
+    func testResolveEndpointFallsBackWhenBaseAbsentOrBlank() {
+        let fb = "https://api.xiaomimimo.com/v1/chat/completions"
+        XCTAssertEqual(ProviderCatalog.resolveEndpoint(base: nil, fallback: fb), fb)
+        XCTAssertEqual(ProviderCatalog.resolveEndpoint(base: "", fallback: fb), fb)
+        XCTAssertEqual(ProviderCatalog.resolveEndpoint(base: "   ", fallback: fb), fb)
+    }
+
+    func testResolveEndpointAppendsChatCompletionsToBase() {
+        // A Token-Plan dedicated base (…/v1) gets the chat-completions path appended, trailing slash or not.
+        let fb = "https://api.xiaomimimo.com/v1/chat/completions"
+        XCTAssertEqual(ProviderCatalog.resolveEndpoint(base: "https://token-plan-sgp.xiaomimimo.com/v1", fallback: fb),
+                       "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions")
+        XCTAssertEqual(ProviderCatalog.resolveEndpoint(base: "https://token-plan-sgp.xiaomimimo.com/v1/", fallback: fb),
+                       "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions")
+    }
+
+    func testResolveEndpointPassesThroughFullChatCompletionsURL() {
+        let fb = "https://api.xiaomimimo.com/v1/chat/completions"
+        let full = "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions"
+        XCTAssertEqual(ProviderCatalog.resolveEndpoint(base: full, fallback: fb), full)
+    }
 }
 
 private struct NullKeys: KeyStore {
