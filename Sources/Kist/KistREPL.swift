@@ -391,24 +391,104 @@ struct KistREPL {
         // /copilot: after a turn that MUTATED files, have the assigned co-reviewer model critique the actual
         // working-tree diff. Advisory only — it prints findings and never edits/reverts. Skips silently when
         // copilot is off, the turn changed nothing, no completion seam is wired, or the diff is empty.
-        func runCopilotReview(task: String) async {
-            // R2a (review catch): after an interject the user's typed instruction must run NEXT —
-            // not after a copilot model call they didn't ask for.
-            guard !lastTurnInterrupted else { return }
-            guard copilot.enabled, let modelComplete else { return }
-            guard Copilot.shouldReview(trajectory: recorder?.snapshot() ?? []) else { return }
+        // One review pass over the current working-tree diff. Returns the review text (nil = nothing
+        // to review / no response), so the team loop can decide whether to run a fix round.
+        func runOneReview(task: String) async -> String? {
+            guard let modelComplete else { return nil }
+            guard Copilot.shouldReview(trajectory: recorder?.snapshot() ?? []) else { return nil }
             let diff = Self.workingTreeDiff(projectRoot: projectRoot)
-            guard !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            guard !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             let co = copilot.co ?? roleSelection.fallback
-            print("\u{001B}[35m⎇ copilot · \(TeamLanguage.displayName(co.providerId)) reviewing the diff…\u{001B}[0m")
+            print("\u{001B}[35m⎇ team · \(TeamLanguage.displayName(co.providerId)) reviewing the diff…\u{001B}[0m")
             let review = await modelComplete(co.providerId, co.model,
                                              Copilot.reviewSystemPrompt,
                                              Copilot.reviewPrompt(task: task, diff: diff))
             guard let review, !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                print("\u{001B}[37m⎇ copilot · \(TeamLanguage.displayName(co.providerId)) had no response\u{001B}[0m")
-                return
+                print("\u{001B}[37m⎇ team · \(TeamLanguage.displayName(co.providerId)) had no response\u{001B}[0m")
+                return nil
             }
-            print("\u{001B}[35m⎇ copilot review (\(TeamLanguage.displayName(co.providerId))):\u{001B}[0m\n\(review)")
+            print("\u{001B}[35m⎇ review (\(TeamLanguage.displayName(co.providerId))):\u{001B}[0m\n\(review)")
+            return review
+        }
+
+        // R4: the coder↔reviewer partnership. The co-reviewer critiques the diff; if it flags blocking
+        // issues AND auto-fix is armed (team mode), the LEAD runs a bounded fix turn to address them,
+        // then the reviewer re-checks — a real team accomplishing the goal, not an advisory print.
+        func runCopilotReview(task: String) async {
+            // R2a (review catch): after an interject the user's typed instruction must run NEXT —
+            // not after a copilot model call they didn't ask for.
+            guard !lastTurnInterrupted else { return }
+            guard copilot.enabled else { return }
+            guard var review = await runOneReview(task: task) else { return }
+
+            guard copilot.autoFix, let loopFactory else { return }   // advisory-only unless team mode armed
+            var round = 0
+            while round < max(1, copilot.maxFixRounds), !Copilot.reviewIsClean(review) {
+                round += 1
+                let lead = copilot.lead ?? roleSelection.fallback
+                print("\u{001B}[35m⎇ team · \(TeamLanguage.displayName(lead.providerId)) fixing the findings (round \(round))…\u{001B}[0m")
+                armTurnLoop()
+                let fixLoop = perm.arm(loopFactory(lead, roleSelection.bindings, perm.mode.isPlan,
+                                                   showReasoning, extendedThinking))
+                // Fresh trajectory for the fix turn so the re-review's shouldReview reflects ONLY what
+                // the fix changed — a no-op fix (coder pushed back) then converges instead of
+                // re-reviewing the unchanged diff on the stale coding-turn records (review catch).
+                recorder?.reset()
+                let oc = await runTurnInterruptible(loop: fixLoop, userInput: Copilot.fixPrompt(task: task, review: review))
+                await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
+                if lastTurnInterrupted { return }     // user stepped in — stop the team loop
+                // Re-review the fix so the loop converges (or exhausts its bounded rounds).
+                guard let next = await runOneReview(task: task) else { return }
+                review = next
+            }
+            if Copilot.reviewIsClean(review) {
+                print("\u{001B}[32m⎇ team · review clean — findings resolved\u{001B}[0m")
+            }
+        }
+
+        // R4: arm a natural-language TEAM ("gemini be the eyes for deepseek", "deepseek codes and mimo
+        // reviews", "work as a team"). Binds the lead (coder) + co (reviewer) across vendors and turns on
+        // the review→fix loop, so a single goal is accomplished by the AIs working together, not one model.
+        func armTeam(_ team: TeamIntent) {
+            func resolve(_ name: String?) -> ProviderBinding? {
+                guard let name, !name.isEmpty else { return nil }
+                return Self.resolveModelSpec(name, currentProvider: roleSelection.fallback.providerId,
+                                             knownProviders: providerAliases, providerModels: providerModels)
+            }
+            if let name = team.lead, resolve(name) == nil {
+                print("\u{001B}[37m↳ team: no configured model for '\(name)' — keeping current lead\u{001B}[0m")
+            }
+            if let name = team.co, resolve(name) == nil {
+                print("\u{001B}[37m↳ team: no configured model for '\(name)' — keeping current reviewer\u{001B}[0m")
+            }
+            if let lead = resolve(team.lead) {
+                copilot.lead = lead
+                _ = roleSelection.setDefault(lead, knownProviders: providerAliases)
+                _ = roleSelection.assign(.coder, to: lead, knownProviders: providerAliases)
+                autoRouting = false                          // a named lead pins the coding model
+                activeBinding = roleSelection.fallback
+                if let loopFactory {
+                    loop = loopFactory(roleSelection.fallback, roleSelection.bindings, loop.isPlanMode, showReasoning, extendedThinking)
+                }
+            }
+            if let co = resolve(team.co) {
+                copilot.co = co
+                _ = roleSelection.assign(.critic, to: co, knownProviders: providerAliases)
+            }
+            copilot.enabled = true
+            let leadB = copilot.lead ?? roleSelection.fallback
+            let coB = copilot.co ?? roleSelection.fallback
+            // Don't let one model review AND fix its own code (no second model resolved). Keep the
+            // review (advisory) but leave auto-fix off — a self-critique-then-self-fix is a no-op that
+            // just burns tokens (review catch).
+            let sameModel = leadB.providerId == coB.providerId && leadB.model == coB.model
+            copilot.autoFix = !sameModel
+            if sameModel {
+                print("\u{001B}[35m⎇ team\u{001B}[0m · only one model configured — \(TeamLanguage.displayName(coB.providerId)) will review (advisory). Name a second model to enable review→fix.")
+            } else {
+                print("\u{001B}[35m⎇ team armed\u{001B}[0m · \(TeamLanguage.displayName(leadB.providerId)) building · "
+                    + "\(TeamLanguage.displayName(coB.providerId)) reviewing · review→fix on")
+            }
         }
 
         func consumeTurnUsageDelta() async -> [AgentSpan] {
@@ -1253,7 +1333,8 @@ struct KistREPL {
                         print("\u{001B}[35m⎇ copilot ON\u{001B}[0m — the co-reviewer critiques the diff after each coding turn. " + copilot.statusLine(render: { Self.render($0) }))
                     case .off:
                         copilot.enabled = false
-                        print("copilot off — no automatic review.")
+                        copilot.autoFix = false   // also disarm the team review→fix loop (never resurrect it via /copilot on)
+                        print("copilot off — no automatic review or fix.")
                     case .setLead(let spec):
                         guard let b = Self.resolveModelSpec(spec, currentProvider: roleSelection.fallback.providerId,
                                                             knownProviders: providerAliases, providerModels: providerModels) else {
@@ -1790,12 +1871,26 @@ struct KistREPL {
             }
             // The message a normal turn acts on: path-stripped if we touched media, else the (possibly
             // control-stripped) message body.
-            let messageText = touchedMedia ? media.prompt : messageBody
+            var messageText = touchedMedia ? media.prompt : messageBody
+
+            // R4: natural-language TEAM assignment. "gemini be the eyes for deepseek", "deepseek codes
+            // and gemini reviews", "work as a team to X" → arm the coder(lead)+reviewer(co) partnership
+            // + review→fix loop, then run the residual task. No team phrasing ⇒ nil ⇒ a normal turn.
+            var armedTeamThisTurn = false
+            if !lineFromQueue, let team = TeamIntent.parse(messageText) {
+                armTeam(team)
+                armedTeamThisTurn = true
+                messageText = team.goal
+                if messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }  // pure setup
+            }
 
             // AUTO-ROUTE (Increment B): for a plain message, the router may PROPOSE an escalation to a
             // fleet / plan-DAG. It never spends big silently — we confirm first; a no falls through to a
             // normal turn. Slash commands above are the explicit path; this is the "just talk" path.
-            if let router, !lineFromQueue, let proposal = await router.propose(messageText) {
+            // A team goal runs as a team-armed turn so the coder↔reviewer review→fix loop actually
+            // fires — an accepted fleet/plan escalation would `continue` past runCopilotReview and drop
+            // the partnership the user just asked for (review catch).
+            if let router, !lineFromQueue, !armedTeamThisTurn, let proposal = await router.propose(messageText) {
                 FileHandle.standardOutput.write(Data(("\u{001B}[33m" + proposal.prompt + " \u{001B}[0m").utf8))
                 let ans = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
                 if ans == "y" || ans == "yes" {

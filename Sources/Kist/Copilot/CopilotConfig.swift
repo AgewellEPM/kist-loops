@@ -12,6 +12,11 @@ struct CopilotConfig: Equatable {
     var enabled = false
     var lead: ProviderBinding? = nil   // who writes the code (nil ⇒ the session default model)
     var co: ProviderBinding? = nil     // who reviews the diff (nil ⇒ the session default model)
+    /// R4: close the loop — when the co-reviewer flags blocking issues, the lead runs a FIX turn to
+    /// address them (a real coder↔reviewer partnership, not an advisory print). Armed by team mode.
+    var autoFix = false
+    /// Bounded fix rounds so a stubborn review can't loop the team forever.
+    var maxFixRounds = 1
 
     /// One-line status for `/copilot` and `/copilot status`.
     func statusLine(render: (ProviderBinding) -> String) -> String {
@@ -82,6 +87,34 @@ enum Copilot {
         ```
 
         Review it.
+        """
+    }
+
+    /// R4: the "clean" sentinel the reviewer emits when there is nothing to fix. When the review is NOT
+    /// clean, the team loop runs a fix round (the lead addresses the findings) — a real coder↔reviewer
+    /// partnership instead of an advisory print. Matched leniently: any LGTM / "no blocking" phrasing.
+    static func reviewIsClean(_ review: String) -> Bool {
+        let l = review.lowercased()
+        if l.contains("lgtm") { return true }
+        if l.contains("no blocking") || l.contains("nothing actionable")
+            || l.contains("no actionable") || l.contains("no issues") { return true }
+        return false
+    }
+
+    /// The fix ask handed BACK to the lead (coder) so the reviewer's findings get addressed in the same
+    /// working tree — closes the loop Luke asked for ("review, catch errors, THEN fix it").
+    static func fixPrompt(task: String, review: String) -> String {
+        """
+        Your teammate reviewed the code you just wrote for this task:
+        \(task.isEmpty ? "(not specified)" : task)
+
+        Their review findings:
+        \(review.trimmingCharacters(in: .whitespacesAndNewlines))
+
+        Address the ACTIONABLE findings above by editing the files. Fix real correctness/security/\
+        edge-case issues; skip anything that's a matter of taste or that you can justify keeping. Make \
+        the minimal edits that resolve the findings — do not rewrite unrelated code. If a finding is \
+        wrong, briefly say why instead of changing the code.
         """
     }
 }
