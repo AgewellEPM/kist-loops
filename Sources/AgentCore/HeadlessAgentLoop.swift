@@ -233,10 +233,28 @@ public struct HeadlessAgentLoop: Sendable {
 
     static func scopeRequestSource(for goal: String) -> String {
         let source = extractBetween(goal, start: PromptCompiler.scopeSourceStart, end: PromptCompiler.scopeSourceEnd)
+            ?? extractAfterMemoryGoalMarker(goal)
+            ?? strippingAppendedMemory(goal)
             ?? extractOriginalUserRequest(from: goal)
             ?? goal
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? goal : trimmed
+    }
+
+    /// KistRunner's plan-execute wrap prefixes injected memory ("MEMORY — …\n---\nGOAL:\n<user
+    /// goal>"). Scope must be judged on the USER'S ask — remembered context is not a request
+    /// (2026-07-29 dogfood catch: cortex text containing "server"/"production" reclassified every
+    /// mission into plan-only serverDiagnostics, blocking all mutating steps).
+    private static func extractAfterMemoryGoalMarker(_ text: String) -> String? {
+        guard let r = text.range(of: "\n---\nGOAL:\n", options: .backwards) else { return nil }
+        return String(text[r.upperBound...])
+    }
+
+    /// The great-loop wrap APPENDS memory after the goal — the sibling shape of the prefix wrap
+    /// above (same poisoning, opposite end).
+    private static func strippingAppendedMemory(_ text: String) -> String? {
+        guard let r = text.range(of: "\n\nMEMORY — what kist knows about you & this project:") else { return nil }
+        return String(text[..<r.lowerBound])
     }
 
     private static func extractBetween(_ text: String, start: String, end: String) -> String? {

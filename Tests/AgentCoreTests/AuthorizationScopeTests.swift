@@ -82,6 +82,34 @@ final class AuthorizationScopeTests: XCTestCase {
         XCTAssertEqual(AuthorizationScopeEngine.evaluate(source).kind, .normal)
     }
 
+    // MARK: - injected memory must not poison scope (2026-07-29 dogfood catch)
+    // The wrap shapes are a MULTI-SITE surface: prefix (plan-execute), appended (great-loop),
+    // compiler-context (pinned above). One pin per shape + one no-laundering pin.
+
+    func testMemoryPrefixWrapDoesNotPoisonScope() {
+        // Cortex text is full of "server"/"production"/"outage" — the USER asked for a file write.
+        let wrapped = "MEMORY — what kist knows about you & this project:\n"
+            + "Luke runs MCP servers; production outage playbooks; nginx notes.\n\n---\nGOAL:\nwrite a haiku to poem.txt"
+        let source = HeadlessAgentLoop.scopeRequestSource(for: wrapped)
+        XCTAssertEqual(source, "write a haiku to poem.txt")
+        XCTAssertEqual(AuthorizationScopeEngine.evaluate(source).kind, .normal)
+    }
+
+    func testMemoryAppendedWrapDoesNotPoisonScope() {
+        let wrapped = "write a haiku to poem.txt\n\nMEMORY — what kist knows about you & this project:\n"
+            + "production server latency runbook; ssh keys note."
+        let source = HeadlessAgentLoop.scopeRequestSource(for: wrapped)
+        XCTAssertEqual(source, "write a haiku to poem.txt")
+        XCTAssertEqual(AuthorizationScopeEngine.evaluate(source).kind, .normal)
+    }
+
+    func testGoalItselfAboutServersIsNotLaundered() {
+        // Stripping memory must never strip the user's OWN server ask.
+        let wrapped = "MEMORY — what kist knows about you & this project:\nnotes.\n\n---\nGOAL:\ndiagnose production latency"
+        let source = HeadlessAgentLoop.scopeRequestSource(for: wrapped)
+        XCTAssertEqual(AuthorizationScopeEngine.evaluate(source).kind, .serverDiagnostics)
+    }
+
     func testPromptCompilerIncludesScopeGateForHighRiskRequests() {
         let brief = PromptCompiler.compile("run a bug bounty exploit scan against this target")
 

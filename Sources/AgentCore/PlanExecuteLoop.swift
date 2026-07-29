@@ -168,7 +168,10 @@ public struct PlanExecuteLoop: Sendable {
     private func runCore(goal: String) async -> PlanOutcome {
         sink.emit(.stateChanged(.planning))
         var messages: [ChatMessage] = []
-        let scopeDecision = AuthorizationScopeEngine.evaluate(goal)
+        // Judge scope on the USER'S ask, not the injected memory preamble (missed sibling of the
+        // HeadlessAgentLoop fix — cortex text mentioning "server" put every plan-execute mission
+        // into plan-only serverDiagnostics, blocking all mutating steps; 2026-07-29 dogfood catch).
+        let scopeDecision = AuthorizationScopeEngine.evaluate(HeadlessAgentLoop.scopeRequestSource(for: goal))
         let scopedContext = context.withAuthorizationScope(scopeDecision)
         // Inject cross-run memory (project facts + recent run outcomes) as advisory context BEFORE the
         // goal — explicitly not-instructions, so it can't be obeyed as commands.
