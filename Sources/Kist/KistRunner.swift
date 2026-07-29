@@ -2051,7 +2051,8 @@ enum KistRunner {
             diffSummary: hadChanges ? (statSummary + "\n\n" + fullDiff) : "(no changes in the working tree)",
             testsPassed: false,
             testSummary: "no automated test suite was run for this fresh build — judge the CODE itself against the goal (this is a new build, not a regression to an existing tested codebase)",
-            signoffSummary: "built hands-free in the autopilot OS sandbox")
+            signoffSummary: "built hands-free in the autopilot OS sandbox",
+            testsRan: false)   // no suite for a fresh build → the council judges the code (NOT a test failure)
         note("")
         note("ship · council of minds reviewing the build…")
         let decision = await ShipPipeline(council: CouncilPromotionJudge(providers: registry, roles: roles)).review(goal: goal, build: build)

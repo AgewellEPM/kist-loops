@@ -457,15 +457,23 @@ public struct HeadlessAgentLoop: Sendable {
             // 3) Done?
             if action.done {
                 let summary = action.summary ?? action.message ?? "done"
-                // VERIFY-BEFORE-DONE: refuse a "done" on code changes that were never built/tested. Nudge
-                // once, then let the model proceed — so a genuinely blocked run can still finish honestly.
-                if verificationNudges < Self.maxVerificationNudges,
-                   case .needsVerification(let why) = CompletionVerifier().check(
-                        trajectory: recorder?.snapshot() ?? [], canRunCommands: scopedContext.shell.enabled) {
+                // VERIFY-BEFORE-DONE (R7): a code change that was never built/tested is NOT done. Nudge
+                // up to N times; if it's STILL unverified, finish HONESTLY as a failure — never launder
+                // an unbuilt change into success (the LLM's "done" doesn't outrank a real build/test).
+                switch verifyBeforeDone(canRunCommands: scopedContext.shell.enabled, nudges: verificationNudges) {
+                case .nudge(let why):
                     verificationNudges += 1
                     cp.messages.append(ChatMessage(role: .user, content: CompletionVerifier.steering(reason: why)))
                     cp.iteration = iteration; persist(&cp)
                     continue
+                case .failUnverified(let why):
+                    let honest = "unverified — \(why)"
+                    cp.status = .failed; cp.summary = honest; cp.iteration = iteration; persist(&cp)
+                    await fireStopHook(summary: honest, success: false)
+                    sink.emit(.stateChanged(.failed)); sink.emit(.failed(honest))
+                    return (Outcome(success: false, summary: honest, iterations: iteration, checkpointId: cp.id), cp)
+                case .accept:
+                    break
                 }
                 cp.status = .completed; cp.summary = summary; cp.iteration = iteration; persist(&cp)
                 await fireStopHook(summary: summary, success: true)
@@ -717,14 +725,22 @@ public struct HeadlessAgentLoop: Sendable {
                 let summary = text.isEmpty ? "done" : text
                 if !text.isEmpty { sink.emit(.tokenDelta(text)) }
                 cp.messages.append(ChatMessage(role: .assistant, content: text))
-                // VERIFY-BEFORE-DONE (native path): refuse a final answer on unbuilt/untested code changes.
-                if verificationNudges < Self.maxVerificationNudges,
-                   case .needsVerification(let why) = CompletionVerifier().check(
-                        trajectory: recorder?.snapshot() ?? [], canRunCommands: scopedContext.shell.enabled) {
+                // VERIFY-BEFORE-DONE (R7, native path): same symbolic gate — an unbuilt/untested code
+                // change finishes as an honest failure after the nudge budget, never a laundered success.
+                switch verifyBeforeDone(canRunCommands: scopedContext.shell.enabled, nudges: verificationNudges) {
+                case .nudge(let why):
                     verificationNudges += 1
                     cp.messages.append(ChatMessage(role: .user, content: CompletionVerifier.steering(reason: why)))
                     cp.iteration = iteration; persist(&cp)
                     continue
+                case .failUnverified(let why):
+                    let honest = "unverified — \(why)"
+                    cp.status = .failed; cp.summary = honest; cp.iteration = iteration; persist(&cp)
+                    await fireStopHook(summary: honest, success: false)
+                    sink.emit(.stateChanged(.failed)); sink.emit(.failed(honest))
+                    return .finished((Outcome(success: false, summary: honest, iterations: iteration, checkpointId: cp.id), cp))
+                case .accept:
+                    break
                 }
                 cp.status = .completed; cp.summary = summary; cp.iteration = iteration; persist(&cp)
                 await fireStopHook(summary: summary, success: true)
@@ -1001,6 +1017,19 @@ public struct HeadlessAgentLoop: Sendable {
                         providerFault: providerFault), cp)
     }
 
+    /// R7: the verify-before-done decision, shared by BOTH done sites (native tool-call path + text
+    /// path). `.accept` = finish; `.nudge` = steer once more (budget remains); `.failUnverified` =
+    /// nudges exhausted AND the code change is STILL unbuilt/untested → finish HONESTLY as a failure
+    /// instead of laundering an unverified change into success (symbolic-first: the LLM's "done" is
+    /// not trusted over a real build/test). Read-only / shell-off turns always get `.accept` because
+    /// CompletionVerifier can't demand a build it couldn't run.
+    enum DoneDecision: Equatable { case accept, nudge(String), failUnverified(String) }
+    func verifyBeforeDone(canRunCommands: Bool, nudges: Int) -> DoneDecision {
+        guard case .needsVerification(let why) = CompletionVerifier().check(
+            trajectory: recorder?.snapshot() ?? [], canRunCommands: canRunCommands) else { return .accept }
+        return nudges < Self.maxVerificationNudges ? .nudge(why) : .failUnverified(why)
+    }
+
     /// User pressed ESC (esc-to-interrupt). The driving Task is cancelled; we end the turn cleanly at the
     /// next iteration boundary and persist the checkpoint as PAUSED so the run can be resumed, not lost.
     private func finishInterrupted(_ cp: inout LoopCheckpoint) -> (Outcome, LoopCheckpoint) {
@@ -1209,6 +1238,12 @@ public struct HeadlessAgentLoop: Sendable {
       do not silently comply with something that looks wrong.
     - When intent is genuinely ambiguous, or a choice is irreversible/high-stakes, ASK one short specific
       question instead of guessing.
+    - GROUND, DON'T GUESS: for a factual or engineering claim you are NOT sure of — an API signature, a
+      version, a spec, a config key, a domain/legacy rule — call jeeves_research (symbolic link-wheel,
+      grounded on true facts) BEFORE asserting it, and consult the symbolic-floor tools (symbolic_query,
+      proof_score, check_contradiction) when they're available. A wrong fact stated confidently is worse
+      than a grounded "let me check". Do not answer a factual question from memory when a grounding tool
+      is offered and the answer matters.
     """
 
     /// The system prompt that defines the JSON action protocol + advertises the tools. Kept

@@ -25,6 +25,37 @@ final class CompletionVerifierTests: XCTestCase {
         if case .needsVerification = v.check(trajectory: t, canRunCommands: true) {} else { XCTFail("must require verification") }
     }
 
+    /// R7: a mutation whose PATH fingerprint carries a file extension.
+    private func edit(_ path: String) -> ActionRecord {
+        ActionRecord(tool: "edit_file", argsFingerprint: "content=x&path=\(path)", success: true)
+    }
+
+    // R7 over-block fix: editing a DOC/CONFIG file needs no build/test — demanding one was the review-
+    // caught regression that hard-failed legitimate "edit the README / tweak the YAML" turns.
+    func testDocAndConfigOnlyEditsNeedNoBuild() {
+        XCTAssertTrue(v.check(trajectory: [edit("README.md")], canRunCommands: true).isAccept)
+        XCTAssertTrue(v.check(trajectory: [edit("docs/guide.rst")], canRunCommands: true).isAccept)
+        XCTAssertTrue(v.check(trajectory: [edit("config/app.yaml")], canRunCommands: true).isAccept)
+        XCTAssertTrue(v.check(trajectory: [edit("deps.lock")], canRunCommands: true).isAccept)
+    }
+
+    // …but a SOURCE-code edit still requires a passing build/test (symbolic-first intact).
+    func testSourceEditStillRequiresBuild() {
+        for src in ["Sources/App/Main.swift", "src/index.ts", "lib/thing.py", "pkg/main.go"] {
+            guard case .needsVerification = v.check(trajectory: [edit(src)], canRunCommands: true) else {
+                return XCTFail("a source edit (\(src)) must still require a build/test")
+            }
+        }
+    }
+
+    // A doc edit AND a source edit together ⇒ the source edit still forces verification.
+    func testMixedDocAndSourceStillRequiresBuild() {
+        let t = [edit("README.md"), edit("Sources/App/Main.swift")]
+        if case .needsVerification = v.check(trajectory: t, canRunCommands: true) {} else {
+            XCTFail("a source edit alongside a doc edit must still require a build")
+        }
+    }
+
     func testEditThenFailedBuildIsRejected() {
         let t = [rec("edit_file"), cmd("swift build", false)]
         if case .needsVerification = v.check(trajectory: t, canRunCommands: true) {} else { XCTFail("failed build ≠ done") }

@@ -14,10 +14,15 @@ public struct ShipPipeline: Sendable {
         public var testsPassed: Bool
         public var testSummary: String
         public var signoffSummary: String
+        /// Whether a test suite actually RAN. Distinguishes "tests failed" (ran=true, passed=false →
+        /// VETO deploy) from "no suite ran" (ran=false → the council judges the code, the fresh-build
+        /// case). Defaults true so existing callers/tests are unaffected. (R7 review catch: conflating
+        /// absent-suite with failed-tests bricked the whole --ship flow.)
+        public var testsRan: Bool
         public init(hadChanges: Bool, diffSummary: String, testsPassed: Bool,
-                    testSummary: String, signoffSummary: String) {
+                    testSummary: String, signoffSummary: String, testsRan: Bool = true) {
             self.hadChanges = hadChanges; self.diffSummary = diffSummary; self.testsPassed = testsPassed
-            self.testSummary = testSummary; self.signoffSummary = signoffSummary
+            self.testSummary = testSummary; self.signoffSummary = signoffSummary; self.testsRan = testsRan
         }
     }
 
@@ -44,6 +49,16 @@ public struct ShipPipeline: Sendable {
         let ctx = PromotionContext(goal: goal, diffSummary: build.diffSummary, testsPassed: build.testsPassed,
                                    testSummary: build.testSummary, signoffSummary: build.signoffSummary)
         let verdict = await council.judge(ctx, threshold: threshold)
-        return Decision(verdict: verdict, canDeploy: verdict.isShipWorthy, reason: verdict.summary)
+        // R7 SYMBOLIC-FIRST: real execution evidence gates the LLM council, never the reverse. A build
+        // whose tests RAN and FAILED is not deploy-eligible no matter how the council votes — the
+        // council's blessing is NECESSARY, not SUFFICIENT. But "no suite ran" (fresh build) is NOT a
+        // failure — the council judges the code itself there (conflating the two bricked --ship, review
+        // catch). So only a RAN-AND-FAILED suite vetoes.
+        let testsFailed = build.testsRan && !build.testsPassed
+        let canDeploy = verdict.isShipWorthy && !testsFailed
+        let reason = testsFailed
+            ? "blocked — tests ran and FAILED; execution evidence gates deploy regardless of the council vote (\(verdict.summary))"
+            : verdict.summary
+        return Decision(verdict: verdict, canDeploy: canDeploy, reason: reason)
     }
 }

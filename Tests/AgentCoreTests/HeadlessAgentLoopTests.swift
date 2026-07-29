@@ -37,6 +37,28 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertTrue(text.contains("Valid tool names are EXACTLY"))
         XCTAssertTrue(native.contains("Valid tool names are EXACTLY"))
         XCTAssertTrue(text.contains("read_file"))
+        // R7: the GROUND-DON'T-GUESS directive must ride BOTH prompts so the model uses the now-reachable
+        // symbolic tools on a knowledge-miss instead of guessing (multi-site: text + native).
+        for p in [text, native] {
+            XCTAssertTrue(p.contains("GROUND, DON'T GUESS"), "grounding directive missing")
+            XCTAssertTrue(p.contains("jeeves_research"), "the grounding tool must be named in the directive")
+        }
+    }
+
+    // R7: verify-before-done is a MULTI-SITE gate (native tool-call path + text path). Both must fail
+    // HONESTLY (not launder success) when a code change is still unverified after the nudge budget.
+    // A source pin so a missed sibling can't silently regress one path to the old "proceed anyway".
+    func testBothDoneSitesFailUnverifiedAfterNudges() throws {
+        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/HeadlessAgentLoop.swift"),
+                             encoding: .utf8)
+        // The shared decision helper exists and returns an honest-fail case…
+        XCTAssertTrue(src.contains("func verifyBeforeDone"), "shared verify-before-done decision helper missing")
+        XCTAssertTrue(src.contains("failUnverified(String)"), "the honest-fail decision case missing")
+        // …and it's consumed at BOTH done sites (two switch arms, not one).
+        let occurrences = src.components(separatedBy: "case .failUnverified").count - 1
+        XCTAssertGreaterThanOrEqual(occurrences, 2, "both done sites must handle .failUnverified — a missed sibling laundered success")
     }
 
     private actor RecordingInteractor: RuntimeInteractor {

@@ -21,11 +21,43 @@ public struct CompletionVerifier: Sendable {
 
     public init() {}
 
+    /// Non-source files whose edit needs NO build/test — docs, config, data, lockfiles. Editing a
+    /// README or a YAML config is a legitimate deliverable; demanding a build/test for it is an
+    /// over-block (R7 review catch: the hardened done-gate was failing doc/config-only turns). The
+    /// extension is read from the mutation's `path=`/`file=` fingerprint; an UNKNOWN path stays
+    /// build-requiring (conservative — never launders a source change as done).
+    static let nonSourceExtensions: Set<String> = [
+        "md", "markdown", "mdx", "rst", "adoc", "org", "txt", "text",
+        "json", "yaml", "yml", "toml", "cfg", "conf", "ini", "env", "properties", "plist",
+        "lock", "csv", "tsv", "log", "gitignore", "gitattributes", "editorconfig", "dockerignore", "license",
+    ]
+
+    /// A mutation that REQUIRES a build/test: a mutating tool whose target is source code (or whose
+    /// path we can't read — fail strict). A clearly-non-source edit (docs/config) does not.
+    static func mutationNeedsBuild(_ r: ActionRecord) -> Bool {
+        guard mutatingTools.contains(r.tool) else { return false }
+        guard let ext = pathExtension(fromFingerprint: r.argsFingerprint) else { return true }   // unknown ⇒ strict
+        return !nonSourceExtensions.contains(ext)
+    }
+
+    /// Extract the lowercased file extension from a record's `path=`/`file=` fingerprint field, or nil
+    /// when no path is present (⇒ caller stays strict). "" when the path has no extension.
+    static func pathExtension(fromFingerprint fp: String) -> String? {
+        for field in fp.split(separator: "&") {
+            let kv = field.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2, kv[0] == "path" || kv[0] == "file" else { continue }
+            let path = String(kv[1])
+            guard let dot = path.lastIndex(of: "."), path.index(after: dot) < path.endIndex else { return "" }
+            return path[path.index(after: dot)...].lowercased()
+        }
+        return nil
+    }
+
     public func check(trajectory: [ActionRecord], canRunCommands: Bool) -> Verdict {
         // Can't run a build/test (shell off) ⇒ don't block on something the agent can't do.
         guard canRunCommands else { return .accept }
-        // No code change ⇒ nothing to verify (a research / question-answering / read-only task).
-        guard let lastMutation = trajectory.lastIndex(where: { Self.mutatingTools.contains($0.tool) }) else {
+        // No SOURCE-CODE change ⇒ nothing to verify (research/read-only, or only docs/config touched).
+        guard let lastMutation = trajectory.lastIndex(where: { Self.mutationNeedsBuild($0) }) else {
             return .accept
         }
         // Was there a SUCCESSFUL build/test AFTER the last code change? TEETH: a bare successful
