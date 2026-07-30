@@ -904,6 +904,15 @@ struct KistREPL {
             if pinnedBar.active {
                 FileHandle.standardOutput.write(Data((pinnedBar.transcriptLead()
                     + "\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
+                // The submitted text must NOT stay frozen in the pinned box while the turn streams above
+                // it (bug: "it still ain't cleared"). Repaint the panel with an EMPTY box now — type-ahead
+                // still surfaces in the live spinner tail (R2a) and the committed prompt is already in the
+                // band above — then park back on the band so turn output scrolls over the pinned panel.
+                FileHandle.standardOutput.write(Data((
+                    pinnedBar.panelLead(statusRows: statusRows) + status + "\n"
+                    + PromptBar.emptyBox(promptLead: promptColor,
+                                         hint: perm.barHint(includeInterrupt: true), width: boxWidth)
+                    + pinnedBar.transcriptLead()).utf8))
             }
             recorder?.reset()                 // fresh trajectory per turn for self-monitoring
 

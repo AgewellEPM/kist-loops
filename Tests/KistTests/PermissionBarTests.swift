@@ -157,6 +157,21 @@ final class PermissionBarTests: XCTestCase {
         XCTAssertTrue(out.contains("\u{001B}[6G"))      // parked at the edit column
     }
 
+    // On submit the R2b pinned bar is repainted with this EMPTY box so the just-sent text stops lingering
+    // in the box while the turn streams above it ("it still ain't cleared"). It draws the full box — top
+    // border · empty input line · bottom border · hint — with every row self-clearing (ESC[2K) and NO
+    // cursor parking / no `\r ESC[J` (the caller has already positioned at the panel top).
+    func testEmptyBoxDrawsAClearedInputBoxWithNoStaleTextOrCursorPark() {
+        let out = PromptBar.emptyBox(promptLead: "│ ❯ ", hint: "BAR", width: 30)
+        XCTAssertTrue(out.contains("╭") && out.contains("╮"))   // top border
+        XCTAssertTrue(out.contains("│ ❯ "))                     // the prompt lead — with NO input after it
+        XCTAssertTrue(out.contains("╰") && out.contains("╯"))   // bottom border closes the box
+        XCTAssertTrue(out.contains("BAR"))                      // hint
+        XCTAssertEqual(out.components(separatedBy: "\u{001B}[2K").count - 1, 3, "each box row self-clears")
+        XCTAssertFalse(out.contains("\u{001B}[2A"), "static repaint parks no cursor (the caller does)")
+        XCTAssertFalse(out.hasPrefix("\r\u{001B}[J"), "no clear-screen prefix — the panelLead already cleared")
+    }
+
     func testTopAndBottomBordersMatchWidth() {
         let top = PromptBar.topBorder(width: 20, color: false)
         let bot = PromptBar.bottomBorder(width: 20, color: false)

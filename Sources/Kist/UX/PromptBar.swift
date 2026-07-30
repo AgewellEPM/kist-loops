@@ -34,6 +34,18 @@ enum PromptBar {
             + "\u{001B}[2A" + "\u{001B}[\(col)G"
     }
 
+    /// A STATIC empty box (top border · empty input line · bottom border · hint), each row self-clearing
+    /// with ESC[2K. Unlike `frame` this parks NO cursor and emits no `\r ESC[J` — the caller has already
+    /// positioned the cursor (e.g. at the pinned panel top). Used on submit to repaint the R2b pinned bar
+    /// with a CLEARED input box while the turn streams above it, so the just-sent text stops lingering in
+    /// the box. Pure so the rows are unit-tested without a terminal.
+    static func emptyBox(promptLead: String, hint: String, width: Int = 60) -> String {
+        topBorder(width: width)
+            + "\n\u{001B}[2K" + promptLead
+            + "\n\u{001B}[2K" + bottomBorder(width: width)
+            + "\n\u{001B}[2K" + hint
+    }
+
     /// Leave a small right margin so terminal width drift (for example a stale COLUMNS=80 in a 79-column
     /// window) cannot auto-wrap the box border or input line and corrupt the prompt area.
     static func safeWidth(columns: Int) -> Int {
