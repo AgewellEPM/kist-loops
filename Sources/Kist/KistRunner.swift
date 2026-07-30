@@ -806,6 +806,10 @@ enum KistRunner {
                                          providerId: providerId, model: model)
             }
             // Council: deep research -> model conference -> decision -> visible kanban board.
+            if opts.digDeep {
+                return await runWideCouncil(opts, goal: goal, registry: registry, root: root,
+                                            providerId: providerId, model: model)
+            }
             if opts.council {
                 return await runCouncil(opts, goal: goal, execute: opts.councilExecute,
                                         registry: registry, root: root, tools: tools,

@@ -30,6 +30,7 @@ struct KistOptions {
     var research = false            // --research: evidence run -> council -> task board
     var council = false             // --council/--consult: research -> multi-model council -> task board
     var councilExecute = false      // --council-execute: council first, then hand builder brief to plan→execute
+    var digDeep = false             // --dig/--dig-in-deep: ask EVERY reachable model the same question, synthesize
     var fleet = false               // --fleet: launch a SUPERVISED parallel fleet (heterogeneous agents)
     var evolve = false              // --evolve: DGM-style self-improvement lab, isolated + benchmarked
     var evolveStatus = false        // --evolve-status: render the evolution archive (frontier, best, blocked)
@@ -209,6 +210,7 @@ struct KistOptions {
             case "--council", "--consult":  o.council = true
             case "--council-execute", "--council-build", "--consult-execute":
                                             o.council = true; o.councilExecute = true
+            case "--dig", "--dig-in-deep", "--dig-deep":  o.digDeep = true
             case "--fleet":                 o.fleet = true
             case "--evolve":                o.evolve = true
             case "--evolve-status":         o.evolveStatus = true
@@ -315,6 +317,7 @@ struct KistOptions {
                                     working (verify each cycle) until done-and-verified or a safety cap.
                                     Caps: --budget <tok> · --loop-hours <h> · --max-cycles <n>. (long-horizon)
       kist --research "<goal>"      Evidence run → research dossier → council → task board.
+      kist --dig "<question>"       Ask EVERY reachable model the same question, synthesize agree/disagree.
       kist --council "<goal>"       Research → council → decision → visible task board.
       kist --council-execute "<g>"  Same, then hand the builder brief to plan→execute.
       kist --protocols              Show MCP/A2A/browser/computer-control status.
