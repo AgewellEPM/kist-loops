@@ -1986,7 +1986,23 @@ struct KistREPL {
             armTurnLoop()   // apply the permission tier (plan/approvals); confirm bypass if just armed
             let compiled = briefCompiler?(messageText, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? messageText
             if let display = personaDisplay?(messageText) { print("\u{001B}[37m↳ \(display)\u{001B}[0m") }
-            let enriched = attachCaptainContext(to: compiled, objective: messageText)
+            var enriched = attachCaptainContext(to: compiled, objective: messageText)
+            // AUTO-EXPLORE: a lookup/find/self question ("find what we did for tinkyspeak", "how does your
+            // X work") is answered from OUR OWN FILES, not the model's memory. Search the estate in-process
+            // (full FS read, bypassing the tool sandbox) and inject what we find so the model stops
+            // hallucinating about work it can't see. Fail-soft: no hits ⇒ a normal answer.
+            if EstateLookupIntent.matches(messageText) {
+                let search = EstateSearch()
+                let mt = messageText
+                print("\u{001B}[35m🔎 searching our files for context…\u{001B}[0m")
+                if let grounding = await Task.detached(priority: .userInitiated, operation: { search.groundingBlock(for: mt) }).value {
+                    let n = max(0, grounding.components(separatedBy: "\n### ").count - 1)
+                    print("\u{001B}[35m🔎 grounded in \(n) file(s) from our estate\u{001B}[0m")
+                    enriched = grounding + "\n\n" + enriched
+                } else {
+                    print("\u{001B}[37m🔎 no matching files — answering from general knowledge\u{001B}[0m")
+                }
+            }
             let transcriptBeforeModelAttempt = transcript
             var oc = await runTurnInterruptible(loop: loop, userInput: enriched)
             if let loopFactory,
