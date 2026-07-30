@@ -30,6 +30,7 @@ final class PinnedBar {
     private let enabled: Bool
     private let raw = RawMode()
     private(set) var active = false
+    private(set) var suspended = false
     private var layout: PinnedBarLayout?
 
     /// `enabled` gates the whole feature; the initializer also refuses non-TTY / dumb terminals so a
@@ -63,6 +64,28 @@ final class PinnedBar {
         RawMode.scrollRegionActiveOnSignal = false
         write(l.deactivateSequence)
         active = false
+    }
+
+    /// Drop the scroll region for the duration of a TURN. The pinned strip only earns its keep while
+    /// idle at the prompt; during a turn a persistent DECSTBM region + a scroll-region-UNAWARE event
+    /// sink dumping a plan/long output is where terminals (esp. Terminal.app) mis-scroll and blank the
+    /// band. So on submit we reset the region and clear the old panel — turn output then flows in plain
+    /// full-screen mode (byte-identical to the inline path that never had this bug). `resume()` re-pins
+    /// at the next prompt. Type-ahead still shows in the live spinner tail, so nothing is lost.
+    func suspend() {
+        guard active, !suspended, let l = layout else { return }
+        suspended = true
+        RawMode.scrollRegionActiveOnSignal = false
+        write(l.suspendSequence)
+    }
+
+    /// Re-pin after a turn (idempotent; no-op if never suspended). Restores the scroll region and parks
+    /// the cursor at the band bottom so the next prompt renders in the pinned strip again.
+    func resume() {
+        guard active, suspended, let l = layout else { return }
+        suspended = false
+        RawMode.scrollRegionActiveOnSignal = true
+        write(l.activateSequence)
     }
 
     /// Re-pin when the terminal was resized between prompts (polled — no async-signal-unsafe handler).
@@ -142,5 +165,13 @@ struct PinnedBarLayout: Equatable {
     /// Park on the last band row so a turn's output scrolls the band, leaving the panel pinned.
     var transcriptLeadSequence: String {
         TerminalANSI.moveTo(row: transcriptBottom, col: 1)
+    }
+
+    /// Suspend for a turn: release the scroll region, drop to the panel row, and clear the old panel so
+    /// the freed bottom rows are blank before turn output flows into full-screen scrolling from there.
+    var suspendSequence: String {
+        TerminalANSI.resetScrollRegion
+            + TerminalANSI.moveTo(row: panelTop, col: 1)
+            + TerminalANSI.clearBelow
     }
 }

@@ -157,19 +157,24 @@ final class PermissionBarTests: XCTestCase {
         XCTAssertTrue(out.contains("\u{001B}[6G"))      // parked at the edit column
     }
 
-    // On submit the R2b pinned bar is repainted with this EMPTY box so the just-sent text stops lingering
-    // in the box while the turn streams above it ("it still ain't cleared"). It draws the full box — top
-    // border · empty input line · bottom border · hint — with every row self-clearing (ESC[2K) and NO
-    // cursor parking / no `\r ESC[J` (the caller has already positioned at the panel top).
-    func testEmptyBoxDrawsAClearedInputBoxWithNoStaleTextOrCursorPark() {
-        let out = PromptBar.emptyBox(promptLead: "│ ❯ ", hint: "BAR", width: 30)
-        XCTAssertTrue(out.contains("╭") && out.contains("╮"))   // top border
-        XCTAssertTrue(out.contains("│ ❯ "))                     // the prompt lead — with NO input after it
-        XCTAssertTrue(out.contains("╰") && out.contains("╯"))   // bottom border closes the box
-        XCTAssertTrue(out.contains("BAR"))                      // hint
-        XCTAssertEqual(out.components(separatedBy: "\u{001B}[2K").count - 1, 3, "each box row self-clears")
-        XCTAssertFalse(out.contains("\u{001B}[2A"), "static repaint parks no cursor (the caller does)")
-        XCTAssertFalse(out.hasPrefix("\r\u{001B}[J"), "no clear-screen prefix — the panelLead already cleared")
+    // R2b lives ONLY at the idle prompt: on submit the scroll region is torn down for the turn so a
+    // scroll-region-unaware sink can't blank the band (Terminal.app DECSTBM quirk), then re-pinned. This
+    // pins the suspend byte contract: release the region (ESC[r), drop to the panel row, clear it — and
+    // crucially it must NOT re-arm a scroll region (that's resume()'s job).
+    func testSuspendSequenceReleasesTheScrollRegionAndClearsThePanel() {
+        let l = PinnedBarLayout(rows: 65, cols: 100, panelRows: 6)
+        let out = l.suspendSequence
+        XCTAssertTrue(out.contains(TerminalANSI.resetScrollRegion), "must release the DECSTBM region")
+        XCTAssertTrue(out.contains(TerminalANSI.moveTo(row: l.panelTop, col: 1)), "drop to the panel row")
+        XCTAssertTrue(out.contains(TerminalANSI.clearBelow), "clear the freed panel so no ghost box lingers")
+        // A bare reset region is ESC[r; an ARMED region is ESC[<t>;<b>r. Suspend must not arm one.
+        XCTAssertFalse(out.contains("\u{001B}[1;\(l.transcriptBottom)r"), "suspend must not re-pin (resume does)")
+    }
+
+    // resume() re-pins after a turn — its sequence is exactly the activate sequence (region + park).
+    func testResumeUsesTheActivateSequenceToRePin() {
+        let l = PinnedBarLayout(rows: 65, cols: 100, panelRows: 6)
+        XCTAssertTrue(l.activateSequence.contains(TerminalANSI.setScrollRegion(top: 1, bottom: l.transcriptBottom)))
     }
 
     func testTopAndBottomBordersMatchWidth() {

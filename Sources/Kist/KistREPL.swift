@@ -865,6 +865,7 @@ struct KistREPL {
             let status = await renderStatusLine()
             // R2b: re-pin if the terminal was resized since the last prompt, then draw the panel in the
             // pinned strip. `panelLead()` is "\n" when the bar is off ⇒ identical to the old inline box.
+            pinnedBar.resume()                 // re-pin the strip after a turn ran with the region torn down
             pinnedBar.refreshSizeIfNeeded()
             // Size the reserved strip to the ACTUAL status height (1 line, or 2 when a task board is
             // active) so the box never overflows the pinned region and corrupts the panel mid-plan.
@@ -904,15 +905,11 @@ struct KistREPL {
             if pinnedBar.active {
                 FileHandle.standardOutput.write(Data((pinnedBar.transcriptLead()
                     + "\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
-                // The submitted text must NOT stay frozen in the pinned box while the turn streams above
-                // it (bug: "it still ain't cleared"). Repaint the panel with an EMPTY box now — type-ahead
-                // still surfaces in the live spinner tail (R2a) and the committed prompt is already in the
-                // band above — then park back on the band so turn output scrolls over the pinned panel.
-                FileHandle.standardOutput.write(Data((
-                    pinnedBar.panelLead(statusRows: statusRows) + status + "\n"
-                    + PromptBar.emptyBox(promptLead: promptColor,
-                                         hint: perm.barHint(includeInterrupt: true), width: boxWidth)
-                    + pinnedBar.transcriptLead()).utf8))
+                // Tear the scroll region down for the turn: the submitted text must not linger frozen in
+                // the pinned box, AND a persistent DECSTBM region + a scroll-region-unaware sink dumping a
+                // plan/long output is what blanks the band on Terminal.app. Turn output now flows in plain
+                // full-screen mode (like the inline path); the strip re-pins at the next prompt (resume()).
+                pinnedBar.suspend()
             }
             recorder?.reset()                 // fresh trajectory per turn for self-monitoring
 
