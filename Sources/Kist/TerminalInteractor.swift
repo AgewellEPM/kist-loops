@@ -55,9 +55,14 @@ actor TerminalInteractor: RuntimeInteractor {
             ? c("41;1", "  ⚠  IRREVERSIBLE — confirm (not covered by ‘allow all’)") + "\n"
             : c("33;1", "  ⚠  permission needed") + "\n"
         out += c("2", "  └ ") + detail + "\n"
-        // A dangerous action does NOT offer "allow all" — it must keep asking each time.
+        // A dangerous action defaults to run-once, but offers an EXPLICIT, clearly-labelled YOLO latch —
+        // "[a] allow ALL incl. irreversible" arms autopilot for the rest of the session (Luke's ask: "need
+        // a YOLO allow-all — once I see this I can ok it"). The wording spells out that it covers irreversible
+        // so it's a deliberate choice, not a fat-finger.
         if dangerous {
-            out += "  " + c("32;1", "[Enter] run once") + c("2", "   ") + c("31", "[n] skip") + "\n"
+            out += "  " + c("32;1", "[Enter] run once") + c("2", "   ")
+                         + c("31", "[n] skip") + c("2", "   ")
+                         + c("41;1", "[a] allow ALL incl. irreversible (rest of session)") + "\n"
         } else {
             out += "  " + c("32;1", "[Enter] run") + c("2", "   ")
                          + c("31", "[n] skip") + c("2", "   ")
@@ -74,7 +79,13 @@ actor TerminalInteractor: RuntimeInteractor {
         case "", "y", "yes", "ok", "run":
             return true                                   // Enter / yes → approve (the default)
         case "a", "all", "always", "yolo":
-            if !dangerous {                               // 'a' on a dangerous prompt runs ONCE, never latches
+            if dangerous {
+                // Explicit YOLO on an irreversible prompt: arm full autopilot — approve EVERYTHING (incl.
+                // irreversible) for the rest of the session. This is the user's deliberate override of the
+                // "never latch dangerous" default (the option is spelled out on the prompt).
+                autopilot = true
+                FileHandle.standardOutput.write(Data((c("41;1", "  ⚠ GUARDS OFF — approving everything (incl. irreversible) for this session") + "\n").utf8))
+            } else {
                 approveAll = true
                 FileHandle.standardOutput.write(Data((c("36", "  ✓ auto-approving the rest of this session") + "\n").utf8))
             }

@@ -56,6 +56,7 @@ final class TUIEventSink: RuntimeEventSink, @unchecked Sendable {
 final class TUIInteractor: RuntimeInteractor, @unchecked Sendable {
     private let ui: TerminalUI
     private var approveAll = false
+    private var approveAllDangerous = false   // YOLO latch: 'a' on an IRREVERSIBLE prompt arms full guards-off
     init(ui: TerminalUI) { self.ui = ui }
 
     func requestApproval(planSummary: String) async -> Bool {
@@ -65,14 +66,19 @@ final class TUIInteractor: RuntimeInteractor, @unchecked Sendable {
     func requestApproval(planSummary: String, dangerous: Bool) async -> Bool {
         // "allow all" covers routine mutations, NOT irreversible ones — a dangerous action ALWAYS asks
         // and never latches allow-all (mirrors TerminalInteractor; Codex HIGH: TUI allow-all bypass).
+        if approveAllDangerous { return true }               // full YOLO armed — nothing prompts
         if approveAll && !dangerous { return true }
-        let prompt = dangerous ? "⚠ IRREVERSIBLE — " + planSummary : planSummary
+        let prompt = dangerous ? "⚠ IRREVERSIBLE (a = allow ALL incl. irreversible) — " + planSummary : planSummary
         // Take stdin from the esc-interrupt watcher for this single-key read (restores the TUI's own raw
         // mode while it reads, so the watcher doesn't steal the key or mis-set VMIN/VTIME). See StdinArbiter.
         switch StdinArbiter.shared.withStdin({ ui.readApproval(summary: prompt) }) {
         case .yes: return true
         case .all:
-            if dangerous { return true }   // run once, do not latch on a dangerous action
+            if dangerous {
+                approveAllDangerous = true   // explicit YOLO on an irreversible prompt → guards off for the session
+                ui.appendTranscript(TerminalANSI.color("41;1", "  ⚠ GUARDS OFF — approving everything (incl. irreversible) this session") + "\r\n")
+                return true
+            }
             approveAll = true
             ui.appendTranscript(TerminalANSI.color("36", "  ✓ auto-approving the rest of this session") + "\r\n")
             return true
