@@ -10,6 +10,11 @@ import AgentCore
 /// REPL owns the git-diff read and the model call.
 struct CopilotConfig: Equatable {
     var enabled = false
+    /// Default-ON advisory "second opinion": after a substantive DIRECT turn, a DIFFERENT model reviews the
+    /// work (diff for coding turns, the answer text for substantive answers) and prints findings — never
+    /// edits. This is the "consult the minds instead of trusting one model" behavior applied automatically.
+    /// Distinct from `enabled` (team mode, which adds the review→FIX loop). `/copilot off` clears both.
+    var autoSecondOpinion = true
     var lead: ProviderBinding? = nil   // who writes the code (nil ⇒ the session default model)
     var co: ProviderBinding? = nil     // who reviews the diff (nil ⇒ the session default model)
     /// R4: close the loop — when the co-reviewer flags blocking issues, the lead runs a FIX turn to
@@ -22,7 +27,7 @@ struct CopilotConfig: Equatable {
     func statusLine(render: (ProviderBinding) -> String) -> String {
         let leadTxt = lead.map(render) ?? "session model"
         let coTxt = co.map(render) ?? "session model"
-        let state = enabled ? "\u{001B}[32mon\u{001B}[0m" : "off"
+        let state = enabled ? "\u{001B}[32mteam (review→fix)\u{001B}[0m" : (autoSecondOpinion ? "second opinion" : "off")
         return "copilot · \(state) · lead: \(leadTxt) · co-reviewer: \(coTxt)"
     }
 }
@@ -88,6 +93,35 @@ enum Copilot {
 
         Review it.
         """
+    }
+
+    /// System prompt for reviewing a substantive ANSWER (not code) — the "second opinion" a different model
+    /// gives on a chat/analysis turn, so the user gets multiple minds instead of trusting one model alone.
+    static let answerReviewSystemPrompt = """
+    You are a second expert giving an independent review of another AI's answer. Be a skeptic, not a \
+    cheerleader. In 1–4 tight lines, say only what matters: is anything WRONG, missing, or overstated? \
+    Name concrete errors, unstated assumptions, or a materially better answer. Do NOT restate or summarize \
+    the answer, and do NOT praise. If the answer is sound with nothing to add, reply exactly: LGTM — no issues.
+    """
+
+    /// Build the answer-review prompt, bounded so a huge answer can't blow the reviewer's context.
+    static func answerReviewPrompt(task: String, answer: String, maxChars: Int = 8_000) -> String {
+        let clipped = answer.count > maxChars ? String(answer.prefix(maxChars)) + "\n… [answer truncated]" : answer
+        return """
+        The user asked:
+        \(task.isEmpty ? "(not specified)" : task)
+
+        Another AI answered:
+        \(clipped)
+
+        Review that answer.
+        """
+    }
+
+    /// Is this answer substantive enough to be worth a second opinion? Skips chit-chat / one-liners so the
+    /// default-on review doesn't 2× the cost of a trivial turn.
+    static func isSubstantiveAnswer(_ answer: String) -> Bool {
+        answer.trimmingCharacters(in: .whitespacesAndNewlines).count >= 400
     }
 
     /// R4: the "clean" sentinel the reviewer emits when there is nothing to fix. When the review is NOT

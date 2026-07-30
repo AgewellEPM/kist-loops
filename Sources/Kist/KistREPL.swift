@@ -394,20 +394,45 @@ struct KistREPL {
         // /copilot: after a turn that MUTATED files, have the assigned co-reviewer model critique the actual
         // working-tree diff. Advisory only — it prints findings and never edits/reverts. Skips silently when
         // copilot is off, the turn changed nothing, no completion seam is wired, or the diff is empty.
-        // One review pass over the current working-tree diff. Returns the review text (nil = nothing
-        // to review / no response), so the team loop can decide whether to run a fix round.
-        func runOneReview(task: String) async -> String? {
+        // Pick the reviewer: a model DIFFERENT from the one that just answered — never self-review (that's
+        // the "just repeat yourself" anti-pattern Luke called out). Team mode's explicit `co` wins if it's
+        // distinct; otherwise auto-pick a configured provider ≠ the answering one, cheap/reliable first.
+        // nil ⇒ no distinct reviewer available (skip the review rather than let a model grade its own work).
+        func autoReviewer(answeredBy: ProviderBinding) -> ProviderBinding? {
+            if let co = copilot.co, co.providerId != answeredBy.providerId { return co }
+            let configured = Set(providerAliases.values)
+            let prefer = ["claude-cli", "gemini", "deepseek", "mimo", "codex-cli", "moonshot", "zhipu", "grok"]
+            if let pid = prefer.first(where: { $0 != answeredBy.providerId && configured.contains($0) }) {
+                return ProviderBinding(providerId: pid)
+            }
+            if let pid = configured.first(where: { $0 != answeredBy.providerId }) {
+                return ProviderBinding(providerId: pid)
+            }
+            return nil
+        }
+
+        // One review pass. Reviews the working-tree DIFF for a coding turn, else the substantive ANSWER
+        // text. Reviewer is a DIFFERENT model than the one that answered (autoReviewer). Returns the review
+        // text (nil = nothing worth reviewing / no distinct reviewer / no response).
+        func runOneReview(task: String, answer: String = "") async -> String? {
             guard let modelComplete else { return nil }
-            guard Copilot.shouldReview(trajectory: recorder?.snapshot() ?? []) else { return nil }
-            let diff = Self.workingTreeDiff(projectRoot: projectRoot)
-            guard !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            let co = copilot.co ?? roleSelection.fallback
-            print("\u{001B}[35m⎇ team · \(TeamLanguage.displayName(co.providerId)) reviewing the diff…\u{001B}[0m")
-            let review = await modelComplete(co.providerId, co.model,
-                                             Copilot.reviewSystemPrompt,
-                                             Copilot.reviewPrompt(task: task, diff: diff))
+            guard let co = autoReviewer(answeredBy: activeBinding) else { return nil }
+            let isCoding = Copilot.shouldReview(trajectory: recorder?.snapshot() ?? [])
+            let diff = isCoding ? Self.workingTreeDiff(projectRoot: projectRoot) : ""
+            let system: String, userPrompt: String
+            if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                system = Copilot.reviewSystemPrompt
+                userPrompt = Copilot.reviewPrompt(task: task, diff: diff)
+            } else if Copilot.isSubstantiveAnswer(answer) {
+                system = Copilot.answerReviewSystemPrompt
+                userPrompt = Copilot.answerReviewPrompt(task: task, answer: answer)
+            } else {
+                return nil   // read-only/failed coding turn or chit-chat answer — nothing to second-opinion
+            }
+            print("\u{001B}[35m⎇ second opinion · \(TeamLanguage.displayName(co.providerId)) reviewing…\u{001B}[0m")
+            let review = await modelComplete(co.providerId, co.model, system, userPrompt)
             guard let review, !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                print("\u{001B}[37m⎇ team · \(TeamLanguage.displayName(co.providerId)) had no response\u{001B}[0m")
+                print("\u{001B}[37m⎇ second opinion · \(TeamLanguage.displayName(co.providerId)) had no response\u{001B}[0m")
                 return nil
             }
             print("\u{001B}[35m⎇ review (\(TeamLanguage.displayName(co.providerId))):\u{001B}[0m\n\(review)")
@@ -417,14 +442,17 @@ struct KistREPL {
         // R4: the coder↔reviewer partnership. The co-reviewer critiques the diff; if it flags blocking
         // issues AND auto-fix is armed (team mode), the LEAD runs a bounded fix turn to address them,
         // then the reviewer re-checks — a real team accomplishing the goal, not an advisory print.
-        func runCopilotReview(task: String) async {
+        func runCopilotReview(task: String, answer: String = "", allowAdvisory: Bool = false) async {
             // R2a (review catch): after an interject the user's typed instruction must run NEXT —
             // not after a copilot model call they didn't ask for.
             guard !lastTurnInterrupted else { return }
-            guard copilot.enabled else { return }
-            guard var review = await runOneReview(task: task) else { return }
+            // Run the review when team mode is on (enabled) OR the default-on advisory second opinion applies
+            // to this DIRECT turn (allowAdvisory). Team mode adds the fix loop below; advisory just prints.
+            let advisory = allowAdvisory && copilot.autoSecondOpinion
+            guard copilot.enabled || advisory else { return }
+            guard var review = await runOneReview(task: task, answer: answer) else { return }
 
-            guard copilot.autoFix, let loopFactory else { return }   // advisory-only unless team mode armed
+            guard copilot.enabled, copilot.autoFix, let loopFactory else { return }   // advisory-only unless team mode armed
             var round = 0
             while round < max(1, copilot.maxFixRounds), !Copilot.reviewIsClean(review) {
                 round += 1
@@ -1339,11 +1367,13 @@ struct KistREPL {
                         }
                     case .on:
                         copilot.enabled = true
+                        copilot.autoSecondOpinion = true   // /copilot on restores the second opinion if it was silenced
                         print("\u{001B}[35m⎇ copilot ON\u{001B}[0m — the co-reviewer critiques the diff after each coding turn. " + copilot.statusLine(render: { Self.render($0) }))
                     case .off:
                         copilot.enabled = false
                         copilot.autoFix = false   // also disarm the team review→fix loop (never resurrect it via /copilot on)
-                        print("copilot off — no automatic review or fix.")
+                        copilot.autoSecondOpinion = false   // fully silence — also turns off the default-on advisory second opinion
+                        print("copilot off — no automatic review, second opinion, or fix.")
                     case .setLead(let spec):
                         guard let b = Self.resolveModelSpec(spec, currentProvider: roleSelection.fallback.providerId,
                                                             knownProviders: providerAliases, providerModels: providerModels) else {
@@ -1966,7 +1996,8 @@ struct KistREPL {
             rememberHumanTurn(user: messageText, assistantSummary: oc.summary)
             selfMonitor(goal: messageText, success: oc.success)
             await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-            await runCopilotReview(task: messageText)
+            // Default-on second opinion: a DIFFERENT model reviews this direct turn's work (diff or answer).
+            await runCopilotReview(task: messageText, answer: oc.summary, allowAdvisory: true)
             await printTurnUsage()
         }
     }

@@ -78,11 +78,16 @@ final class ChainCopilotPickerTests: XCTestCase {
 
     func testCopilotStatusLineReflectsState() {
         var cfg = CopilotConfig()
+        // Default: team mode off, but the advisory second opinion is ON (that's the default-on feature).
+        XCTAssertTrue(cfg.statusLine(render: { $0.providerId }).contains("second opinion"))
+        // Fully silenced only when the second opinion is also off.
+        cfg.autoSecondOpinion = false
         XCTAssertTrue(cfg.statusLine(render: { $0.providerId }).contains("off"))
+        // Team mode → the review→fix loop.
         cfg.enabled = true
         cfg.co = ProviderBinding(providerId: "gemini")
         let line = cfg.statusLine(render: { $0.providerId })
-        XCTAssertTrue(line.contains("on"))
+        XCTAssertTrue(line.contains("team"))
         XCTAssertTrue(line.contains("gemini"))
         XCTAssertTrue(line.contains("session model"))   // lead unset ⇒ session model
     }
