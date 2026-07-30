@@ -27,6 +27,55 @@ final class AutoSecondOpinionTests: XCTestCase {
         XCTAssertLessThan(p.count, 8600)
     }
 
+    // THE FIX: the reviewer was context-blind (no idea what "Kist" is) → answered "can't verify these claims"
+    // instead of reviewing. Passing projectContext must inject a labeled BACKGROUND block carrying that
+    // grounding, for BOTH the answer-review and the diff-review paths.
+    func testProjectContextGroundsBothReviewPrompts() {
+        let ctx = "You are Kist: an autonomous coding + research Captain. Source at /Volumes/PRO-G40/kist-loops."
+        let answerP = Copilot.answerReviewPrompt(task: "what happens when agents finish",
+                                                 answer: String(repeating: "A", count: 500), projectContext: ctx)
+        XCTAssertTrue(answerP.contains("BACKGROUND"), "the reviewer must receive a labeled background block")
+        XCTAssertTrue(answerP.contains("autonomous coding + research Captain"),
+                      "the actual grounding text must be present so the reviewer knows what Kist is")
+        XCTAssertTrue(answerP.contains("NOT as the answer you are reviewing"),
+                      "background must be fenced off from the answer under review")
+
+        let diffP = Copilot.reviewPrompt(task: "add a flag", diff: "diff --git a b", projectContext: ctx)
+        XCTAssertTrue(diffP.contains("BACKGROUND"))
+        XCTAssertTrue(diffP.contains("autonomous coding + research Captain"))
+    }
+
+    // Backward-compat: an empty projectContext builds the SAME prompt as before (no stray background block),
+    // so ungrounded callers/tests are unaffected.
+    func testEmptyProjectContextAddsNoGrounding() {
+        XCTAssertEqual(Copilot.groundingBlock(""), "")
+        XCTAssertEqual(Copilot.groundingBlock("   \n  "), "", "whitespace-only context adds nothing")
+        let p = Copilot.answerReviewPrompt(task: "q", answer: String(repeating: "A", count: 500))
+        XCTAssertFalse(p.contains("BACKGROUND"), "no context ⇒ no background block (unchanged behaviour)")
+        XCTAssertTrue(p.hasPrefix("The user asked:"))
+    }
+
+    // The grounding block is bounded so a huge project memory can't crowd out the answer being reviewed.
+    func testGroundingBlockIsBounded() {
+        let huge = String(repeating: "K", count: 20_000)
+        let block = Copilot.groundingBlock(huge, maxChars: 6_000)
+        XCTAssertTrue(block.contains("[context truncated]"))
+        // clipped content (≤6000) + the fixed wrapper/label text — bounded well under the untruncated 20k.
+        XCTAssertLessThan(block.count, 6_800)
+    }
+
+    // Wiring source pin: the review path must actually BUILD grounding and pass it into the prompt builders —
+    // else the fix is dead code. Pins reviewerGrounding() (self-identity + project memory) and its use.
+    func testReviewPassesGroundingToThePromptBuilders() {
+        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("func reviewerGrounding()"),
+                      "there must be a helper that assembles the reviewer's grounding")
+        XCTAssertTrue(repl.contains("kistSelfContext()") && repl.contains("ProjectMemory(root: projectRoot).facts()"),
+                      "grounding must reuse the primary turn's self-identity brief + durable project memory")
+        XCTAssertTrue(repl.contains("projectContext: grounding"),
+                      "the grounding must be threaded into BOTH review prompt builders")
+    }
+
     func testCopilotOffSilencesTheSecondOpinion() {
         // Source pin: `/copilot off` must clear autoSecondOpinion, not just team mode — else "off" leaves
         // the per-turn second-opinion call running and the user can't quiet it.

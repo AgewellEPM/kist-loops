@@ -411,6 +411,17 @@ struct KistREPL {
             return nil
         }
 
+        // The grounding handed to the second-opinion reviewer so it isn't context-blind. Same self-identity
+        // brief the primary turn rides on (so the reviewer knows what "Kist" IS) + durable project memory
+        // (AGENTS.md/CLAUDE.md/facts). Without this the reviewer answers "I've never heard of this system,
+        // can't verify the claims" instead of actually reviewing — the brain-dead second opinion.
+        func reviewerGrounding() -> String {
+            var parts = [kistSelfContext()]
+            let facts = ProjectMemory(root: projectRoot).facts()
+            if !facts.isEmpty { parts.append("[PROJECT MEMORY]\n" + facts) }
+            return parts.joined(separator: "\n\n")
+        }
+
         // One review pass. Reviews the working-tree DIFF for a coding turn, else the substantive ANSWER
         // text. Reviewer is a DIFFERENT model than the one that answered (autoReviewer). Returns the review
         // text (nil = nothing worth reviewing / no distinct reviewer / no response).
@@ -419,13 +430,17 @@ struct KistREPL {
             guard let co = autoReviewer(answeredBy: activeBinding) else { return nil }
             let isCoding = Copilot.shouldReview(trajectory: recorder?.snapshot() ?? [])
             let diff = isCoding ? Self.workingTreeDiff(projectRoot: projectRoot) : ""
+            // Ground the reviewer in the SAME context the primary turn had — its self-identity brief plus
+            // durable project memory. Without this the second model is context-blind about the domain (it
+            // has never heard of "Kist") and answers "I can't verify these claims" instead of reviewing.
+            let grounding = reviewerGrounding()
             let system: String, userPrompt: String
             if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 system = Copilot.reviewSystemPrompt
-                userPrompt = Copilot.reviewPrompt(task: task, diff: diff)
+                userPrompt = Copilot.reviewPrompt(task: task, diff: diff, projectContext: grounding)
             } else if Copilot.isSubstantiveAnswer(answer) {
                 system = Copilot.answerReviewSystemPrompt
-                userPrompt = Copilot.answerReviewPrompt(task: task, answer: answer)
+                userPrompt = Copilot.answerReviewPrompt(task: task, answer: answer, projectContext: grounding)
             } else {
                 return nil   // read-only/failed coding turn or chit-chat answer — nothing to second-opinion
             }
