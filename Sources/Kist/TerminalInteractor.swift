@@ -117,6 +117,10 @@ actor TerminalInteractor: RuntimeInteractor {
             }
         }
         if ["n", "no", "skip"].contains(lower) { return nil }
+        // A stray punctuation keystroke ("$", ";") typed at an approval must NOT become the next turn's
+        // prompt — that ran a garbage `ask_user` turn instead of the user's real question. Require real
+        // (alphanumeric) content, same gate as the type-ahead queue.
+        guard TurnInputQueue.isQueueableInstruction(trimmed) else { return nil }
         return trimmed
     }
 }

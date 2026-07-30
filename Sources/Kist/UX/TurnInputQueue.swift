@@ -36,6 +36,13 @@ final class TurnInputQueue: @unchecked Sendable {
     func begin() { lock.lock(); collecting = true; typedThisTurn = false; lock.unlock() }
     func end() { lock.lock(); collecting = false; lock.unlock() }
 
+    /// A committed line is only queued as a real instruction if it has SOME alphanumeric content — a stray
+    /// punctuation keystroke ("$", ";", "!") is not an instruction and must never become the next turn
+    /// (the garbage-turn bug: a queued "$" ran `ask_user` instead of the user's real question). Pure/testable.
+    static func isQueueableInstruction(_ line: String) -> Bool {
+        line.rangeOfCharacter(from: .alphanumerics) != nil
+    }
+
     /// One raw byte from the watcher. Printable bytes accumulate; Enter commits a line;
     /// backspace removes the last UTF-8 scalar; other control bytes are ignored.
     func feed(_ b: UInt8) {
@@ -45,7 +52,7 @@ final class TurnInputQueue: @unchecked Sendable {
         case 0x0D, 0x0A:                                  // Enter → commit the line
             let line = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             bytes.removeAll()
-            if !line.isEmpty { queued.append(line) }
+            if !line.isEmpty, Self.isQueueableInstruction(line) { queued.append(line) }
         case 0x7F, 0x08:                                  // backspace → drop last scalar:
             // strip trailing CONTINUATION bytes (10xxxxxx) first, then the lead byte.
             while let last = bytes.last, last & 0b1100_0000 == 0b1000_0000 { bytes.removeLast() }
@@ -90,7 +97,7 @@ final class TurnInputQueue: @unchecked Sendable {
         guard typedThisTurn else { lock.unlock(); return }
         let line = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         bytes.removeAll()
-        if !line.isEmpty { queued.append(line) }
+        if !line.isEmpty, Self.isQueueableInstruction(line) { queued.append(line) }
         lock.unlock()
     }
 
