@@ -7,6 +7,9 @@ import AgentCore
 final class TUIEventSink: RuntimeEventSink, @unchecked Sendable {
     private let ui: TerminalUI
     private let showReasoning: Bool
+    // Same double-print guard as TerminalEventSink: if the answer already streamed inline via tokenDelta,
+    // don't reprint it as the "done · <summary>" tail. Reset at each terminal event. (Bug fix 2026-07-29.)
+    private var textWasStreamed = false
     init(ui: TerminalUI, showReasoning: Bool = false) { self.ui = ui; self.showReasoning = showReasoning }
 
     private func c(_ code: String, _ s: String) -> String { TerminalANSI.color(code, s) }
@@ -14,6 +17,7 @@ final class TUIEventSink: RuntimeEventSink, @unchecked Sendable {
     func emit(_ event: RuntimeEvent) {
         switch event {
         case .tokenDelta(let t):
+            textWasStreamed = true
             ui.appendTranscript(t.replacingOccurrences(of: "\n", with: "\r\n"))
         case .reasoningDelta(let r):
             if showReasoning { ui.appendTranscript(c("2;3", r.replacingOccurrences(of: "\n", with: "\r\n"))) }
@@ -31,11 +35,15 @@ final class TUIEventSink: RuntimeEventSink, @unchecked Sendable {
                 ui.appendTranscript(c("36", "│ ") + c("31;1", "✗ ") + c("31", String((error ?? output).prefix(200))) + "\r\n")
             }
         case .completed(let summary):
-            ui.appendTranscript("\r\n" + c("32;1", "● ") + c("32", "done") + (summary.isEmpty ? "" : c("2", " · " + summary)) + "\r\n")
+            let tail = (textWasStreamed || summary.isEmpty) ? "" : c("2", " · " + summary)
+            ui.appendTranscript("\r\n" + c("32;1", "● ") + c("32", "done") + tail + "\r\n")
+            textWasStreamed = false
         case .failed(let reason):
             ui.appendTranscript("\r\n" + c("31;1", "● ") + c("31", "failed") + c("2", " · " + reason) + "\r\n")
+            textWasStreamed = false
         case .cancelled:
             ui.appendTranscript("\r\n" + c("33;1", "● ") + c("33", "stopped") + "\r\n")
+            textWasStreamed = false
         default:
             break
         }

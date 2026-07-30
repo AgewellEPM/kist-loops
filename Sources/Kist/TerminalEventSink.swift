@@ -19,6 +19,12 @@ struct TerminalEventSink: RuntimeEventSink {
         var liveLabel = "thinking"
         var liveSeed = 0              // varies the starting spinner word per live session
         var streamedChars = 0
+        // "Was the final answer already shown inline this turn?" — set on any tokenDelta, reset ONLY at a
+        // terminal event (completed/failed/cancelled). UNLIKE `streamedChars`, `finishLiveStatus` must NOT
+        // touch it: `.stateChanged(.completed)` calls finishLiveStatus (which zeroes streamedChars) IMMEDIATELY
+        // before `.completed` renders, so a streamedChars-based guard is always false by then and the whole
+        // answer double-prints as the "done" tail. This flag survives that reset. (Bug fix 2026-07-29.)
+        var textWasStreamed = false
         var promptTokens = 0
         var completionTokens = 0
         var usageEstimated = false
@@ -117,6 +123,7 @@ struct TerminalEventSink: RuntimeEventSink {
         case .tokenDelta(let t):
             proofStore?.record(.init(kind: .assistant, tool: nil, success: nil, text: t))   // proof keeps raw
             state.streamedChars += t.count
+            state.textWasStreamed = true                                   // final answer shown inline ⇒ don't reprint on "done"
             finishLiveStatus(clearOnly: true)
             write(Self.spaceListItems(t))                                  // assistant prose, list-spaced
         case .usage(let promptTokens, let completionTokens, let estimated):
@@ -210,14 +217,18 @@ struct TerminalEventSink: RuntimeEventSink {
             proofStore?.record(.init(kind: .completed, tool: nil, success: true, text: summary))
             // The final answer was ALREADY streamed live (tokenDelta). Don't reprint the whole thing on the
             // "done" line — only surface the summary when nothing visible was streamed (e.g. a tool-only
-            // turn). Otherwise every answer showed twice.
-            let tail = (state.streamedChars > 0 || summary.isEmpty) ? "" : c("37", " · " + summary)
+            // turn). Guard on `textWasStreamed`, NOT `streamedChars`: the `.stateChanged(.completed)` that
+            // fires just before this event resets streamedChars to 0, so the old streamedChars>0 guard was
+            // always false here and every answer printed twice. (Bug fix 2026-07-29.)
+            let tail = (state.textWasStreamed || summary.isEmpty) ? "" : c("37", " · " + summary)
             print("\n" + c("32;1", "●") + c("32", " done") + tail)
+            state.textWasStreamed = false                         // turn over — next turn starts un-streamed
         case .failed(let reason):
             finishLiveStatus()
             state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             proofStore?.record(.init(kind: .failed, tool: nil, success: false, text: reason))
             print("\n" + c("31;1", "●") + c("31", " failed") + c("37", " · " + ErrorHumanizer.humanize(reason)))
+            state.textWasStreamed = false                         // turn over
         case .contextCompacted(let omitted):
             finishLiveStatus(clearOnly: true)
             print(c("2", "⟢ compacted \(omitted) earlier step(s) into a summary — staying within context"))
@@ -225,6 +236,7 @@ struct TerminalEventSink: RuntimeEventSink {
             finishLiveStatus()
             state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             print("\n" + c("33;1", "●") + c("33", " stopped"))
+            state.textWasStreamed = false                         // turn over
         case .planReady(let summary, let stepCount):
             // R0.1 (2026-07-28): this event was previously UNHANDLED (fell into `default: break`),
             // so the planning spinner's 1s timer kept overwriting the approval prompt's input line —
