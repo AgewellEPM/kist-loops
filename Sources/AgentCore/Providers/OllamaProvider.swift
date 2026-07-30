@@ -33,6 +33,10 @@ public struct OllamaProvider: ChatProvider {
         return "http://localhost:11434/api/chat"
     }
 
+    /// Liveness-probe URL so a fan-out (wide council) can skip Ollama when the daemon isn't running,
+    /// instead of wasting a panel slot. Local by definition unless OLLAMA_HOST points elsewhere.
+    public var healthProbeURL: String? { endpoint }
+
     /// Build the request body — pure/testable.
     public func makeBody(messages: [ChatMessage], model: String, settings: ModelSettings) -> [String: Any] {
         var apiMessages: [[String: Any]] = []

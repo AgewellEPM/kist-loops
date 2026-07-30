@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Sentinel passed to `fallbackFinalPlan` when the council halts on `--budget` rather than a provider
 /// error — so the fallback plan reads as an honest budget stop, not a failure.
@@ -225,10 +230,25 @@ public struct AICouncil: Sendable {
         let normalizedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         await heartbeat(status: "council", message: "dig-in-deep started")
 
-        // Reachable providers, FREE/keyless first (claude-cli/codex-cli/mlx/ollama), then keyed. Dedup by
-        // id, cap at maxMinds. The catalog already drops CLI providers whose binary isn't installed.
-        let reachable = providers.providers
-            .filter { providers.hasKey(for: $0) }
+        // Candidate providers: has a key (or is keyless). The catalog already drops CLI providers whose
+        // binary isn't installed.
+        let keyed = providers.providers.filter { providers.hasKey(for: $0) }
+        // Drop LOCAL providers (mlx/ollama) whose server isn't answering — a keyless local server passes
+        // `hasKey` even when its process is down, so without this it eats a panel slot a WORKING model
+        // could use (the bug Luke hit: mlx/ollama ate slots, gemini/deepseek never got asked). Probe the
+        // local endpoints in parallel with a short timeout; remote providers are trusted (a real outage
+        // just degrades to a failed mind).
+        let liveness: [Bool] = await withTaskGroup(of: (Int, Bool).self) { group in
+            for (i, p) in keyed.enumerated() {
+                let probe = p.healthProbeURL
+                group.addTask { (i, probe == nil ? true : await Self.isEndpointLive(probe!, timeout: 1.5)) }
+            }
+            var out = [Bool](repeating: true, count: keyed.count)
+            for await (i, ok) in group { out[i] = ok }
+            return out
+        }
+        // FREE/keyless first (claude-cli/codex-cli then live locals), then keyed API models. Dedup, cap.
+        let reachable = zip(keyed, liveness).filter { $0.1 }.map { $0.0 }
             .sorted { ($0.requiresAPIKey ? 1 : 0) < ($1.requiresAPIKey ? 1 : 0) }
         var seen = Set<String>()
         let chosen = Array(reachable.filter { seen.insert($0.id).inserted }.prefix(maxMinds))
@@ -341,6 +361,55 @@ public struct AICouncil: Sendable {
         } catch {
             return Self.fallbackFinalPlan(error: error, minds: minds)
         }
+    }
+
+    /// Fast liveness check for a LOCAL provider endpoint via a raw non-blocking TCP `connect()` + `poll()`:
+    /// a completed handshake (SO_ERROR == 0) means the server is up; connection-refused or timeout means
+    /// it's down. Deterministic, unlike a URLSession GET or NWConnection (which reported `.ready`
+    /// optimistically on a refused loopback port). Used to skip dead local servers so they don't crowd
+    /// working models out of the wide-council panel.
+    static func isEndpointLive(_ urlString: String, timeout: TimeInterval) async -> Bool {
+        guard let url = URL(string: urlString), let host = url.host else { return false }
+        let port = url.port ?? (url.scheme == "https" ? 443 : 80)
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.global().async {
+                cont.resume(returning: Self.tcpConnectable(host: host, port: port, timeout: timeout))
+            }
+        }
+    }
+
+    /// Blocking non-blocking-socket connect probe (run off the cooperative pool). Returns true iff a TCP
+    /// handshake to host:port completes within `timeout`.
+    private static func tcpConnectable(host: String, port: Int, timeout: TimeInterval) -> Bool {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &res) == 0 else { return false }
+        defer { freeaddrinfo(res) }
+        var ai = res
+        while let a = ai {
+            let fd = socket(a.pointee.ai_family, a.pointee.ai_socktype, a.pointee.ai_protocol)
+            if fd >= 0 {
+                let fl = fcntl(fd, F_GETFL, 0)
+                _ = fcntl(fd, F_SETFL, fl | O_NONBLOCK)
+                let rc = connect(fd, a.pointee.ai_addr, a.pointee.ai_addrlen)
+                if rc == 0 { close(fd); return true }                      // immediate (fast loopback)
+                if errno == EINPROGRESS {
+                    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    if poll(&pfd, 1, Int32(max(0, timeout) * 1000)) > 0 {
+                        var soErr: Int32 = 0
+                        var len = socklen_t(MemoryLayout<Int32>.size)
+                        getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &len)
+                        close(fd)
+                        return soErr == 0                                  // handshake completed cleanly
+                    }
+                }
+                close(fd)                                                  // refused / timed out
+            }
+            ai = a.pointee.ai_next
+        }
+        return false
     }
 
     /// Race an async op against a wall clock; throws `CouncilMindTimeout` if the timer wins.

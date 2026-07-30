@@ -296,7 +296,12 @@ public struct CLIChatProvider: ChatProvider {
                     "--disable", "shell_tool",
                     "--disable", "unified_exec",
                 ]
-                if !model.isEmpty { a += ["--model", model] }
+                // Do NOT force `--model` for the default: codex's API model ids (e.g. "gpt-5.5-codex")
+                // are REJECTED on a ChatGPT *subscription* account ("model is not supported when using
+                // Codex with a ChatGPT account") — the account dictates the model. Omitting `--model`
+                // uses the account default, which works. An explicit non-default override still passes
+                // through for accounts that support model selection. (Bug fix 2026-07-29.)
+                if !model.isEmpty && model != "gpt-5.5-codex" { a += ["--model", model] }
                 return a
             },
             parseOutput: { raw in Self.extractCodexAnswer(raw) }

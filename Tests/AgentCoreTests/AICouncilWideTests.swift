@@ -54,6 +54,20 @@ final class AICouncilWideTests: XCTestCase {
         XCTAssertTrue(result.finalPlan.contains("merged from two"), "synthesis still runs from the surviving minds")
     }
 
+    func testRunWideSkipsDeadLocalProvidersSoWorkingModelsGetTheSlots() async {
+        // A LOCAL provider (healthProbeURL set) whose server is down must be skipped, not eat a slot —
+        // the exact bug: mlx/ollama ate the free-first slots and keyed models never got asked.
+        let deadLocal = WideLocalProvider(id: "mlxdead", probeURL: "http://127.0.0.1:59321/down")  // nothing listening
+        let working = WideScriptedProvider(id: "gemini-like", responses: ["real answer", "Decision:\n- from the working model."])
+        let registry = ProviderRegistry(providers: [deadLocal, working], keyStore: WideNullKeys())
+        let roles = RoleBindings(default: ProviderBinding(providerId: "gemini-like"))
+
+        let result = await AICouncil(providers: registry, roles: roles).runWide(goal: "decide", maxMinds: 1)
+
+        XCTAssertEqual(result.minds.map(\.name), ["gemini-like"],
+                       "a dead LOCAL provider must be probed-out so a WORKING model takes the capped slot")
+    }
+
     func testRunWideCapsAtMaxMinds() async {
         let a = WideScriptedProvider(id: "alpha", responses: ["a", "Decision:\n- capped."])
         let b = WideScriptedProvider(id: "bravo", responses: ["b"])
@@ -121,6 +135,32 @@ private struct WideFailingProvider: ChatProvider {
 
     func stream(messages: [ChatMessage], model: String, settings: ModelSettings, apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
         throw AIProviderError.transport("charlie down")
+    }
+}
+
+/// A LOCAL provider (non-nil healthProbeURL) that never answers — its probe URL points at a dead port,
+/// so the liveness check should skip it before it ever reaches `stream`.
+private struct WideLocalProvider: ChatProvider {
+    let id: String
+    let name: String
+    let iconName = "desktopcomputer"
+    let requiresAPIKey = false
+    let keyAccount: String
+    let defaultModel: String
+    let availableModels: [AIModel]
+    let healthProbeURL: String?
+
+    init(id: String, probeURL: String) {
+        self.id = id
+        self.name = id
+        self.keyAccount = id
+        self.defaultModel = "\(id)-default"
+        self.availableModels = [AIModel(id: "\(id)-default")]
+        self.healthProbeURL = probeURL
+    }
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings, apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        throw AIProviderError.transport("dead local server should never be called")
     }
 }
 

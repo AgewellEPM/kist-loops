@@ -182,6 +182,12 @@ public struct OpenAICompatibleProvider: ChatProvider {
     /// Layer B: the `/models` URL derived from this provider's chat endpoint.
     public var modelsListEndpoint: String? { ProviderDoctor.modelsEndpoint(for: self) }
 
+    /// Liveness-probe URL for a LOCAL server (e.g. MLX at localhost:8080) so a fan-out can skip it when its
+    /// process is down; nil for remote endpoints (their outage degrades to a failed mind instead).
+    public var healthProbeURL: String? {
+        (endpoint.contains("localhost") || endpoint.contains("127.0.0.1")) ? endpoint : nil
+    }
+
     /// JSON Schema (object) for a tool's parameters, from the neutral `[ToolParameter]`.
     public static func jsonSchema(_ params: [ToolParameter]) -> [String: Any] {
         var props: [String: Any] = [:]

@@ -74,6 +74,11 @@ public protocol ChatProvider: Sendable {
     /// so an override dispatches through an `any ChatProvider` existential.
     var modelsListEndpoint: String? { get }
 
+    /// Liveness-probe URL for a LOCAL provider (mlx/ollama). A REQUIREMENT — not merely an extension default —
+    /// so an override dispatches through an `any ChatProvider` existential (an extension-only member resolves
+    /// statically to nil for every existential and would never probe). Only local providers return non-nil.
+    var healthProbeURL: String? { get }
+
     /// Stream WITH native tool definitions. Default ignores `tools` and forwards to `stream`
     /// (the text-protocol path). Providers that support native tools override this to send the
     /// tool schema and emit `StreamEvent.toolCall`.
@@ -90,6 +95,11 @@ public extension ChatProvider {
     var iconName: String { "cpu" }
     var supportsNativeTools: Bool { false }
     var modelsListEndpoint: String? { nil }   // default: no OpenAI-shaped /models list
+    /// A URL to fast-liveness-probe a LOCAL provider (mlx/ollama) before including it in a fan-out like the
+    /// wide council — a keyless local server passes `hasKey` even when its process is down, so it would
+    /// otherwise eat a panel slot a working model could use. nil = remote/trusted (no probe; a real outage
+    /// just degrades to a failed mind). Only local providers override this. (Added 2026-07-29.)
+    var healthProbeURL: String? { nil }
     func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
                      apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
         try await stream(messages: messages, model: model, settings: settings, apiKey: apiKey)
