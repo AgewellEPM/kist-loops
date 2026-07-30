@@ -6,6 +6,12 @@ struct CouncilBudgetExceeded: Error, CustomStringConvertible {
     var description: String { "token budget exceeded — council synthesized from completed minds without a final model call" }
 }
 
+/// Thrown by `AICouncil.withTimeout` when a wide-council mind exceeds its wall-clock budget, so one hung
+/// provider degrades to a `failed` mind instead of stalling the whole panel.
+struct CouncilMindTimeout: Error, CustomStringConvertible {
+    var description: String { "mind timed out" }
+}
+
 public struct CouncilMindResult: Sendable, Codable, Equatable {
     public let name: String
     public let role: String
@@ -195,6 +201,160 @@ public struct AICouncil: Sendable {
         await heartbeat(status: "council", message: "council completed")
         return CouncilRunResult(goal: normalizedGoal, minds: minds, finalPlan: finalPlan,
                                 markdown: markdown, builderBrief: builderBrief)
+    }
+
+    // MARK: - "dig in deep" — the WIDE council
+
+    /// Natural-language trigger for the wide council. Deliberately narrow: fires only on an explicit
+    /// "ask everyone" intent, never on incidental phrasing, so a normal message is never hijacked.
+    public static func looksLikeDigDeep(_ input: String) -> Bool {
+        let t = input.lowercased()
+        let phrases = ["dig in deep", "dig deep", "consult the minds", "consult the mind",
+                       "ask all the models", "ask all of the models", "all of the ai models",
+                       "all the ai models", "every model", "consult all the", "get multiple opinions",
+                       "multiple models weigh in", "council of models", "ask everyone"]
+        return phrases.contains { t.contains($0) }
+    }
+
+    /// "Dig in deep" — ask EVERY reachable model the SAME question IN PARALLEL, then synthesize where they
+    /// AGREE and DISAGREE. Unlike `run()`, this is NOT role-based and builds no kanban: it's a multi-mind
+    /// second-opinion panel ("consult the minds, not repeat the same answer"). Free/keyless providers are
+    /// asked first (cheap, no metering); capped at `maxMinds`; each mind has its own wall-clock timeout so
+    /// one hung provider can't stall the report; budget-gated like `run()`.
+    public func runWide(goal: String, maxMinds: Int = 5, perMindTimeout: TimeInterval = 90) async -> CouncilRunResult {
+        let normalizedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        await heartbeat(status: "council", message: "dig-in-deep started")
+
+        // Reachable providers, FREE/keyless first (claude-cli/codex-cli/mlx/ollama), then keyed. Dedup by
+        // id, cap at maxMinds. The catalog already drops CLI providers whose binary isn't installed.
+        let reachable = providers.providers
+            .filter { providers.hasKey(for: $0) }
+            .sorted { ($0.requiresAPIKey ? 1 : 0) < ($1.requiresAPIKey ? 1 : 0) }
+        var seen = Set<String>()
+        let chosen = Array(reachable.filter { seen.insert($0.id).inserted }.prefix(maxMinds))
+        guard !chosen.isEmpty else {
+            let none = "Decision:\n- No reachable models. Set a provider key in ~/.config/kist/secrets.env or install claude-cli / codex-cli."
+            return CouncilRunResult(goal: normalizedGoal, minds: [], finalPlan: none, markdown: none, builderBrief: "")
+        }
+
+        // Fan out — each mind answers the SAME question independently, order preserved for a stable report.
+        let question = normalizedGoal
+        let minds: [CouncilMindResult] = await withTaskGroup(of: (Int, CouncilMindResult).self) { group in
+            for (i, p) in chosen.enumerated() {
+                let (pid, model, label) = (p.id, p.defaultModel, p.name)
+                group.addTask {
+                    (i, await self.askWide(providerId: pid, model: model, label: label,
+                                           question: question, timeout: perMindTimeout))
+                }
+            }
+            var slots = [CouncilMindResult?](repeating: nil, count: chosen.count)
+            for await (i, r) in group { slots[i] = r }
+            return slots.compactMap { $0 }
+        }
+
+        let answered = minds.filter { !$0.failed }
+        let finalPlan: String
+        if answered.count >= 2 {
+            finalPlan = await synthesizeWide(goal: normalizedGoal, minds: answered)
+        } else if let only = answered.first {
+            finalPlan = "Decision:\n- Only one model was reachable (\(only.name)); no cross-check was possible. Its answer stands above."
+        } else {
+            finalPlan = "Decision:\n- Every model failed to answer — see the per-model errors above."
+        }
+        let markdown = Self.renderMarkdown(goal: normalizedGoal, minds: minds, finalPlan: finalPlan)
+        await heartbeat(status: "council", message: "dig-in-deep completed")
+        return CouncilRunResult(goal: normalizedGoal, minds: minds, finalPlan: finalPlan,
+                                markdown: markdown, builderBrief: "")
+    }
+
+    /// One wide-council mind: ask a single provider the raw question, raced against a wall-clock timeout so
+    /// a hung provider degrades to a `failed` mind instead of stalling the whole panel.
+    private func askWide(providerId: String, model: String, label: String,
+                         question: String, timeout: TimeInterval) async -> CouncilMindResult {
+        let binding = ProviderBinding(providerId: providerId, model: model)
+        if let budget, await budget.isExceeded() {
+            return CouncilMindResult(name: label, role: "mind", binding: binding,
+                                     output: "SKIPPED — token budget exceeded before this mind ran.", failed: true)
+        }
+        let messages = [ChatMessage(role: .user, content: question)]
+        let settings = ModelSettings(temperature: 0.3, maxTokens: 1200,
+                                     systemPrompt: "You are ONE of several independent expert AI models answering the SAME question in parallel for a 'consult the minds' panel. Answer DIRECTLY and concretely. State your key claims and explicitly flag anything you are unsure about. No meta-commentary about being an AI. Substantive but concise.",
+                                     disableThinking: true)
+        let started = Date()
+        await heartbeat(status: "council", message: "\(label) started")
+        do {
+            let (text, usage) = try await Self.withTimeout(seconds: timeout) {
+                try await self.providers.completeWithUsage(providerId: providerId, model: model,
+                                                           messages: messages, settings: settings)
+            }
+            await record(role: "council_mind_\(label.lowercased())", binding: binding, usage: usage,
+                         promptChars: question.count, completionChars: text.count, started: started, status: .ok)
+            await heartbeat(status: "council", message: "\(label) completed")
+            return CouncilMindResult(name: label, role: "mind", binding: binding, output: text.trimmedOrPlaceholder())
+        } catch {
+            await record(role: "council_mind_\(label.lowercased())", binding: binding, usage: .zero,
+                         promptChars: question.count, completionChars: 0, started: started, status: .error)
+            await heartbeat(status: "council", message: "\(label) failed")
+            let reason = (error is CouncilMindTimeout) ? "TIMED OUT after \(Int(timeout))s" : "FAILED: \(error)"
+            return CouncilMindResult(name: label, role: "mind", binding: binding, output: reason, failed: true)
+        }
+    }
+
+    /// Merge the wide panel's answers into ONE decisive verdict with explicit agree/disagree. Uses the
+    /// planner binding (a strong model). Produces a `Decision:` section so CouncilCard renders it.
+    private func synthesizeWide(goal: String, minds: [CouncilMindResult]) async -> String {
+        let binding = roles.binding(for: .planner)
+        if let budget, await budget.isExceeded() { return Self.fallbackFinalPlan(error: CouncilBudgetExceeded(), minds: minds) }
+        let transcript = minds.map { "### \($0.name) (\($0.binding?.model ?? "?"))\n\($0.output)" }.joined(separator: "\n\n")
+        let prompt = """
+        Several INDEPENDENT AI models answered the SAME question below. Synthesize their answers — do not
+        just summarize each in turn; produce ONE merged verdict.
+
+        Output shape:
+        Decision:
+        - The single strongest merged answer to the question.
+
+        Agreement:
+        - Where the models agree.
+
+        Disagreement:
+        - Where they diverge, and which position is more credible and why.
+
+        Confidence: <low|medium|high> — one line why.
+
+        Question:
+        \(goal)
+
+        Model answers:
+        \(transcript)
+        """
+        let messages = [ChatMessage(role: .user, content: prompt)]
+        let settings = ModelSettings(temperature: 0.2, maxTokens: 1600,
+                                     systemPrompt: "You merge multiple expert opinions into one decisive, honest answer, naming agreement and disagreement plainly.",
+                                     disableThinking: true)
+        do {
+            let (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
+                                                                      messages: messages, settings: settings)
+            await record(role: "council_wide_synthesis", binding: binding, usage: usage,
+                         promptChars: prompt.count, completionChars: text.count, started: Date(), status: .ok)
+            return text.trimmedOrPlaceholder()
+        } catch {
+            return Self.fallbackFinalPlan(error: error, minds: minds)
+        }
+    }
+
+    /// Race an async op against a wall clock; throws `CouncilMindTimeout` if the timer wins.
+    static func withTimeout<T: Sendable>(seconds: TimeInterval, _ op: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await op() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                throw CouncilMindTimeout()
+            }
+            defer { group.cancelAll() }
+            let first = try await group.next()!
+            return first
+        }
     }
 
     /// Convenience for tests / simple callers: parse a critic's output, ground each finding, render the

@@ -18,6 +18,9 @@ struct KistREPL {
     var planExecute: ((_ goal: String, _ roles: RoleBindings) async -> Void)? = nil
     /// Run an AI council (researcher -> architect -> coder -> critic -> UX -> memory -> final board).
     var council: ((_ goal: String, _ roles: RoleBindings, _ execute: Bool) async -> Void)? = nil
+    /// "Dig in deep" / "consult the minds": ask EVERY reachable model the same question in parallel and
+    /// synthesize agree/disagree — the multi-model second opinion, instead of one model answering alone.
+    var digDeep: ((_ goal: String, _ roles: RoleBindings) async -> Void)? = nil
     /// Run an evidence-first research pass, feed the dossier to council, and seed the shared board.
     var research: ((_ goal: String, _ roles: RoleBindings) async -> Void)? = nil
     /// Forge a specialist from a plain-English role description (AgentForge), bounded by the loop's tool
@@ -1710,6 +1713,11 @@ struct KistREPL {
                     }
                     await council(invocation.goal, roleSelection.bindings, invocation.execute)
                     continue
+                case "dig", "digdeep", "minds", "mind":
+                    guard let digDeep else { print("\u{001B}[31m/dig isn't available here\u{001B}[0m"); continue }
+                    guard !args.isEmpty else { print("usage: /dig <question> — ask every reachable model in parallel and synthesize"); continue }
+                    await digDeep(args, roleSelection.bindings)
+                    continue
                 case "research":
                     let researchGoal = args.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !researchGoal.isEmpty else { print("usage: /research <goal>"); continue }
@@ -1896,6 +1904,13 @@ struct KistREPL {
             // A team goal runs as a team-armed turn so the coder↔reviewer review→fix loop actually
             // fires — an accepted fleet/plan escalation would `continue` past runCopilotReview and drop
             // the partnership the user just asked for (review catch).
+            // "Dig in deep" / "consult the minds": an explicit ask to hear from EVERY reachable model, not
+            // one model answering (and re-answering) alone. Fires only on the narrow phrase set, so a normal
+            // message is never hijacked; runs before the router so it isn't shadowed by a research proposal.
+            if let digDeep, !lineFromQueue, AICouncil.looksLikeDigDeep(messageText) {
+                await digDeep(messageText, roleSelection.bindings)
+                continue
+            }
             if let router, !lineFromQueue, !armedTeamThisTurn, let proposal = await router.propose(messageText) {
                 FileHandle.standardOutput.write(Data(("\u{001B}[33m" + proposal.prompt + " \u{001B}[0m").utf8))
                 let ans = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces).lowercased()

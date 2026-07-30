@@ -734,6 +734,20 @@ enum KistRunner {
                                          providerId: providerId, model: model, rolesOverride: roles)
                     }
                 }
+                repl.digDeep = { g, roles in
+                    // "Dig in deep" / "consult the minds": same ESC watcher as council — top-level, sequential.
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
+                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                        if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                        else { TurnInputQueue.shared.commitPending() }
+                        print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
+                              + " — dig-in-deep stopped\u{001B}[0m")
+                    }) {
+                        _ = await runWideCouncil(opts, goal: g, registry: registry, root: root,
+                                                 providerId: providerId, model: model, rolesOverride: roles)
+                    }
+                }
                 repl.research = { g, roles in
                     // R1 sibling: same watcher for the research pipeline.
                     TurnInputQueue.shared.begin()
@@ -1398,6 +1412,27 @@ enum KistRunner {
         return await runPlanExecute(opts, goal: builderGoal, registry: registry, root: root,
                                     tools: tools, context: context, providerId: providerId,
                                     model: model, rolesOverride: roles, budgetOverride: runBudget)
+    }
+
+    /// "Dig in deep" — the WIDE council: every reachable model answers the SAME question, synthesized into
+    /// one verdict. Same CouncilCard render; no plan-execute hand-off (it's a consultation, not a build).
+    private static func runWideCouncil(_ opts: KistOptions, goal: String,
+                                       registry: ProviderRegistry, root: String,
+                                       providerId: String, model: String?,
+                                       rolesOverride: RoleBindings? = nil) async -> Int32 {
+        guard let requestedRoles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
+        let roles = autoCouncilRoles(requestedRoles, registry: registry)
+        let recorder = TraceRecorder(traceId: TraceID.make())
+        let reachable = registry.providers.filter { registry.hasKey(for: $0) }.count
+        note("kist · dig in deep · consulting up to \(min(reachable, 5)) model(s) · \(root)")
+        let runBudget = opts.makeBudget()
+        let result = await AICouncil(providers: registry, roles: roles,
+                                     recorder: recorder, budget: runBudget).runWide(goal: goal)
+        let path = try? writeCouncilArtifact(result.markdown, goal: goal, root: root)
+        if let path { note("dig in deep · panel saved · \(path)") }
+        print(CouncilCard.render(result, artifactPath: path, color: isatty(fileno(stdout)) != 0))
+        for line in await recorder.summary().terminalLines() { note(line) }
+        return 0
     }
 
     private static func councilResearchProgress(projectRoot: String, runID: String?) -> AICouncil.ProgressSink? {
