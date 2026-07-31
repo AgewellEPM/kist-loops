@@ -6,7 +6,7 @@ import Foundation
 /// binary never lies about what it is. `version` is the human product version — bump on meaningful releases.
 enum KistBuild {
     static let version = "0.16.0"
-    static let commit = "de77693"        // ← overwritten at deploy by scripts/stamp-build.sh
+    static let commit = "0bc6565"        // ← overwritten at deploy by scripts/stamp-build.sh
     static let built = "2026-07-31"               // ← overwritten at deploy by scripts/stamp-build.sh
 
     /// One-line label: `v0.16.0 · 9534cc8 · 2026-07-31`.
