@@ -42,6 +42,7 @@ for path in [home/"bin",home/".kist/scripts",home/".kist/cortex/live/assets",hom
     path.mkdir(parents=True,exist_ok=True)
 os.chmod(home,0o700); os.chmod(home/".kist",0o700)
 project=home/"project"; (project/"fixture.txt").write_text("release registry source\n")
+(project/".gitignore").write_text(".build-local/\n")
 (project/"Sources/Kist").mkdir(parents=True)
 (project/"Sources/AgentCore").mkdir(parents=True)
 (project/"Tests/KistTests").mkdir(parents=True)
@@ -264,6 +265,21 @@ SOURCE_STATE_AFTER_RUNTIME=$("$FIXTURE/bin/kist-rebuild" --print-source-state "$
   ':(exclude,top).kist/runs' ':(exclude,top).kist/runs/**') ]]
 RUNTIME_USAGE_HASH=$(/usr/bin/shasum -a 256 "$FIXTURE/project/.kist/usage.jsonl" \
   | /usr/bin/awk '{print $1}')
+
+# The ignored root alternate SwiftPM cache is not source and may contain SwiftPM's convenience
+# symlink. The same name nested under Sources remains source.
+/bin/mkdir -p "$FIXTURE/project/.build-local/arm64-apple-macosx/debug"
+printf 'ignored SwiftPM cache\n' \
+  > "$FIXTURE/project/.build-local/arm64-apple-macosx/debug/cache-entry"
+/bin/ln -s arm64-apple-macosx/debug "$FIXTURE/project/.build-local/debug"
+[[ $("$FIXTURE/bin/kist-rebuild" --print-source-state "$FIXTURE/project") = "$SOURCE_STATE_BEFORE" ]]
+/bin/mkdir -p "$FIXTURE/project/Sources/Kist/.build-local"
+printf '// nested alternate build name remains source\n' \
+  > "$FIXTURE/project/Sources/Kist/.build-local/Hidden.swift"
+[[ $("$FIXTURE/bin/kist-rebuild" --print-source-state "$FIXTURE/project") != "$SOURCE_STATE_BEFORE" ]]
+/bin/mv "$FIXTURE/project/Sources/Kist/.build-local" "$TMP/nested-build-local-probe"
+[[ $("$FIXTURE/bin/kist-rebuild" --print-source-state "$FIXTURE/project") = "$SOURCE_STATE_BEFORE" ]]
+
 /bin/cp "$FIXTURE/project/scripts/kist-rebuild" "$TMP/tracked-script"
 printf '# source mutation\n' >> "$FIXTURE/project/scripts/kist-rebuild"
 SOURCE_STATE_AFTER_SOURCE=$("$FIXTURE/bin/kist-rebuild" --print-source-state "$FIXTURE/project")

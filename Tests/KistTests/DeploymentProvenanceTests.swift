@@ -602,6 +602,10 @@ final class DeploymentProvenanceTests: XCTestCase {
         let plan = repo.appendingPathComponent(".kist/plan.json")
         let modeSensitiveDirectory = repo.appendingPathComponent(
             "Sources/Kist/ModeSensitive", isDirectory: true)
+        let alternateBuildCache = repo.appendingPathComponent(
+            ".build-local", isDirectory: true)
+        let alternateBuildNearMiss = repo.appendingPathComponent(
+            ".build-local-source/Tracked.swift")
         try write("reviewer-v1\n", to: agent)
         try write("#!/bin/sh\n# canonical fixture\n", to: canonicalScript, executable: true)
         try write("{\"plan\":\"bound\"}\n", to: plan)
@@ -654,8 +658,27 @@ final class DeploymentProvenanceTests: XCTestCase {
         try FileManager.default.moveItem(at: renamedDirectory, to: modeSensitiveDirectory)
         XCTAssertEqual(try sourceState(of: repo), initial)
 
+        let alternateBuildTarget = alternateBuildCache.appendingPathComponent(
+            "arm64-apple-macosx/debug", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: alternateBuildTarget, withIntermediateDirectories: true)
+        try write(
+            "ignored SwiftPM cache\n",
+            to: alternateBuildTarget.appendingPathComponent("cache-entry"))
+        try FileManager.default.createSymbolicLink(
+            atPath: alternateBuildCache.appendingPathComponent("debug").path,
+            withDestinationPath: "arm64-apple-macosx/debug")
+        XCTAssertEqual(
+            try sourceState(of: repo),
+            initial,
+            "the exact root alternate SwiftPM cache must not affect source identity")
+
         let first = try snapshot(named: "snapshot-one")
         XCTAssertEqual(first.1, initial)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: first.0.appendingPathComponent(".build-local").path),
+            "the private source snapshot must omit the root alternate SwiftPM cache")
         let snapshottedDirectoryAttributes = try FileManager.default.attributesOfItem(
             atPath: first.0.appendingPathComponent("Sources/Kist/ModeSensitive").path)
         let snapshottedDirectoryMode = try XCTUnwrap(
@@ -680,6 +703,38 @@ final class DeploymentProvenanceTests: XCTestCase {
             "reviewer-v1\n",
             "the private snapshot must not alias later original-tree writes")
         try write("reviewer-v1\n", to: agent)
+        XCTAssertEqual(try sourceState(of: repo), initial)
+
+        try FileManager.default.removeItem(at: alternateBuildCache)
+        try write("not a build directory\n", to: alternateBuildCache)
+        let wrongBuildCacheType = try run(
+            rebuild,
+            arguments: ["--print-source-state", repo.path])
+        XCTAssertNotEqual(
+            wrongBuildCacheType.status,
+            0,
+            "a regular file must not masquerade as the excluded alternate build directory")
+        try FileManager.default.removeItem(at: alternateBuildCache)
+        XCTAssertEqual(try sourceState(of: repo), initial)
+
+        let nestedAlternateBuild = repo.appendingPathComponent(
+            "Sources/Kist/.build-local/Hidden.swift")
+        try write("// nested source remains bound\n", to: nestedAlternateBuild)
+        XCTAssertNotEqual(
+            try sourceState(of: repo),
+            initial,
+            "the alternate build exclusion must apply only at the repository root")
+        try FileManager.default.removeItem(
+            at: nestedAlternateBuild.deletingLastPathComponent())
+        XCTAssertEqual(try sourceState(of: repo), initial)
+
+        try write("// root near-miss remains bound\n", to: alternateBuildNearMiss)
+        XCTAssertNotEqual(
+            try sourceState(of: repo),
+            initial,
+            "the alternate build exclusion must not broaden to root path prefixes")
+        try FileManager.default.removeItem(
+            at: alternateBuildNearMiss.deletingLastPathComponent())
         XCTAssertEqual(try sourceState(of: repo), initial)
 
         try write(

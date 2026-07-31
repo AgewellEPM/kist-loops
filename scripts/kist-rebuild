@@ -250,9 +250,11 @@ def walk(fd,prefix,target_fd=None):
         rel=f"{prefix}/{name}" if prefix else name; visited+=1
         if visited>250000 or len(rel.encode())>16384: raise RuntimeError("inventory bound")
         st=os.stat(name,dir_fd=fd,follow_symlinks=False); identity=fp(st); observed.append((name,identity))
-        # Root build products and the two high-churn telemetry paths are not source. The rest of
-        # root .kist (notably agents/, plan.json, and checked-in learning policy) is a runtime/build
-        # input and must be copied and hashed. Same-named paths nested elsewhere remain source too.
+        # Root SwiftPM/Xcode build products and the two high-churn telemetry paths are not source.
+        # `.build-local` is the repo's ignored alternate SwiftPM cache and may contain symlinks.
+        # The rest of root .kist (notably agents/, plan.json, and checked-in learning policy) is a
+        # runtime/build input and must be copied and hashed. Same-named paths nested elsewhere
+        # remain source too.
         if not prefix and name==".git":
             if stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode): continue
             raise RuntimeError("git metadata has an invalid type")
@@ -262,7 +264,7 @@ def walk(fd,prefix,target_fd=None):
         if rel==".kist/runs":
             if stat.S_ISDIR(st.st_mode): continue
             raise RuntimeError("run telemetry has an invalid type")
-        if not prefix and name in {".build","DerivedData"}:
+        if not prefix and name in {".build",".build-local","DerivedData"}:
             if stat.S_ISDIR(st.st_mode): continue
             raise RuntimeError("build output has an invalid type")
         if stat.S_ISDIR(st.st_mode):
