@@ -148,14 +148,26 @@ public struct SpawnAgentTool: AgentTool {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func parseRole(_ raw: String?) -> AgentRole? {
+    static func parseRole(_ raw: String?) -> AgentRole? {   // internal for tests (composite-role regression)
         guard let raw else { return nil }
-        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "planner", "plan": return .planner
-        case "worker", "research", "researcher", "analyst": return .worker
-        case "coder", "code", "builder", "build", "developer", "dev": return .coder
-        case "critic", "review", "reviewer", "verify", "verifier", "judge": return .critic
-        default: return nil
+        let norm = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        func match(_ tok: String) -> AgentRole? {
+            switch tok {
+            case "planner", "plan": return .planner
+            case "worker", "research", "researcher", "analyst": return .worker
+            case "coder", "code", "builder", "build", "developer", "dev": return .coder
+            case "critic", "review", "reviewer", "verify", "verifier", "judge": return .critic
+            default: return nil
+            }
         }
+        // Accept the COMPOSITE names we advertise ("worker/researcher", "coder/builder", "critic/reviewer")
+        // — the tool description + error message tell the model to use those exact slash forms, so the parser
+        // MUST honor them. Try the whole string, then each token split on / space - , so any advertised or
+        // single-synonym form resolves instead of being rejected (the "unknown sub-agent role" bug).
+        if let r = match(norm) { return r }
+        for tok in norm.split(whereSeparator: { "/ -,".contains($0) }).map(String.init) {
+            if let r = match(tok) { return r }
+        }
+        return nil
     }
 }

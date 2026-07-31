@@ -81,6 +81,9 @@ actor MCPServerConnection: MCPConnection {
     private let maxLineBytes = 1 * 1024 * 1024
     private let initializeTimeout: UInt64 = 10
     private let callTimeout: UInt64 = 30
+    /// A misbehaving server (e.g. one printing a startup banner to stdout) emits many non-JSON lines;
+    /// warn ONCE so it can't flood startup. Reset is unnecessary — one notice per connection is enough.
+    private var warnedNonJSON = false
 
     init(config: MCPServerConfig) {
         self.config = config
@@ -304,7 +307,10 @@ actor MCPServerConnection: MCPConnection {
 
     private func dispatch(_ lineData: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
-            MCPLog.warn("server '\(config.name)' sent non-JSON line; ignoring")
+            if !warnedNonJSON {
+                warnedNonJSON = true
+                MCPLog.warn("server '\(config.name)' sent non-JSON on stdout (likely a startup banner); ignoring these lines")
+            }
             return
         }
         // Only correlate responses to an integer id we issued. Server->client
