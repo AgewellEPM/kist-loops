@@ -1465,10 +1465,22 @@ enum KistRunner {
         }
         if let report = synth.metadata["report"] { note("research · dossier saved · \(report)") }
 
+        // DEEP ESTATE SWEEP (Luke 2026-07-31): on TOP of the web + current-repo evidence, sweep our OWN
+        // system files across ~ and /Volumes IN-PROCESS (bypasses the tool sandbox → reaches our real source
+        // at /Volumes/PRO-G40/kist-loops and the rest of the estate) and fold that real-file grounding into
+        // the dossier the council scores. So /research is grounded in our actual system — evidence pipeline
+        // AND captain score AND a real deep-dive of our files — instead of answering from memory.
+        var dossier = synth.output
+        if let estateGrounding = EstateSearch(maxFiles: 16, maxTotalChars: 16_000).groundingBlock(for: goal) {
+            let swept = max(0, estateGrounding.components(separatedBy: "\n### ").count - 1)
+            note("research · swept \(swept) system file(s) from our estate into the dossier")
+            dossier += "\n\n" + estateGrounding
+        }
+
         return await runCouncil(opts, goal: goal, execute: opts.councilExecute,
                                 registry: registry, root: root, tools: tools, context: context,
                                 providerId: providerId, model: model, rolesOverride: rolesOverride,
-                                researchDossier: synth.output, researchRunID: runID)
+                                researchDossier: dossier, researchRunID: runID)
     }
 
     private static func runCouncil(_ opts: KistOptions, goal: String, execute: Bool,
