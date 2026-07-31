@@ -1847,15 +1847,40 @@ struct KistREPL {
                     guard !args.isEmpty else { print("usage: /dig <question> — ask every reachable model in parallel and synthesize"); continue }
                     await digDeep(args, roleSelection.bindings)
                     continue
-                case "research":
+                case "research", "deepdive", "sweep", "deep":
                     let researchGoal = args.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !researchGoal.isEmpty else { print("usage: /research <goal>"); continue }
-                    // Symbolic link-wheel first (Tavily → PEEL → GraphReasoner, local + grounded on true
-                    // facts). Fall back to the model research pipeline only if the bridge isn't installed.
-                    if runSymbolicResearch(researchGoal) { continue }
-                    guard let research else { print("\u{001B}[31m/research isn't available here\u{001B}[0m"); continue }
-                    print("\u{001B}[2m↳ symbolic research bridge unavailable — using the model research pipeline\u{001B}[0m")
-                    await research(researchGoal, roleSelection.bindings)
+                    guard !researchGoal.isEmpty else { print("usage: /research <question> — deep sweep of our own files + a grounded deep-dive analysis"); continue }
+                    // DEEP LOCAL SWEEP (2026-07-31, Luke): fire a question → sweep our OWN estate/system files
+                    // in-process (bypasses the tool sandbox — reaches ~ and /Volumes/PRO-G40/kist-loops) and
+                    // ground a thorough deep-dive analysis in the real files, so it stops answering from memory.
+                    print("\u{001B}[35m🔎 deep sweep of our system files for: \(researchGoal)…\u{001B}[0m")
+                    let deepSearch = EstateSearch(maxFiles: 16, maxTotalChars: 16_000)
+                    let goalCopy = researchGoal
+                    let grounding = await Task.detached(priority: .userInitiated, operation: { deepSearch.groundingBlock(for: goalCopy) }).value
+                    if let g = grounding {
+                        let n = max(0, g.components(separatedBy: "\n### ").count - 1)
+                        print("\u{001B}[35m🔎 swept \(n) file(s) from our estate — running the deep-dive analysis\u{001B}[0m")
+                    } else {
+                        print("\u{001B}[37m🔎 no pre-matched files — the analysis will list_files/read_file the project + /Volumes/PRO-G40/kist-loops directly\u{001B}[0m")
+                    }
+                    armTurnLoop()
+                    let researchBrief = """
+                    DEEP RESEARCH — a thorough, grounded deep-dive analysis answering this question:
+                    \(researchGoal)
+
+                    You've been handed REAL files swept from our OWN estate below. READ them, and use \
+                    list_files / read_file to go DEEPER into the most relevant ones (our source lives at \
+                    /Volumes/PRO-G40/kist-loops). Ground EVERY claim in specific files and cite their paths. \
+                    Do NOT answer from memory or guess — if the swept files don't cover something, read more \
+                    files or say plainly what's missing. Be comprehensive and concrete.
+
+                    \(grounding ?? "(no files pre-swept — start with list_files on the project root and /Volumes/PRO-G40/kist-loops, then read the relevant ones.)")
+                    """
+                    let researchOC = await runTurnInterruptible(loop: loop, userInput: researchBrief)
+                    rememberHumanTurn(user: "/research \(researchGoal)", assistantSummary: researchOC.summary)
+                    await printTurnSummary(outcomeSummary: researchOC.summary, success: researchOC.success)
+                    await runCopilotReview(task: researchGoal, answer: researchOC.summary, allowAdvisory: true)
+                    await printTurnUsage()
                     continue
                 default:
                     if let expanded = commands.expand(name, args: args) {
