@@ -296,11 +296,13 @@ public enum MCPClientConfig {
 
     /// Final environment for `Process`: allowlisted host vars + the server's explicit
     /// env (server env wins on collision).
-    static func resolvedEnvironment(for config: MCPServerConfig) -> [String: String] {
+    static func resolvedEnvironment(
+        for config: MCPServerConfig,
+        hostEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
         var result: [String: String] = [:]
-        let host = ProcessInfo.processInfo.environment
         for key in inheritedEnvAllowlist {
-            if let v = host[key] { result[key] = v }
+            if let v = hostEnvironment[key] { result[key] = v }
         }
         for (k, v) in config.env { result[k] = v }
         return result

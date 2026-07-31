@@ -8,6 +8,8 @@ enum StartupHeader {
         func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
         let pin = mode == "auto-routing" ? "/model to pin" : "/model to change"
         let plan = planMode ? c("33", " · plan mode (read-only)") : ""
+        // Product version is immutable source metadata; deployment identity lives in the
+        // authenticated installed manifest rather than a self-rewriting source stamp.
         return """
         \(c("36;1", "kist")) \(c("2", "·")) \(c("32", KistBuildInfo.startupLabel)) \(c("2", "·")) \(c("35", mode)) \(c("2", "·")) \(c("2", abbreviate(projectRoot)))\(plan)
         \(c("2", "↳ just type · " + pin + " · /help"))

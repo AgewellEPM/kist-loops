@@ -296,7 +296,7 @@ final class KistREPLTests: XCTestCase {
         let now = Date()
         let spans = [AgentSpan(id: "s1", traceId: "t", kind: .llmCall, vendor: "openai",
                                promptTokens: 100, completionTokens: 20, startedAt: now, endedAt: now)]
-        let trajectory = [ActionRecord(tool: "read_file", argsFingerprint: "a", success: true)]
+        let trajectory = [ActionRecord(tool: "write_file", argsFingerprint: "a", success: true)]
 
         let summary = KistREPL.renderSimpleSummary(projectRoot: dir, spans: spans, trajectory: trajectory)
 

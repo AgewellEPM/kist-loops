@@ -178,11 +178,13 @@ final class MCPClientTests: XCTestCase {
     }
 
     func testResolvedEnvironment_dropsHostSecretsKeepsAllowlist() {
-        setenv("PATH", "/usr/bin", 1)
-        setenv("SNEAKY_API_KEY", "should-not-pass", 1)
-        defer { unsetenv("SNEAKY_API_KEY") }
         let cfg = MCPServerConfig(name: "x", command: "/bin/sh", args: [], env: ["OWN": "1"])
-        let env = MCPClientConfig.resolvedEnvironment(for: cfg)
+        let env = MCPClientConfig.resolvedEnvironment(
+            for: cfg,
+            hostEnvironment: [
+                "PATH": "/usr/bin",
+                "SNEAKY_API_KEY": "should-not-pass"
+            ])
         XCTAssertEqual(env["OWN"], "1")               // explicit config env passes
         XCTAssertNotNil(env["PATH"])                  // allowlisted host var passes
         XCTAssertNil(env["SNEAKY_API_KEY"])           // non-allowlisted host secret dropped

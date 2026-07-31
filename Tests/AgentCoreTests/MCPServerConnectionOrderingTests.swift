@@ -1190,6 +1190,9 @@ final class MCPServerConnectionOrderingTests: XCTestCase {
         let path = directory + "/fake-mcp.sh"
         let source = #"""
         #!/bin/sh
+        # Test behavior must not depend on a prior test's process-wide PATH.
+        PATH=/usr/bin:/bin
+        export PATH
         mode="$1"
         while IFS= read -r request; do
             id=$(printf '%s\n' "$request" | sed -E 's/.*"id"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/')
