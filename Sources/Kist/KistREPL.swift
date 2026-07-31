@@ -2324,9 +2324,10 @@ struct KistREPL {
                 minds.append(.init(name: TeamLanguage.displayName(b.providerId), role: label))
             }
         }
-        // Build Queue — the shared board (top few non-research items).
+        // Build Queue — the shared board. ACTIONABLE items only (done tasks drop off) so the queue
+        // advances as work lands instead of freezing on the same completed items every turn.
         let plan = PlanStore(projectRoot: projectRoot).load()
-        let tasks = plan.tasks.filter { $0.kind != .research }.sorted { $0.id < $1.id }.prefix(6).map { t -> StatusDashboard.Item in
+        let tasks = plan.buildQueue(limit: 6).map { t -> StatusDashboard.Item in
             let st: StatusDashboard.Item.State
             switch t.status { case .done: st = .done; case .blocked: st = .blocked; default: st = .pending }
             return .init(title: t.boardTitle, state: st)
@@ -2358,7 +2359,10 @@ struct KistREPL {
             let healthy = TrajectoryAnalyzer.analyze(trajectory).healthy
             confidence = min(0.98, max(0.30, 0.95 - rate * 0.4 - (healthy ? 0 : 0.15) - (grounded ? 0 : 0.15)))
         }
-        let next = plan.active?.boardTitle ?? plan.next?.boardTitle ?? "Continue"
+        // Next advances to the active task, else the next actionable BUILD task, and only falls to any
+        // remaining todo (research) or "Continue" when the build queue is clear — so finishing a task
+        // visibly moves "Next" forward instead of parking on a never-closing research item.
+        let next = plan.active?.boardTitle ?? plan.nextActionable?.boardTitle ?? plan.next?.boardTitle ?? "Continue"
         return StatusDashboard(minds: minds,
                                tasks: Array(tasks),
                                learned: latestCapsule?.learned ?? [],
