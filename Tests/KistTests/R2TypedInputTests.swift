@@ -61,6 +61,19 @@ final class R2TypedInputTests: XCTestCase {
         XCTAssertEqual(q.preview().pending, "", "feed must be a no-op outside a collecting turn (TUI keeps old behavior)")
     }
 
+    func testNestedCollectionDoesNotEndTheOuterSession() {
+        let q = TurnInputQueue()
+        q.begin()                       // submitted-message session
+        q.begin()                       // legacy plan/council wrapper
+        type("during nested", into: q)
+        q.end()
+        type(" after wrapper", into: q) // outer session must still collect
+        XCTAssertEqual(q.preview().pending, "during nested after wrapper")
+        q.end()
+        type(" ghost", into: q)
+        XCTAssertEqual(q.preview().pending, "during nested after wrapper")
+    }
+
     func testCommitPendingQueuesTypedTextForInterject() {
         let q = freshQueue()
         type("use deepseek instead", into: q)
@@ -215,9 +228,13 @@ final class R2TypedInputTests: XCTestCase {
         XCTAssertFalse(tui.contains("TurnInputQueue.shared.begin"),
                        "TUIConversation began collecting typed input but has no drain — Enter'd messages black-hole")
 
-        // REPL: collection lifecycle + interject-commit/cancel-clear + prompt seeding.
+        // REPL: one session starts immediately after non-slash submit and stays through all
+        // routing/model/post-review work; interject/cancel semantics + prompt seeding remain.
         let repl = try src("Sources/Kist/KistREPL.swift")
-        XCTAssertTrue(repl.contains("TurnInputQueue.shared.begin()"), "chat turns stopped collecting typed input")
+        XCTAssertTrue(repl.contains("let session = TurnInteractionSession("),
+                      "chat submission stopped starting its session-wide stdin owner")
+        XCTAssertTrue(repl.contains("await session.finish()"),
+                      "session no longer survives through the next-prompt boundary")
         XCTAssertTrue(repl.contains("TurnInputQueue.shared.commitPending()"),
                       "interject no longer turns typed text into the next instruction")
         XCTAssertTrue(repl.contains("TurnInputQueue.shared.clearAll()"),
@@ -229,5 +246,7 @@ final class R2TypedInputTests: XCTestCase {
         let watcher = try src("Sources/Kist/UX/InterruptibleTurn.swift")
         XCTAssertTrue(watcher.contains("TurnInputQueue.shared.feed"),
                       "the turn watcher went back to DISCARDING typed keys")
+        XCTAssertTrue(watcher.contains("TurnInteractionSession.current"),
+                      "InterruptibleTurn stopped reusing the session watcher (double stdin reader risk)")
     }
 }

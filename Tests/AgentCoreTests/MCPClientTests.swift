@@ -308,8 +308,28 @@ final class MCPClientTests: XCTestCase {
         let huge = String(repeating: "A", count: 5000)
         let line = MCPLog.serverStderrLine(server: "evil", text: huge, verbose: true)
         XCTAssertNotNil(line)
-        // "[mcp STDERR] [evil] " prefix + 2000 payload chars + "\n"
-        XCTAssertEqual(line?.filter { $0 == "A" }.count, 2000)
+        // "[mcp STDERR] [evil] " prefix + 2 KiB payload + bounded truncation marker + "\n"
+        XCTAssertEqual(line?.filter { $0 == "A" }.count, 2 * 1024)
+        XCTAssertTrue(line?.contains("…[truncated]") == true)
+        XCTAssertLessThan(line?.utf8.count ?? .max, 2 * 1024 + 256)
+    }
+
+    func testMCPLogSanitizer_handlesUnicodeC1StringTerminatorsAndByteBoundary() {
+        let dirty = "before"
+            + "\u{009D}hidden-osc\u{009C}"
+            + "middle"
+            + "\u{0090}hidden-dcs\u{009C}"
+            + "after\u{202E}\u{2066}\u{FEFF}"
+        XCTAssertEqual(
+            MCPLog.sanitizedDiagnosticForTesting(dirty),
+            "beforemiddleafter"
+        )
+
+        let splitScalar = String(repeating: "A", count: 7) + "🙂tail"
+        let bounded = MCPLog.sanitizedDiagnosticForTesting(splitScalar, byteLimit: 9)
+        XCTAssertTrue(bounded.hasPrefix("AAAAAAA\u{FFFD}"))
+        XCTAssertTrue(bounded.hasSuffix("…[truncated]"))
+        XCTAssertFalse(bounded.contains("tail"))
     }
 
     /// Codex (a): gating the live stream mustn't erase the failure diagnosis. The connection keeps a

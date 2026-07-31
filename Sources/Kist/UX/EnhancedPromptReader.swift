@@ -37,6 +37,7 @@ final class EnhancedPromptReader {
                   onPaste: () -> String? = { nil },
                   barHint: (() -> String)? = nil,
                   onCycle: (() -> Void)? = nil,
+                  beforeRawRestore: (() -> Void)? = nil,
                   initialText: String = "") -> Outcome {
         guard enabled else {
             FileHandle.standardOutput.write(Data(prompt.utf8))
@@ -55,6 +56,11 @@ final class EnhancedPromptReader {
             write("\u{001B}[?2004l")
             raw.disable()
         }
+        // A fixed DECSTBM panel must be released while stdin is still raw. Otherwise the
+        // kernel can echo bytes typed across the submit/EOF handoff directly into that panel,
+        // bypassing the serialized stdout/stderr owner. Registered after the raw-mode defer
+        // so Swift's LIFO defer order runs this callback first on every return path.
+        defer { beforeRawRestore?() }
         // R2a: text typed WHILE the previous turn ran (without Enter) survives into this prompt
         // box — same as Claude Code's always-alive input.
         if !initialText.isEmpty { editor.insert(initialText) }

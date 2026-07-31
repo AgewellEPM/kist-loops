@@ -26,10 +26,13 @@ final class PinnedBarTests: XCTestCase {
                        "reset region → real last row → show cursor → newline off the panel")
     }
 
-    func testPanelLeadJumpsToPanelAndClears() {
+    func testPanelLeadClearsEachPhysicalRowWithoutED() {
         let l = PinnedBarLayout(rows: 40, cols: 100, panelRows: 6)
-        XCTAssertEqual(l.panelLeadSequence, "\u{001B}[35;1H" + "\u{001B}[0J",
-                       "position at panel top, then clear-to-end wipes the whole bottom strip")
+        XCTAssertFalse(l.panelLeadSequence.contains(TerminalANSI.clearBelow),
+                       "ED is forbidden while DECSTBM is active")
+        XCTAssertFalse(l.panelLeadSequence.contains("\n"))
+        XCTAssertEqual(l.panelLeadSequence.components(separatedBy: "\u{001B}[K").count - 1, 6)
+        XCTAssertTrue(l.panelLeadSequence.hasSuffix(TerminalANSI.moveTo(row: l.panelTop, col: 1)))
     }
 
     func testTranscriptLeadParksOnLastBandRow() {

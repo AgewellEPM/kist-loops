@@ -13,11 +13,11 @@ final class TurnInputQueue: @unchecked Sendable {
     static let shared = TurnInputQueue()
 
     private let lock = NSLock()
-    private var collecting = false
+    private var collectionDepth = 0
     private var bytes: [UInt8] = []      // uncommitted UTF-8 being typed (bounded)
     private var queued: [String] = []    // committed lines (Enter), FIFO
     private var typedThisTurn = false    // did any byte arrive since begin()? gates commitPending
-    private var changeHooks: [@Sendable () -> Void] = []
+    private var changeHooks: [(id: UUID, hook: @Sendable () -> Void)] = []
     private static let maxPendingBytes = 4096
     private static let maxHooks = 8
 
@@ -26,15 +26,36 @@ final class TurnInputQueue: @unchecked Sendable {
     /// their own sinks without unregistering the active one — a single slot would leave the
     /// live sink's per-keystroke refresh dead after any side turn (review catch). Stale hooks
     /// no-op safely: refreshLiveStatus only writes while ITS spinner is on screen.
-    func addOnChange(_ hook: @escaping @Sendable () -> Void) {
+    @discardableResult
+    func addOnChange(_ hook: @escaping @Sendable () -> Void) -> UUID {
+        let id = UUID()
         lock.lock()
-        changeHooks.append(hook)
+        changeHooks.append((id, hook))
         if changeHooks.count > Self.maxHooks { changeHooks.removeFirst() }
+        lock.unlock()
+        return id
+    }
+
+    func removeOnChange(_ id: UUID) {
+        lock.lock()
+        changeHooks.removeAll { $0.id == id }
         lock.unlock()
     }
 
-    func begin() { lock.lock(); collecting = true; typedThisTurn = false; lock.unlock() }
-    func end() { lock.lock(); collecting = false; lock.unlock() }
+    /// Collection may be nested: the session-wide watcher starts at submit, while legacy escalation
+    /// wrappers also bracket their own run. Only the outermost begin/end changes collection state.
+    func begin() {
+        lock.lock()
+        if collectionDepth == 0 { typedThisTurn = false }
+        collectionDepth += 1
+        lock.unlock()
+    }
+
+    func end() {
+        lock.lock()
+        collectionDepth = max(0, collectionDepth - 1)
+        lock.unlock()
+    }
 
     /// A committed line is only queued as a real instruction if it has SOME alphanumeric content — a stray
     /// punctuation keystroke ("$", ";", "!") is not an instruction and must never become the next turn
@@ -47,7 +68,7 @@ final class TurnInputQueue: @unchecked Sendable {
     /// backspace removes the last UTF-8 scalar; other control bytes are ignored.
     func feed(_ b: UInt8) {
         lock.lock()
-        guard collecting else { lock.unlock(); return }
+        guard collectionDepth > 0 else { lock.unlock(); return }
         switch b {
         case 0x0D, 0x0A:                                  // Enter → commit the line
             let line = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -63,7 +84,7 @@ final class TurnInputQueue: @unchecked Sendable {
             if bytes.count < Self.maxPendingBytes { bytes.append(b) }
         }
         typedThisTurn = true
-        let hooks = changeHooks
+        let hooks = changeHooks.map(\.hook)
         lock.unlock()
         for hook in hooks { hook() }
     }

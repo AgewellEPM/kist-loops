@@ -157,16 +157,17 @@ final class PermissionBarTests: XCTestCase {
         XCTAssertTrue(out.contains("\u{001B}[6G"))      // parked at the edit column
     }
 
-    // R2b lives ONLY at the idle prompt: on submit the scroll region is torn down for the turn so a
-    // scroll-region-unaware sink can't blank the band (Terminal.app DECSTBM quirk), then re-pinned. This
-    // pins the suspend byte contract: release the region (ESC[r), drop to the panel row, clear it — and
-    // crucially it must NOT re-arm a scroll region (that's resume()'s job).
-    func testSuspendSequenceReleasesTheScrollRegionAndClearsThePanel() {
+    // The default (no --sticky-turns) still leases the full terminal for the turn. Teardown must clear
+    // the fixed strip row-by-row: ED is the Terminal.app corruption path this fix removes.
+    func testSuspendSequenceReleasesRegionAndClearsRowsWithoutED() {
         let l = PinnedBarLayout(rows: 65, cols: 100, panelRows: 6)
         let out = l.suspendSequence
         XCTAssertTrue(out.contains(TerminalANSI.resetScrollRegion), "must release the DECSTBM region")
         XCTAssertTrue(out.contains(TerminalANSI.moveTo(row: l.panelTop, col: 1)), "drop to the panel row")
-        XCTAssertTrue(out.contains(TerminalANSI.clearBelow), "clear the freed panel so no ghost box lingers")
+        XCTAssertFalse(out.contains(TerminalANSI.clearBelow), "ED must never touch the fixed strip")
+        XCTAssertEqual(out.components(separatedBy: "\u{001B}[K").count - 1, l.panelRows,
+                       "clear each freed panel row with EL")
+        XCTAssertFalse(out.contains("\n"))
         // A bare reset region is ESC[r; an ARMED region is ESC[<t>;<b>r. Suspend must not arm one.
         XCTAssertFalse(out.contains("\u{001B}[1;\(l.transcriptBottom)r"), "suspend must not re-pin (resume does)")
     }

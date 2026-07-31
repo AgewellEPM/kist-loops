@@ -103,6 +103,22 @@ public struct Plan: Sendable, Codable, Equatable {
     /// The lowest-id task that's still actionable (todo) — what "the next task" resolves to.
     public var next: PlanTask? { tasks.filter { $0.status == .todo }.min { $0.id < $1.id } }
     public var active: PlanTask? { tasks.filter { $0.status == .inProgress }.min { $0.id < $1.id } }
+
+    /// The next actionable build task. Research remains visible in its own dashboard
+    /// section instead of parking "Next" while implementation work is available.
+    public var nextActionable: PlanTask? {
+        tasks.filter { $0.status == .todo && $0.kind != .research }
+            .min { $0.id < $1.id }
+    }
+
+    /// Actionable, non-research work for the dashboard's Build Queue. Completed
+    /// tasks leave the queue so visible state advances as work lands.
+    public func buildQueue(limit: Int = 6) -> [PlanTask] {
+        Array(tasks.filter { $0.kind != .research && $0.status != .done }
+            .sorted { $0.id < $1.id }
+            .prefix(max(0, limit)))
+    }
+
     public var testPlan: [PlanTask] { tasks.filter { $0.kind == .test } }
 
     public func render() -> String {

@@ -84,8 +84,8 @@ struct KistREPL {
     var autoApproveClipboardVision = false
     /// R2b: pin the input bar to the bottom via a scroll region (default on for TTYs; --no-pinned-bar off).
     var pinnedBarEnabled = true
-    /// R2b+ trial: keep the pinned box glued to the bottom DURING a turn (never suspend the region), so the
-    /// input bar is there 24/7 and you can type into it mid-turn. Off by default until proven corruption-free.
+    /// Keep the pinned box glued to the bottom DURING a turn through the serialized screen owner.
+    /// Explicit opt-in (`--sticky-turns`); the default continues to suspend between prompts.
     var stickyTurnsEnabled = false
     /// Whether a given (provider, model) can interpret images/media — drives one-turn media routing.
     var providerSupportsVision: ((ProviderBinding) -> Bool)? = nil
@@ -192,7 +192,10 @@ struct KistREPL {
         func armTurnLoop() {
             if perm.needsBypassConfirm {
                 FileHandle.standardOutput.write(Data("\u{001B}[31;1m⚠ Arm bypass permissions (guards OFF)? Skips ALL approval prompts this session. (y/N) \u{001B}[0m".utf8))
-                let ans = (Swift.readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+                let ans = StdinArbiter.shared.withStdin {
+                    (Swift.readLine(strippingNewline: true) ?? "")
+                        .trimmingCharacters(in: .whitespaces).lowercased()
+                }
                 if ans == "y" || ans == "yes" {
                     perm.confirmBypass()
                     print("\u{001B}[31;1m⚠ bypass armed — guards off for this session (shift+tab to leave)\u{001B}[0m")
@@ -218,9 +221,8 @@ struct KistREPL {
             let preTurnTranscript = transcript
             let tBox = MutableBox(transcript)
             lastTurnInterrupted = false   // fresh turn; post-turn guards read it, next turn resets it
-            // R2a: collect keystrokes while the turn runs (rendered live; Enter queues a message).
-            TurnInputQueue.shared.begin()
-            defer { TurnInputQueue.shared.end() }
+            // Collection is session-wide (submit → routing → model → post-review). InterruptibleTurn
+            // borrows that session's one watcher and only registers this active model task.
             // R1: single ESC = interject (take over, work stays resumable); double ESC = hard
             // cancel (transcript restored + checkpoint marked ABANDONED — kept on disk so a
             // panic ESC-hammer is never irreversible, but hidden from --list/--resume-last).
@@ -325,6 +327,9 @@ struct KistREPL {
         // video/audio + Gemini file refs are Gemini-only, so we borrow Gemini (disclosed) unless the
         // active model already is it. Shared by the drag-a-path and clipboard /paste flows.
         func runMediaTurn(_ atts: [MediaAttachment], prompt: String) async {
+            // Inline image protocols (OSC/APC), ANSI previews, and binary/fullscreen media renderers
+            // must own a normal terminal. Abandon sticky capture before emitting even the first byte.
+            pinnedBar.suspend()
             armTurnLoop()
             if let preview = TerminalMediaRenderer.preview(attachments: atts) {
                 FileHandle.standardOutput.write(Data(("\n" + preview + "\n").utf8))
@@ -448,7 +453,15 @@ struct KistREPL {
                 return nil   // read-only/failed coding turn or chit-chat answer — nothing to second-opinion
             }
             print("\u{001B}[35m⎇ second opinion · \(TeamLanguage.displayName(co.providerId)) reviewing…\u{001B}[0m")
-            let review = await modelComplete(co.providerId, co.model, system, userPrompt)
+            let review = await InterruptibleTurn.run(onInterrupt: { reason in
+                if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                else { TurnInputQueue.shared.commitPending() }
+                print("\n\u{001B}[33m"
+                      + (reason == .cancel ? "⎋⎋ review cancelled" : "⎋ review interrupted — your turn")
+                      + "\u{001B}[0m")
+            }) {
+                await modelComplete(co.providerId, co.model, system, userPrompt)
+            }
             guard let review, !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 print("\u{001B}[37m⎇ second opinion · \(TeamLanguage.displayName(co.providerId)) had no response\u{001B}[0m")
                 return nil
@@ -902,7 +915,17 @@ struct KistREPL {
                                              symbolCache: { cachedSymbols ?? [] })
         }
 
+        var activeInteractionSession: TurnInteractionSession?
         while true {
+            // The previous submitted message is complete only now: post-review and usage rendering
+            // have finished. `finish()` releases descriptor capture + DECSTBM while stdin is still
+            // raw, then stops its one watcher and restores cooked mode. This is the no-lost-typeahead,
+            // no-kernel-echo-through-the-panel handoff boundary.
+            if let session = activeInteractionSession {
+                await session.finish()
+                activeInteractionSession = nil
+                pinnedBar.endStickyTurn()
+            }
             // Claude-Code-style rounded input box: a top border, then a `│ ❯` prompt line the reader edits
             // inside, a bottom border, and the hint. (Plan mode flags the prompt yellow.)
             let boxWidth = PromptBar.safeWidth(columns: TerminalMediaRenderer.terminalColumns(default: 80))
@@ -921,6 +944,7 @@ struct KistREPL {
             let statusRows = status.isEmpty ? 1 : status.split(separator: "\n", omittingEmptySubsequences: false).count
             let panelLead = pinnedBar.panelLead(statusRows: statusRows)
             let line: String
+            let promptWasPinned = pinnedBar.active
             // R2a: a drained line was typed while the user may have WALKED AWAY — never block the
             // backlog on an interactive y/N confirm for it (router guard below).
             var lineFromQueue = false
@@ -928,6 +952,9 @@ struct KistREPL {
                 FileHandle.standardOutput.write(Data((panelLead + status + "\n" + topBorder + "\n" + promptColor + queued + "\n").utf8))
                 line = queued
                 lineFromQueue = true
+                // There is no prompt reader/raw-mode defer on this path. Release the fixed screen
+                // explicitly before the new turn session takes stdin ownership.
+                pinnedBar.suspend()
             } else {
                 FileHandle.standardOutput.write(Data((panelLead + status + "\n" + topBorder + "\n").utf8))
                 let read = inputReader.readLine(prompt: promptColor,
@@ -937,6 +964,9 @@ struct KistREPL {
                                                 onPaste: { PasteboardReader.text() },
                                                 barHint: { perm.barHint(includeInterrupt: true) },
                                                 onCycle: { perm.cycle() },
+                                                // Runs from the prompt reader's defer before RawMode.disable().
+                                                // Kernel echo must never coexist with the fixed panel.
+                                                beforeRawRestore: { pinnedBar.suspend() },
                                                 // R2a: half-typed text from during the turn lands here.
                                                 initialText: TurnInputQueue.shared.takePending())
                 switch read {
@@ -947,28 +977,68 @@ struct KistREPL {
             }
             let input = Self.collapseFloodedPaths(line.trimmingCharacters(in: .whitespacesAndNewlines))
             if input.isEmpty { continue }
-            // R2b: park the cursor on the band's last row so this turn's output scrolls ABOVE the pinned
-            // panel. The panel is overwritten each turn, so echo the committed prompt into the band too —
-            // otherwise the scrollback would lose the record of what you typed. No-op when the bar is off
-            // (transcriptLead == "" and the inline box already IS the scrollback record).
-            if pinnedBar.active {
-                FileHandle.standardOutput.write(Data((pinnedBar.transcriptLead()
-                    + "\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
-                if stickyTurnsEnabled {
-                    // TRIAL (--sticky-turns): DON'T suspend — keep the region pinned so the box stays glued
-                    // to the bottom while the turn streams above it. Repaint the strip as an empty, ready
-                    // input box (type-ahead queues into TurnInputQueue and lands next prompt) so the bar is
-                    // visibly there 24/7 instead of freezing on the just-submitted text.
-                    let hint = perm.barHint(includeInterrupt: true)
-                    FileHandle.standardOutput.write(Data((panelLead + status + "\n" + topBorder + "\n"
-                        + promptColor + "\n" + PromptBar.bottomBorder(width: boxWidth) + "\n"
-                        + "\u{001B}[2m\(hint)\u{001B}[0m" + pinnedBar.transcriptLead()).utf8))
-                } else {
-                    // Tear the scroll region down for the turn: the submitted text must not linger frozen in
-                    // the pinned box, AND a persistent DECSTBM region + a scroll-region-unaware sink dumping a
-                    // plan/long output is what blanks the band on Terminal.app. Turn output now flows in plain
-                    // full-screen mode (like the inline path); the strip re-pins at the next prompt (resume()).
-                    pinnedBar.suspend()
+            let slashCommand = Self.isSlashCommand(input)
+            var turnSession: TurnInteractionSession?
+            if !slashCommand {
+                var onInputChange: (@Sendable (String, Int) -> Void)?
+                var onScreenLeaseBegin: (@Sendable () -> Bool)?
+                var onScreenLeaseEnd: (@Sendable () -> Bool)?
+                var onScreenReleaseBeforeFinish: (@Sendable () -> Void)?
+                var setBracketedPasteMode: (@Sendable (Bool) -> Void)?
+                if stickyTurnsEnabled, promptWasPinned {
+                    onInputChange = { pending, queuedCount in
+                        pinnedBar.updateStickyTypeahead(
+                            pending: pending, queuedCount: queuedCount)
+                    }
+                    onScreenLeaseBegin = { pinnedBar.beginInputScreenLease() }
+                    onScreenLeaseEnd = { pinnedBar.endInputScreenLease() }
+                    onScreenReleaseBeforeFinish = { pinnedBar.suspend() }
+                    setBracketedPasteMode = { pinnedBar.setBracketedPasteEnabled($0) }
+                }
+                let session = TurnInteractionSession(
+                    queue: TurnInputQueue.shared,
+                    onInputChange: onInputChange,
+                    onScreenLeaseBegin: onScreenLeaseBegin,
+                    onScreenLeaseEnd: onScreenLeaseEnd,
+                    onScreenReleaseBeforeFinish: onScreenReleaseBeforeFinish,
+                    setBracketedPasteMode: setBracketedPasteMode)
+                session.start()
+                turnSession = session
+                activeInteractionSession = session
+            }
+
+            var stickyCaptureSucceeded = false
+            var committedEchoWritten = false
+            if promptWasPinned {
+                if !slashCommand, stickyTurnsEnabled,
+                   turnSession?.safelyOwnsRawStdin == true {
+                    // The prompt reader released DECSTBM before restoring cooked mode. Re-pin only
+                    // after this turn's one watcher has confirmed raw stdin ownership.
+                    pinnedBar.resume()
+                    if pinnedBar.active {
+                        FileHandle.standardOutput.write(Data((pinnedBar.transcriptLead()
+                            + "\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
+                        committedEchoWritten = true
+                        let snapshot = TurnInputQueue.shared.preview()
+                        let panel = TerminalScreenCoordinator.Panel(
+                            status: status,
+                            promptPrefix: promptPlain,
+                            pending: snapshot.pending,
+                            queuedCount: snapshot.queuedCount,
+                            hint: perm.barHint(includeInterrupt: true))
+                        stickyCaptureSucceeded = pinnedBar.beginStickyTurn(panel: panel)
+                    }
+                    if !stickyCaptureSucceeded {
+                        // Raw ownership or capture setup failed. Stay on the full-screen fallback.
+                        pinnedBar.suspend()
+                    }
+                }
+
+                if !stickyCaptureSucceeded, !committedEchoWritten {
+                    // The fixed prompt was cleared by the safe raw→cooked handoff, so preserve the
+                    // committed text once in normal scrollback for slash and non-sticky turns.
+                    FileHandle.standardOutput.write(Data(
+                        ("\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
                 }
             }
             recorder?.reset()                 // fresh trajectory per turn for self-monitoring
@@ -976,7 +1046,7 @@ struct KistREPL {
             // Slash commands: built-ins, /commands, then any custom .kist/commands/<name>.md.
             // Only a command-shaped leading "/" counts — a dragged-in path falls through
             // to the agent as a normal message (see isSlashCommand).
-            if Self.isSlashCommand(input) {
+            if slashCommand {
                 let body = input.dropFirst()
                 let name: String, args: String
                 if let sp = body.firstIndex(of: " ") {
@@ -1970,9 +2040,27 @@ struct KistREPL {
                 await digDeep(messageText, roleSelection.bindings)
                 continue
             }
-            if let router, !lineFromQueue, !armedTeamThisTurn, let proposal = await router.propose(messageText) {
+            let routingWasInterrupted = MutableBox(false)
+            var routeProposal: ConversationRouter.Proposal?
+            if let router, !lineFromQueue, !armedTeamThisTurn {
+                routeProposal = await InterruptibleTurn.run(onInterrupt: { reason in
+                    routingWasInterrupted.value = true
+                    if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                    else { TurnInputQueue.shared.commitPending() }
+                    print("\n\u{001B}[33m"
+                          + (reason == .cancel ? "⎋⎋ routing cancelled" : "⎋ routing interrupted — your turn")
+                          + "\u{001B}[0m")
+                }) {
+                    await router.propose(messageText)
+                }
+            }
+            if routingWasInterrupted.value { continue }
+            if let proposal = routeProposal {
                 FileHandle.standardOutput.write(Data(("\u{001B}[33m" + proposal.prompt + " \u{001B}[0m").utf8))
-                let ans = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+                let ans = StdinArbiter.shared.withStdin {
+                    (readLine(strippingNewline: true) ?? "")
+                        .trimmingCharacters(in: .whitespaces).lowercased()
+                }
                 if ans == "y" || ans == "yes" {
                     switch proposal.route {
                     case .fleet(let agents): if let fleet { await fleet(messageText, agents, roleSelection.bindings) }
@@ -2324,9 +2412,10 @@ struct KistREPL {
                 minds.append(.init(name: TeamLanguage.displayName(b.providerId), role: label))
             }
         }
-        // Build Queue — the shared board (top few non-research items).
+        // Build Queue — actionable items only. Completed tasks drop away so the
+        // board advances instead of repeating the same finished work each turn.
         let plan = PlanStore(projectRoot: projectRoot).load()
-        let tasks = plan.tasks.filter { $0.kind != .research }.sorted { $0.id < $1.id }.prefix(6).map { t -> StatusDashboard.Item in
+        let tasks = plan.buildQueue(limit: 6).map { t -> StatusDashboard.Item in
             let st: StatusDashboard.Item.State
             switch t.status { case .done: st = .done; case .blocked: st = .blocked; default: st = .pending }
             return .init(title: t.boardTitle, state: st)
@@ -2358,7 +2447,10 @@ struct KistREPL {
             let healthy = TrajectoryAnalyzer.analyze(trajectory).healthy
             confidence = min(0.98, max(0.30, 0.95 - rate * 0.4 - (healthy ? 0 : 0.15) - (grounded ? 0 : 0.15)))
         }
-        let next = plan.active?.boardTitle ?? plan.next?.boardTitle ?? "Continue"
+        let next = plan.active?.boardTitle
+            ?? plan.nextActionable?.boardTitle
+            ?? plan.next?.boardTitle
+            ?? "Continue"
         return StatusDashboard(minds: minds,
                                tasks: Array(tasks),
                                learned: latestCapsule?.learned ?? [],

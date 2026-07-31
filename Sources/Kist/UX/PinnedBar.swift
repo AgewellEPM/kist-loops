@@ -15,7 +15,7 @@ import Glibc
 /// byte-identical to pre-R2b. The scroll region is the ONLY behavioral change, and it only exists
 /// while `active`. All screen math is in the pure `PinnedBarLayout` so it is unit-tested without a
 /// terminal; this class is the thin I/O + lifecycle shell.
-final class PinnedBar {
+final class PinnedBar: @unchecked Sendable {
     /// Rows reserved for the input panel, sized to the TALLEST panel: a 2-line status (active task
     /// board) + top border + input + bottom border + hint = 6. A 1-line status draws 5 and is
     /// bottom-anchored with one pad row (see `panelLead(statusRows:)`), so the box is always flush
@@ -27,43 +27,42 @@ final class PinnedBar {
     /// Below this many rows a pinned strip would starve the transcript — fall back to inline.
     static let minTerminalRows = 12
 
-    private let enabled: Bool
-    private let raw = RawMode()
-    private(set) var active = false
-    private(set) var suspended = false
-    private var layout: PinnedBarLayout?
+    private let coordinator: TerminalScreenCoordinator
+    private let stateLock = NSLock()
+    private var suspendedState = false
+
+    var active: Bool { coordinator.screenActive }
+    var safelyOwnsTurns: Bool { coordinator.canSafelyPinTurns }
+    var suspended: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return suspendedState
+    }
 
     /// `enabled` gates the whole feature; the initializer also refuses non-TTY / dumb terminals so a
     /// piped or CI run never emits scroll-region escapes into a log.
     init(enabled: Bool) {
-        let isTTY = isatty(STDOUT_FILENO) != 0 && isatty(STDIN_FILENO) != 0
-        let dumb = (ProcessInfo.processInfo.environment["TERM"] ?? "").lowercased() == "dumb"
-        self.enabled = enabled && isTTY && !dumb
+        coordinator = TerminalScreenCoordinator(enabled: enabled)
+    }
+
+    /// Internal injection seam for deterministic screen tests and the offline visual diagnostic.
+    init(coordinator: TerminalScreenCoordinator) {
+        self.coordinator = coordinator
     }
 
     /// Pin the bar: set the scroll region and drop the cursor to the bottom of the band so the first
     /// panel renders at the bottom and subsequent transcript scrolls up from there (Claude-Code feel:
     /// box at the bottom, conversation filling in above). No-op when disabled or the terminal is too short.
     func activate() {
-        guard enabled, !active else { return }
-        let size = raw.size()
-        guard size.rows >= Self.minTerminalRows else { return }
-        let l = PinnedBarLayout(rows: size.rows, cols: size.cols, panelRows: Self.panelRows)
-        layout = l
-        write(l.activateSequence)
-        active = true
-        // A killed kist must not leave the shell with a frozen bottom strip: the RawMode signal
-        // handler releases the region when this flag is set (async-signal-safe write).
-        RawMode.scrollRegionActiveOnSignal = true
+        coordinator.activate()
+        setSuspended(false)
     }
 
     /// Release the region and restore a normal full-screen cursor. Idempotent; MUST run on every REPL
     /// exit path (wire via `defer`) or the user's shell is left with a stuck scroll region.
     func deactivate() {
-        guard active, let l = layout else { return }
-        RawMode.scrollRegionActiveOnSignal = false
-        write(l.deactivateSequence)
-        active = false
+        coordinator.deactivate()
+        setSuspended(false)
     }
 
     /// Drop the scroll region for the duration of a TURN. The pinned strip only earns its keep while
@@ -73,36 +72,22 @@ final class PinnedBar {
     /// full-screen mode (byte-identical to the inline path that never had this bug). `resume()` re-pins
     /// at the next prompt. Type-ahead still shows in the live spinner tail, so nothing is lost.
     func suspend() {
-        guard active, !suspended, let l = layout else { return }
-        suspended = true
-        RawMode.scrollRegionActiveOnSignal = false
-        write(l.suspendSequence)
+        guard !suspended else { return }
+        if coordinator.suspend() { setSuspended(true) }
     }
 
     /// Re-pin after a turn (idempotent; no-op if never suspended). Restores the scroll region and parks
     /// the cursor at the band bottom so the next prompt renders in the pinned strip again.
     func resume() {
-        guard active, suspended, let l = layout else { return }
-        suspended = false
-        RawMode.scrollRegionActiveOnSignal = true
-        write(l.activateSequence)
+        guard suspended else { return }
+        coordinator.resume()
+        setSuspended(false)
     }
 
     /// Re-pin when the terminal was resized between prompts (polled — no async-signal-unsafe handler).
     /// A resize that shrinks the terminal below the floor tears the bar down to inline for safety.
     func refreshSizeIfNeeded() {
-        guard active, let current = layout else { return }
-        let size = raw.size()
-        guard size.rows != current.rows || size.cols != current.cols else { return }
-        guard size.rows >= Self.minTerminalRows else { deactivate(); return }
-        let l = PinnedBarLayout(rows: size.rows, cols: size.cols, panelRows: Self.panelRows)
-        // A GROW leaves the old panel stranded mid-band (emulators keep prior rows anchored) — wipe
-        // from the higher of the two panel tops down before re-pinning so no ghost box lingers. The
-        // transcript above that row is preserved; the next panelLead repaints the real panel.
-        let clearFrom = min(current.panelTop, l.panelTop)
-        write(TerminalANSI.moveTo(row: max(1, clearFrom), col: 1) + TerminalANSI.clearBelow)
-        layout = l
-        write(l.activateSequence)
+        coordinator.refreshSizeIfNeeded()
     }
 
     /// Prefix emitted right before the status line + prompt box are drawn. `statusRows` is how many
@@ -110,7 +95,7 @@ final class PinnedBar {
     /// bottom-anchored inside the reserved strip. Pinned: jump to the panel top, clear it, pad so the
     /// box sits flush to the bottom. Inline (fallback): a bare "\n", exactly as the pre-R2b loop wrote.
     func panelLead(statusRows: Int = 1) -> String {
-        guard active, let l = layout else { return "\n" }
+        guard active, let l = coordinator.currentLayout else { return "\n" }
         let contentRows = min(Self.panelRows, max(1, statusRows) + Self.boxRows)
         let pad = max(0, l.panelRows - contentRows)
         return l.panelLeadSequence + String(repeating: "\n", count: pad)
@@ -118,9 +103,49 @@ final class PinnedBar {
 
     /// Prefix emitted right before a turn's transcript output begins. Pinned: park the cursor on the
     /// last band row so streamed output scrolls the band (not the pinned panel). Inline: "" (no-op).
-    func transcriptLead() -> String { active ? (layout?.transcriptLeadSequence ?? "") : "" }
+    func transcriptLead() -> String {
+        active ? (coordinator.currentLayout?.transcriptLeadSequence ?? "") : ""
+    }
 
-    private func write(_ s: String) { FileHandle.standardOutput.write(Data(s.utf8)) }
+    /// Switch from the legacy prompt renderer to the production during-turn owner. stdout+stderr
+    /// are captured only after the committed prompt has been echoed into the transcript band.
+    @discardableResult
+    func beginStickyTurn(panel: TerminalScreenCoordinator.Panel) -> Bool {
+        guard active, !suspended else { return false }
+        return coordinator.beginTurnCapture(panel: panel)
+    }
+
+    /// Suspend sticky ownership around a cooked stdin read. The caller must pair a successful begin
+    /// with `endInputScreenLease()` before allowing its watcher to resume.
+    @discardableResult
+    func beginInputScreenLease() -> Bool {
+        coordinator.beginScreenLease()
+    }
+
+    @discardableResult
+    func endInputScreenLease() -> Bool {
+        let restored = coordinator.endScreenLease()
+        if !restored { setSuspended(true) }
+        return restored
+    }
+
+    func setBracketedPasteEnabled(_ enabled: Bool) {
+        coordinator.setBracketedPasteEnabled(enabled)
+    }
+
+    func updateStickyTypeahead(pending: String, queuedCount: Int) {
+        coordinator.updateTypeahead(pending: pending, queuedCount: queuedCount)
+    }
+
+    func endStickyTurn() {
+        coordinator.endTurnCapture()
+    }
+
+    private func setSuspended(_ value: Bool) {
+        stateLock.lock()
+        suspendedState = value
+        stateLock.unlock()
+    }
 }
 
 /// Pure screen arithmetic for the pinned bar (unit-tested; no I/O). The transcript band is rows
@@ -156,10 +181,11 @@ struct PinnedBarLayout: Equatable {
             + TerminalANSI.showCursor + "\r\n"
     }
 
-    /// Jump to the panel strip and clear it (cursor-to-end-of-display erases the whole bottom panel,
-    /// even though scrolling is confined to the band above).
+    /// Clear every panel row explicitly, then park at the first one. ED is deliberately forbidden:
+    /// Terminal.app has corrupted the DECSTBM band when clear-to-end-of-display races streamed output.
     var panelLeadSequence: String {
-        TerminalANSI.moveTo(row: panelTop, col: 1) + TerminalANSI.clearBelow
+        TerminalScreenCoordinator.clearPanelSequence(self)
+            + TerminalANSI.moveTo(row: panelTop, col: 1)
     }
 
     /// Park on the last band row so a turn's output scrolls the band, leaving the panel pinned.
@@ -167,11 +193,10 @@ struct PinnedBarLayout: Equatable {
         TerminalANSI.moveTo(row: transcriptBottom, col: 1)
     }
 
-    /// Suspend for a turn: release the scroll region, drop to the panel row, and clear the old panel so
-    /// the freed bottom rows are blank before turn output flows into full-screen scrolling from there.
+    /// Suspend for a terminal lease: release the region and clear each panel row with absolute CUP+EL.
     var suspendSequence: String {
         TerminalANSI.resetScrollRegion
+            + TerminalScreenCoordinator.clearPanelSequence(self)
             + TerminalANSI.moveTo(row: panelTop, col: 1)
-            + TerminalANSI.clearBelow
     }
 }

@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// The raw-mode terminal surface: a scrolling transcript band on top, a pinned input box on the
 /// bottom. It composes the tested pieces (RawMode, ScreenLayout, KeyDecoder, LineEditor) into the
@@ -36,6 +41,12 @@ final class TerminalUI {
         let size = raw.size()
         layout = ScreenLayout(rows: size.rows, cols: size.cols, inputRows: Self.inputRows(barShown: barHint != nil))
         raw.enable()
+        // Own signal cleanup before DECSTBM reaches the terminal. RawMode's termios registration and
+        // the scroll-region registration are independent because setup can still pin if raw mode fails.
+        guard RawMode.updateScrollRegionSignalState(active: true, resetFD: STDOUT_FILENO) else {
+            raw.disable()
+            return
+        }
         write(layout.scrollRegion)                              // pin the transcript band
         write(TerminalANSI.moveTo(row: layout.transcriptBottom, col: 1))
         active = true
@@ -47,6 +58,7 @@ final class TerminalUI {
         write(TerminalANSI.resetScrollRegion)
         write(TerminalANSI.moveTo(row: layout.rows, col: 1))
         write(TerminalANSI.showCursor + "\r\n")
+        RawMode.updateScrollRegionSignalState(active: false, resetFD: STDOUT_FILENO)
         raw.disable()
         active = false
     }

@@ -148,13 +148,16 @@ public struct SpawnAgentTool: AgentTool {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func parseRole(_ raw: String?) -> AgentRole? {
+    static func parseRole(_ raw: String?) -> AgentRole? {
         guard let raw else { return nil }
         switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "planner", "plan": return .planner
-        case "worker", "research", "researcher", "analyst": return .worker
-        case "coder", "code", "builder", "build", "developer", "dev": return .coder
-        case "critic", "review", "reviewer", "verify", "verifier", "judge": return .critic
+        case "worker", "research", "researcher", "analyst", "worker/researcher":
+            return .worker
+        case "coder", "code", "builder", "build", "developer", "dev", "coder/builder":
+            return .coder
+        case "critic", "review", "reviewer", "verify", "verifier", "judge", "critic/reviewer":
+            return .critic
         default: return nil
         }
     }

@@ -3,7 +3,7 @@ import Foundation
 /// The transport-agnostic surface the MCP client manager depends on. Both the stdio subprocess transport
 /// (`MCPServerConnection`) and the Streamable-HTTP transport (`MCPHTTPConnection`) conform, so the manager
 /// can hold either behind one type and the rest of the system is unaware of the wire.
-protocol MCPConnection: Sendable {
+protocol MCPConnection: AnyObject, Sendable {
     var config: MCPServerConfig { get async }
     /// Whether the connection is usable (stdio: process alive; http: always true — each request stands alone).
     var isAlive: Bool { get async }

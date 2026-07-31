@@ -10,17 +10,52 @@ This repo is what runs when Luke types `kist`. Treat every change as production.
 - ⚠️ `/Volumes/PRO-G40/Downloads/kist-loops` is a DEAD worktree of a different ancestor —
   never build from or sync to it.
 
-## Build / test / deploy (the only sanctioned path)
+## Build / test / deploy
 ```
-swift test                                   # full suite must be green (3300+)
-swift build -c release --product kist
-cp .build/release/kist ~/bin/kist-current
-codesign -f -s - ~/bin/kist-current          # cp BREAKS the signature → SIGKILL 137; ALWAYS re-sign
+swift test                                           # local verification
+swift build -c release --product kist                # local release build only
+.build/release/kist --version                        # exact semantic product identity
+
+# The ONLY sanctioned production promotion path:
+MYTHOS_REPO=/Volumes/PRO-G40/kist-loops ~/bin/kist-rebuild --force
 ```
-Wrapper `~/bin/kist` arms `--enable-computer-use --allow-shell --allow-read /Volumes` and
-sources `~/.config/kist/secrets.env`, then execs `~/bin/kist-current`.
+`kist-rebuild` runs the test/build/sign/smoke gates, then performs a lease-serialized, journaled
+promotion of the binary plus its tracked wrapper/dashboard/rebuild/safe-rebuild scripts. The
+individual path replacements are not globally atomic for readers that bypass the deployment lease;
+failed promotions roll back, and operators must not launch a new Kist process while promotion is
+in progress. Never manually `cp` a binary or deployment script into `~/bin`; that bypasses the
+artifact closure and leaves installed provenance stale. `scripts/kist-wrapper`,
+`scripts/kist-dashboard`, `scripts/kist-rebuild`, and `scripts/kist-safe-rebuild.sh` are the
+canonical deployed sources.
+
+Bootstrap from a legacy closure is deliberately two-pass: run the exact promotion command above
+once to install the compatibility-aware dashboard/rebuild gate and produce a transitional v2
+manifest, validate it, then run the same command again to transactionally install the safe helper
+and produce the five-payload v3 closure. Never archive the transitional deployment. V3 release
+closure covers only rollback-restorable deployed payloads; mutable dashboard runtime/cortex state
+is trust-validated independently at each dashboard launch.
+Pre-v3 registry records are explicitly labeled `best-effort-legacy-non-self-contained`: their
+runtime/cortex dependencies were never archived, and a compatibility rollback leaves the newer
+safe-rebuild helper outside the legacy closure. The gate dry-validates that operational closure
+before activation; use v3 archives for exact rollback.
+Repository-root `.kist/usage.jsonl` and `.kist/runs/**` are operational telemetry: promotion neither
+hashes nor modifies them. Other `.kist/` inputs—including `.kist/agents/**`, plan data, and checked-in
+learning policy—remain in the source identity and private build snapshot. Tracked source and
+deployment scripts remain in that identity, and persistent source churn fails promotion.
+
+Wrapper `~/bin/kist` sources `~/.config/kist/secrets.env`, defaults
+`--enable-computer-use --allow-shell --allow-read /Volumes` unless the caller supplied each
+authority explicitly, then execs `~/bin/kist-current`.
+The during-turn pinned input panel is opt-in only via `--sticky-turns`. Production and the default
+wrapper must keep it OFF unless a separate change is approved after direct Terminal.app validation;
+never add that flag to the wrapper or rebuild path implicitly.
 A running kist session does NOT pick up a redeploy — start a new session to test.
 If the release module cache goes stale: `rm -rf .build/*/release/ModuleCache && find .build -name '*.pch' -delete`.
+
+Provenance restoration note (2026-07-30): `scripts/kist-rebuild` began as an emergency port of the
+audited installed promotion gate and now carries the compatibility-aware v3 closure protocol.
+Follow-up: split its evidence validation, transaction, release-registry, and build/promotion
+phases into separately tested modules without changing behavior before adding more features.
 
 ## Architecture (where things live)
 - `Sources/AgentCore/` — provider-agnostic engine: `PlanExecuteLoop` (plan→execute→replan→verify),

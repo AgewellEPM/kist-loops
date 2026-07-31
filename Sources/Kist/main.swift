@@ -1,12 +1,21 @@
 import Foundation
 import AgentCore
 
+let kistRawArguments = Array(CommandLine.arguments.dropFirst())
+
+// Deployment metadata must be inspectable without mutating KIST_ACTIVE or touching option parsing,
+// project discovery, MCP configuration, provider selection, or model initialization.
+if KistBuildInfo.isVersionRequest(kistRawArguments) {
+    print(KistBuildInfo.versionText)
+    exit(0)
+}
+
 // Mythos / kist entry point. One static binary, no external deps.
 // Unbuffer stdout so the event sink's writes and the REPL's prompts stay in order
 // (we mix print() with raw FileHandle writes for the inline prompt + token stream).
 setvbuf(stdout, nil, _IONBF, 0)
 
-let opts = KistOptions.parse(Array(CommandLine.arguments.dropFirst()))
+let opts = KistOptions.parse(kistRawArguments)
 
 // Mark this process so any CHILD kist (an agent's run_command → `kist …`) detects nesting and refuses
 // self-escalation (computer-use arming / guards-off). parse() above already read the INHERITED value for

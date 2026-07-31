@@ -78,7 +78,8 @@ threat model those choices assume. Labels follow the project bar; see the bottom
 - **Config validation (pre-spawn):** absolute command paths only, no `..`, no shell
   metacharacters, executable check, NUL-free env, secret-key hints; project-local config
   opt-in. **Output sanitization (post-call):** size cap + control/bidi/zero-width stripping.
-- Zombie-proof shutdown (SIGTERM→SIGKILL + await-exit), actor-isolated, 1 MB line cap.
+- Zombie-proof ownership (SIGTERM→SIGKILL with a bounded caller join, plus a retained
+  eventual `waitpid` when exit exceeds that budget), actor-isolated, 1 MB line cap.
 
 ### 6. OS-level sandbox tier — `SandboxPolicy` / `SeatbeltSandbox` (opt-in, macOS)
 - When `ToolContext.sandbox` is enabled, `run_command` wraps the resolved command in macOS

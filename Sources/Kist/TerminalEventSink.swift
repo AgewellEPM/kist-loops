@@ -80,6 +80,9 @@ struct TerminalEventSink: RuntimeEventSink {
     func refreshLiveStatus() {
         state.withLock {
             guard state.liveStartedAt != nil, state.timer != nil else { return }
+            // The fixed panel redraws type-ahead immediately while a safe sticky turn owns the
+            // screen. Repainting the spinner too would duplicate the typed tail in the transcript.
+            guard !TerminalScreenCoordinator.isTypeaheadPanelActive else { return }
             FileHandle.standardOutput.write(Data(liveLine().utf8))
             state.liveLineActive = true
         }
@@ -329,7 +332,7 @@ struct TerminalEventSink: RuntimeEventSink {
     /// The live status line INCLUDING the R2a typed-input tail. Call with the state lock held.
     private func liveLine() -> String {
         var line = Self.liveStatusLine(state: state, color: color)
-        if let snapshot = typedInput?() {
+        if !TerminalScreenCoordinator.isTypeaheadPanelActive, let snapshot = typedInput?() {
             let tail = Self.typedInputTail(pending: snapshot.pending, queuedCount: snapshot.queuedCount)
             if !tail.isEmpty { line += Self.color("36", tail, enabled: color) + "\u{001B}[K" }
         }

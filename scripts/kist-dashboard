@@ -1,0 +1,1031 @@
+#!/bin/bash -p
+# Canonical authenticated Kist dashboard launcher. Parse first; validate deployment provenance before
+# process mutation; replace only an exactly-owned, authenticated Kist listener.
+set -euo pipefail
+umask 077
+unset ENV BASH_ENV CDPATH
+
+readonly INSTALL_HOME="/Users/lukekist"
+readonly KIST_HOME="$INSTALL_HOME/.kist"
+readonly PYTHON="/usr/bin/python3"
+readonly RUNTIME="$KIST_HOME/scripts/kist_runtime.py"
+readonly SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+readonly SERVICE="kist-live-dashboard"
+PATH="$SAFE_PATH"
+HOME="$INSTALL_HOME"
+export HOME PATH
+
+usage() {
+  printf '%s\n' 'usage: kist-dashboard [control] [conversation|flow|timeline|fleet|vms|plan] [--project-root PATH] [--port PORT] [--no-open]'
+}
+die() { printf 'kist-dashboard: %s\n' "$*" >&2; exit 1; }
+
+VIEW=""
+PORT=7777
+PROJECT_ROOT=""
+CONTROL=0
+NO_OPEN=0
+PROJECT_SEEN=0
+PORT_SEEN=0
+HELP=0
+EVALUATE=0
+VALIDATE=0
+REQUIRE_ENTERPRISE=0
+EVAL_BINARY=""
+EVAL_WRAPPER=""
+EVAL_DASHBOARD=""
+EVAL_REBUILD=""
+EVAL_SAFE_REBUILD=""
+EVAL_CLOSURE_VERSION=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    conversation|flow|timeline|fleet|vms|plan)
+      [[ -z "$VIEW" ]] || die 'dashboard view may be supplied only once'
+      VIEW="$1"; shift ;;
+    control)
+      [[ "$CONTROL" -eq 0 ]] || die 'control may be supplied only once'
+      CONTROL=1; shift ;;
+    --project-root)
+      [[ "$PROJECT_SEEN" -eq 0 && $# -ge 2 && -n "$2" ]] || die '--project-root requires one value and may be supplied only once'
+      PROJECT_SEEN=1; PROJECT_ROOT="$2"; shift 2 ;;
+    --project-root=*)
+      [[ "$PROJECT_SEEN" -eq 0 && -n "${1#--project-root=}" ]] || die '--project-root requires one value and may be supplied only once'
+      PROJECT_SEEN=1; PROJECT_ROOT="${1#--project-root=}"; shift ;;
+    --port)
+      [[ "$PORT_SEEN" -eq 0 && $# -ge 2 ]] || die '--port requires one value and may be supplied only once'
+      PORT_SEEN=1; PORT="$2"; shift 2 ;;
+    --port=*)
+      [[ "$PORT_SEEN" -eq 0 && -n "${1#--port=}" ]] || die '--port requires one value and may be supplied only once'
+      PORT_SEEN=1; PORT="${1#--port=}"; shift ;;
+    --no-open)
+      [[ "$NO_OPEN" -eq 0 ]] || die '--no-open may be supplied only once'
+      NO_OPEN=1; shift ;;
+    -h|--help)
+      [[ "$HELP" -eq 0 ]] || die '--help may be supplied only once'
+      HELP=1; shift ;;
+    --provenance-evaluate)
+      [[ "$EVALUATE" -eq 0 ]] || die '--provenance-evaluate may be supplied only once'
+      [[ $# -eq 3 || $# -eq 5 || $# -eq 6 ]] \
+        || die '--provenance-evaluate requires BINARY WRAPPER [DASHBOARD REBUILD [SAFE_REBUILD]]'
+      EVALUATE=1; EVAL_BINARY="$2"; EVAL_WRAPPER="$3"
+      if [[ $# -eq 6 ]]; then
+        EVAL_DASHBOARD="$4"; EVAL_REBUILD="$5"; EVAL_SAFE_REBUILD="$6"
+        EVAL_CLOSURE_VERSION=3; shift 6
+      elif [[ $# -eq 5 ]]; then
+        EVAL_DASHBOARD="$4"; EVAL_REBUILD="$5"
+        EVAL_CLOSURE_VERSION=2; shift 5
+      else
+        EVAL_CLOSURE_VERSION=2; shift 3
+      fi ;;
+    --provenance-validate)
+      [[ "$VALIDATE" -eq 0 ]] || die '--provenance-validate may be supplied only once'
+      VALIDATE=1; shift ;;
+    --require-enterprise)
+      [[ "$REQUIRE_ENTERPRISE" -eq 0 ]] || die '--require-enterprise may be supplied only once'
+      REQUIRE_ENTERPRISE=1; shift ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+if [[ ! "$PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( 10#$PORT > 65535 )); then
+  die '--port requires a canonical integer from 1 through 65535'
+fi
+if [[ "$HELP" -eq 1 ]]; then usage; exit 0; fi
+if [[ "$EVALUATE" -eq 1 ]]; then
+  [[ -z "$VIEW" && "$CONTROL" -eq 0 && "$NO_OPEN" -eq 0 && "$PROJECT_SEEN" -eq 0 && "$PORT_SEEN" -eq 0 ]] \
+    || die '--provenance-evaluate cannot be combined with launch arguments'
+  for override in "$EVAL_BINARY" "$EVAL_WRAPPER" "$EVAL_DASHBOARD" "$EVAL_REBUILD" "$EVAL_SAFE_REBUILD"; do
+    [[ -z "$override" || "$override" = /* ]] || die 'provenance override paths must be absolute'
+  done
+fi
+if [[ "$VALIDATE" -eq 1 ]]; then
+  [[ "$EVALUATE" -eq 0 && -z "$VIEW" && "$CONTROL" -eq 0 && "$NO_OPEN" -eq 0 && "$PROJECT_SEEN" -eq 0 && "$PORT_SEEN" -eq 0 ]] \
+    || die '--provenance-validate cannot be combined with launch arguments'
+fi
+if [[ "$REQUIRE_ENTERPRISE" -eq 1 && "$VALIDATE" -ne 1 ]]; then
+  die '--require-enterprise is valid only with --provenance-validate'
+fi
+[[ -x "$PYTHON" && ! -L "$PYTHON" ]] || die "trusted system python is unavailable at $PYTHON"
+
+python_clean() {
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    TMPDIR=/private/tmp PYTHONNOUSERSITE=1 "$PYTHON" -I "$@" 8>&- 9>&-
+}
+
+# Hold a kernel-backed shared deployment lease from validation through authenticated readiness.
+# Rebuild takes the same file exclusively, so the bytes proven below cannot be replaced between
+# validation and execution.  This shell owns the inherited open-file descriptions directly: a
+# short trusted Python process applies BSD flock, exits, and leaves the lock with this process.
+DEPLOY_LEASE_ACTIVE=0
+DEPLOY_LEASE_IDENTITY=""
+LAUNCH_LEASE_ACTIVE=0
+LAUNCH_LEASE_IDENTITY=""
+
+lease_python() {
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    TMPDIR=/private/tmp PYTHONNOUSERSITE=1 "$PYTHON" -I "$@"
+}
+
+prepare_lease_path() {
+  python_clean - "$1" <<'PY'
+import os,stat,sys
+path=sys.argv[1]; uid=os.geteuid()
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def dfp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid)
+parent=os.path.dirname(path); leaf=os.path.basename(path)
+if not leaf or "/" in leaf or not path.startswith("/") or os.path.realpath(parent)!=parent:
+    raise SystemExit(1)
+directory=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); pins=[]
+try:
+    root=os.fstat(directory)
+    if not stat.S_ISDIR(root.st_mode) or root.st_uid not in {0,uid} or root.st_mode&0o022:
+        raise SystemExit(1)
+    for part in [item for item in parent.split("/") if item]:
+        named=os.stat(part,dir_fd=directory,follow_symlinks=False)
+        if (not stat.S_ISDIR(named.st_mode) or named.st_uid not in {0,uid}
+                or named.st_mode&0o022):
+            raise SystemExit(1)
+        child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+        if fp(os.fstat(child))!=fp(named):
+            os.close(child); raise SystemExit(1)
+        pins.append((directory,part,child,dfp(named))); directory=child
+    try:
+        named=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+    except FileNotFoundError:
+        fd=os.open(leaf,os.O_RDONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,
+                   dir_fd=directory)
+        os.close(fd); os.fsync(directory)
+        named=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+    if (not stat.S_ISREG(named.st_mode) or named.st_uid!=uid or named.st_nlink!=1
+            or stat.S_IMODE(named.st_mode)!=0o600):
+        raise SystemExit(1)
+    fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+    try:
+        if fp(os.fstat(fd))!=fp(named):
+            raise SystemExit(1)
+    finally:
+        os.close(fd)
+    for parent_fd,name,child_fd,identity in pins:
+        if dfp(os.fstat(child_fd))!=identity:
+            raise SystemExit(1)
+        if dfp(os.stat(name,dir_fd=parent_fd,follow_symlinks=False))!=identity:
+            raise SystemExit(1)
+finally:
+    descriptors={directory}
+    for parent_fd,_,child_fd,_ in pins:
+        descriptors.update({parent_fd,child_fd})
+    for descriptor in descriptors:
+        os.close(descriptor)
+PY
+}
+
+lease_fd_operation() {
+  local action="$1" mode="$2" path="$3" fd="$4" expected="${5-}"
+  lease_python - "$action" "$mode" "$path" "$fd" "$expected" <<'PY'
+import fcntl,os,stat,sys,time
+action,mode,path,fd_text,expected=sys.argv[1:]; uid=os.geteuid(); fd=int(fd_text)
+other=8 if fd==9 else 9
+try: os.close(other)
+except OSError: pass
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def dfp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid)
+def lock_fp(value): return (value.st_dev,value.st_ino)
+def valid_file(value):
+    return (stat.S_ISREG(value.st_mode) and value.st_uid==uid and value.st_nlink==1
+            and stat.S_IMODE(value.st_mode)==0o600)
+parent=os.path.dirname(path); leaf=os.path.basename(path)
+if action not in {"acquire","assert"} or mode not in {"shared","exclusive"} or fd not in {8,9}:
+    raise SystemExit(1)
+if not leaf or "/" in leaf or not path.startswith("/") or os.path.realpath(parent)!=parent:
+    raise SystemExit(1)
+inherited=os.fstat(fd)
+if not valid_file(inherited):
+    raise SystemExit(1)
+directory=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); pins=[]
+try:
+    root=os.fstat(directory)
+    if not stat.S_ISDIR(root.st_mode) or root.st_uid not in {0,uid} or root.st_mode&0o022:
+        raise SystemExit(1)
+    for part in [item for item in parent.split("/") if item]:
+        named=os.stat(part,dir_fd=directory,follow_symlinks=False)
+        if (not stat.S_ISDIR(named.st_mode) or named.st_uid not in {0,uid}
+                or named.st_mode&0o022):
+            raise SystemExit(1)
+        child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+        if fp(os.fstat(child))!=fp(named):
+            os.close(child); raise SystemExit(1)
+        pins.append((directory,part,child,dfp(named))); directory=child
+    named=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+    named_fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+    try:
+        if not valid_file(named) or fp(os.fstat(named_fd))!=fp(named):
+            raise SystemExit(1)
+        if lock_fp(named)!=lock_fp(inherited) or fp(os.fstat(fd))!=fp(inherited):
+            raise SystemExit(1)
+        identity=f"{inherited.st_dev}:{inherited.st_ino}"
+        if action=="assert":
+            if identity!=expected:
+                raise SystemExit(1)
+        else:
+            deadline=time.monotonic()+30.0
+            operation=(fcntl.LOCK_SH if mode=="shared" else fcntl.LOCK_EX)|fcntl.LOCK_NB
+            while True:
+                try:
+                    fcntl.flock(fd,operation); break
+                except BlockingIOError:
+                    if time.monotonic()>=deadline:
+                        raise SystemExit(75)
+                    time.sleep(.05)
+        if fp(os.fstat(fd))!=fp(inherited):
+            raise SystemExit(1)
+        refreshed=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+        if fp(refreshed)!=fp(named) or lock_fp(refreshed)!=lock_fp(inherited):
+            raise SystemExit(1)
+        for parent_fd,name,child_fd,pinned in pins:
+            if dfp(os.fstat(child_fd))!=pinned:
+                raise SystemExit(1)
+            if dfp(os.stat(name,dir_fd=parent_fd,follow_symlinks=False))!=pinned:
+                raise SystemExit(1)
+        print(identity)
+    finally:
+        os.close(named_fd)
+finally:
+    descriptors={directory}
+    for parent_fd,_,child_fd,_ in pins:
+        descriptors.update({parent_fd,child_fd})
+    for descriptor in descriptors:
+        os.close(descriptor)
+PY
+}
+
+assert_lease() {
+  local slot="$1"
+  if [[ "$slot" == deployment ]]; then
+    if [[ "$DEPLOY_LEASE_ACTIVE" -ne 1 ]] \
+       || ! lease_fd_operation assert shared "$INSTALL_HOME/bin/.kist-deployment.lock" 9 \
+            "$DEPLOY_LEASE_IDENTITY" >/dev/null; then
+      die 'deployment lease descriptor is not held by this process'
+    fi
+  else
+    if [[ "$LAUNCH_LEASE_ACTIVE" -ne 1 ]] \
+       || ! lease_fd_operation assert exclusive "$RUN_DIR/dashboard-$PORT.launch.lock" 8 \
+            "$LAUNCH_LEASE_IDENTITY" >/dev/null; then
+      die 'launch lease descriptor is not held by this process'
+    fi
+  fi
+}
+start_lease() {
+  local slot="$1" mode="$2" lock_path="$3" identity=""
+  [[ "$mode" == shared || "$mode" == exclusive ]] || die "invalid $slot lease mode"
+  prepare_lease_path "$lock_path" || die "$slot lease path is unsafe"
+  if [[ "$slot" == deployment ]]; then
+    [[ "$DEPLOY_LEASE_ACTIVE" -eq 0 ]] || die 'deployment lease is already active'
+    exec 9< "$lock_path"
+    identity=$(lease_fd_operation acquire "$mode" "$lock_path" 9) \
+      || { exec 9>&-; die "timed out or failed to acquire the $slot $mode lease"; }
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] \
+      || { exec 9>&-; die "$slot lease returned an invalid identity"; }
+    DEPLOY_LEASE_IDENTITY="$identity"; DEPLOY_LEASE_ACTIVE=1
+  else
+    [[ "$LAUNCH_LEASE_ACTIVE" -eq 0 ]] || die 'launch lease is already active'
+    exec 8< "$lock_path"
+    identity=$(lease_fd_operation acquire "$mode" "$lock_path" 8) \
+      || { exec 8>&-; die "timed out or failed to acquire the $slot $mode lease"; }
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] \
+      || { exec 8>&-; die "$slot lease returned an invalid identity"; }
+    LAUNCH_LEASE_IDENTITY="$identity"; LAUNCH_LEASE_ACTIVE=1
+  fi
+  assert_lease "$slot"
+}
+release_lease() {
+  local slot="$1" status=0
+  if [[ "$slot" == deployment ]]; then
+    [[ "$DEPLOY_LEASE_ACTIVE" -eq 1 ]] || return 0
+    lease_fd_operation assert shared "$INSTALL_HOME/bin/.kist-deployment.lock" 9 \
+      "$DEPLOY_LEASE_IDENTITY" >/dev/null || status=1
+    exec 9>&-
+    DEPLOY_LEASE_ACTIVE=0; DEPLOY_LEASE_IDENTITY=""
+  else
+    [[ "$LAUNCH_LEASE_ACTIVE" -eq 1 ]] || return 0
+    lease_fd_operation assert exclusive "$RUN_DIR/dashboard-$PORT.launch.lock" 8 \
+      "$LAUNCH_LEASE_IDENTITY" >/dev/null || status=1
+    exec 8>&-
+    LAUNCH_LEASE_ACTIVE=0; LAUNCH_LEASE_IDENTITY=""
+  fi
+  return "$status"
+}
+# shellcheck disable=SC2329 # Invoked by EXIT/INT/TERM traps below.
+release_all_leases() {
+  local status=0
+  release_lease launch || status=1
+  release_lease deployment || status=1
+  return "$status"
+}
+trap release_all_leases EXIT
+
+if [[ "$EVALUATE" -eq 0 ]]; then
+  start_lease deployment shared "$INSTALL_HOME/bin/.kist-deployment.lock"
+fi
+
+[[ -n "$PROJECT_ROOT" ]] || PROJECT_ROOT="$PWD"
+[[ -d "$PROJECT_ROOT" ]] || die "dashboard project root is not a directory: $PROJECT_ROOT"
+PROJECT_ROOT="$(cd -P -- "$PROJECT_ROOT" && pwd)"
+
+# Same schema/digest semantics as Swift and kist-rebuild. The helper reads through O_NOFOLLOW
+# descriptors, rejects ACL/mode/owner/type drift, and binds executable Python plus served assets.
+PROVENANCE_OUTPUT="$(python_clean - "$INSTALL_HOME" "$EVALUATE" "$EVAL_BINARY" "$EVAL_WRAPPER" \
+  "$EVAL_DASHBOARD" "$EVAL_REBUILD" "$EVAL_SAFE_REBUILD" "$EVAL_CLOSURE_VERSION" \
+  "$REQUIRE_ENTERPRISE" <<'PY'
+import ctypes, errno, hashlib, json, os, stat, subprocess, sys
+HOME=os.path.realpath(sys.argv[1]); EVALUATE=sys.argv[2]=="1"
+OVERRIDES={"bin/kist-current":sys.argv[3],"bin/kist":sys.argv[4],
+           "bin/kist-dashboard":sys.argv[5],"bin/kist-rebuild":sys.argv[6],
+           "bin/kist-safe-rebuild.sh":sys.argv[7]}
+EVAL_CLOSURE_VERSION=sys.argv[8]; REQUIRE_ENTERPRISE=sys.argv[9]=="1"
+UID=os.geteuid(); MAX_FILE=512*1024*1024
+MAX_TOTAL=1024*1024*1024; MAX_PATHS=4*1024*1024; MAX_ENTRIES=25000
+SKIP={".git",".pytest_cache"}
+IMPORTABLE=(".py",".pyw",".pyi",".pth",".so",".dylib",".bundle",".pyd",".zip",".egg",".whl",".pyz")
+EXECUTABLE_SUFFIXES=(".sh",".bash",".zsh",".swift",".js",".mjs",".cjs",".pl",".rb")
+CONFIG_SUFFIXES=(".toml",".yaml",".yml",".ini",".cfg",".plist")
+CONFIG_NAMES={"Pipfile","requirements.txt","constraints.txt"}
+def fp(s): return (s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_size,s.st_nlink,s.st_mtime_ns,s.st_ctime_ns)
+libc=ctypes.CDLL(None,use_errno=True); libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]; libc.acl_get_fd_np.restype=ctypes.c_void_p; libc.acl_free.argtypes=[ctypes.c_void_p]
+def acl(fd):
+    ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+    if value: libc.acl_free(value); return True
+    error=ctypes.get_errno()
+    if error in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+    raise OSError(error,os.strerror(error))
+def pins(relative):
+    target=os.path.join(HOME,relative) if relative else HOME
+    hc=[x for x in HOME.split("/") if x]; tc=[x for x in target.split("/") if x]
+    if tc[:len(hc)]!=hc: raise RuntimeError("escape")
+    out=[]; fd=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); out.append((fd,None,fp(os.fstat(fd))))
+    cur=""
+    try:
+        for name in tc:
+            st=os.stat(name,dir_fd=fd,follow_symlinks=False); cur += "/"+name
+            if not stat.S_ISDIR(st.st_mode) or st.st_mode&0o022: raise RuntimeError("directory mode")
+            below=cur==HOME or cur.startswith(HOME+"/")
+            if (below and st.st_uid!=UID) or (not below and st.st_uid not in {0,UID}): raise RuntimeError("directory owner")
+            child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            if fp(os.fstat(child))!=fp(st) or (below and cur!=HOME and acl(child)): os.close(child); raise RuntimeError("directory race/acl")
+            out.append((child,name,fp(st))); fd=child
+        return out
+    except Exception:
+        for item in reversed(out): os.close(item[0])
+        raise
+def stable(ps):
+    for i,(fd,name,identity) in enumerate(ps):
+        if fp(os.fstat(fd))!=identity: return False
+        if i and fp(os.stat(name,dir_fd=ps[i-1][0],follow_symlinks=False))!=identity: return False
+    return True
+budget=[0,0]
+def reserve(logical,size):
+    path=logical.encode()
+    if size>MAX_TOTAL-budget[0] or len(path)>MAX_PATHS-budget[1]: raise RuntimeError("aggregate bound")
+    budget[0]+=size; budget[1]+=len(path)
+def read_leaf(relative, executable=False, limit=MAX_FILE, logical=None, digest_only=False):
+    parts=relative.split("/"); ps=pins("/".join(parts[:-1])); parent=ps[-1][0]; leaf=parts[-1]
+    try:
+        st=os.stat(leaf,dir_fd=parent,follow_symlinks=False); ident=fp(st)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid!=UID or st.st_nlink!=1
+                or st.st_mode&0o022 or st.st_size>limit): raise RuntimeError("leaf trust")
+        if executable and not st.st_mode&stat.S_IXUSR: raise RuntimeError("owner execute")
+        if logical is not None: reserve(logical,st.st_size)
+        fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=parent)
+        try:
+            if fp(os.fstat(fd))!=ident or acl(fd): raise RuntimeError("leaf race/acl")
+            chunks=[]; digest=hashlib.sha256() if digest_only else None; total=0
+            while True:
+                block=os.read(fd,min(1024*1024,limit-total+1))
+                if not block: break
+                total+=len(block)
+                if total>limit: raise RuntimeError("leaf too large")
+                if digest is not None: digest.update(block)
+                else: chunks.append(block)
+            if fp(os.fstat(fd))!=ident or fp(os.stat(leaf,dir_fd=parent,follow_symlinks=False))!=ident or not stable(ps): raise RuntimeError("leaf changed")
+            return (digest.digest() if digest is not None else b"".join(chunks)),stat.S_IMODE(st.st_mode),st.st_size
+        finally: os.close(fd)
+    finally:
+        for item in reversed(ps): os.close(item[0])
+def cortex():
+    ps=pins(".kist/cortex"); rootfd=ps[-1][0]; result=[]; visited=0
+    def walk(fd,prefix):
+        nonlocal visited
+        initial=fp(os.fstat(fd)); observed=[]
+        with os.scandir(os.dup(fd)) as scan:
+            names=sorted((e.name for e in scan),key=lambda x:x.encode())
+        for name in names:
+            rel=f"{prefix}/{name}" if prefix else name; visited+=1
+            if visited>250000 or len(rel.encode())>16384: raise RuntimeError("inventory bound")
+            st=os.stat(name,dir_fd=fd,follow_symlinks=False); ident=fp(st); observed.append((name,ident))
+            if name=="__pycache__" or rel.lower().endswith((".pyc",".pyo")): raise RuntimeError("unbound bytecode")
+            if name in SKIP:
+                if not stat.S_ISDIR(st.st_mode): raise RuntimeError("cache type")
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                if st.st_uid!=UID or st.st_mode&0o022: raise RuntimeError("cortex directory trust")
+                child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                try:
+                    if fp(os.fstat(child))!=ident or acl(child): raise RuntimeError("cortex directory race/acl")
+                    walk(child,rel)
+                    if fp(os.fstat(child))!=ident or fp(os.stat(name,dir_fd=fd,follow_symlinks=False))!=ident: raise RuntimeError("cortex directory changed")
+                finally: os.close(child)
+            elif stat.S_ISREG(st.st_mode):
+                lower=rel.lower(); executable=bool(st.st_mode&(stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH))
+                selected=(lower.endswith(IMPORTABLE) or rel.startswith("live/assets/")
+                          or name in CONFIG_NAMES or lower.endswith(CONFIG_SUFFIXES))
+                if executable and not selected:
+                    if not lower.endswith(EXECUTABLE_SUFFIXES): raise RuntimeError("unrecognized executable cortex payload")
+                    selected=True
+                if not selected: continue
+                if (len(result)>=MAX_ENTRIES-5 or st.st_uid!=UID or st.st_nlink!=1
+                        or st.st_mode&0o022 or st.st_size>MAX_FILE): raise RuntimeError("cortex leaf trust")
+                logical=f".kist/cortex/{rel}"; reserve(logical,st.st_size)
+                child=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
+                try:
+                    if fp(os.fstat(child))!=ident or acl(child): raise RuntimeError("cortex leaf race/acl")
+                    digest=hashlib.sha256(); remaining=st.st_size
+                    while remaining:
+                        block=os.read(child,min(1024*1024,remaining))
+                        if not block: raise RuntimeError("cortex leaf short read")
+                        digest.update(block); remaining-=len(block)
+                    if os.read(child,1) or fp(os.fstat(child))!=ident or fp(os.stat(name,dir_fd=fd,follow_symlinks=False))!=ident: raise RuntimeError("cortex leaf changed")
+                    result.append((logical,digest.digest(),stat.S_IMODE(st.st_mode),st.st_size))
+                finally: os.close(child)
+            else: raise RuntimeError("cortex special/symlink")
+        if fp(os.fstat(fd))!=initial: raise RuntimeError("cortex inventory changed")
+        for name,ident in observed:
+            if fp(os.stat(name,dir_fd=fd,follow_symlinks=False))!=ident: raise RuntimeError("cortex name changed")
+    try:
+        walk(rootfd,"")
+        if not stable(ps): raise RuntimeError("cortex ancestry changed")
+        return result
+    finally:
+        for item in reversed(ps): os.close(item[0])
+schema3_required={"schema","stamp","deployed","worktree","branch","commit","remote-origin-sha256","repository-id","source-dirty","source-state-sha256","binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256","dashboard-runtime-sha256","artifact-closure-sha256","artifact-closure-count","test-evidence"}
+schema4_extras={"deployment-assurance","provenance-kind","unsigned-release-sha256","signed-installed-sha256","signing-type","signing-identity","notarization-status","notarization-submission-id","notarization-package-sha256","deployment-evidence-sha256","product-version"}
+schema4_legacy_base=schema3_required|schema4_extras
+# V3 is exactly the transactionally restorable release payload. Mutable dashboard runtime/cortex
+# state is trust-walked and descriptor-pinned at launch, but is intentionally not release/archive data.
+schema4_v3_base=(schema3_required-{"dashboard-runtime-sha256"})|schema4_extras|{"safe-rebuild-sha256"}
+schema4_enterprise={"candidate-manifest-sha256","full-suite-evidence-sha256","full-suite-test-count","full-suite-failures","full-suite-errors","five-canary-evidence-sha256","five-canary-count","five-canary-failures","sbom-sha256","sbom-format","enterprise-evidence-sha256"}
+fields={}; stamp=""; schema=""; closure_version=0
+if EVALUATE:
+    if EVAL_CLOSURE_VERSION not in {"2","3"}: raise SystemExit(1)
+    closure_version=int(EVAL_CLOSURE_VERSION)
+else:
+    stamp=read_leaf("bin/.kist-build",False,16384)[0].decode()
+    manifest=read_leaf("bin/kist-current.manifest",False,262144)[0].decode()
+    if not stamp.endswith("\n") or "\n" in stamp[:-1] or "\r" in stamp: raise SystemExit(1)
+    stamp=stamp[:-1]
+    for raw in manifest.splitlines():
+        if not raw or ":" not in raw: raise SystemExit(1)
+        k,v=raw.split(":",1); k=k.strip().lower(); v=v.strip()
+        if not k or not v or k in fields: raise SystemExit(1)
+        fields[k]=v
+    schema=fields.get("schema")
+    assurance=fields.get("deployment-assurance")
+    if schema=="3":
+        required=schema3_required; closure_version=2
+    elif schema=="4" and assurance in {"pilot","enterprise"}:
+        if "safe-rebuild-sha256" in fields:
+            required=schema4_v3_base; closure_version=3
+        else:
+            required=schema4_legacy_base; closure_version=2
+        if assurance=="enterprise": required=required|schema4_enterprise
+    else:
+        raise SystemExit(1)
+    if set(fields)!=required or fields["stamp"]!=stamp: raise SystemExit(1)
+
+fixed_v2=[("bin/kist-current",True),("bin/kist",True),("bin/kist-dashboard",True),
+          ("bin/kist-rebuild",True),(".kist/scripts/kist_runtime.py",True)]
+fixed_v3=[("bin/kist-current",True),("bin/kist",True),("bin/kist-dashboard",True),
+          ("bin/kist-rebuild",True),("bin/kist-safe-rebuild.sh",True)]
+fixed=fixed_v3 if closure_version==3 else fixed_v2
+entries=[]; hashes={}
+for logical,exe in fixed:
+    physical=OVERRIDES.get(logical) if EVALUATE else ""
+    selected=logical
+    if physical:
+        canonical=os.path.realpath(physical)
+        if canonical!=physical or not canonical.startswith(HOME+"/"): raise SystemExit(1)
+        selected=os.path.relpath(canonical,HOME)
+    digest,mode,size=read_leaf(selected,exe,logical=logical,digest_only=True)
+    entries.append((logical,digest,mode,size)); hashes[logical]=digest.hex()
+
+runtime_digest=None
+if closure_version==2:
+    entries += cortex()
+    runtime_digest=hashes[".kist/scripts/kist_runtime.py"]
+elif not EVALUATE:
+    # Operational state is independently trust-validated on every launch/validation. Runtime bytes
+    # are then compiled from, and retained through, the validated descriptor below.
+    runtime_digest=read_leaf(".kist/scripts/kist_runtime.py",True,digest_only=True)[0].hex()
+    cortex()
+entries.sort(key=lambda x:x[0].encode())
+closure=hashlib.sha256()
+closure.update(b"kist-artifact-closure-v3\0" if closure_version==3 else b"kist-artifact-closure-v2\0")
+for logical,digest,mode,size in entries:
+    p=logical.encode()
+    closure.update(len(p).to_bytes(8,"big")); closure.update(p)
+    closure.update(mode.to_bytes(4,"big")); closure.update(size.to_bytes(8,"big")); closure.update(digest)
+
+if EVALUATE:
+    print("binary-sha256="+hashes["bin/kist-current"])
+    print("wrapper-sha256="+hashes["bin/kist"])
+    print("dashboard-launcher-sha256="+hashes["bin/kist-dashboard"])
+    print("rebuild-sha256="+hashes["bin/kist-rebuild"])
+    if closure_version==3:
+        print("safe-rebuild-sha256="+hashes["bin/kist-safe-rebuild.sh"])
+    else:
+        print("dashboard-runtime-sha256="+hashes[".kist/scripts/kist_runtime.py"])
+    print("artifact-closure-sha256="+closure.hexdigest())
+    print("artifact-closure-count="+str(len(entries)))
+    raise SystemExit(0)
+
+stamp_parts=stamp.split(" · ",3)
+def valid_hex(value,minimum=64,maximum=64):
+    return minimum<=len(value)<=maximum and all(character in "0123456789abcdefABCDEF" for character in value)
+if len(stamp_parts)!=4 or not all(part.strip() for part in stamp_parts) or not valid_hex(stamp_parts[0],7,64): raise SystemExit(1)
+if not os.path.isabs(stamp_parts[3]) or fields["deployed"]!=stamp_parts[2] or fields["worktree"]!=stamp_parts[3] or fields["branch"]!=stamp_parts[1]: raise SystemExit(1)
+if os.path.realpath(fields["worktree"])!=fields["worktree"] or not os.path.isdir(fields["worktree"]): raise SystemExit(1)
+if not valid_hex(fields["commit"],40,64) or not fields["commit"].lower().startswith(stamp_parts[0].lower()): raise SystemExit(1)
+hash_fields=["remote-origin-sha256","repository-id","source-state-sha256","binary-sha256",
+             "wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
+             "artifact-closure-sha256"]
+hash_fields.append("safe-rebuild-sha256" if closure_version==3 else "dashboard-runtime-sha256")
+for key in hash_fields:
+    if not valid_hex(fields[key]): raise SystemExit(1)
+if fields["source-dirty"] not in {"yes","no"} or fields["test-evidence"].lower()=="yes": raise SystemExit(1)
+try: closure_count=int(fields["artifact-closure-count"])
+except ValueError: raise SystemExit(1)
+if closure_count<=0 or str(closure_count)!=fields["artifact-closure-count"] or closure_count!=len(entries): raise SystemExit(1)
+checks={"binary-sha256":hashes["bin/kist-current"],"wrapper-sha256":hashes["bin/kist"],
+        "dashboard-launcher-sha256":hashes["bin/kist-dashboard"],
+        "rebuild-sha256":hashes["bin/kist-rebuild"],
+        "artifact-closure-sha256":closure.hexdigest(),"artifact-closure-count":str(len(entries))}
+if closure_version==3:
+    checks["safe-rebuild-sha256"]=hashes["bin/kist-safe-rebuild.sh"]
+else:
+    checks["dashboard-runtime-sha256"]=hashes[".kist/scripts/kist_runtime.py"]
+if any(fields[k]!=v for k,v in checks.items()): raise SystemExit(1)
+if schema=="4":
+    import re
+    semver=r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    if not re.fullmatch(semver,fields["product-version"]): raise SystemExit(1)
+    for key in ["unsigned-release-sha256","signed-installed-sha256","deployment-evidence-sha256"]:
+        if not valid_hex(fields[key]): raise SystemExit(1)
+    if fields["signed-installed-sha256"]!=fields["binary-sha256"] or fields["provenance-kind"]!="local-candidate": raise SystemExit(1)
+    if fields["signing-type"] not in {"ad-hoc","developer-id","other"} or fields["notarization-status"] not in {"accepted","not-accepted"}: raise SystemExit(1)
+    if not fields["signing-identity"] or len(fields["signing-identity"])>512 or any(ord(c)<32 or ord(c)==127 for c in fields["signing-identity"]): raise SystemExit(1)
+    if fields["notarization-status"]=="accepted":
+        import re
+        if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",fields["notarization-submission-id"]) or not valid_hex(fields["notarization-package-sha256"]): raise SystemExit(1)
+    elif fields["notarization-submission-id"]!="none" or fields["notarization-package-sha256"]!="none": raise SystemExit(1)
+    evidence=read_leaf("bin/kist-current.provenance.json",False,64*1024*1024)[0]
+    if hashlib.sha256(evidence).hexdigest()!=fields["deployment-evidence-sha256"]: raise SystemExit(1)
+    if fields["deployment-assurance"]=="pilot":
+        try: pilot=json.loads(evidence)
+        except (UnicodeDecodeError,json.JSONDecodeError): raise SystemExit(1)
+        if type(pilot) is not dict or set(pilot)!={"schema","assurance","provenance_kind","product_version","source_state_sha256","unsigned_release_sha256","signed_installed_sha256"}: raise SystemExit(1)
+        if (json.dumps(pilot,sort_keys=True,separators=(",",":"),ensure_ascii=True)+"\n").encode()!=evidence: raise SystemExit(1)
+        if pilot!={"schema":1,"assurance":"pilot","provenance_kind":"local-candidate","product_version":fields["product-version"],"source_state_sha256":fields["source-state-sha256"],"unsigned_release_sha256":fields["unsigned-release-sha256"],"signed_installed_sha256":fields["signed-installed-sha256"]}: raise SystemExit(1)
+    else:
+        if fields.get("enterprise-evidence-sha256")!=fields["deployment-evidence-sha256"] or fields.get("sbom-format")!="cyclonedx-1.7-json": raise SystemExit(1)
+        validation=subprocess.run([os.path.join(HOME,"bin","kist-rebuild"),"--evidence-evaluate",os.path.join(HOME,"bin","kist-current.provenance.json"),os.path.join(HOME,"bin","kist-current.manifest"),os.path.join(HOME,"bin","kist-current")],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=30)
+        if validation.returncode or len(validation.stdout)>65536: raise SystemExit(1)
+    signing=subprocess.run([os.path.join(HOME,"bin","kist-rebuild"),"--signing-evaluate",os.path.join(HOME,"bin","kist-current")],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=30)
+    if signing.returncode or len(signing.stdout)>4096: raise SystemExit(1)
+    actual={}
+    for line in signing.stdout.decode("utf-8").splitlines():
+        key,sep,value=line.partition("=")
+        if not sep or key in actual: raise SystemExit(1)
+        actual[key]=value
+    if actual!={"signing-type":fields["signing-type"],"signing-identity":fields["signing-identity"],"notarization-status":fields["notarization-status"]}: raise SystemExit(1)
+    if fields["deployment-assurance"]=="enterprise" and (fields["signing-type"]!="developer-id" or fields["notarization-status"]!="accepted"): raise SystemExit(1)
+if REQUIRE_ENTERPRISE and not (
+    schema=="4" and closure_version==3 and fields.get("deployment-assurance")=="enterprise"
+): raise SystemExit(1)
+if runtime_digest is None: raise SystemExit(1)
+print("dashboard-runtime-sha256="+runtime_digest)
+print("deployment-assurance="+(fields.get("deployment-assurance") or "legacy-schema-3"))
+PY
+ )" || die 'deployment provenance validation failed'
+if [[ "$EVALUATE" -eq 1 ]]; then printf '%s\n' "$PROVENANCE_OUTPUT"; exit 0; fi
+if [[ "${KIST_REBUILD_TESTING-}" == 1 \
+      && "${KIST_DASHBOARD_TEST_CLOSE_DEPLOYMENT_LEASE_AFTER_VALIDATION-}" == 1 ]]; then
+  [[ "$INSTALL_HOME" != /Users/lukekist ]] \
+    || die 'dashboard lease failure hooks are forbidden for production'
+  exec 9>&-
+fi
+assert_lease deployment
+if [[ "$VALIDATE" -eq 1 ]]; then exit 0; fi
+RUNTIME_SHA=$(printf '%s\n' "$PROVENANCE_OUTPUT" | /usr/bin/awk -F= '
+  $1=="dashboard-runtime-sha256" { if (seen++) exit 2; value=substr($0,26) }
+  END { if (seen!=1 || value !~ /^[a-f0-9]{64}$/) exit 3; print value }
+') || die 'validated provenance omitted the exact runtime digest'
+
+TOKEN="${KIST_DASHBOARD_TOKEN-}"
+BOOTSTRAP="${KIST_DASHBOARD_BOOTSTRAP-}"
+BROWSER_HOST="${KIST_DASHBOARD_BROWSER_HOST-}"
+if [[ -n "$TOKEN" || -n "$BOOTSTRAP" || -n "$BROWSER_HOST" ]]; then
+  [[ -n "$TOKEN" && -n "$BOOTSTRAP" && -n "$BROWSER_HOST" ]] || die 'incomplete credential set'
+else
+  read -r TOKEN BOOTSTRAP BROWSER_HOST < <(python_clean - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48),secrets.token_urlsafe(48),f"kist-{secrets.token_hex(16)}.localhost")
+PY
+  )
+fi
+[[ "$TOKEN" =~ ^[A-Za-z0-9_-]{32,128}$ && "$BOOTSTRAP" =~ ^[A-Za-z0-9_-]{32,128}$ && "$BROWSER_HOST" =~ ^kist-[a-f0-9]{32}\.localhost$ ]] || die 'invalid credential set'
+
+ARGS=(dashboard --serve --port "$PORT" --project-root "$PROJECT_ROOT")
+[[ -z "$VIEW" ]] || ARGS+=(--view "$VIEW")
+[[ "$CONTROL" -eq 0 ]] || ARGS+=(--allow-control)
+[[ "$NO_OPEN" -eq 0 ]] || ARGS+=(--no-open)
+RUN_DIR="$KIST_HOME/run"
+OWNER="$RUN_DIR/dashboard-$PORT.owner"
+assert_lease deployment
+python_clean - "$KIST_HOME" <<'PY' || die 'dashboard run directory is untrusted'
+import ctypes,errno,os,stat,sys
+home=sys.argv[1]; uid=os.geteuid()
+def fp(value): return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+libc=ctypes.CDLL(None,use_errno=True); libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]; libc.acl_get_fd_np.restype=ctypes.c_void_p; libc.acl_free.argtypes=[ctypes.c_void_p]
+def acl(fd):
+    ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+    if value: libc.acl_free(value); return True
+    if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+    raise SystemExit(1)
+if os.path.realpath(home)!=home: raise SystemExit(1)
+hst=os.lstat(home)
+if not stat.S_ISDIR(hst.st_mode) or hst.st_uid!=uid or hst.st_mode&0o022: raise SystemExit(1)
+hfd=os.open(home,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+    if fp(os.fstat(hfd))!=fp(hst) or acl(hfd): raise SystemExit(1)
+    try: os.mkdir("run",0o700,dir_fd=hfd)
+    except FileExistsError: pass
+    refreshed=os.fstat(hfd)
+    if (refreshed.st_dev,refreshed.st_ino,refreshed.st_mode,refreshed.st_uid)!=(hst.st_dev,hst.st_ino,hst.st_mode,hst.st_uid): raise SystemExit(1)
+    hid=fp(refreshed)
+    if fp(os.lstat(home))!=hid: raise SystemExit(1)
+    rst=os.stat("run",dir_fd=hfd,follow_symlinks=False)
+    if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid or stat.S_IMODE(rst.st_mode)!=0o700: raise SystemExit(1)
+    rfd=os.open("run",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=hfd)
+    try:
+        if fp(os.fstat(rfd))!=fp(rst) or acl(rfd): raise SystemExit(1)
+        if fp(os.stat("run",dir_fd=hfd,follow_symlinks=False))!=fp(rst) or fp(os.fstat(hfd))!=hid or fp(os.lstat(home))!=hid: raise SystemExit(1)
+        os.fsync(hfd)
+    finally: os.close(rfd)
+finally: os.close(hfd)
+PY
+SERVER_PID=""
+BOOT_RECEIPT=""
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+cleanup_dashboard() {
+  if [[ -n "$SERVER_PID" ]] && /bin/kill -0 "$SERVER_PID" 2>/dev/null; then
+    /bin/kill -TERM "$SERVER_PID" 2>/dev/null || true
+  fi
+  [[ -z "$BOOT_RECEIPT" ]] || /bin/rm -f "$BOOT_RECEIPT"
+  release_all_leases
+}
+trap cleanup_dashboard EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+start_lease launch exclusive "$RUN_DIR/dashboard-$PORT.launch.lock"
+assert_lease deployment
+assert_lease launch
+
+BOOT_RECEIPT="$RUN_DIR/.dashboard-$PORT.runtime-${TOKEN:0:32}.receipt"
+BOOTSTRAP_CODE=$(/bin/cat <<'PY'
+import ctypes,errno,hashlib,os,secrets,stat,sys
+runtime,expected,receipt,bootstrap_sha,*runtime_args=sys.argv[1:]
+uid=os.geteuid()
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+libc=ctypes.CDLL(None,use_errno=True)
+libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]
+libc.acl_get_fd_np.restype=ctypes.c_void_p
+libc.acl_free.argtypes=[ctypes.c_void_p]
+def acl(fd):
+    ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+    if value: libc.acl_free(value); return True
+    if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+    raise SystemExit(126)
+if (not os.path.isabs(runtime) or os.path.realpath(runtime)!=runtime or len(expected)!=64
+        or any(c not in "0123456789abcdef" for c in expected)): raise SystemExit(126)
+named=os.lstat(runtime)
+if (not stat.S_ISREG(named.st_mode) or named.st_uid!=uid or named.st_nlink!=1 or named.st_mode&0o022
+        or named.st_size>512*1024*1024): raise SystemExit(126)
+fd=os.open(runtime,os.O_RDONLY|os.O_NOFOLLOW)
+if fp(os.fstat(fd))!=fp(named) or acl(fd): raise SystemExit(126)
+chunks=[]; digest=hashlib.sha256(); remaining=named.st_size
+while remaining:
+    block=os.read(fd,min(1024*1024,remaining))
+    if not block: raise SystemExit(126)
+    digest.update(block); chunks.append(block); remaining-=len(block)
+if os.read(fd,1) or fp(os.fstat(fd))!=fp(named) or digest.hexdigest()!=expected: raise SystemExit(126)
+source=b"".join(chunks)
+code=compile(source,runtime,"exec",dont_inherit=True)
+run=os.path.dirname(receipt); leaf=os.path.basename(receipt)
+rst=os.lstat(run)
+if (not leaf or "/" in leaf or not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid
+        or stat.S_IMODE(rst.st_mode)!=0o700): raise SystemExit(126)
+rfd=os.open(run,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+temp=f".{leaf}.{secrets.token_hex(16)}"
+try:
+    if fp(os.fstat(rfd))!=fp(rst): raise SystemExit(126)
+    out=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=rfd)
+    try:
+        payload=(f"pid={os.getpid()}\nruntime-sha256={expected}\nruntime-device={named.st_dev}\n"
+                 f"runtime-inode={named.st_ino}\nruntime-mode={stat.S_IMODE(named.st_mode)}\n"
+                 f"runtime-size={named.st_size}\nruntime-fd={fd}\nbootstrap-sha256={bootstrap_sha}\n").encode()
+        offset=0
+        while offset<len(payload):
+            written=os.write(out,payload[offset:])
+            if written<=0: raise SystemExit(126)
+            offset+=written
+        os.fsync(out)
+    finally: os.close(out)
+    os.replace(temp,leaf,src_dir_fd=rfd,dst_dir_fd=rfd); os.fsync(rfd)
+finally:
+    try: os.unlink(temp,dir_fd=rfd)
+    except FileNotFoundError: pass
+    os.close(rfd)
+# Keep the validated descriptor reachable for the process lifetime and execute the exact bytes read
+# from it while retaining the canonical path expected by runtime-relative imports and diagnostics.
+sys.argv=[runtime,*runtime_args]
+sys.path.insert(0,os.path.dirname(runtime))
+namespace={"__name__":"__main__","__file__":runtime,"__package__":None,"__cached__":None,
+           "__spec__":None,"_kist_validated_runtime_fd":fd}
+exec(code,namespace,namespace)
+PY
+)
+read -r BOOTSTRAP_SHA ARGV_SHA PYTHON_EXEC_SHA < <(python_clean - "$BOOTSTRAP_CODE" "$RUNTIME" "$RUNTIME_SHA" "$BOOT_RECEIPT" "${ARGS[@]}" <<'PY'
+import ctypes,hashlib,os,sys
+code,*tail=sys.argv[1:]
+def proc_executable(pid):
+    libc=ctypes.CDLL(None,use_errno=True); mib=(ctypes.c_int*3)(1,49,pid); size=ctypes.c_size_t()
+    if libc.sysctl(mib,3,None,ctypes.byref(size),None,0): raise SystemExit(1)
+    data=ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib,3,data,ctypes.byref(size),None,0): raise SystemExit(1)
+    raw=data.raw[:size.value]; end=raw.find(b"\0",4)
+    if end<0: raise SystemExit(1)
+    return raw[4:end].decode("utf-8")
+bootstrap=hashlib.sha256(code.encode()).hexdigest()
+arguments=["-I","-c",code,*tail[:3],bootstrap,*tail[3:]]
+argv_sha=hashlib.sha256(b"\0".join(value.encode() for value in arguments)).hexdigest()
+executable_sha=hashlib.sha256(proc_executable(os.getpid()).encode()).hexdigest()
+print(bootstrap,argv_sha,executable_sha)
+PY
+)
+[[ "$BOOTSTRAP_SHA" =~ ^[a-f0-9]{64}$ && "$ARGV_SHA" =~ ^[a-f0-9]{64}$ \
+   && "$PYTHON_EXEC_SHA" =~ ^[a-f0-9]{64}$ ]] || die 'cannot bind the exact dashboard bootstrap identity'
+
+LISTENERS=()
+while IFS= read -r listener; do
+  [[ -z "$listener" ]] || LISTENERS+=("$listener")
+done < <(/usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | /usr/bin/sort -u || true)
+if (( ${#LISTENERS[@]} > 1 )); then die "multiple listeners already own :$PORT"; fi
+assert_lease deployment
+assert_lease launch
+if (( ${#LISTENERS[@]} == 1 )); then
+  OLD_PID="${LISTENERS[0]}"
+  [[ "$OLD_PID" =~ ^[0-9]+$ ]] || die "invalid listener identity on :$PORT"
+  python_clean - "$RUN_DIR" "dashboard-$PORT.owner" "$OLD_PID" "$PORT" "$RUNTIME" <<'PY' \
+    || die "refusing to replace unowned, unauthenticated, or mismatched listener on :$PORT"
+import ctypes,errno,hashlib,json,os,signal,stat,subprocess,sys,urllib.request
+run,name,pid_text,port,runtime=sys.argv[1:]; pid=int(pid_text); uid=os.geteuid()
+def fp(value): return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+libc=ctypes.CDLL(None,use_errno=True); libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]; libc.acl_get_fd_np.restype=ctypes.c_void_p; libc.acl_free.argtypes=[ctypes.c_void_p]
+def acl(fd):
+    ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+    if value: libc.acl_free(value); return True
+    if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+    raise SystemExit(1)
+def procargs(target):
+    mib=(ctypes.c_int*3)(1,49,target); size=ctypes.c_size_t()
+    if libc.sysctl(mib,3,None,ctypes.byref(size),None,0): raise SystemExit(1)
+    data=ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib,3,data,ctypes.byref(size),None,0): raise SystemExit(1)
+    raw=data.raw[:size.value]; argc=int.from_bytes(raw[:4],sys.byteorder,signed=True); pos=4; end=raw.find(b"\0",pos)
+    if argc<1 or argc>64 or end<0: raise SystemExit(1)
+    executable=raw[pos:end].decode("utf-8"); pos=end
+    while pos<len(raw) and raw[pos]==0: pos+=1
+    argv=[]
+    while pos<len(raw) and len(argv)<argc:
+        end=raw.find(b"\0",pos)
+        if end<0: raise SystemExit(1)
+        argv.append(raw[pos:end].decode("utf-8")); pos=end+1
+    if len(argv)!=argc: raise SystemExit(1)
+    return executable,argv
+rst=os.lstat(run)
+if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid or stat.S_IMODE(rst.st_mode)!=0o700: raise SystemExit(1)
+rfd=os.open(run,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+    if fp(os.fstat(rfd))!=fp(rst) or acl(rfd): raise SystemExit(1)
+    st=os.stat(name,dir_fd=rfd,follow_symlinks=False); ident=fp(st)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid!=uid or st.st_mode&0o077 or st.st_size>4096: raise SystemExit(1)
+    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=rfd)
+    try:
+        if fp(os.fstat(fd))!=ident or acl(fd): raise SystemExit(1)
+        chunks=[]; total=0
+        while True:
+            block=os.read(fd,min(4097-total,4096))
+            if not block: break
+            total+=len(block)
+            if total>4096: raise SystemExit(1)
+            chunks.append(block)
+        if fp(os.fstat(fd))!=ident or fp(os.stat(name,dir_fd=rfd,follow_symlinks=False))!=ident or fp(os.fstat(rfd))!=fp(rst): raise SystemExit(1)
+    finally: os.close(fd)
+finally: os.close(rfd)
+raw=b"".join(chunks)
+if not raw.endswith(b"\n") or b"\r" in raw: raise SystemExit(1)
+values={}
+for line in raw.decode("utf-8").splitlines():
+    k,sep,v=line.partition("=")
+    if not sep or not k or not v or k in values: raise SystemExit(1)
+    values[k]=v
+required={"pid","start","token","service","protocol","argv-sha256","python-executable-sha256",
+          "runtime-sha256","runtime-device","runtime-inode","runtime-mode","runtime-size","runtime-fd",
+          "bootstrap-sha256"}
+if set(values)!=required or values["pid"]!=pid_text or values["service"]!="kist-live-dashboard" or values["protocol"]!="1": raise SystemExit(1)
+for key in ["argv-sha256","python-executable-sha256","runtime-sha256","bootstrap-sha256"]:
+    if len(values[key])!=64 or any(c not in "0123456789abcdef" for c in values[key]): raise SystemExit(1)
+for key in ["runtime-device","runtime-inode","runtime-mode","runtime-size","runtime-fd"]:
+    if not values[key].isdigit() or str(int(values[key]))!=values[key]: raise SystemExit(1)
+req=urllib.request.Request(f"http://127.0.0.1:{port}/api/meta",headers={"Authorization":"Bearer "+values["token"]})
+with urllib.request.urlopen(req,timeout=.8) as response: meta=json.load(response)
+if (type(meta) is not dict or type(meta.get("service")) is not str or meta["service"]!="kist-live-dashboard"
+        or type(meta.get("protocol")) is not int or meta["protocol"]!=1
+        or type(meta.get("authenticated")) is not bool or meta["authenticated"] is not True): raise SystemExit(1)
+current=subprocess.run(["/bin/ps","-o","lstart=","-p",pid_text],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=1,check=True).stdout.decode().strip()
+if current!=values["start"]: raise SystemExit(1)
+executable,argv=procargs(pid)
+if not argv or argv[0]!=executable or len(argv)<14 or argv[1:3]!=["-I","-c"]: raise SystemExit(1)
+if hashlib.sha256(argv[3].encode()).hexdigest()!=values["bootstrap-sha256"]: raise SystemExit(1)
+if argv[4]!=runtime or argv[5]!=values["runtime-sha256"] or argv[7]!=values["bootstrap-sha256"]: raise SystemExit(1)
+if os.path.dirname(argv[6])!=run or not os.path.basename(argv[6]).startswith(f".dashboard-{port}.runtime-"): raise SystemExit(1)
+if argv[8:13] != ["dashboard","--serve","--port",port,"--project-root"]: raise SystemExit(1)
+if not os.path.isabs(argv[13]) or os.path.realpath(argv[13])!=argv[13] or not os.path.isdir(argv[13]): raise SystemExit(1)
+tail=argv[14:]; index=0; seen=set()
+while index<len(tail):
+    option=tail[index]
+    if option=="--view" and option not in seen and index+1<len(tail) and tail[index+1] in {"conversation","flow","timeline","fleet","plan"}: index+=2
+    elif option in {"--allow-control","--no-open"} and option not in seen: index+=1
+    else: raise SystemExit(1)
+    seen.add(option)
+actual_argv=hashlib.sha256(b"\0".join(value.encode("utf-8") for value in argv[1:])).hexdigest()
+actual_executable=hashlib.sha256(executable.encode("utf-8")).hexdigest()
+if actual_argv!=values["argv-sha256"] or actual_executable!=values["python-executable-sha256"]: raise SystemExit(1)
+fd=values["runtime-fd"]
+lsof=subprocess.run(["/usr/sbin/lsof","-a","-p",pid_text,"-d",fd,"-F","fDin"],stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=1,check=True).stdout.decode().splitlines()
+parsed={line[:1]:line[1:] for line in lsof if line[:1] in {"f","D","i","n"}}
+if parsed.get("f")!=fd or int(parsed.get("D","-1"),0)!=int(values["runtime-device"]) or int(parsed.get("i","-1"))!=int(values["runtime-inode"]): raise SystemExit(1)
+os.kill(pid,signal.SIGTERM)
+PY
+  for _ in {1..20}; do /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 || break; /bin/sleep .1; done
+  /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 && die "owned listener on :$PORT did not stop"
+elif [[ -e "$OWNER" || -L "$OWNER" ]]; then
+  python_clean - "$RUN_DIR" "dashboard-$PORT.owner" <<'PY' || die 'unsafe stale dashboard owner record'
+import ctypes,errno,os,stat,sys
+run,name=sys.argv[1:]; uid=os.geteuid()
+def fp(value): return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+libc=ctypes.CDLL(None,use_errno=True); libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]; libc.acl_get_fd_np.restype=ctypes.c_void_p; libc.acl_free.argtypes=[ctypes.c_void_p]
+def acl(fd):
+    ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+    if value: libc.acl_free(value); return True
+    if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+    raise SystemExit(1)
+rst=os.lstat(run)
+if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid or stat.S_IMODE(rst.st_mode)!=0o700: raise SystemExit(1)
+rfd=os.open(run,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+    if fp(os.fstat(rfd))!=fp(rst) or acl(rfd): raise SystemExit(1)
+    st=os.stat(name,dir_fd=rfd,follow_symlinks=False); ident=fp(st)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid!=uid or st.st_mode&0o077: raise SystemExit(1)
+    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=rfd)
+    try:
+        if fp(os.fstat(fd))!=ident or acl(fd): raise SystemExit(1)
+        if fp(os.stat(name,dir_fd=rfd,follow_symlinks=False))!=ident: raise SystemExit(1)
+    finally: os.close(fd)
+    os.unlink(name,dir_fd=rfd); os.fsync(rfd)
+finally: os.close(rfd)
+PY
+fi
+
+assert_lease deployment
+assert_lease launch
+/usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" KIST_HOME="$KIST_HOME" \
+  LANG="en_US.UTF-8" LC_ALL="en_US.UTF-8" TMPDIR="/tmp" PYTHONNOUSERSITE=1 \
+  PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 KIST_DASHBOARD_TOKEN="$TOKEN" \
+  KIST_DASHBOARD_BOOTSTRAP="$BOOTSTRAP" KIST_DASHBOARD_BROWSER_HOST="$BROWSER_HOST" \
+  "$PYTHON" -I -c "$BOOTSTRAP_CODE" "$RUNTIME" "$RUNTIME_SHA" "$BOOT_RECEIPT" \
+  "$BOOTSTRAP_SHA" "${ARGS[@]}" 6>&- 7>&- 8>&- 9>&- &
+SERVER_PID=$!
+START="$(/bin/ps -o lstart= -p "$SERVER_PID" | /usr/bin/sed 's/^ *//;s/ *$//')"
+[[ -n "$START" ]] || die 'dashboard child exited before its process receipt was captured'
+for _ in {1..100}; do
+  [[ -s "$BOOT_RECEIPT" ]] && break
+  /bin/kill -0 "$SERVER_PID" 2>/dev/null || break
+  /bin/sleep .05
+done
+[[ -s "$BOOT_RECEIPT" ]] || die 'dashboard child did not publish its pinned-runtime receipt'
+python_clean - "$RUN_DIR" "dashboard-$PORT.owner" "${BOOT_RECEIPT##*/}" "$SERVER_PID" "$START" \
+  "$TOKEN" "$SERVICE" "$ARGV_SHA" "$PYTHON_EXEC_SHA" "$RUNTIME_SHA" "$BOOTSTRAP_SHA" <<'PY'
+import ctypes,errno,os,secrets,stat,sys
+run,name,receipt_name,pid,start,token,service,argv_sha,python_sha,runtime_sha,bootstrap_sha=sys.argv[1:]; uid=os.geteuid()
+def fp(value): return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+libc=ctypes.CDLL(None,use_errno=True); libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]; libc.acl_get_fd_np.restype=ctypes.c_void_p; libc.acl_free.argtypes=[ctypes.c_void_p]
+def acl(fd):
+    ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+    if value: libc.acl_free(value); return True
+    if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+    raise SystemExit(1)
+rst=os.lstat(run)
+if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid or stat.S_IMODE(rst.st_mode)!=0o700: raise SystemExit(1)
+rfd=os.open(run,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+temp=f".{name}.{secrets.token_hex(16)}"
+try:
+    if fp(os.fstat(rfd))!=fp(rst) or acl(rfd): raise SystemExit(1)
+    receipt_st=os.stat(receipt_name,dir_fd=rfd,follow_symlinks=False); receipt_id=fp(receipt_st)
+    if not stat.S_ISREG(receipt_st.st_mode) or receipt_st.st_uid!=uid or stat.S_IMODE(receipt_st.st_mode)!=0o600 or receipt_st.st_size>4096: raise SystemExit(1)
+    receipt_fd=os.open(receipt_name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=rfd)
+    try:
+        if fp(os.fstat(receipt_fd))!=receipt_id or acl(receipt_fd): raise SystemExit(1)
+        receipt=os.read(receipt_fd,4097)
+        if len(receipt)>4096 or fp(os.fstat(receipt_fd))!=receipt_id or fp(os.stat(receipt_name,dir_fd=rfd,follow_symlinks=False))!=receipt_id: raise SystemExit(1)
+    finally: os.close(receipt_fd)
+    if not receipt.endswith(b"\n") or b"\r" in receipt: raise SystemExit(1)
+    runtime_values={}
+    for line in receipt.decode("utf-8").splitlines():
+        key,separator,value=line.partition("=")
+        if not separator or not key or not value or key in runtime_values: raise SystemExit(1)
+        runtime_values[key]=value
+    runtime_required={"pid","runtime-sha256","runtime-device","runtime-inode","runtime-mode","runtime-size","runtime-fd","bootstrap-sha256"}
+    if set(runtime_values)!=runtime_required or runtime_values["pid"]!=pid or runtime_values["runtime-sha256"]!=runtime_sha or runtime_values["bootstrap-sha256"]!=bootstrap_sha: raise SystemExit(1)
+    for key in ["runtime-device","runtime-inode","runtime-mode","runtime-size","runtime-fd"]:
+        value=runtime_values[key]
+        if not value.isdigit() or str(int(value))!=value: raise SystemExit(1)
+    fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=rfd)
+    try:
+        payload=(f"pid={pid}\nstart={start}\ntoken={token}\nservice={service}\nprotocol=1\n"
+                 f"argv-sha256={argv_sha}\npython-executable-sha256={python_sha}\n"
+                 f"runtime-sha256={runtime_values['runtime-sha256']}\n"
+                 f"runtime-device={runtime_values['runtime-device']}\n"
+                 f"runtime-inode={runtime_values['runtime-inode']}\n"
+                 f"runtime-mode={runtime_values['runtime-mode']}\n"
+                 f"runtime-size={runtime_values['runtime-size']}\n"
+                 f"runtime-fd={runtime_values['runtime-fd']}\n"
+                 f"bootstrap-sha256={runtime_values['bootstrap-sha256']}\n").encode("utf-8")
+        offset=0
+        while offset<len(payload):
+            written=os.write(fd,payload[offset:])
+            if written<=0: raise SystemExit(1)
+            offset+=written
+        os.fchmod(fd,0o600); os.fsync(fd)
+    finally: os.close(fd)
+    os.replace(temp,name,src_dir_fd=rfd,dst_dir_fd=rfd)
+    os.fsync(rfd)
+    st=os.stat(name,dir_fd=rfd,follow_symlinks=False)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid!=uid or stat.S_IMODE(st.st_mode)!=0o600: raise SystemExit(1)
+    if fp(os.stat(receipt_name,dir_fd=rfd,follow_symlinks=False))!=receipt_id: raise SystemExit(1)
+    os.unlink(receipt_name,dir_fd=rfd); os.fsync(rfd)
+finally:
+    try: os.unlink(temp,dir_fd=rfd)
+    except FileNotFoundError: pass
+    os.close(rfd)
+PY
+python_clean - "$SERVER_PID" "$PORT" "$TOKEN" <<'PY' || die 'dashboard child failed authenticated readiness'
+import json,os,sys,time,urllib.request
+pid=int(sys.argv[1]); port=sys.argv[2]; token=sys.argv[3]; deadline=time.monotonic()+5
+while time.monotonic()<deadline:
+    try: os.kill(pid,0)
+    except ProcessLookupError: raise SystemExit(1)
+    try:
+        request=urllib.request.Request(f"http://127.0.0.1:{port}/api/meta",headers={"Authorization":"Bearer "+token})
+        with urllib.request.urlopen(request,timeout=.25) as response: meta=json.load(response)
+        if (type(meta) is dict and type(meta.get("service")) is str and meta["service"]=="kist-live-dashboard"
+                and type(meta.get("protocol")) is int and meta["protocol"]==1
+                and type(meta.get("authenticated")) is bool and meta["authenticated"] is True): raise SystemExit(0)
+    except Exception: pass
+    time.sleep(.05)
+raise SystemExit(1)
+PY
+READY_PID=$(/usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | /usr/bin/sort -u)
+[[ "$READY_PID" = "$SERVER_PID" ]] || die 'authenticated dashboard readiness did not match the recorded listener PID'
+assert_lease launch
+assert_lease deployment
+release_lease launch
+release_lease deployment
+if wait "$SERVER_PID"; then status=0; else status=$?; fi
+SERVER_PID=""
+exit "$status"

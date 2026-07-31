@@ -1,0 +1,24 @@
+#!/bin/sh -p
+# Kist — your captain. Loads provider keys, arms host control, runs the kist-loops captain binary.
+# --allow-read /Volumes (2026-07-28): file tools may READ mounted CDs/USB drives; writes stay
+# project-confined. Revert: cp ~/bin/kist.pre-allowread-20260728 ~/bin/kist
+unset ENV BASH_ENV CDPATH
+readonly INSTALL_HOME="/Users/lukekist"
+HOME="$INSTALL_HOME"
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export HOME PATH
+# shellcheck source=/dev/null
+[ -f "$INSTALL_HOME/.config/kist/secrets.env" ] && . "$INSTALL_HOME/.config/kist/secrets.env"
+HOME="$INSTALL_HOME"
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export HOME PATH
+has_computer=0; has_shell=0; has_read=0
+for arg in "$@"; do
+  [ "$arg" = "--enable-computer-use" ] && has_computer=1
+  [ "$arg" = "--allow-shell" ] && has_shell=1
+  [ "$arg" = "--allow-read" ] && has_read=1
+done
+[ "$has_computer" -eq 1 ] || set -- --enable-computer-use "$@"
+[ "$has_shell" -eq 1 ] || set -- --allow-shell "$@"
+[ "$has_read" -eq 1 ] || set -- --allow-read /Volumes "$@"
+exec "$INSTALL_HOME/bin/kist-current" "$@"

@@ -9,7 +9,7 @@ enum StartupHeader {
         let pin = mode == "auto-routing" ? "/model to pin" : "/model to change"
         let plan = planMode ? c("33", " · plan mode (read-only)") : ""
         return """
-        \(c("36;1", "kist")) \(c("2", "·")) \(c("35", mode)) \(c("2", "·")) \(c("2", abbreviate(projectRoot)))\(plan)
+        \(c("36;1", "kist")) \(c("2", "·")) \(c("32", KistBuildInfo.startupLabel)) \(c("2", "·")) \(c("35", mode)) \(c("2", "·")) \(c("2", abbreviate(projectRoot)))\(plan)
         \(c("2", "↳ just type · " + pin + " · /help"))
         """
     }

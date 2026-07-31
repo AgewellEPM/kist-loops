@@ -27,19 +27,39 @@ enum InterruptibleTurn {
                        onInterrupt: @escaping (InterruptReason) -> Void = { _ in },
                        _ work: @escaping () async -> T) async -> T {
         guard enabled else { return await work() }
+        // A submitted-message session already owns stdin from routing through post-review. Borrow
+        // its one watcher and only swap the cancellable task; never create a competing stdin reader.
+        if let session = TurnInteractionSession.current {
+            return await session.runModelTask(onInterrupt: onInterrupt, work)
+        }
 
         let raw = RawMode()
         // Bracketed paste ON while the watcher owns stdin (R2a): a paste arrives as one
         // CSI 200~ … 201~ span and is collected as TEXT — without it, a pasted blob containing
         // ESC would hard-cancel the turn. Paired with every enable/disable transition below
         // (the prompt readers manage their own ?2004 state).
-        func armWatch() { raw.enableForWatch(); FileHandle.standardOutput.write(Data("\u{001B}[?2004h".utf8)) }
-        func disarmWatch() { FileHandle.standardOutput.write(Data("\u{001B}[?2004l".utf8)); raw.disable() }
-        armWatch()
+        @discardableResult
+        func armWatch() -> Bool {
+            raw.enableForWatch()
+            guard raw.isActive else { return false }
+            FileHandle.standardOutput.write(Data("\u{001B}[?2004h".utf8))
+            return true
+        }
+        func disarmWatch() {
+            if raw.isActive {
+                FileHandle.standardOutput.write(Data("\u{001B}[?2004l".utf8))
+            }
+            raw.disable()
+        }
+        // Never create a background read against cooked stdin. If raw-mode setup is unavailable,
+        // preserve the turn and simply run without the optional keyboard interrupt watcher.
+        guard armWatch() else { return await work() }
         let flag = InterruptFlag()
         // Hand stdin off to in-turn interactor prompts (approvals / clarifying questions): while an
         // interactor reads, the watcher pauses and stdin drops back to its pre-watch mode (Codex BLOCKER).
-        StdinArbiter.shared.registerWatcher(suspend: { disarmWatch() }, resume: { armWatch() })
+        StdinArbiter.shared.registerWatcher(
+            suspend: { disarmWatch() },
+            resume: { _ = armWatch() })
 
         let turn = Task { await work() }
         let watcher = Task.detached {
@@ -53,6 +73,9 @@ enum InterruptibleTurn {
                 guard StdinArbiter.shared.watcherMayRead() else {   // an interactor owns stdin — yield
                     usleep(15_000); continue
                 }
+                // A cooked-prompt lease may fail to re-arm raw mode. Exit before read(2), which would
+                // otherwise block canonically and prevent the watcher join from completing.
+                guard raw.isActive else { return }
                 switch scanOnce(readByte: { raw.readByteTimed() },
                                 collect: { TurnInputQueue.shared.feed($0) }) {
                 case .interject:

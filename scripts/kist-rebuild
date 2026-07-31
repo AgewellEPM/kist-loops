@@ -1,0 +1,2875 @@
+#!/bin/sh -p
+# Build and lease-serialize a journaled promotion from one explicit or provenance-bound checkout.
+# Multi-file visibility is not globally atomic for readers outside the lease; failures roll back.
+# No sibling-directory scan is permitted: a stale or partial deployment must fail closed.
+set -eu
+umask 077
+unset ENV BASH_ENV CDPATH
+
+INSTALL_HOME=/Users/lukekist
+GIT=/usr/bin/git
+PYTHON=/usr/bin/python3
+SHASUM=/usr/bin/shasum
+SWIFT=/usr/bin/swift
+SAFE_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+PATH=$SAFE_PATH
+HOME=$INSTALL_HOME
+export PATH HOME
+DASHBOARD_LAUNCHER="$INSTALL_HOME/bin/kist-dashboard"
+DASHBOARD_REBUILD="$INSTALL_HOME/bin/kist-rebuild"
+DASHBOARD_RUNTIME="$INSTALL_HOME/.kist/scripts/kist_runtime.py"
+# Build snapshots and suite logs live below one owner-private per-installation directory.  Never
+# enumerate a shared sticky directory for stale names: a different local UID must not be able to
+# wedge recovery by reserving one of our fixed-format names.
+SNAPSHOT_PARENT="$INSTALL_HOME/.kist-rebuild-private-tmp"
+
+die() { echo "error: $*" >&2; exit 1; }
+[ -x "$PYTHON" ] && [ ! -L "$PYTHON" ] || die "trusted system python is unavailable"
+[ -x "$SWIFT" ] && [ ! -L "$SWIFT" ] || die "trusted system Swift is unavailable"
+
+python_clean() {
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    TMPDIR=/private/tmp PYTHONNOUSERSITE=1 "$PYTHON" -I "$@" 9>&-
+}
+
+swift_clean() {
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    TMPDIR=/private/tmp "$SWIFT" "$@" 9>&-
+}
+
+is_kist_repo() {
+  [ -f "$1/Package.swift" ] \
+    && [ -f "$1/Sources/Kist/KistRunner.swift" ] \
+    && [ -f "$1/Sources/AgentCore/CaptainOrchestrator.swift" ] \
+    && [ -f "$1/Tests/KistTests/KistOptionsTests.swift" ] \
+    && /usr/bin/grep -Fq '.executable(name: "kist"' "$1/Package.swift" 2>/dev/null
+}
+
+validated_repo() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  is_kist_repo "$1" || return 1
+  (cd -P -- "$1" 2>/dev/null && pwd)
+}
+
+sha256_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  "$SHASUM" -a 256 "$1" | /usr/bin/awk '{print $1}'
+}
+
+stable_sha256_file() {
+  python_clean - "$1" <<'PY'
+import hashlib,os,stat,sys
+path=sys.argv[1]; before=os.lstat(path)
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+identity=fp(before)
+if (not stat.S_ISREG(before.st_mode) or before.st_uid!=os.geteuid()
+        or before.st_nlink!=1 or before.st_mode&0o022 or before.st_size>262144):
+    raise SystemExit(1)
+fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW); digest=hashlib.sha256()
+try:
+    if fp(os.fstat(fd))!=identity: raise SystemExit(1)
+    remaining=before.st_size
+    while remaining:
+        block=os.read(fd,min(1024*1024,remaining))
+        if not block: raise SystemExit(1)
+        digest.update(block); remaining-=len(block)
+    if os.read(fd,1) or fp(os.fstat(fd))!=identity or fp(os.lstat(path))!=identity:
+        raise SystemExit(1)
+finally:
+    os.close(fd)
+print(digest.hexdigest())
+PY
+}
+
+stage_stable_executable() {
+  python_clean - "$1" "$2" <<'PY'
+import hashlib,os,stat,sys
+source,target=sys.argv[1:]
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+before=os.lstat(source); identity=fp(before)
+if (not stat.S_ISREG(before.st_mode) or before.st_uid!=os.geteuid()
+        or before.st_nlink!=1 or before.st_mode&0o022 or before.st_size>512*1024*1024):
+    raise SystemExit(1)
+target_before=os.lstat(target)
+if (not stat.S_ISREG(target_before.st_mode) or target_before.st_uid!=os.geteuid()
+        or target_before.st_nlink!=1 or target_before.st_mode&0o022
+        or target_before.st_size!=0):
+    raise SystemExit(1)
+src=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+dst=os.open(target,os.O_WRONLY|os.O_NOFOLLOW)
+digest=hashlib.sha256(); total=0
+try:
+    if fp(os.fstat(src))!=identity or fp(os.fstat(dst))!=fp(target_before): raise SystemExit(1)
+    while True:
+        block=os.read(src,1024*1024)
+        if not block: break
+        offset=0
+        while offset<len(block):
+            written=os.write(dst,block[offset:])
+            if written<=0: raise SystemExit(1)
+            offset+=written
+        digest.update(block); total+=len(block)
+    if (total!=before.st_size or os.read(src,1) or fp(os.fstat(src))!=identity
+            or fp(os.lstat(source))!=identity):
+        raise SystemExit(1)
+    os.fchmod(dst,0o755); os.fsync(dst)
+finally:
+    os.close(src); os.close(dst)
+print(digest.hexdigest())
+PY
+}
+
+publish_unsigned_artifact() {
+  python_clean - "$1" "$2" <<'PY'
+import hashlib,os,re,secrets,stat,sys
+root,source=sys.argv[1:]; uid=os.geteuid()
+if os.path.realpath(root)!=root: raise SystemExit(1)
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def open_directory_at(parent,name,create=False):
+    try: named=os.stat(name,dir_fd=parent,follow_symlinks=False)
+    except FileNotFoundError:
+        if not create: raise
+        os.mkdir(name,0o700,dir_fd=parent)
+        named=os.stat(name,dir_fd=parent,follow_symlinks=False)
+    if not stat.S_ISDIR(named.st_mode) or named.st_uid!=uid or named.st_mode&0o022:
+        raise SystemExit(1)
+    fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+    if fp(os.fstat(fd))!=fp(named): os.close(fd); raise SystemExit(1)
+    return fd
+rst=os.lstat(root)
+if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid: raise SystemExit(1)
+rfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+temp=".kist-unsigned."+secrets.token_hex(16); sfd=None; dfd=None; bfd=None; out=None
+try:
+    if fp(os.fstat(rfd))!=fp(rst): raise SystemExit(1)
+    bfd=open_directory_at(rfd,".build",True)
+    dfd=open_directory_at(bfd,"release",True)
+    removed=False
+    for name in os.listdir(dfd):
+        if re.fullmatch(r"\.kist-unsigned\.[0-9a-f]{32}",name):
+            stale=os.stat(name,dir_fd=dfd,follow_symlinks=False)
+            if (not stat.S_ISREG(stale.st_mode) or stale.st_uid!=uid or stale.st_nlink!=1
+                    or stale.st_mode&0o022):
+                raise SystemExit(1)
+            os.unlink(name,dir_fd=dfd); removed=True
+    if removed: os.fsync(dfd)
+    before=os.lstat(source); identity=fp(before)
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid!=uid or before.st_nlink!=1
+            or before.st_mode&0o022 or before.st_size>512*1024*1024):
+        raise SystemExit(1)
+    sfd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+    if fp(os.fstat(sfd))!=identity: raise SystemExit(1)
+    out=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o700,dir_fd=dfd)
+    digest=hashlib.sha256(); total=0
+    while True:
+        block=os.read(sfd,1024*1024)
+        if not block: break
+        offset=0
+        while offset<len(block):
+            written=os.write(out,block[offset:])
+            if written<=0: raise SystemExit(1)
+            offset+=written
+        digest.update(block); total+=len(block)
+    if total!=before.st_size or fp(os.fstat(sfd))!=identity or fp(os.lstat(source))!=identity:
+        raise SystemExit(1)
+    os.fchmod(out,0o755); os.fsync(out); os.close(out); out=None
+    os.replace(temp,"kist",src_dir_fd=dfd,dst_dir_fd=dfd); os.fsync(dfd)
+    print(digest.hexdigest())
+finally:
+    if out is not None: os.close(out)
+    if sfd is not None: os.close(sfd)
+    if dfd is not None:
+        try: os.unlink(temp,dir_fd=dfd)
+        except FileNotFoundError: pass
+        os.close(dfd)
+    if bfd is not None: os.close(bfd)
+    os.close(rfd)
+PY
+}
+
+source_inventory() {
+  python_clean - "$1" "${2-}" <<'PY'
+import hashlib,os,stat,sys
+root=os.path.realpath(sys.argv[1]); destination_arg=sys.argv[2]
+destination=os.path.realpath(destination_arg) if destination_arg else None
+MAX_FILE=512*1024*1024; MAX_TOTAL=2*1024*1024*1024; MAX_PATHS=32*1024*1024
+def fp(s): return (s.st_dev,s.st_ino,s.st_mode,s.st_size,s.st_nlink,s.st_mtime_ns,s.st_ctime_ns)
+# Every logical child directory is an input too: Package.swift and build tools are executable code
+# and may branch on empty-directory existence or permission mode.  The snapshot root itself is a
+# deliberately normalized 0700 privacy boundary, so records begin with its children.
+entries=[]; visited=total=paths=0
+destination_fd=None
+if destination is not None:
+    if destination!=destination_arg or destination==root or destination.startswith(root+"/"):
+        raise SystemExit(1)
+    dst=os.lstat(destination)
+    if (not stat.S_ISDIR(dst.st_mode) or dst.st_uid!=os.geteuid()
+            or stat.S_IMODE(dst.st_mode)!=0o700 or os.listdir(destination)):
+        raise SystemExit(1)
+    destination_fd=os.open(destination,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    if fp(os.fstat(destination_fd))!=fp(dst): raise SystemExit(1)
+def write_all(fd,data):
+    offset=0
+    while offset<len(data):
+        written=os.write(fd,data[offset:])
+        if written<=0: raise RuntimeError("short write")
+        offset+=written
+def read_file(parent,name,identity,size,target_parent=None):
+    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=parent)
+    out=None
+    try:
+        if fp(os.fstat(fd))!=identity: raise RuntimeError("race")
+        if target_parent is not None:
+            out=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,
+                        dir_fd=target_parent)
+        digest=hashlib.sha256(); remaining=size
+        while remaining:
+            b=os.read(fd,min(1024*1024,remaining))
+            if not b: raise RuntimeError("short")
+            digest.update(b)
+            if out is not None: write_all(out,b)
+            remaining-=len(b)
+        if os.read(fd,1) or fp(os.fstat(fd))!=identity or fp(os.stat(name,dir_fd=parent,follow_symlinks=False))!=identity: raise RuntimeError("race")
+        if out is not None:
+            os.fchmod(out,stat.S_IMODE(identity[2])); os.fsync(out)
+        return digest.digest()
+    finally:
+        os.close(fd)
+        if out is not None: os.close(out)
+def walk(fd,prefix,target_fd=None):
+    global visited,total,paths
+    initial=fp(os.fstat(fd)); observed=[]
+    with os.scandir(os.dup(fd)) as scan: names=sorted((e.name for e in scan),key=lambda x:x.encode())
+    for name in names:
+        rel=f"{prefix}/{name}" if prefix else name; visited+=1
+        if visited>250000 or len(rel.encode())>16384: raise RuntimeError("inventory bound")
+        st=os.stat(name,dir_fd=fd,follow_symlinks=False); identity=fp(st); observed.append((name,identity))
+        # Root build products and the two high-churn telemetry paths are not source. The rest of
+        # root .kist (notably agents/, plan.json, and checked-in learning policy) is a runtime/build
+        # input and must be copied and hashed. Same-named paths nested elsewhere remain source too.
+        if not prefix and name==".git":
+            if stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode): continue
+            raise RuntimeError("git metadata has an invalid type")
+        if rel==".kist/usage.jsonl":
+            if stat.S_ISREG(st.st_mode): continue
+            raise RuntimeError("usage telemetry has an invalid type")
+        if rel==".kist/runs":
+            if stat.S_ISDIR(st.st_mode): continue
+            raise RuntimeError("run telemetry has an invalid type")
+        if not prefix and name in {".build","DerivedData"}:
+            if stat.S_ISDIR(st.st_mode): continue
+            raise RuntimeError("build output has an invalid type")
+        if stat.S_ISDIR(st.st_mode):
+            rb=rel.encode(); paths+=len(rb)
+            if paths>MAX_PATHS: raise RuntimeError("aggregate bound")
+            entries.append((rb,b"D",stat.S_IMODE(st.st_mode),b""))
+            child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            target_child=None
+            try:
+                if fp(os.fstat(child))!=identity: raise RuntimeError("directory race")
+                if target_fd is not None:
+                    os.mkdir(name,0o700,dir_fd=target_fd)
+                    target_child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,
+                                         dir_fd=target_fd)
+                walk(child,rel,target_child)
+                if target_child is not None:
+                    os.fchmod(target_child,stat.S_IMODE(st.st_mode)); os.fsync(target_child)
+                if fp(os.fstat(child))!=identity or fp(os.stat(name,dir_fd=fd,follow_symlinks=False))!=identity: raise RuntimeError("directory changed")
+            finally:
+                os.close(child)
+                if target_child is not None: os.close(target_child)
+        elif stat.S_ISREG(st.st_mode):
+            rb=rel.encode(); total+=st.st_size; paths+=len(rb)
+            if st.st_size>MAX_FILE or total>MAX_TOTAL or paths>MAX_PATHS: raise RuntimeError("aggregate bound")
+            entries.append((rb,b"F",stat.S_IMODE(st.st_mode),
+                            read_file(fd,name,identity,st.st_size,target_fd)))
+        else: raise RuntimeError("source symlink/special")
+    if fp(os.fstat(fd))!=initial: raise RuntimeError("directory changed")
+    for name,identity in observed:
+        if fp(os.stat(name,dir_fd=fd,follow_symlinks=False))!=identity: raise RuntimeError("name changed")
+parent=os.path.dirname(root); leaf=os.path.basename(root)
+if not leaf: raise SystemExit(1)
+pfd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); parent_id=fp(os.fstat(pfd))
+try:
+    root_named=fp(os.stat(leaf,dir_fd=pfd,follow_symlinks=False))
+    fd=os.open(leaf,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=pfd)
+    try:
+        if fp(os.fstat(fd))!=root_named: raise RuntimeError("root race")
+        walk(fd,"",destination_fd)
+        if fp(os.fstat(fd))!=root_named or fp(os.stat(leaf,dir_fd=pfd,follow_symlinks=False))!=root_named or fp(os.fstat(pfd))!=parent_id: raise RuntimeError("root changed")
+    finally: os.close(fd)
+finally: os.close(pfd)
+entries.sort(key=lambda x:(x[0],x[1])); digest=hashlib.sha256(b"kist-source-state-v2\0")
+for path,kind,mode,payload in entries:
+    digest.update(len(path).to_bytes(8,"big"));digest.update(path);digest.update(kind);digest.update(mode.to_bytes(4,"big"));digest.update(len(payload).to_bytes(8,"big"));digest.update(payload)
+if destination_fd is not None:
+    os.fsync(destination_fd); os.close(destination_fd)
+print(digest.hexdigest())
+PY
+}
+source_state() {
+  source_inventory "$1"
+}
+snapshot_source() {
+  source_inventory "$1" "$2"
+}
+remove_source_snapshot() {
+  [ -n "${1-}" ] || return 0
+  python_clean - "$1" "$SNAPSHOT_PARENT" <<'PY'
+import ctypes,errno,os,re,stat,sys
+path,parent=sys.argv[1:]; uid=os.geteuid()
+leaf=os.path.basename(path)
+if (os.path.dirname(path)!=parent or os.path.realpath(parent)!=parent
+        or not re.fullmatch(r"kist-source-snapshot\.[A-Za-z0-9]{6}",leaf)):
+    raise SystemExit(1)
+try: value=os.lstat(path)
+except FileNotFoundError: raise SystemExit(0)
+def identity(item): return (item.st_dev,item.st_ino,item.st_mode,item.st_uid)
+if (not stat.S_ISDIR(value.st_mode) or value.st_uid!=uid
+        or stat.S_IMODE(value.st_mode)!=0o700 or os.path.realpath(path)!=path):
+    raise SystemExit(1)
+pfd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+libc=ctypes.CDLL(None,use_errno=True)
+libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]
+libc.acl_get_fd_np.restype=ctypes.c_void_p
+libc.acl_free.argtypes=[ctypes.c_void_p]
+def has_acl(fd):
+    ctypes.set_errno(0); acl=libc.acl_get_fd_np(fd,256)
+    if acl:
+        libc.acl_free(acl); return True
+    if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+    raise SystemExit(1)
+def same_directory(left,right):
+    return (stat.S_ISDIR(left.st_mode) and stat.S_ISDIR(right.st_mode)
+            and (left.st_dev,left.st_ino,left.st_uid)==(right.st_dev,right.st_ino,right.st_uid))
+def remove_tree(parent_fd,name,root_dev,root=False):
+    named=os.stat(name,dir_fd=parent_fd,follow_symlinks=False); named_id=identity(named)
+    if (not stat.S_ISDIR(named.st_mode) or named.st_uid!=uid or named.st_dev!=root_dev
+            or (root and stat.S_IMODE(named.st_mode)!=0o700)):
+        raise SystemExit(1)
+    directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+    try:
+        opened=os.fstat(directory)
+        rebound=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+        if identity(opened)!=named_id or identity(rebound)!=named_id or (root and has_acl(directory)):
+            raise SystemExit(1)
+        # Snapshot children deliberately preserve source directory modes, including read-only
+        # 0555/0550 directories.  Rebind the opened descriptor to its still-identical name before
+        # changing only this owner-private snapshot inode; otherwise unlink/rmdir can fail after a
+        # successful deployment.  All later checks use the new descriptor/name identity.
+        os.fchmod(directory,0o700)
+        writable=os.fstat(directory)
+        rebound=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+        writable_id=identity(writable)
+        if (not same_directory(writable,named) or identity(rebound)!=writable_id
+                or stat.S_IMODE(writable.st_mode)!=0o700):
+            raise SystemExit(1)
+        with os.scandir(os.dup(directory)) as scan:
+            names=sorted((entry.name for entry in scan),key=lambda item:item.encode())
+        for child_name in names:
+            child=os.stat(child_name,dir_fd=directory,follow_symlinks=False)
+            if child.st_uid!=uid or child.st_dev!=root_dev: raise SystemExit(1)
+            if stat.S_ISDIR(child.st_mode):
+                remove_tree(directory,child_name,root_dev)
+            elif (stat.S_ISREG(child.st_mode) or stat.S_ISLNK(child.st_mode)
+                  or stat.S_ISFIFO(child.st_mode) or stat.S_ISSOCK(child.st_mode)):
+                if not stat.S_ISLNK(child.st_mode) and child.st_nlink!=1: raise SystemExit(1)
+                os.unlink(child_name,dir_fd=directory)
+            else:
+                raise SystemExit(1)
+        if (identity(os.fstat(directory))!=writable_id
+                or identity(os.stat(name,dir_fd=parent_fd,follow_symlinks=False))!=writable_id):
+            raise SystemExit(1)
+    finally: os.close(directory)
+    os.rmdir(name,dir_fd=parent_fd)
+try:
+    remove_tree(pfd,leaf,value.st_dev,True)
+    os.fsync(pfd)
+finally: os.close(pfd)
+PY
+}
+
+# Validate one retained enterprise evidence bundle. The bundle contains the evidence bytes, not
+# merely caller-supplied digests, and is deliberately described as local-candidate provenance: it
+# is not a SLSA attestation. Output is a small canonical key=value projection for manifest creation.
+enterprise_evidence_evaluate() {
+  python_clean - "$1" "$2" "$3" <<'PY'
+import base64,binascii,hashlib,json,os,stat,sys,xml.etree.ElementTree as ET
+bundle_path,manifest_path,binary_path=sys.argv[1:]
+HEX=set("0123456789abcdef")
+BASE_REQUIRED={
+ "schema","stamp","deployed","worktree","branch","commit","remote-origin-sha256","repository-id",
+ "source-dirty","source-state-sha256","binary-sha256","wrapper-sha256","dashboard-launcher-sha256",
+ "rebuild-sha256","safe-rebuild-sha256","artifact-closure-sha256","artifact-closure-count","test-evidence",
+ "deployment-assurance","provenance-kind","unsigned-release-sha256","signed-installed-sha256","signing-type",
+ "signing-identity","notarization-status","notarization-submission-id","notarization-package-sha256",
+ "deployment-evidence-sha256","product-version",
+}
+ENTERPRISE_REQUIRED={
+ "candidate-manifest-sha256","full-suite-evidence-sha256","full-suite-test-count","full-suite-failures",
+ "full-suite-errors","five-canary-evidence-sha256","five-canary-count","five-canary-failures","sbom-sha256",
+ "sbom-format","enterprise-evidence-sha256",
+}
+def valid_hash(value): return type(value) is str and len(value)==64 and all(c in HEX for c in value)
+def stable_read(path,limit,executable=False):
+    if not os.path.isabs(path) or os.path.realpath(path)!=path: raise SystemExit(1)
+    before=os.lstat(path)
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid!=os.geteuid() or before.st_nlink!=1
+            or before.st_mode&0o022 or before.st_size>limit or (executable and not before.st_mode&stat.S_IXUSR)):
+        raise SystemExit(1)
+    identity=(before.st_dev,before.st_ino,before.st_mode,before.st_uid,before.st_size,before.st_nlink,before.st_mtime_ns,before.st_ctime_ns)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        current=os.fstat(fd)
+        if (current.st_dev,current.st_ino,current.st_mode,current.st_uid,current.st_size,current.st_nlink,current.st_mtime_ns,current.st_ctime_ns)!=identity: raise SystemExit(1)
+        chunks=[]; remaining=before.st_size
+        while remaining:
+            block=os.read(fd,min(1024*1024,remaining))
+            if not block: raise SystemExit(1)
+            chunks.append(block); remaining-=len(block)
+        if os.read(fd,1): raise SystemExit(1)
+        current=os.fstat(fd); named=os.lstat(path)
+        for value in (current,named):
+            if (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)!=identity: raise SystemExit(1)
+        return b"".join(chunks)
+    finally: os.close(fd)
+def fields(raw):
+    try: text=raw.decode("utf-8")
+    except UnicodeDecodeError: raise SystemExit(1)
+    if not text.endswith("\n") or "\r" in text: raise SystemExit(1)
+    result={}
+    for line in text.splitlines():
+        if not line or ":" not in line: raise SystemExit(1)
+        key,value=line.split(":",1); key=key.strip().lower(); value=value.strip()
+        if not key or not value or key in result: raise SystemExit(1)
+        result[key]=value
+    return result
+def decode(value,limit):
+    if type(value) is not str or len(value)>((limit+2)//3)*4+4: raise SystemExit(1)
+    try: raw=base64.b64decode(value.encode("ascii"),validate=True)
+    except (UnicodeEncodeError,binascii.Error): raise SystemExit(1)
+    if len(raw)>limit or base64.b64encode(raw).decode("ascii")!=value: raise SystemExit(1)
+    return raw
+def natural(value,positive=False):
+    if type(value) is not int or isinstance(value,bool) or value<0 or (positive and value==0): raise SystemExit(1)
+    return value
+def digest(raw,claimed):
+    if not valid_hash(claimed) or hashlib.sha256(raw).hexdigest()!=claimed: raise SystemExit(1)
+
+manifest_raw=stable_read(manifest_path,262144)
+current=fields(manifest_raw)
+if current.get("schema")!="4" or current.get("deployment-assurance") not in {"pilot","enterprise"}: raise SystemExit(1)
+expected=BASE_REQUIRED|(ENTERPRISE_REQUIRED if current["deployment-assurance"]=="enterprise" else set())
+if set(current)!=expected or current.get("provenance-kind")!="local-candidate": raise SystemExit(1)
+import re
+semver=r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+if not re.fullmatch(semver,current.get("product-version","")): raise SystemExit(1)
+for key in ["source-state-sha256","unsigned-release-sha256","signed-installed-sha256","binary-sha256","deployment-evidence-sha256"]:
+    if not valid_hash(current.get(key)): raise SystemExit(1)
+if current["signed-installed-sha256"]!=current["binary-sha256"]: raise SystemExit(1)
+if current.get("notarization-status")=="accepted":
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",current.get("notarization-submission-id","")) or not valid_hash(current.get("notarization-package-sha256")): raise SystemExit(1)
+elif current.get("notarization-status")!="not-accepted" or current.get("notarization-submission-id")!="none" or current.get("notarization-package-sha256")!="none": raise SystemExit(1)
+binary=stable_read(binary_path,512*1024*1024,True)
+if hashlib.sha256(binary).hexdigest()!=current["signed-installed-sha256"]: raise SystemExit(1)
+
+bundle_raw=stable_read(bundle_path,64*1024*1024)
+try: bundle=json.loads(bundle_raw)
+except (UnicodeDecodeError,json.JSONDecodeError): raise SystemExit(1)
+if type(bundle) is not dict or set(bundle)!={"schema","assurance","provenance_kind","source_state_sha256","unsigned_release_sha256","signed_installed_sha256","candidate_manifest_sha256","candidate_manifest_base64","full_suite","five_canaries","sbom"}: raise SystemExit(1)
+if bundle.get("schema")!=1 or bundle.get("assurance")!="enterprise" or bundle.get("provenance_kind")!="local-candidate": raise SystemExit(1)
+canonical=(json.dumps(bundle,sort_keys=True,separators=(",",":"),ensure_ascii=True)+"\n").encode()
+if canonical!=bundle_raw: raise SystemExit(1)
+for key in ["source_state_sha256","unsigned_release_sha256","signed_installed_sha256","candidate_manifest_sha256"]:
+    if not valid_hash(bundle.get(key)): raise SystemExit(1)
+if bundle["source_state_sha256"]!=current["source-state-sha256"] or bundle["unsigned_release_sha256"]!=current["unsigned-release-sha256"] or bundle["signed_installed_sha256"]!=current["signed-installed-sha256"]: raise SystemExit(1)
+
+candidate_raw=decode(bundle["candidate_manifest_base64"],262144); digest(candidate_raw,bundle["candidate_manifest_sha256"])
+candidate=fields(candidate_raw)
+if set(candidate)!=BASE_REQUIRED or candidate.get("schema")!="4" or candidate.get("deployment-assurance")!="pilot" or candidate.get("provenance-kind")!="local-candidate": raise SystemExit(1)
+for key in BASE_REQUIRED-{"deployment-assurance","test-evidence","deployment-evidence-sha256"}:
+    if current.get(key)!=candidate.get(key): raise SystemExit(1)
+if current["deployment-assurance"]=="pilot" and candidate_raw!=manifest_raw: raise SystemExit(1)
+if current["deployment-assurance"]=="enterprise" and current.get("candidate-manifest-sha256")!=bundle["candidate_manifest_sha256"]: raise SystemExit(1)
+
+suite=bundle["full_suite"]
+if type(suite) is not dict or set(suite)!={"content_base64","sha256","tests","failures","errors"}: raise SystemExit(1)
+suite_raw=decode(suite["content_base64"],32*1024*1024); digest(suite_raw,suite["sha256"])
+if b"<!DOCTYPE" in suite_raw.upper() or b"<!ENTITY" in suite_raw.upper(): raise SystemExit(1)
+try: xml=ET.fromstring(suite_raw)
+except ET.ParseError: raise SystemExit(1)
+nodes=[xml] if xml.tag.rsplit("}",1)[-1]=="testsuite" else [node for node in list(xml) if node.tag.rsplit("}",1)[-1]=="testsuite"]
+if not nodes: raise SystemExit(1)
+def xml_count(node,name):
+    value=node.attrib.get(name,"0")
+    if not value.isdigit() or str(int(value))!=value: raise SystemExit(1)
+    return int(value)
+xml_tests=sum(xml_count(node,"tests") for node in nodes); xml_failures=sum(xml_count(node,"failures") for node in nodes); xml_errors=sum(xml_count(node,"errors") for node in nodes)
+if natural(suite["tests"],True)!=xml_tests or natural(suite["failures"])!=xml_failures or natural(suite["errors"])!=xml_errors or xml_failures or xml_errors: raise SystemExit(1)
+
+canary=bundle["five_canaries"]
+if type(canary) is not dict or set(canary)!={"content_base64","sha256","count","failures"}: raise SystemExit(1)
+canary_raw=decode(canary["content_base64"],1024*1024); digest(canary_raw,canary["sha256"])
+try: canary_doc=json.loads(canary_raw)
+except (UnicodeDecodeError,json.JSONDecodeError): raise SystemExit(1)
+if type(canary_doc) is not dict or set(canary_doc)!={"schema","binary_sha256","source_state_sha256","canaries"} or canary_doc.get("schema")!=1: raise SystemExit(1)
+if (json.dumps(canary_doc,sort_keys=True,separators=(",",":"),ensure_ascii=True)+"\n").encode()!=canary_raw: raise SystemExit(1)
+if canary_doc.get("binary_sha256")!=current["signed-installed-sha256"] or canary_doc.get("source_state_sha256")!=current["source-state-sha256"]: raise SystemExit(1)
+expected_names={"observe","whole-computer","local-research","fetch-only","live-tavily"}; records=canary_doc.get("canaries")
+if type(records) is not list or len(records)!=5: raise SystemExit(1)
+names=set()
+for record in records:
+    if type(record) is not dict or set(record)!={"name","status"} or record.get("name") not in expected_names or record.get("status")!="pass" or record["name"] in names: raise SystemExit(1)
+    names.add(record["name"])
+if names!=expected_names or natural(canary["count"])!=5 or natural(canary["failures"])!=0: raise SystemExit(1)
+
+sbom=bundle["sbom"]
+if type(sbom) is not dict or set(sbom)!={"content_base64","sha256","format"} or sbom.get("format")!="cyclonedx-1.7-json": raise SystemExit(1)
+sbom_raw=decode(sbom["content_base64"],8*1024*1024); digest(sbom_raw,sbom["sha256"])
+try: sbom_doc=json.loads(sbom_raw)
+except (UnicodeDecodeError,json.JSONDecodeError): raise SystemExit(1)
+if type(sbom_doc) is not dict or sbom_doc.get("bomFormat")!="CycloneDX" or sbom_doc.get("specVersion")!="1.7": raise SystemExit(1)
+metadata=sbom_doc.get("metadata"); properties=metadata.get("properties") if type(metadata) is dict else None
+if type(properties) is not list: raise SystemExit(1)
+bound={}
+trusted={"kist:source-state-sha256","kist:unsigned-release-sha256","kist:product-version"}
+for item in properties:
+    if type(item) is dict and item.get("name") in trusted:
+        if set(item)!={"name","value"} or item["name"] in bound or type(item.get("value")) is not str: raise SystemExit(1)
+        bound[item["name"]]=item["value"]
+if bound!={"kist:source-state-sha256":current["source-state-sha256"],"kist:unsigned-release-sha256":current["unsigned-release-sha256"],"kist:product-version":current["product-version"]}: raise SystemExit(1)
+
+bundle_hash=hashlib.sha256(bundle_raw).hexdigest()
+projection={
+ "candidate-manifest-sha256":bundle["candidate_manifest_sha256"],
+ "full-suite-evidence-sha256":suite["sha256"],"full-suite-test-count":str(suite["tests"]),
+ "full-suite-failures":str(suite["failures"]),"full-suite-errors":str(suite["errors"]),
+ "five-canary-evidence-sha256":canary["sha256"],"five-canary-count":"5","five-canary-failures":"0",
+ "sbom-sha256":sbom["sha256"],"sbom-format":"cyclonedx-1.7-json",
+ "enterprise-evidence-sha256":bundle_hash,"deployment-evidence-sha256":bundle_hash,
+}
+if current["deployment-assurance"]=="enterprise":
+    for key,value in projection.items():
+        if current.get(key)!=value: raise SystemExit(1)
+for key in sorted(projection): print(f"{key}={projection[key]}")
+PY
+}
+
+# Report the actual code-signing and Gatekeeper state. Identity values are public certificate
+# metadata; keychain material and notarization credentials are never read or printed.
+signing_state() {
+  python_clean - "$1" <<'PY'
+import os,subprocess,sys
+path=sys.argv[1]
+if not os.path.isabs(path) or os.path.realpath(path)!=path: raise SystemExit(1)
+try:
+    verification=subprocess.run(
+        ["/usr/bin/codesign","--verify","--strict","--all-architectures",path],
+        stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+except (OSError,subprocess.TimeoutExpired):
+    raise SystemExit(1)
+if verification.returncode: raise SystemExit(1)
+codesign=subprocess.run(["/usr/bin/codesign","-d","--verbose=4",path],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=15)
+if codesign.returncode: raise SystemExit(1)
+try: lines=codesign.stderr.decode("utf-8").splitlines()
+except UnicodeDecodeError: raise SystemExit(1)
+signature=next((line.split("=",1)[1] for line in lines if line.startswith("Signature=")),"")
+authorities=[line.split("=",1)[1] for line in lines if line.startswith("Authority=")]
+if signature=="adhoc": kind,identity="ad-hoc","adhoc"
+elif authorities and authorities[0].startswith("Developer ID Application:"): kind,identity="developer-id",authorities[0]
+else: kind,identity="other",(authorities[0] if authorities else "unknown")
+if not identity or len(identity)>512 or any(ord(c)<32 or ord(c)==127 for c in identity): raise SystemExit(1)
+notarization="not-accepted"
+try:
+    gate=subprocess.run(["/usr/sbin/spctl","--assess","--type","execute","--verbose=4",path],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+    report=(gate.stdout+gate.stderr).decode("utf-8","replace")
+    if gate.returncode==0 and "source=Notarized Developer ID" in report: notarization="accepted"
+except (OSError,subprocess.TimeoutExpired): pass
+print("signing-type="+kind); print("signing-identity="+identity); print("notarization-status="+notarization)
+PY
+}
+
+# Read-only evidence plumbing is available before any deployment lease, network access, build, or
+# mutation. CI uses the exact production source-state implementation to bind its test invocation.
+if [ "${1-}" = "--print-source-state" ]; then
+  [ "$#" -le 2 ] || die "usage: kist-rebuild --print-source-state [ABSOLUTE_REPO]"
+  PRINT_ROOT=${2:-$PWD}
+  PRINT_ROOT=$(validated_repo "$PRINT_ROOT") || die "source-state root is not one canonical Kist repo"
+  source_state "$PRINT_ROOT" || die "cannot compute source state"
+  exit 0
+fi
+if [ "${1-}" = "--test-snapshot-source" ]; then
+  [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ "$INSTALL_HOME" != /Users/lukekist ] \
+    || die "source snapshot test seam is unavailable in production"
+  [ "$#" -eq 3 ] || die "--test-snapshot-source requires ABSOLUTE_REPO ABSOLUTE_EMPTY_DESTINATION"
+  SNAPSHOT_TEST_ROOT=$(validated_repo "$2") || die "snapshot test root is not one canonical Kist repo"
+  case "$3" in /*) ;; *) die "snapshot test destination must be absolute" ;; esac
+  snapshot_source "$SNAPSHOT_TEST_ROOT" "$3" || die "source snapshot test failed"
+  exit 0
+fi
+if [ "${1-}" = "--evidence-evaluate" ]; then
+  [ "$#" -eq 4 ] || die "--evidence-evaluate requires BUNDLE MANIFEST BINARY"
+  enterprise_evidence_evaluate "$2" "$3" "$4" || die "enterprise evidence is missing, stale, malformed, or inconsistent"
+  exit 0
+fi
+if [ "${1-}" = "--signing-evaluate" ]; then
+  [ "$#" -eq 2 ] || die "--signing-evaluate requires BINARY"
+  signing_state "$2" || die "cannot inspect code-signing state"
+  exit 0
+fi
+
+# Validate schema-3 compatibility deployments and every schema-4 field against canonical repository
+# identity and installed artifacts. The only output on success is the canonical worktree.
+deployed_repo() {
+  python_clean - "$INSTALL_HOME" <<'PY'
+import hashlib
+import ctypes,errno,os
+import stat
+import selectors,signal,subprocess,time
+import sys
+
+home = os.path.realpath(sys.argv[1])
+stamp_path = os.path.join(home, "bin", ".kist-build")
+manifest_path = os.path.join(home, "bin", "kist-current.manifest")
+binary_path = os.path.join(home, "bin", "kist-current")
+wrapper_path = os.path.join(home, "bin", "kist")
+launcher_path = os.path.join(home, "bin", "kist-dashboard")
+rebuild_path = os.path.join(home, "bin", "kist-rebuild")
+safe_rebuild_path = os.path.join(home, "bin", "kist-safe-rebuild.sh")
+runtime_path = os.path.join(home, ".kist", "scripts", "kist_runtime.py")
+evidence_path = os.path.join(home, "bin", "kist-current.provenance.json")
+artifacts = [stamp_path, manifest_path, binary_path, wrapper_path, launcher_path, rebuild_path, runtime_path]
+if any(not stat.S_ISREG(os.lstat(path).st_mode) for path in artifacts):
+    raise SystemExit(1)
+
+def fp(value):
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_size,
+            value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+libc=ctypes.CDLL(None,use_errno=True)
+libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]
+libc.acl_get_fd_np.restype=ctypes.c_void_p
+libc.acl_free.argtypes=[ctypes.c_void_p]
+def acl(fd):
+    ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+    if value:
+        libc.acl_free(value); return True
+    if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}:
+        return False
+    raise SystemExit(1)
+
+def stable_read_bin(name: str, limit: int) -> str:
+    parent=os.path.dirname(home); home_name=os.path.basename(home)
+    pfd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); pid=fp(os.fstat(pfd))
+    try:
+        hst=os.stat(home_name,dir_fd=pfd,follow_symlinks=False); hid=fp(hst)
+        if not stat.S_ISDIR(hst.st_mode) or hst.st_uid!=os.geteuid() or hst.st_mode&0o022: raise SystemExit(1)
+        hfd=os.open(home_name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=pfd)
+        try:
+            if fp(os.fstat(hfd))!=hid: raise SystemExit(1)
+            bst=os.stat("bin",dir_fd=hfd,follow_symlinks=False); bid=fp(bst)
+            if not stat.S_ISDIR(bst.st_mode) or bst.st_uid!=os.geteuid() or bst.st_mode&0o022: raise SystemExit(1)
+            bfd=os.open("bin",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=hfd)
+            try:
+                if fp(os.fstat(bfd))!=bid or acl(bfd): raise SystemExit(1)
+                st=os.stat(name,dir_fd=bfd,follow_symlinks=False); before=fp(st)
+                if (not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid() or st.st_nlink!=1
+                        or st.st_mode&0o022 or st.st_size>limit): raise SystemExit(1)
+                fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=bfd)
+                try:
+                    if fp(os.fstat(fd))!=before or acl(fd): raise SystemExit(1)
+                    chunks=[]; total=0
+                    while True:
+                        block=os.read(fd,min(65536,limit-total+1))
+                        if not block: break
+                        total+=len(block)
+                        if total>limit: raise SystemExit(1)
+                        chunks.append(block)
+                    if fp(os.fstat(fd))!=before or fp(os.stat(name,dir_fd=bfd,follow_symlinks=False))!=before: raise SystemExit(1)
+                finally: os.close(fd)
+                if fp(os.fstat(bfd))!=bid or fp(os.stat("bin",dir_fd=hfd,follow_symlinks=False))!=bid: raise SystemExit(1)
+                if fp(os.fstat(hfd))!=hid or fp(os.stat(home_name,dir_fd=pfd,follow_symlinks=False))!=hid or fp(os.fstat(pfd))!=pid: raise SystemExit(1)
+                return b"".join(chunks).decode("utf-8")
+            finally: os.close(bfd)
+        finally: os.close(hfd)
+    finally: os.close(pfd)
+raw_stamp=stable_read_bin(".kist-build",16384)
+if not raw_stamp.endswith("\n") or "\r" in raw_stamp or "\n" in raw_stamp[:-1]:
+    raise SystemExit(1)
+stamp_line = raw_stamp[:-1]
+stamp = stamp_line.split(" · ", 3)
+if len(stamp) != 4 or not all(stamp) or not (7 <= len(stamp[0]) <= 64):
+    raise SystemExit(1)
+
+fields = {}
+for raw in stable_read_bin("kist-current.manifest",262144).splitlines(keepends=True):
+        line = raw.rstrip("\r\n")
+        if not line:
+            continue
+        if ":" not in line:
+            raise SystemExit(1)
+        key, value = line.split(":", 1)
+        key, value = key.strip().lower(), value.strip()
+        if not key or not value or key in fields:
+            raise SystemExit(1)
+        fields[key] = value
+
+schema3_required = {
+    "schema", "stamp", "deployed", "worktree", "branch", "commit", "remote-origin-sha256",
+    "repository-id", "source-dirty", "source-state-sha256", "binary-sha256", "wrapper-sha256",
+    "dashboard-launcher-sha256", "rebuild-sha256", "dashboard-runtime-sha256", "artifact-closure-sha256",
+    "artifact-closure-count", "test-evidence",
+}
+schema4_extras = {
+    "deployment-assurance", "provenance-kind", "unsigned-release-sha256", "signed-installed-sha256",
+    "signing-type", "signing-identity", "notarization-status", "notarization-submission-id",
+    "notarization-package-sha256", "deployment-evidence-sha256", "product-version",
+}
+schema4_legacy_base = schema3_required | schema4_extras
+schema4_v3_base = (schema3_required - {"dashboard-runtime-sha256"}) | schema4_extras | {
+    "safe-rebuild-sha256",
+}
+schema4_enterprise = {
+    "candidate-manifest-sha256", "full-suite-evidence-sha256", "full-suite-test-count",
+    "full-suite-failures", "full-suite-errors", "five-canary-evidence-sha256", "five-canary-count",
+    "five-canary-failures", "sbom-sha256", "sbom-format", "enterprise-evidence-sha256",
+}
+schema=fields.get("schema")
+if schema=="3":
+    required=schema3_required; closure_version=2
+elif schema=="4" and fields.get("deployment-assurance") in {"pilot","enterprise"}:
+    if "safe-rebuild-sha256" in fields:
+        required=schema4_v3_base; closure_version=3
+    else:
+        required=schema4_legacy_base; closure_version=2
+    if fields["deployment-assurance"]=="enterprise": required=required|schema4_enterprise
+else: raise SystemExit(1)
+if set(fields) != required or fields["stamp"] != stamp_line:
+    raise SystemExit(1)
+launcher_raw=stable_read_bin("kist-dashboard",16*1024*1024).encode("utf-8")
+if hashlib.sha256(launcher_raw).hexdigest()!=fields["dashboard-launcher-sha256"]:
+    raise SystemExit(1)
+if closure_version==3:
+    stable_read_bin("kist-safe-rebuild.sh",16*1024*1024)
+if fields["deployed"] != stamp[2] or fields["worktree"] != stamp[3] or fields["branch"] != stamp[1]:
+    raise SystemExit(1)
+if fields["source-dirty"] not in {"yes", "no"} or fields["test-evidence"].lower() == "yes":
+    raise SystemExit(1)
+def valid_hex(value: str, minimum: int, maximum: int) -> bool:
+    return minimum <= len(value) <= maximum and all(character in "0123456789abcdefABCDEF" for character in value)
+if not valid_hex(stamp[0], 7, 64) or not valid_hex(fields["commit"], 40, 64):
+    raise SystemExit(1)
+if not fields["commit"].lower().startswith(stamp[0].lower()):
+    raise SystemExit(1)
+hash_fields=["remote-origin-sha256", "repository-id", "source-state-sha256", "binary-sha256",
+             "wrapper-sha256", "dashboard-launcher-sha256", "rebuild-sha256",
+             "artifact-closure-sha256"]
+hash_fields.append("safe-rebuild-sha256" if closure_version==3 else "dashboard-runtime-sha256")
+for key in hash_fields:
+    if not valid_hex(fields[key], 64, 64):
+        raise SystemExit(1)
+if schema=="4":
+    import re
+    semver=r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    if not re.fullmatch(semver,fields["product-version"]): raise SystemExit(1)
+    for key in ["unsigned-release-sha256","signed-installed-sha256","deployment-evidence-sha256"]:
+        if not valid_hex(fields[key],64,64): raise SystemExit(1)
+    if fields["signed-installed-sha256"]!=fields["binary-sha256"] or fields["provenance-kind"]!="local-candidate": raise SystemExit(1)
+    if fields["signing-type"] not in {"ad-hoc","developer-id","other"} or fields["notarization-status"] not in {"accepted","not-accepted"}: raise SystemExit(1)
+    if not fields["signing-identity"] or len(fields["signing-identity"])>512 or any(ord(c)<32 or ord(c)==127 for c in fields["signing-identity"]): raise SystemExit(1)
+    if fields["notarization-status"]=="accepted":
+        import re
+        if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",fields["notarization-submission-id"]): raise SystemExit(1)
+        if not valid_hex(fields["notarization-package-sha256"],64,64): raise SystemExit(1)
+    elif fields["notarization-submission-id"]!="none" or fields["notarization-package-sha256"]!="none": raise SystemExit(1)
+    evidence=stable_read_bin("kist-current.provenance.json",64*1024*1024).encode("utf-8")
+    if hashlib.sha256(evidence).hexdigest()!=fields["deployment-evidence-sha256"]: raise SystemExit(1)
+    if fields["deployment-assurance"]=="enterprise":
+        for key in ["candidate-manifest-sha256","full-suite-evidence-sha256","five-canary-evidence-sha256","sbom-sha256","enterprise-evidence-sha256"]:
+            if not valid_hex(fields[key],64,64): raise SystemExit(1)
+        if fields["enterprise-evidence-sha256"]!=fields["deployment-evidence-sha256"] or fields["sbom-format"]!="cyclonedx-1.7-json": raise SystemExit(1)
+        for key,positive in [("full-suite-test-count",True),("full-suite-failures",False),("full-suite-errors",False),("five-canary-count",True),("five-canary-failures",False)]:
+            value=fields[key]
+            if not value.isdigit() or str(int(value))!=value or (positive and int(value)<=0): raise SystemExit(1)
+        if fields["full-suite-failures"]!="0" or fields["full-suite-errors"]!="0" or fields["five-canary-count"]!="5" or fields["five-canary-failures"]!="0": raise SystemExit(1)
+
+root = os.path.realpath(fields["worktree"])
+if root != fields["worktree"]:
+    raise SystemExit(1)
+git = "/usr/bin/git"
+git_env = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/var/empty", "LANG": "C", "LC_ALL": "C",
+    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+def git_data(*args: str) -> bytes:
+    process = subprocess.Popen(
+        [git, "-C", root, "--no-pager", "-c", "core.hooksPath=/dev/null",
+         "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+         "-c", "credential.helper=", "-c", "maintenance.auto=false", *args],
+        env=git_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True)
+    selector=selectors.DefaultSelector(); selector.register(process.stdout,selectors.EVENT_READ,0); selector.register(process.stderr,selectors.EVENT_READ,1)
+    buffers=[bytearray(),bytearray()]; deadline=time.monotonic()+10
+    try:
+        while selector.get_map():
+            if time.monotonic()>deadline: raise TimeoutError()
+            for key,_ in selector.select(.1):
+                block=os.read(key.fileobj.fileno(),65536)
+                if not block: selector.unregister(key.fileobj); continue
+                buffers[key.data]+=block
+                if len(buffers[key.data])>2*1024*1024: raise OverflowError()
+        code=process.wait(timeout=max(.1,deadline-time.monotonic()))
+        if code: raise subprocess.CalledProcessError(code,process.args)
+        return bytes(buffers[0])
+    except Exception:
+        try: os.killpg(process.pid,signal.SIGTERM); process.wait(timeout=1)
+        except Exception:
+            try: os.killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError: pass
+        raise
+def git_text(*args: str) -> str:
+    return git_data(*args).decode("utf-8").strip()
+
+top = os.path.realpath(git_text("rev-parse", "--show-toplevel"))
+common_raw = git_text("rev-parse", "--git-common-dir")
+common = os.path.realpath(common_raw if os.path.isabs(common_raw) else os.path.join(root, common_raw))
+try:
+    remote = git_data("config", "--get", "remote.origin.url").decode("utf-8")
+    if remote.endswith("\n"): remote=remote[:-1]
+    if remote.endswith("\r"): remote=remote[:-1]
+    if not remote or "\n" in remote or "\r" in remote: raise SystemExit(1)
+except subprocess.CalledProcessError:
+    remote = "(none)"
+def normalize_remote(value: str) -> str:
+    if not value or any(c.isspace() or c=="\0" for c in value): raise SystemExit(1)
+    cuts=[i for i in (value.find("?"),value.find("#")) if i>=0]
+    value=value[:min(cuts)] if cuts else value
+    if "://" in value:
+        scheme,rest=value.split("://",1); authority,sep,path=rest.partition("/")
+        authority=authority.rsplit("@",1)[-1]
+        if not scheme or not authority: raise SystemExit(1)
+        return scheme.lower()+"://"+authority.lower()+(sep+path if sep else "")
+    colon=value.find(":"); slash=value.find("/")
+    if colon>=0 and (slash<0 or colon<slash):
+        host=value[:colon].rsplit("@",1)[-1]
+        if not host: raise SystemExit(1)
+        return host.lower()+value[colon:]
+    return value
+remote_hash = hashlib.sha256(normalize_remote(remote).encode()).hexdigest()
+repository_id = hashlib.sha256(f"{remote_hash}\n{common}\n".encode()).hexdigest()
+if top != root or remote_hash != fields["remote-origin-sha256"] or repository_id != fields["repository-id"]:
+    raise SystemExit(1)
+
+evaluation_args=[launcher_path,"--provenance-evaluate",binary_path,wrapper_path]
+if closure_version==3:
+    evaluation_args += [launcher_path,rebuild_path,safe_rebuild_path]
+evaluation = subprocess.run(evaluation_args,
+                            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=30,check=True)
+if len(evaluation.stdout)>65536: raise SystemExit(1)
+computed={}
+for line in evaluation.stdout.decode().splitlines():
+    key,sep,value=line.partition("=")
+    if not sep or key in computed: raise SystemExit(1)
+    computed[key]=value
+closure_keys=["binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
+              "artifact-closure-sha256","artifact-closure-count"]
+closure_keys.append("safe-rebuild-sha256" if closure_version==3 else "dashboard-runtime-sha256")
+for key in closure_keys:
+    if computed.get(key)!=fields[key]: raise SystemExit(1)
+print(root)
+PY
+}
+
+validate_installed_dashboard() {
+  python_clean - "$DASHBOARD_LAUNCHER" "$DASHBOARD_REBUILD" "$DASHBOARD_RUNTIME" <<'PY'
+import ctypes,errno,os,pwd
+import stat
+import sys
+
+uid = os.geteuid()
+account_home=os.path.realpath(pwd.getpwuid(uid).pw_dir)
+libc=ctypes.CDLL(None,use_errno=True);libc.acl_get_fd_np.restype=ctypes.c_void_p;libc.acl_free.argtypes=[ctypes.c_void_p]
+def has_acl(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+        if value: libc.acl_free(value); return True
+        if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+        raise SystemExit(1)
+    finally: os.close(fd)
+for index, path in enumerate(sys.argv[1:]):
+    if not os.path.isabs(path):
+        raise SystemExit(1)
+    current = "/"
+    parts = [part for part in path.split("/") if part]
+    paths = [current]
+    for part in parts:
+        current = os.path.join(current, part)
+        paths.append(current)
+    for offset, item in enumerate(paths):
+        info = os.lstat(item)
+        leaf = offset == len(paths) - 1
+        if (leaf and (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1)) or (not leaf and not stat.S_ISDIR(info.st_mode)):
+            raise SystemExit(1)
+        if info.st_uid not in {0, uid} or info.st_mode & 0o022:
+            raise SystemExit(1)
+        if item != account_home:
+            if has_acl(item): raise SystemExit(1)
+        if leaf and info.st_uid != uid:
+            raise SystemExit(1)
+        if leaf and not info.st_mode & stat.S_IXUSR:
+            raise SystemExit(1)
+PY
+}
+
+# Validate schema-4 retained evidence and actual signing while the caller already holds the
+# exclusive deployment lease. Calling `kist-dashboard --provenance-validate` here would attempt a
+# nested shared flock and self-deadlock. `deployed_repo` remains the closure/Git/manifest validator;
+# this function supplies the dashboard validator's pilot/enterprise evidence and signing checks.
+validate_installed_provenance_exclusive() {
+  deployed_repo >/dev/null || return 1
+  validate_installed_dashboard || return 1
+  provenance_projection=$(python_clean - "$INSTALL_HOME/bin/kist-current.manifest" \
+    "$INSTALL_HOME/bin/kist-current.provenance.json" <<'PY'
+import hashlib,json,os,stat,sys
+manifest_path,evidence_path=sys.argv[1:]; uid=os.geteuid()
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def stable(path,limit):
+    before=os.lstat(path); identity=fp(before)
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid!=uid or before.st_nlink!=1
+            or stat.S_IMODE(before.st_mode)!=0o600 or before.st_size>limit):
+        raise SystemExit(1)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        if fp(os.fstat(fd))!=identity: raise SystemExit(1)
+        chunks=[]; remaining=before.st_size
+        while remaining:
+            block=os.read(fd,min(1024*1024,remaining))
+            if not block: raise SystemExit(1)
+            chunks.append(block); remaining-=len(block)
+        if os.read(fd,1) or fp(os.fstat(fd))!=identity or fp(os.lstat(path))!=identity:
+            raise SystemExit(1)
+        return b"".join(chunks)
+    finally: os.close(fd)
+manifest_raw=stable(manifest_path,262144); evidence=stable(evidence_path,64*1024*1024)
+try: text=manifest_raw.decode("utf-8")
+except UnicodeDecodeError: raise SystemExit(1)
+if not text.endswith("\n") or "\r" in text: raise SystemExit(1)
+fields={}
+for line in text.splitlines():
+    if not line or ":" not in line: raise SystemExit(1)
+    key,value=line.split(":",1); key=key.strip().lower(); value=value.strip()
+    if not key or not value or key in fields: raise SystemExit(1)
+    fields[key]=value
+if fields.get("schema")!="4" or fields.get("deployment-assurance") not in {"pilot","enterprise"}:
+    raise SystemExit(1)
+if hashlib.sha256(evidence).hexdigest()!=fields.get("deployment-evidence-sha256"):
+    raise SystemExit(1)
+if fields["deployment-assurance"]=="pilot":
+    try: pilot=json.loads(evidence)
+    except (UnicodeDecodeError,json.JSONDecodeError): raise SystemExit(1)
+    expected={"schema":1,"assurance":"pilot","provenance_kind":"local-candidate",
+              "product_version":fields.get("product-version"),
+              "source_state_sha256":fields.get("source-state-sha256"),
+              "unsigned_release_sha256":fields.get("unsigned-release-sha256"),
+              "signed_installed_sha256":fields.get("signed-installed-sha256")}
+    if type(pilot) is not dict or pilot!=expected or (
+            json.dumps(pilot,sort_keys=True,separators=(",",":"),ensure_ascii=True)+"\n").encode()!=evidence:
+        raise SystemExit(1)
+elif fields.get("enterprise-evidence-sha256")!=fields.get("deployment-evidence-sha256"):
+    raise SystemExit(1)
+for key in ["deployment-assurance","signing-type","signing-identity","notarization-status"]:
+    value=fields.get(key)
+    if not value or "\n" in value or "\r" in value: raise SystemExit(1)
+    print(key+"="+value)
+PY
+  ) || return 1
+  projection_value() {
+    printf '%s\n' "$provenance_projection" | /usr/bin/awk -F= -v key="$1" \
+      '$1==key {if(seen++)exit 2;value=substr($0,length(key)+2)} END{if(seen!=1||value=="")exit 3;print value}'
+  }
+  installed_assurance=$(projection_value deployment-assurance) || return 1
+  expected_signing_type=$(projection_value signing-type) || return 1
+  expected_signing_identity=$(projection_value signing-identity) || return 1
+  expected_notarization=$(projection_value notarization-status) || return 1
+  if [ "$installed_assurance" = enterprise ]; then
+    enterprise_evidence_evaluate "$INSTALL_HOME/bin/kist-current.provenance.json" \
+      "$INSTALL_HOME/bin/kist-current.manifest" "$INSTALL_HOME/bin/kist-current" >/dev/null \
+      || return 1
+  fi
+  actual_signing=$(signing_state "$INSTALL_HOME/bin/kist-current") || return 1
+  actual_signing_type=$(printf '%s\n' "$actual_signing" | /usr/bin/awk -F= \
+    '$1=="signing-type"{if(seen++)exit 2;value=substr($0,14)} END{if(seen!=1)exit 3;print value}') \
+    || return 1
+  actual_signing_identity=$(printf '%s\n' "$actual_signing" | /usr/bin/awk -F= \
+    '$1=="signing-identity"{if(seen++)exit 2;value=substr($0,18)} END{if(seen!=1)exit 3;print value}') \
+    || return 1
+  actual_notarization=$(printf '%s\n' "$actual_signing" | /usr/bin/awk -F= \
+    '$1=="notarization-status"{if(seen++)exit 2;value=substr($0,21)} END{if(seen!=1)exit 3;print value}') \
+    || return 1
+  [ "$actual_signing_type" = "$expected_signing_type" ] \
+    && [ "$actual_signing_identity" = "$expected_signing_identity" ] \
+    && [ "$actual_notarization" = "$expected_notarization" ] || return 1
+  if [ "$installed_assurance" = enterprise ]; then
+    [ "$actual_signing_type" = developer-id ] && [ "$actual_notarization" = accepted ] || return 1
+  fi
+}
+
+# The rebuilding shell owns descriptor 9 and therefore owns the BSD flock itself.  A short,
+# trusted Python process validates the path and applies flock to the inherited open-file
+# description; the lock remains held by this shell after that process exits.  Candidate code and
+# hooks never inherit descriptor 9.
+DEPLOY_LEASE_ACTIVE=0
+DEPLOY_LEASE_MODE=
+DEPLOY_LEASE_IDENTITY=
+DEPLOY_LEASE_PATH="$INSTALL_HOME/bin/.kist-deployment.lock"
+
+lease_python() {
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    TMPDIR=/private/tmp PYTHONNOUSERSITE=1 "$PYTHON" -I "$@"
+}
+
+prepare_deployment_lease_path() {
+  lease_python - "$DEPLOY_LEASE_PATH" <<'PY'
+import os,stat,sys
+path=sys.argv[1]; uid=os.geteuid()
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def dfp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid)
+parent=os.path.dirname(path); leaf=os.path.basename(path)
+if not leaf or "/" in leaf or not path.startswith("/") or os.path.realpath(parent)!=parent:
+    raise SystemExit(1)
+directory=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); pins=[]
+try:
+    root=os.fstat(directory)
+    if not stat.S_ISDIR(root.st_mode) or root.st_uid not in {0,uid} or root.st_mode&0o022:
+        raise SystemExit(1)
+    for part in [item for item in parent.split("/") if item]:
+        named=os.stat(part,dir_fd=directory,follow_symlinks=False)
+        if (not stat.S_ISDIR(named.st_mode) or named.st_uid not in {0,uid}
+                or named.st_mode&0o022):
+            raise SystemExit(1)
+        child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+        if fp(os.fstat(child))!=fp(named):
+            os.close(child); raise SystemExit(1)
+        pins.append((directory,part,child,dfp(named))); directory=child
+    try:
+        named=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+    except FileNotFoundError:
+        fd=os.open(leaf,os.O_RDONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,
+                   dir_fd=directory)
+        os.close(fd); os.fsync(directory)
+        named=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+    if (not stat.S_ISREG(named.st_mode) or named.st_uid!=uid or named.st_nlink!=1
+            or stat.S_IMODE(named.st_mode)!=0o600):
+        raise SystemExit(1)
+    fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+    try:
+        if fp(os.fstat(fd))!=fp(named):
+            raise SystemExit(1)
+    finally:
+        os.close(fd)
+    for parent_fd,name,child_fd,identity in pins:
+        if dfp(os.fstat(child_fd))!=identity:
+            raise SystemExit(1)
+        if dfp(os.stat(name,dir_fd=parent_fd,follow_symlinks=False))!=identity:
+            raise SystemExit(1)
+finally:
+    descriptors={directory}
+    for parent_fd,_,child_fd,_ in pins:
+        descriptors.update({parent_fd,child_fd})
+    for descriptor in descriptors:
+        os.close(descriptor)
+PY
+}
+
+deployment_lease_fd_operation() {
+  lease_action=$1
+  lease_mode=$2
+  lease_expected=${3-}
+  lease_python - "$lease_action" "$lease_mode" "$DEPLOY_LEASE_PATH" \
+    "$lease_expected" <<'PY'
+import fcntl,os,stat,sys,time
+action,mode,path,expected=sys.argv[1:]; uid=os.geteuid(); fd=9
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def dfp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid)
+def lock_fp(value):
+    return (value.st_dev,value.st_ino)
+def valid_file(value):
+    return (stat.S_ISREG(value.st_mode) and value.st_uid==uid and value.st_nlink==1
+            and stat.S_IMODE(value.st_mode)==0o600)
+parent=os.path.dirname(path); leaf=os.path.basename(path)
+if action not in {"acquire","assert"} or mode not in {"shared","exclusive"}:
+    raise SystemExit(1)
+if not leaf or "/" in leaf or not path.startswith("/") or os.path.realpath(parent)!=parent:
+    raise SystemExit(1)
+inherited=os.fstat(fd)
+if not valid_file(inherited):
+    raise SystemExit(1)
+directory=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); pins=[]
+try:
+    root=os.fstat(directory)
+    if not stat.S_ISDIR(root.st_mode) or root.st_uid not in {0,uid} or root.st_mode&0o022:
+        raise SystemExit(1)
+    for part in [item for item in parent.split("/") if item]:
+        named=os.stat(part,dir_fd=directory,follow_symlinks=False)
+        if (not stat.S_ISDIR(named.st_mode) or named.st_uid not in {0,uid}
+                or named.st_mode&0o022):
+            raise SystemExit(1)
+        child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+        if fp(os.fstat(child))!=fp(named):
+            os.close(child); raise SystemExit(1)
+        pins.append((directory,part,child,dfp(named))); directory=child
+    named=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+    named_fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+    try:
+        if not valid_file(named) or fp(os.fstat(named_fd))!=fp(named):
+            raise SystemExit(1)
+        if lock_fp(named)!=lock_fp(inherited) or fp(os.fstat(fd))!=fp(inherited):
+            raise SystemExit(1)
+        identity=f"{inherited.st_dev}:{inherited.st_ino}"
+        if action=="assert":
+            if identity!=expected:
+                raise SystemExit(1)
+        else:
+            deadline=time.monotonic()+120.0
+            operation=(fcntl.LOCK_SH if mode=="shared" else fcntl.LOCK_EX)|fcntl.LOCK_NB
+            while True:
+                try:
+                    fcntl.flock(fd,operation); break
+                except BlockingIOError:
+                    if time.monotonic()>=deadline:
+                        raise SystemExit(75)
+                    time.sleep(.05)
+        if fp(os.fstat(fd))!=fp(inherited):
+            raise SystemExit(1)
+        refreshed=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+        if fp(refreshed)!=fp(named) or lock_fp(refreshed)!=lock_fp(inherited):
+            raise SystemExit(1)
+        for parent_fd,name,child_fd,pinned in pins:
+            if dfp(os.fstat(child_fd))!=pinned:
+                raise SystemExit(1)
+            if dfp(os.stat(name,dir_fd=parent_fd,follow_symlinks=False))!=pinned:
+                raise SystemExit(1)
+        print(identity)
+    finally:
+        os.close(named_fd)
+finally:
+    descriptors={directory}
+    for parent_fd,_,child_fd,_ in pins:
+        descriptors.update({parent_fd,child_fd})
+    for descriptor in descriptors:
+        os.close(descriptor)
+PY
+}
+
+deployment_lease_alive() {
+  [ "$DEPLOY_LEASE_ACTIVE" -eq 1 ] \
+    && deployment_lease_fd_operation assert "$DEPLOY_LEASE_MODE" \
+      "$DEPLOY_LEASE_IDENTITY" >/dev/null
+}
+require_deployment_lease() {
+  required_mode=${1-}
+  [ "$DEPLOY_LEASE_ACTIVE" -eq 1 ] || die "deployment lease is not active"
+  [ -z "$required_mode" ] || [ "$DEPLOY_LEASE_MODE" = "$required_mode" ] \
+    || die "deployment $required_mode lease is not active"
+  deployment_lease_alive || die "deployment lease descriptor is not held by this process"
+}
+acquire_deployment_lease() {
+  lease_mode=$1
+  [ "$DEPLOY_LEASE_ACTIVE" -eq 0 ] || die "deployment lease is already active"
+  case "$lease_mode" in shared|exclusive) ;; *) die "invalid deployment lease mode" ;; esac
+  prepare_deployment_lease_path || die "deployment lease path is unsafe"
+  if ! exec 9< "$DEPLOY_LEASE_PATH"; then
+    die "cannot open deployment lease"
+  fi
+  if ! lease_identity=$(deployment_lease_fd_operation acquire "$lease_mode"); then
+    exec 9>&-
+    die "timed out or failed to acquire the deployment $lease_mode lease"
+  fi
+  case "$lease_identity" in
+    ""|*[!0-9:]*|:*|*:|*:*:*)
+      exec 9>&-; die "deployment lease returned an invalid identity" ;;
+    *:*) ;;
+    *) exec 9>&-; die "deployment lease returned an invalid identity" ;;
+  esac
+  DEPLOY_LEASE_ACTIVE=1
+  DEPLOY_LEASE_MODE=$lease_mode
+  DEPLOY_LEASE_IDENTITY=$lease_identity
+  deployment_lease_alive || {
+    exec 9>&-
+    DEPLOY_LEASE_ACTIVE=0
+    DEPLOY_LEASE_MODE=
+    DEPLOY_LEASE_IDENTITY=
+    die "deployment lease descriptor was lost during acquisition"
+  }
+}
+abandon_deployment_lease() {
+  [ "$DEPLOY_LEASE_ACTIVE" -eq 1 ] || return 0
+  exec 9>&-
+  DEPLOY_LEASE_ACTIVE=0
+  DEPLOY_LEASE_MODE=
+  DEPLOY_LEASE_IDENTITY=
+}
+ensure_exclusive_recovery_lease() {
+  if [ "$DEPLOY_LEASE_ACTIVE" -eq 1 ] && [ "$DEPLOY_LEASE_MODE" = exclusive ] \
+     && deployment_lease_alive; then
+    return 0
+  fi
+  abandon_deployment_lease
+  acquire_deployment_lease exclusive
+  deployment_lease_alive
+}
+release_deployment_lease() {
+  [ "$DEPLOY_LEASE_ACTIVE" -eq 1 ] || return 0
+  lease_release_status=0
+  deployment_lease_alive || lease_release_status=1
+  exec 9>&-
+  DEPLOY_LEASE_ACTIVE=0
+  DEPLOY_LEASE_MODE=
+  DEPLOY_LEASE_IDENTITY=
+  return "$lease_release_status"
+}
+
+TRANSACTION_ACTIVE=0
+transaction_control() {
+  transaction_action=$1
+  shift
+  case "$transaction_action" in
+    check-clean) require_deployment_lease ;;
+    recover|begin|begin-finalize|rollback|commit) require_deployment_lease exclusive ;;
+    *) die "unknown deployment transaction action" ;;
+  esac
+  python_clean - "$INSTALL_HOME" "$SNAPSHOT_PARENT" "$transaction_action" "$@" <<'PY'
+import ctypes,errno,hashlib,json,os,re,secrets,stat,sys
+home,snapshot_parent,action,*stages=sys.argv[1:]
+uid=os.geteuid(); home=os.path.realpath(home); bindir=os.path.join(home,"bin")
+journal=os.path.join(bindir,".kist-rebuild-journal")
+legacy_targets=["kist-current","kist","kist-dashboard","kist-rebuild","kist-current.manifest",".kist-build"]
+legacy_full_targets=legacy_targets+["kist-current.provenance.json"]
+full_targets=["kist-current","kist","kist-dashboard","kist-rebuild","kist-safe-rebuild.sh",
+              "kist-current.manifest",".kist-build","kist-current.provenance.json"]
+finalize_targets=["kist-current.manifest","kist-current.provenance.json"]
+executable_targets={"kist-current","kist","kist-dashboard","kist-rebuild","kist-safe-rebuild.sh"}
+def fp(value): return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+bst=os.lstat(bindir)
+if not stat.S_ISDIR(bst.st_mode) or bst.st_uid!=uid or bst.st_mode&0o022 or os.path.realpath(bindir)!=bindir: raise SystemExit(1)
+bfd=os.open(bindir,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+if fp(os.fstat(bfd))!=fp(bst): raise SystemExit(1)
+def fsync_dir(): os.fsync(bfd)
+def secure_regular(path, executable=None):
+    value=os.lstat(path)
+    if not stat.S_ISREG(value.st_mode) or value.st_uid!=uid or value.st_nlink!=1 or value.st_mode&0o022: raise SystemExit(1)
+    if executable is True and not value.st_mode&stat.S_IXUSR: raise SystemExit(1)
+    if executable is False and stat.S_IMODE(value.st_mode)!=0o600: raise SystemExit(1)
+    return value
+def write_all(fd,data):
+    offset=0
+    while offset<len(data):
+        written=os.write(fd,data[offset:])
+        if written<=0: raise SystemExit(1)
+        offset+=written
+def atomic_json(payload):
+    raw=(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode()
+    temp=f".kist-rebuild-journal.{secrets.token_hex(16)}"
+    fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=bfd)
+    try: write_all(fd,raw); os.fsync(fd)
+    finally: os.close(fd)
+    os.replace(temp,os.path.basename(journal),src_dir_fd=bfd,dst_dir_fd=bfd); fsync_dir()
+def read_journal():
+    st=secure_regular(journal,False)
+    if st.st_size>65536: raise SystemExit(1)
+    fd=os.open(os.path.basename(journal),os.O_RDONLY|os.O_NOFOLLOW,dir_fd=bfd)
+    try:
+        if fp(os.fstat(fd))!=fp(st): raise SystemExit(1)
+        chunks=[]; remaining=st.st_size
+        while remaining:
+            block=os.read(fd,min(65536,remaining))
+            if not block: raise SystemExit(1)
+            chunks.append(block); remaining-=len(block)
+        if os.read(fd,1) or fp(os.fstat(fd))!=fp(st): raise SystemExit(1)
+    finally: os.close(fd)
+    raw=b"".join(chunks)
+    if not raw.endswith(b"\n") or b"\n" in raw[:-1] or b"\r" in raw: raise SystemExit(1)
+    value=json.loads(raw)
+    required={"schema","token","phase","backup","targets","present","installed"}
+    if type(value) is not dict or set(value)!=required or type(value["schema"]) is not int or value["schema"]!=1: raise SystemExit(1)
+    if type(value["token"]) is not str or len(value["token"])!=32 or any(c not in "0123456789abcdef" for c in value["token"]): raise SystemExit(1)
+    if type(value["phase"]) is not str or value["phase"] not in {"preparing","prepared","activating","active","rolling-back","rolled-back","committed"}: raise SystemExit(1)
+    targets=value["targets"]
+    if (targets!=legacy_targets and targets!=legacy_full_targets
+            and targets!=full_targets and targets!=finalize_targets): raise SystemExit(1)
+    if type(value["present"]) is not dict or set(value["present"])!=set(targets): raise SystemExit(1)
+    if any(type(value["present"][name]) is not bool for name in targets): raise SystemExit(1)
+    if type(value["installed"]) is not list or any(type(name) is not str for name in value["installed"]): raise SystemExit(1)
+    if len(set(value["installed"]))!=len(value["installed"]) or any(name not in targets for name in value["installed"]): raise SystemExit(1)
+    expected=f".kist-rebuild-backup.{value['token']}"
+    if value["backup"]!=expected: raise SystemExit(1)
+    return value
+def copy_stable(source,destination,mode=None):
+    before=secure_regular(source)
+    src=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+    temp=destination+f".new.{secrets.token_hex(12)}"
+    dst=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,stat.S_IMODE(before.st_mode))
+    digest=hashlib.sha256(); total=0
+    promoted=False
+    try:
+        try:
+            while True:
+                block=os.read(src,1024*1024)
+                if not block: break
+                write_all(dst,block); digest.update(block); total+=len(block)
+            if total!=before.st_size or fp(os.fstat(src))!=fp(before): raise SystemExit(1)
+            os.fchmod(dst,stat.S_IMODE(before.st_mode) if mode is None else mode); os.fsync(dst)
+        finally:
+            os.close(src); os.close(dst)
+        os.replace(temp,destination); promoted=True
+    finally:
+        if not promoted:
+            try: os.unlink(temp)
+            except FileNotFoundError: pass
+    return digest.hexdigest()
+def remove_backup(value):
+    backup=os.path.join(bindir,value["backup"])
+    try:
+        backup_st=os.lstat(backup)
+        if (not stat.S_ISDIR(backup_st.st_mode) or backup_st.st_uid!=uid
+                or stat.S_IMODE(backup_st.st_mode)!=0o700
+                or os.path.realpath(backup)!=backup):
+            raise SystemExit(1)
+        names=os.listdir(backup)
+    except FileNotFoundError: names=[]
+    generated=re.compile(
+        r"(?:"+"|".join(re.escape(name) for name in value["targets"])+r")\.new\.[0-9a-f]{24}")
+    if any(name not in value["targets"] and not generated.fullmatch(name) for name in names):
+        raise SystemExit(1)
+    for name in names:
+        path=os.path.join(backup,name); secure_regular(path); os.unlink(path)
+    try: os.rmdir(backup)
+    except FileNotFoundError: pass
+def rollback(value):
+    for name in os.listdir(bindir):
+        if any(re.fullmatch(re.escape(target)+r"\.new\.[0-9a-f]{24}",name)
+               for target in value["targets"]):
+            secure_regular(os.path.join(bindir,name)); os.unlink(name,dir_fd=bfd)
+    value["phase"]="rolling-back"; atomic_json(value)
+    backup=os.path.join(bindir,value["backup"])
+    for name in value["targets"]:
+        target=os.path.join(bindir,name); saved=os.path.join(backup,name)
+        if value["present"][name]:
+            secure_regular(saved)
+            copy_stable(saved,target)
+        else:
+            try:
+                current=os.lstat(target)
+                if not stat.S_ISREG(current.st_mode) or current.st_uid!=uid: raise SystemExit(1)
+                os.unlink(target)
+            except FileNotFoundError: pass
+    fsync_dir()
+    value["phase"]="rolled-back"; atomic_json(value)
+    remove_backup(value); os.unlink(journal); fsync_dir()
+def finish_without_restore(value):
+    remove_backup(value)
+    os.unlink(journal)
+    fsync_dir()
+def recover_journal(value):
+    if value["phase"] in {"preparing","rolled-back","committed"}:
+        finish_without_restore(value)
+    else:
+        rollback(value)
+def cleanup_orphans():
+    removed=False
+    generated_target=re.compile(
+        r"(?:"+"|".join(re.escape(name) for name in full_targets)+r")\.new\.[0-9a-f]{24}")
+    reserved_prefixes=[
+        ".kist-current.new",".kist.wrapper",".kist-dashboard",".kist-rebuild",
+        ".kist-safe-rebuild",".kist-current.manifest",".kist-build",
+        ".kist-current.provenance",".kist-status",".kist-notary-archive",
+        ".kist-notary-result",".kist-current.manifest.final",
+        ".kist-current.provenance.final",".kist-current.projection.final",
+    ]
+    reserved_temp=re.compile(
+        r"(?:"+"|".join(re.escape(name) for name in reserved_prefixes)+r")\.[A-Za-z0-9]{6}")
+    for name in os.listdir(bindir):
+        path=os.path.join(bindir,name)
+        if re.fullmatch(r"\.kist-rebuild-journal\.[0-9a-f]{32}",name):
+            secure_regular(path); os.unlink(name,dir_fd=bfd); removed=True
+        elif re.fullmatch(r"\.kist-rebuild-backup\.[0-9a-f]{32}",name):
+            remove_backup({"backup":name,"targets":full_targets}); removed=True
+        elif generated_target.fullmatch(name):
+            secure_regular(path); os.unlink(name,dir_fd=bfd); removed=True
+        elif reserved_temp.fullmatch(name):
+            secure_regular(path); os.unlink(name,dir_fd=bfd); removed=True
+    if removed: fsync_dir()
+def cleanup_stale_snapshots():
+    expected=os.path.join(home,".kist-rebuild-private-tmp")
+    if snapshot_parent!=expected or os.path.realpath(snapshot_parent)!=snapshot_parent:
+        raise SystemExit(1)
+    try: parent_st=os.lstat(snapshot_parent)
+    except FileNotFoundError:
+        os.mkdir(snapshot_parent,0o700)
+        os.chmod(snapshot_parent,0o700)
+        parent_st=os.lstat(snapshot_parent)
+    if (not stat.S_ISDIR(parent_st.st_mode) or parent_st.st_uid!=uid
+            or stat.S_IMODE(parent_st.st_mode)!=0o700):
+        raise SystemExit(1)
+    parent_fd=os.open(snapshot_parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    libc=ctypes.CDLL(None,use_errno=True)
+    libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]
+    libc.acl_get_fd_np.restype=ctypes.c_void_p
+    libc.acl_free.argtypes=[ctypes.c_void_p]
+    def has_acl(fd):
+        ctypes.set_errno(0); value=libc.acl_get_fd_np(fd,256)
+        if value:
+            libc.acl_free(value); return True
+        if ctypes.get_errno() in {errno.ENOENT,errno.EINVAL,errno.ENOTSUP}: return False
+        raise SystemExit(1)
+    def directory_identity(value):
+        return (value.st_dev,value.st_ino,value.st_mode,value.st_uid)
+    def same_directory(left,right):
+        return (stat.S_ISDIR(left.st_mode) and stat.S_ISDIR(right.st_mode)
+                and (left.st_dev,left.st_ino,left.st_uid)==(right.st_dev,right.st_ino,right.st_uid))
+    def remove_tree(parent,name,root=False,root_dev=None):
+        named=os.stat(name,dir_fd=parent,follow_symlinks=False); identity=directory_identity(named)
+        if not stat.S_ISDIR(named.st_mode) or named.st_uid!=uid:
+            raise SystemExit(1)
+        if root and stat.S_IMODE(named.st_mode)!=0o700:
+            raise SystemExit(1)
+        if root_dev is None: root_dev=named.st_dev
+        if named.st_dev!=root_dev: raise SystemExit(1)
+        directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+        try:
+            opened=os.fstat(directory)
+            rebound=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            if (directory_identity(opened)!=identity or directory_identity(rebound)!=identity
+                    or (root and has_acl(directory))):
+                raise SystemExit(1)
+            # A killed build can leave source-mode 0555/0550 descendants.  After proving the opened
+            # inode is still bound to this private snapshot name, make only that inode owner-writable
+            # and carry its new descriptor/name identity through recursive removal.
+            os.fchmod(directory,0o700)
+            writable=os.fstat(directory)
+            rebound=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            writable_identity=directory_identity(writable)
+            if (not same_directory(writable,named)
+                    or directory_identity(rebound)!=writable_identity
+                    or stat.S_IMODE(writable.st_mode)!=0o700):
+                raise SystemExit(1)
+            with os.scandir(os.dup(directory)) as scan:
+                names=sorted((entry.name for entry in scan),key=lambda value:value.encode())
+            for child_name in names:
+                child=os.stat(child_name,dir_fd=directory,follow_symlinks=False)
+                if child.st_uid!=uid or child.st_dev!=root_dev:
+                    raise SystemExit(1)
+                if stat.S_ISDIR(child.st_mode):
+                    remove_tree(directory,child_name,root_dev=root_dev)
+                elif (stat.S_ISREG(child.st_mode) or stat.S_ISLNK(child.st_mode)
+                      or stat.S_ISFIFO(child.st_mode) or stat.S_ISSOCK(child.st_mode)):
+                    if not stat.S_ISLNK(child.st_mode) and child.st_nlink!=1:
+                        raise SystemExit(1)
+                    os.unlink(child_name,dir_fd=directory)
+                else:
+                    raise SystemExit(1)
+            if directory_identity(os.fstat(directory))!=writable_identity:
+                raise SystemExit(1)
+            if directory_identity(os.stat(name,dir_fd=parent,follow_symlinks=False))!=writable_identity:
+                raise SystemExit(1)
+        finally:
+            os.close(directory)
+        os.rmdir(name,dir_fd=parent)
+    try:
+        if fp(os.fstat(parent_fd))!=fp(parent_st) or has_acl(parent_fd):
+            raise SystemExit(1)
+        snapshot_name=re.compile(r"kist-source-snapshot\.[A-Za-z0-9]{6}")
+        suite_name=re.compile(r"kist-rebuild-suite\.[A-Za-z0-9]{6}")
+        changed=False
+        for name in os.listdir(snapshot_parent):
+            if snapshot_name.fullmatch(name):
+                path=os.path.join(snapshot_parent,name)
+                if os.path.realpath(path)!=path: raise SystemExit(1)
+                remove_tree(parent_fd,name,root=True); changed=True
+            elif suite_name.fullmatch(name):
+                value=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+                if (not stat.S_ISREG(value.st_mode) or value.st_uid!=uid or value.st_nlink!=1
+                        or value.st_mode&0o022):
+                    raise SystemExit(1)
+                os.unlink(name,dir_fd=parent_fd); changed=True
+        if changed: os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+try:
+    if action=="check-clean":
+        if os.path.lexists(journal): raise SystemExit(1)
+    elif action=="recover":
+        if os.path.lexists(journal):
+            value=read_journal()
+            recover_journal(value)
+        cleanup_orphans()
+        cleanup_stale_snapshots()
+        # A kill between archive validation and transaction begin can leave only these fixed-format,
+        # owner-private stage files. The exclusive lease proves no live rollback can still own them.
+        removed=False
+        for name in os.listdir(bindir):
+            if re.fullmatch(r"\.kist-rollback-stage\.[0-9a-f]{32}",name):
+                secure_regular(os.path.join(bindir,name)); os.unlink(name,dir_fd=bfd); removed=True
+        if removed: fsync_dir()
+    elif action in {"begin","begin-finalize"}:
+        if action=="begin":
+            if len(stages)==len(full_targets): targets=full_targets
+            elif len(stages)==len(legacy_full_targets): targets=legacy_full_targets
+            else: raise SystemExit(1)
+        else:
+            targets=finalize_targets
+        if len(stages)!=len(targets) or os.path.lexists(journal): raise SystemExit(1)
+        for index,path in enumerate(stages):
+            if not os.path.isabs(path) or os.path.dirname(path)!=bindir: raise SystemExit(1)
+            secure_regular(path,(targets[index] in executable_targets) if action=="begin" else False)
+        token=secrets.token_hex(16); backup_name=f".kist-rebuild-backup.{token}"; backup=os.path.join(bindir,backup_name)
+        os.mkdir(backup,0o700); present={}
+        for name in targets:
+            path=os.path.join(bindir,name)
+            try:
+                secure_regular(path); present[name]=True
+            except FileNotFoundError: present[name]=False
+        value={"schema":1,"token":token,"phase":"preparing","backup":backup_name,
+               "targets":targets,"present":present,"installed":[]}
+        atomic_json(value)
+        for name in targets:
+            if present[name]: copy_stable(os.path.join(bindir,name),os.path.join(backup,name))
+        bkupfd=os.open(backup,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); os.fsync(bkupfd); os.close(bkupfd)
+        value["phase"]="prepared"; atomic_json(value)
+        for name,stage in zip(targets,stages):
+            os.replace(stage,os.path.join(bindir,name)); value["installed"].append(name)
+            value["phase"]="activating"; atomic_json(value)
+        fsync_dir(); value["phase"]="active"; atomic_json(value)
+        print(token)
+    elif action=="rollback":
+        if os.path.lexists(journal): recover_journal(read_journal())
+    elif action=="commit":
+        value=read_journal()
+        if value["phase"]!="active": raise SystemExit(1)
+        value["phase"]="committed"; atomic_json(value)
+        remove_backup(value); os.unlink(journal); fsync_dir()
+    else: raise SystemExit(1)
+finally: os.close(bfd)
+PY
+  transaction_status=$?
+  [ "$transaction_status" -eq 0 ] || return "$transaction_status"
+  # Commit itself is the terminal durable boundary.  Every other action remains reversible and is
+  # followed by an exact helper-liveness check before its caller can continue.
+  [ "$transaction_action" = commit ] || {
+    case "$transaction_action" in
+      check-clean) require_deployment_lease ;;
+      *) require_deployment_lease exclusive ;;
+    esac
+  }
+}
+
+# kist-release-registry-v1
+# Retain explicitly approved, exact deployment transaction sets and prepare a CAS-bound rollback.
+# This registry is an owner-local recovery control, not a remote/WORM trust root: the full current
+# release digest approves an archive, and the full plan digest approves a rollback.
+release_registry_control() {
+  registry_action=$1
+  shift
+  case "$registry_action" in
+    status|list|plan) require_deployment_lease ;;
+    archive|stage) require_deployment_lease exclusive ;;
+    *) die "unknown release registry action" ;;
+  esac
+  python_clean - "$INSTALL_HOME" "$registry_action" "$@" <<'PY'
+import datetime,hashlib,json,os,re,secrets,stat,sys,time
+
+home,action,*arguments=sys.argv[1:]
+home=os.path.realpath(home); uid=os.geteuid(); bindir=os.path.join(home,"bin")
+registry=os.path.join(home,".kist","release-registry"); releases=os.path.join(registry,"releases")
+legacy_targets=["kist-current","kist","kist-dashboard","kist-rebuild",
+                "kist-current.manifest",".kist-build","kist-current.provenance.json"]
+v3_targets=["kist-current","kist","kist-dashboard","kist-rebuild","kist-safe-rebuild.sh",
+            "kist-current.manifest",".kist-build","kist-current.provenance.json"]
+known_targets=set(legacy_targets)|set(v3_targets)
+executables={"kist-current","kist","kist-dashboard","kist-rebuild","kist-safe-rebuild.sh"}
+MAX_FILE=512*1024*1024; MAX_TOTAL=1024*1024*1024; MAX_RELEASES=32
+HEX=re.compile(r"[0-9a-f]{64}")
+STAGING=re.compile(r"\.release-staging\.[0-9a-f]{32}")
+
+def fail(message):
+    print("release registry: "+message,file=sys.stderr)
+    raise SystemExit(1)
+def canonical(value):
+    return (json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True)+"\n").encode()
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def write_all(fd,data):
+    offset=0
+    while offset<len(data):
+        written=os.write(fd,data[offset:])
+        if written<=0: fail("short write")
+        offset+=written
+def secure_directory(path,exact_private=False):
+    try: value=os.lstat(path)
+    except FileNotFoundError: fail("required directory is missing")
+    if (not stat.S_ISDIR(value.st_mode) or value.st_uid!=uid or
+            value.st_mode&0o022 or os.path.realpath(path)!=path):
+        fail("directory ownership, mode, or ancestry is untrusted")
+    if exact_private and stat.S_IMODE(value.st_mode)!=0o700:
+        fail("registry directory is not mode 0700")
+    return value
+def make_private(path):
+    try:
+        os.mkdir(path,0o700)
+        os.chmod(path,0o700)
+    except FileExistsError:
+        pass
+    secure_directory(path,True)
+def stable_read(path,limit,expected_mode=None,executable=None):
+    try: before=os.lstat(path)
+    except FileNotFoundError: fail("required file is missing: "+os.path.basename(path))
+    mode=stat.S_IMODE(before.st_mode)
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid!=uid or before.st_nlink!=1
+            or before.st_mode&0o022 or before.st_size>limit):
+        fail("file ownership, type, link count, mode, or size is untrusted: "+os.path.basename(path))
+    if expected_mode is not None and mode!=expected_mode:
+        fail("file mode is not canonical: "+os.path.basename(path))
+    if executable is True and not before.st_mode&stat.S_IXUSR:
+        fail("expected executable is not owner-executable: "+os.path.basename(path))
+    if executable is False and mode!=0o600:
+        fail("deployment metadata is not mode 0600: "+os.path.basename(path))
+    identity=fp(before)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        if fp(os.fstat(fd))!=identity: fail("file changed before read")
+        chunks=[]; remaining=before.st_size
+        while remaining:
+            block=os.read(fd,min(1024*1024,remaining))
+            if not block: fail("short read")
+            chunks.append(block); remaining-=len(block)
+        if os.read(fd,1) or fp(os.fstat(fd))!=identity or fp(os.lstat(path))!=identity:
+            fail("file changed during read")
+        return b"".join(chunks),mode
+    finally: os.close(fd)
+def parse_manifest(raw):
+    try: text=raw.decode("utf-8")
+    except UnicodeDecodeError: fail("manifest is not UTF-8")
+    if not text.endswith("\n") or "\r" in text: fail("manifest is not canonical text")
+    fields={}
+    for line in text.splitlines():
+        if not line or ":" not in line: fail("manifest line is malformed")
+        key,value=line.split(":",1); key=key.strip().lower(); value=value.strip()
+        if not key or not value or key in fields: fail("manifest field is malformed")
+        fields[key]=value
+    required={"schema","stamp","commit","deployment-assurance","product-version",
+              "artifact-closure-sha256","source-state-sha256"}
+    if not required<=set(fields) or fields["schema"]!="4":
+        fail("only coherent schema-4 deployments may be archived")
+    if fields["deployment-assurance"] not in {"pilot","enterprise"}:
+        fail("manifest assurance is invalid")
+    for key in ["commit","artifact-closure-sha256","source-state-sha256"]:
+        if not HEX.fullmatch(fields[key]) and not (key=="commit" and re.fullmatch(r"[0-9a-fA-F]{40,64}",fields[key])):
+            fail("manifest identity is malformed")
+    return fields
+def release_digest(files):
+    digest=hashlib.sha256(b"kist-release-registry-v1\0")
+    for item in files:
+        name=item["name"].encode()
+        digest.update(len(name).to_bytes(8,"big")); digest.update(name)
+        digest.update(item["mode"].to_bytes(4,"big"))
+        digest.update(item["bytes"].to_bytes(8,"big"))
+        digest.update(bytes.fromhex(item["sha256"]))
+    return digest.hexdigest()
+def targets_for_names(names):
+    if names==legacy_targets: return legacy_targets
+    if names==v3_targets: return v3_targets
+    fail("release file ordering is invalid")
+def rollback_semantics(targets):
+    return ("exact-v3" if targets==v3_targets
+            else "best-effort-legacy-non-self-contained")
+def current_inventory(include_payload=False):
+    secure_directory(home); secure_directory(bindir)
+    manifest_raw=stable_read(os.path.join(bindir,"kist-current.manifest"),262144,
+                             executable=False)[0]
+    manifest=parse_manifest(manifest_raw)
+    targets=v3_targets if "safe-rebuild-sha256" in manifest else legacy_targets
+    files=[]; payloads={}; total=0
+    for name in targets:
+        raw,mode=stable_read(os.path.join(bindir,name),MAX_FILE,
+                             executable=True if name in executables else False)
+        total+=len(raw)
+        if total>MAX_TOTAL: fail("deployment transaction set exceeds aggregate bound")
+        files.append({"bytes":len(raw),"mode":mode,"name":name,
+                      "sha256":hashlib.sha256(raw).hexdigest()})
+        if include_payload: payloads[name]=raw
+    if include_payload and payloads["kist-current.manifest"]!=manifest_raw:
+        fail("manifest changed during release inventory")
+    identifier=release_digest(files)
+    return identifier,files,payloads,manifest
+def open_registry(create=False):
+    secure_directory(home)
+    kist=os.path.join(home,".kist")
+    secure_directory(kist)
+    if create:
+        make_private(registry); make_private(releases)
+    elif not os.path.lexists(registry):
+        return False
+    secure_directory(registry,True); secure_directory(releases,True)
+    if set(os.listdir(registry))!={"releases"}: fail("registry contains unknown entries")
+    return True
+def release_names():
+    if not open_registry(False): return []
+    result=[]
+    for name in os.listdir(releases):
+        if STAGING.fullmatch(name):
+            value=os.lstat(os.path.join(releases,name))
+            if not stat.S_ISDIR(value.st_mode) or value.st_uid!=uid or stat.S_IMODE(value.st_mode)!=0o700:
+                fail("archive staging entry is untrusted")
+            continue
+        if not re.fullmatch(r"release-[0-9a-f]{64}",name):
+            fail("release registry contains an unknown entry")
+        result.append(name)
+    return sorted(result)
+def cleanup_archive_staging():
+    # Archive runs under the exclusive deployment lease. Remove only the exact private shape this
+    # implementation can leave behind; an unknown name, symlink, or special file remains fail-closed.
+    for name in os.listdir(releases):
+        if not STAGING.fullmatch(name): continue
+        directory=os.path.join(releases,name); secure_directory(directory,True)
+        entries=set(os.listdir(directory))
+        if not entries<= {"files","record.json"}: fail("archive staging contains unknown entries")
+        record_path=os.path.join(directory,"record.json")
+        if "record.json" in entries:
+            value=os.lstat(record_path)
+            if (not stat.S_ISREG(value.st_mode) or value.st_uid!=uid or value.st_nlink!=1
+                    or value.st_mode&0o022): fail("archive staging record is untrusted")
+            os.unlink(record_path)
+        files_dir=os.path.join(directory,"files")
+        if "files" in entries:
+            secure_directory(files_dir,True)
+            staged=set(os.listdir(files_dir))
+            if not staged<=known_targets: fail("archive staging file set is invalid")
+            for target in staged:
+                value=os.lstat(os.path.join(files_dir,target))
+                if (not stat.S_ISREG(value.st_mode) or value.st_uid!=uid or value.st_nlink!=1
+                        or value.st_mode&0o022): fail("archive staging file is untrusted")
+                os.unlink(os.path.join(files_dir,target))
+            os.rmdir(files_dir)
+        os.rmdir(directory)
+    fsync_directory(releases)
+def validate_record_shape(record,identifier):
+    required={"approved_by_uid","archived_at","archived_at_unix_ns","assurance","commit",
+              "files","product_version","release_id","schema","source_state_sha256","stamp"}
+    if type(record) is not dict or set(record)!=required or record.get("schema")!=1:
+        fail("release record schema is invalid")
+    if record.get("release_id")!=identifier or record.get("approved_by_uid")!=uid:
+        fail("release record identity is invalid")
+    if (type(record.get("archived_at_unix_ns")) is not int or
+            isinstance(record.get("archived_at_unix_ns"),bool) or record["archived_at_unix_ns"]<=0):
+        fail("release archive time is invalid")
+    if type(record.get("archived_at")) is not str or not record["archived_at"].endswith("Z"):
+        fail("release archive timestamp is invalid")
+    if record.get("assurance") not in {"pilot","enterprise"}:
+        fail("release assurance is invalid")
+    if type(record.get("files")) is not list:
+        fail("release file inventory is invalid")
+    targets=targets_for_names(
+        [item.get("name") if type(item) is dict else None for item in record["files"]])
+    for item in record["files"]:
+        if set(item)!={"bytes","mode","name","sha256"} or type(item["bytes"]) is not int or item["bytes"]<0:
+            fail("release file record is invalid")
+        if (type(item["mode"]) is not int or type(item["sha256"]) is not str
+                or not HEX.fullmatch(item["sha256"])):
+            fail("release file record is malformed")
+    if (type(record.get("commit")) is not str or not re.fullmatch(r"[0-9a-fA-F]{40,64}",record["commit"])
+            or type(record.get("source_state_sha256")) is not str
+            or not HEX.fullmatch(record["source_state_sha256"])
+            or type(record.get("product_version")) is not str
+            or type(record.get("stamp")) is not str):
+        fail("release metadata is malformed")
+    if release_digest(record["files"])!=identifier:
+        fail("release record digest is invalid")
+def validate_release(identifier,with_payload=False):
+    if not HEX.fullmatch(identifier): fail("release id must be one full lowercase SHA-256 digest")
+    if not open_registry(False): fail("release registry does not exist")
+    directory=os.path.join(releases,"release-"+identifier); secure_directory(directory,True)
+    if set(os.listdir(directory))!={"files","record.json"}: fail("release archive contains unknown entries")
+    files_dir=os.path.join(directory,"files"); secure_directory(files_dir,True)
+    record_raw,_=stable_read(os.path.join(directory,"record.json"),262144,expected_mode=0o600)
+    try: record=json.loads(record_raw)
+    except (UnicodeDecodeError,json.JSONDecodeError): fail("release record is not valid JSON")
+    if canonical(record)!=record_raw: fail("release record is not canonical JSON")
+    validate_record_shape(record,identifier)
+    targets=targets_for_names([item["name"] for item in record["files"]])
+    if set(os.listdir(files_dir))!=set(targets): fail("release archive file set is incomplete")
+    total=0; payloads={}
+    for item in record["files"]:
+        name=item["name"]; raw,mode=stable_read(os.path.join(files_dir,name),MAX_FILE,
+                                               expected_mode=item["mode"],
+                                               executable=True if name in executables else False)
+        total+=len(raw)
+        if total>MAX_TOTAL or len(raw)!=item["bytes"] or hashlib.sha256(raw).hexdigest()!=item["sha256"]:
+            fail("archived release bytes do not match their record")
+        if with_payload: payloads[name]=raw
+    parse_manifest(payloads["kist-current.manifest"] if with_payload else
+                   stable_read(os.path.join(files_dir,"kist-current.manifest"),262144,
+                               expected_mode=0o600)[0])
+    return record,record_raw,payloads
+def create_file(path,raw,mode):
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,mode)
+    try: write_all(fd,raw); os.fchmod(fd,mode); os.fsync(fd)
+    finally: os.close(fd)
+def fsync_directory(path):
+    fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+def atomic_output(path,payload):
+    if not os.path.isabs(path) or os.path.abspath(path)!=path or os.path.lexists(path):
+        fail("plan output must be a new absolute path")
+    parent=os.path.dirname(path); secure_directory(parent)
+    create_file(path,payload,0o600); fsync_directory(parent)
+def plan_body(plan):
+    return {key:plan[key] for key in
+             ["created_at","created_at_unix_ns","current_release_id","schema",
+              "target_record_sha256","target_release_id","target_rollback_semantics"]}
+def validate_plan(path,confirm=None):
+    if not os.path.isabs(path) or os.path.abspath(path)!=path: fail("plan path must be absolute")
+    raw,_=stable_read(path,65536,expected_mode=0o600)
+    try: plan=json.loads(raw)
+    except (UnicodeDecodeError,json.JSONDecodeError): fail("rollback plan is not valid JSON")
+    required={"created_at","created_at_unix_ns","current_release_id","plan_digest","schema",
+              "target_record_sha256","target_release_id","target_rollback_semantics"}
+    if type(plan) is not dict or set(plan)!=required or plan.get("schema")!=1 or canonical(plan)!=raw:
+        fail("rollback plan is not canonical")
+    for key in ["current_release_id","plan_digest","target_record_sha256","target_release_id"]:
+        if type(plan.get(key)) is not str or not HEX.fullmatch(plan[key]): fail("rollback plan digest is invalid")
+    if plan["target_rollback_semantics"] not in {
+            "exact-v3","best-effort-legacy-non-self-contained"}:
+        fail("rollback plan semantics are invalid")
+    if (type(plan.get("created_at")) is not str or not plan["created_at"].endswith("Z")
+            or type(plan.get("created_at_unix_ns")) is not int
+            or isinstance(plan["created_at_unix_ns"],bool) or plan["created_at_unix_ns"]<=0):
+        fail("rollback plan timestamp is invalid")
+    expected=hashlib.sha256(b"kist-rollback-plan-v1\0"+canonical(plan_body(plan))).hexdigest()
+    if plan["plan_digest"]!=expected or (confirm is not None and confirm!=expected):
+        fail("rollback plan confirmation does not match")
+    if plan["current_release_id"]==plan["target_release_id"]: fail("rollback target equals current release")
+    return plan
+
+if action=="status":
+    if arguments: fail("status takes no values")
+    identifier,files,_,manifest=current_inventory()
+    archived=False
+    if open_registry(False) and "release-"+identifier in release_names():
+        validate_release(identifier); archived=True
+    print(canonical({"archived":archived,"assurance":manifest["deployment-assurance"],
+                     "commit":manifest["commit"],"current_release_id":identifier,
+                     "product_version":manifest["product-version"],
+                     "rollback_semantics":rollback_semantics(
+                         targets_for_names([item["name"] for item in files])),
+                     "schema":1}).decode(),end="")
+elif action=="list":
+    if arguments: fail("list takes no values")
+    values=[]
+    for name in release_names():
+        identifier=name[8:]; record,raw,_=validate_release(identifier)
+        values.append({"archived_at":record["archived_at"],"assurance":record["assurance"],
+                       "commit":record["commit"],"product_version":record["product_version"],
+                       "record_sha256":hashlib.sha256(raw).hexdigest(),"release_id":identifier,
+                       "rollback_semantics":rollback_semantics(
+                           targets_for_names([item["name"] for item in record["files"]]))})
+    print(canonical({"releases":values,"schema":1}).decode(),end="")
+elif action=="archive":
+    if len(arguments)!=1 or not HEX.fullmatch(arguments[0]):
+        fail("archive requires one full lowercase current release digest")
+    confirm=arguments[0]; identifier,files,payloads,manifest=current_inventory(True)
+    if confirm!=identifier: fail("archive confirmation does not match the current deployment")
+    if "safe-rebuild-sha256" not in manifest:
+        fail("legacy transitional deployments may be validated but not archived; complete the v3 promotion")
+    open_registry(True); cleanup_archive_staging(); names=release_names()
+    if "release-"+identifier in names:
+        record,raw,_=validate_release(identifier)
+        print(canonical({"created":False,"record_sha256":hashlib.sha256(raw).hexdigest(),
+                         "release_id":identifier,"schema":1}).decode(),end="")
+        raise SystemExit(0)
+    if len(names)>=MAX_RELEASES: fail("release registry reached its 32-release bound")
+    timestamp_ns=time.time_ns()
+    timestamp=datetime.datetime.fromtimestamp(timestamp_ns/1_000_000_000,
+                                               datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00","Z")
+    record={"approved_by_uid":uid,"archived_at":timestamp,"archived_at_unix_ns":timestamp_ns,
+            "assurance":manifest["deployment-assurance"],"commit":manifest["commit"],"files":files,
+            "product_version":manifest["product-version"],"release_id":identifier,"schema":1,
+            "source_state_sha256":manifest["source-state-sha256"],"stamp":manifest["stamp"]}
+    record_raw=canonical(record); validate_record_shape(record,identifier)
+    staging=os.path.join(releases,".release-staging."+secrets.token_hex(16))
+    os.mkdir(staging,0o700); files_dir=os.path.join(staging,"files"); os.mkdir(files_dir,0o700)
+    for item in files:
+        create_file(os.path.join(files_dir,item["name"]),payloads[item["name"]],item["mode"])
+    create_file(os.path.join(staging,"record.json"),record_raw,0o600)
+    fsync_directory(files_dir); fsync_directory(staging)
+    os.rename(staging,os.path.join(releases,"release-"+identifier)); fsync_directory(releases)
+    validate_release(identifier)
+    print(canonical({"created":True,"record_sha256":hashlib.sha256(record_raw).hexdigest(),
+                     "release_id":identifier,"schema":1}).decode(),end="")
+elif action=="plan":
+    if len(arguments)!=2: fail("plan requires TARGET_RELEASE_ID and absolute output path")
+    target,out=arguments; current,_,_,_=current_inventory()
+    if current==target: fail("rollback target equals current release")
+    target_record,record_raw,_=validate_release(target)
+    timestamp_ns=time.time_ns()
+    timestamp=datetime.datetime.fromtimestamp(timestamp_ns/1_000_000_000,
+                                               datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00","Z")
+    body={"created_at":timestamp,"created_at_unix_ns":timestamp_ns,"current_release_id":current,
+          "schema":1,"target_record_sha256":hashlib.sha256(record_raw).hexdigest(),
+          "target_release_id":target,
+          "target_rollback_semantics":rollback_semantics(
+              targets_for_names([item["name"] for item in target_record["files"]]))}
+    plan=dict(body); plan["plan_digest"]=hashlib.sha256(b"kist-rollback-plan-v1\0"+canonical(body)).hexdigest()
+    atomic_output(out,canonical(plan))
+    print(canonical({"current_release_id":current,"plan":out,"plan_digest":plan["plan_digest"],
+                     "schema":1,"target_release_id":target,
+                     "target_rollback_semantics":plan["target_rollback_semantics"]}).decode(),end="")
+elif action=="stage":
+    if len(arguments)!=2: fail("stage requires PLAN and full plan digest")
+    plan=validate_plan(arguments[0],arguments[1])
+    current,_,_,_=current_inventory()
+    if current!=plan["current_release_id"]: fail("current deployment changed after rollback planning")
+    _,record_raw,payloads=validate_release(plan["target_release_id"],True)
+    if hashlib.sha256(record_raw).hexdigest()!=plan["target_record_sha256"]:
+        fail("target release record changed after rollback planning")
+    record_files=json.loads(record_raw)["files"]
+    targets=targets_for_names([item["name"] for item in record_files])
+    if plan["target_rollback_semantics"]!=rollback_semantics(targets):
+        fail("rollback plan semantics do not match the target archive")
+    staged=[]
+    try:
+        for name in targets:
+            path=os.path.join(bindir,".kist-rollback-stage."+secrets.token_hex(16))
+            mode=next(item["mode"] for item in record_files if item["name"]==name)
+            create_file(path,payloads[name],mode); staged.append(path)
+        fsync_directory(bindir)
+    except BaseException:
+        for path in staged:
+            try: os.unlink(path)
+            except FileNotFoundError: pass
+        raise
+    print("target-release-id="+plan["target_release_id"])
+    for name,path in zip(targets,staged): print(name+"="+path)
+else:
+    fail("unknown registry action")
+PY
+  registry_status=$?
+  [ "$registry_status" -eq 0 ] || return "$registry_status"
+  case "$registry_action" in
+    status|list|plan) require_deployment_lease ;;
+    *) require_deployment_lease exclusive ;;
+  esac
+}
+trap 'release_deployment_lease' 0
+trap 'exit 130' 2
+trap 'exit 143' 15
+
+if [ "${1-}" = "--test-hold-deployment-lease" ]; then
+  [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ "$INSTALL_HOME" != /Users/lukekist ] \
+    || die "deployment lease test hooks are forbidden for production"
+  [ "$#" -eq 3 ] || die "--test-hold-deployment-lease requires ABSOLUTE_READY ABSOLUTE_RELEASE"
+  case "$2:$3" in /*:/*) ;; *) die "deployment lease test paths must be absolute" ;; esac
+  acquire_deployment_lease exclusive
+  python_clean - "$2" "$3" <<'PY' || die "deployment lease test coordination failed"
+import errno,os,stat,sys,time
+ready,release=sys.argv[1:]; uid=os.geteuid()
+try:
+    os.fstat(9)
+except OSError as error:
+    if error.errno!=errno.EBADF: raise
+else:
+    raise SystemExit(1)
+for path in (ready,release):
+    parent=os.path.dirname(path); leaf=os.path.basename(path)
+    if not leaf or "/" in leaf or os.path.realpath(parent)!=parent:
+        raise SystemExit(1)
+    value=os.lstat(parent)
+    if not stat.S_ISDIR(value.st_mode) or value.st_uid!=uid or value.st_mode&0o022:
+        raise SystemExit(1)
+fd=os.open(ready,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+try:
+    os.write(fd,b"shell-owned-exclusive-lease\n"); os.fsync(fd)
+finally:
+    os.close(fd)
+deadline=time.monotonic()+20.0
+while time.monotonic()<deadline:
+    try: value=os.lstat(release)
+    except FileNotFoundError:
+        time.sleep(.02); continue
+    if (not stat.S_ISREG(value.st_mode) or value.st_uid!=uid or value.st_nlink!=1
+            or value.st_mode&0o077):
+        raise SystemExit(1)
+    raise SystemExit(0)
+raise SystemExit(75)
+PY
+  require_deployment_lease exclusive
+  release_deployment_lease
+  exit 0
+fi
+
+if [ "${1-}" = "--release-status" ]; then
+  [ "$#" -eq 1 ] || die "--release-status takes no values"
+  acquire_deployment_lease shared
+  transaction_control check-clean || die "a deployment transaction requires exclusive recovery"
+  deployed_repo >/dev/null || die "installed deployment is not coherent"
+  validate_installed_dashboard || die "dashboard launcher/runtime ownership, mode, or ancestry is untrusted"
+  "$DASHBOARD_LAUNCHER" --provenance-validate 9>&- \
+    || die "dashboard artifact closure validation failed"
+  release_registry_control status || die "cannot inspect the release registry"
+  exit 0
+fi
+
+if [ "${1-}" = "--release-list" ]; then
+  [ "$#" -eq 1 ] || die "--release-list takes no values"
+  acquire_deployment_lease shared
+  transaction_control check-clean || die "a deployment transaction requires exclusive recovery"
+  deployed_repo >/dev/null || die "installed deployment is not coherent"
+  validate_installed_dashboard || die "dashboard launcher/runtime ownership, mode, or ancestry is untrusted"
+  "$DASHBOARD_LAUNCHER" --provenance-validate 9>&- \
+    || die "dashboard artifact closure validation failed"
+  release_registry_control list || die "cannot validate the release registry"
+  exit 0
+fi
+
+if [ "${1-}" = "--release-archive" ]; then
+  [ "$#" -eq 3 ] && [ "$2" = "--confirm" ] \
+    || die "--release-archive requires --confirm CURRENT_RELEASE_ID"
+  acquire_deployment_lease exclusive
+  transaction_control recover || die "cannot recover the previous deployment transaction"
+  validate_installed_provenance_exclusive \
+    || die "installed deployment provenance, evidence, or signing state is not coherent"
+  release_registry_control archive "$3" || die "cannot archive the current known-good release"
+  exit 0
+fi
+
+if [ "${1-}" = "--rollback-plan" ]; then
+  [ "$#" -eq 4 ] && [ "$3" = "--out" ] \
+    || die "--rollback-plan requires TARGET_RELEASE_ID --out ABSOLUTE_NEW_PLAN"
+  acquire_deployment_lease shared
+  transaction_control check-clean || die "a deployment transaction requires exclusive recovery"
+  deployed_repo >/dev/null || die "installed deployment is not coherent"
+  validate_installed_dashboard || die "dashboard launcher/runtime ownership, mode, or ancestry is untrusted"
+  "$DASHBOARD_LAUNCHER" --provenance-validate 9>&- \
+    || die "dashboard artifact closure validation failed"
+  release_registry_control plan "$2" "$4" || die "cannot create the rollback plan"
+  exit 0
+fi
+
+if [ "${1-}" = "--rollback-apply" ]; then
+  [ "$#" -eq 5 ] && [ "$2" = "--plan" ] && [ "$4" = "--confirm" ] \
+    || die "--rollback-apply requires --plan ABSOLUTE_PLAN --confirm PLAN_DIGEST"
+  ROLLBACK_PLAN=$3
+  ROLLBACK_CONFIRM=$5
+  acquire_deployment_lease exclusive
+  transaction_control recover || die "cannot recover the previous deployment transaction"
+  validate_installed_provenance_exclusive \
+    || die "installed deployment provenance, evidence, or signing state is not coherent"
+  ROLLBACK_TRANSACTION_ACTIVE=0
+  TMP_ROLLBACK_BINARY=
+  TMP_ROLLBACK_WRAPPER=
+  TMP_ROLLBACK_DASHBOARD=
+  TMP_ROLLBACK_REBUILD=
+  TMP_ROLLBACK_SAFE_REBUILD=
+  TMP_ROLLBACK_MANIFEST=
+  TMP_ROLLBACK_STAMP=
+  TMP_ROLLBACK_EVIDENCE=
+  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+  rollback_cleanup() {
+    rollback_status=$?
+    trap - 0 1 2 15
+    if [ "$ROLLBACK_TRANSACTION_ACTIVE" -eq 1 ]; then
+      if ensure_exclusive_recovery_lease; then
+        transaction_control rollback || rollback_status=1
+      else
+        rollback_status=1
+      fi
+      ROLLBACK_TRANSACTION_ACTIVE=0
+    fi
+    for staged_path in "$TMP_ROLLBACK_BINARY" "$TMP_ROLLBACK_WRAPPER" "$TMP_ROLLBACK_DASHBOARD" \
+      "$TMP_ROLLBACK_REBUILD" "$TMP_ROLLBACK_SAFE_REBUILD" "$TMP_ROLLBACK_MANIFEST" \
+      "$TMP_ROLLBACK_STAMP" "$TMP_ROLLBACK_EVIDENCE"; do
+      [ -z "$staged_path" ] || /bin/rm -f "$staged_path"
+    done
+    release_deployment_lease || rollback_status=1
+    exit "$rollback_status"
+  }
+  trap rollback_cleanup 0
+  trap 'exit 130' 2
+  trap 'exit 143' 15
+  STAGE_OUTPUT=$(release_registry_control stage "$ROLLBACK_PLAN" "$ROLLBACK_CONFIRM") \
+    || die "rollback plan, current deployment, or target archive did not validate"
+  stage_value() {
+    printf '%s\n' "$STAGE_OUTPUT" | /usr/bin/awk -F= -v key="$1" \
+      '$1==key {if(seen++)exit 2;value=substr($0,length(key)+2)} END{if(seen!=1||value=="")exit 3;print value}'
+  }
+  ROLLBACK_TARGET=$(stage_value target-release-id) || die "rollback staging omitted target identity"
+  TMP_ROLLBACK_BINARY=$(stage_value kist-current) || die "rollback staging omitted binary"
+  TMP_ROLLBACK_WRAPPER=$(stage_value kist) || die "rollback staging omitted wrapper"
+  TMP_ROLLBACK_DASHBOARD=$(stage_value kist-dashboard) || die "rollback staging omitted dashboard"
+  TMP_ROLLBACK_REBUILD=$(stage_value kist-rebuild) || die "rollback staging omitted rebuild"
+  TMP_ROLLBACK_SAFE_REBUILD=$(stage_value kist-safe-rebuild.sh 2>/dev/null || true)
+  TMP_ROLLBACK_MANIFEST=$(stage_value kist-current.manifest) || die "rollback staging omitted manifest"
+  TMP_ROLLBACK_STAMP=$(stage_value .kist-build) || die "rollback staging omitted stamp"
+  TMP_ROLLBACK_EVIDENCE=$(stage_value kist-current.provenance.json) || die "rollback staging omitted evidence"
+  if [ -z "$TMP_ROLLBACK_SAFE_REBUILD" ]; then
+    LEGACY_DRY_CLOSURE=$("$DASHBOARD_LAUNCHER" --provenance-evaluate \
+      "$TMP_ROLLBACK_BINARY" "$TMP_ROLLBACK_WRAPPER" "$TMP_ROLLBACK_DASHBOARD" \
+      "$TMP_ROLLBACK_REBUILD" 9>&-) \
+      || die "legacy rollback target is not compatible with the current mutable runtime/cortex"
+    python_clean - "$TMP_ROLLBACK_MANIFEST" "$LEGACY_DRY_CLOSURE" <<'PY' \
+      || die "legacy rollback target is non-self-contained and its current operational closure does not match"
+import os,stat,sys
+manifest_path,projection_text=sys.argv[1:]
+st=os.lstat(manifest_path)
+if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid() or st.st_nlink!=1: raise SystemExit(1)
+fields={}
+for raw in open(manifest_path,encoding="utf-8"):
+    key,separator,value=raw.rstrip("\n").partition(":")
+    key=key.strip().lower(); value=value.strip()
+    if not separator or not key or not value or key in fields: raise SystemExit(1)
+    fields[key]=value
+projection={}
+for raw in projection_text.splitlines():
+    key,separator,value=raw.partition("=")
+    if not separator or not key or not value or key in projection: raise SystemExit(1)
+    projection[key]=value
+required={"binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
+          "dashboard-runtime-sha256","artifact-closure-sha256","artifact-closure-count"}
+if set(projection)!=required or any(fields.get(key)!=value for key,value in projection.items()):
+    raise SystemExit(1)
+PY
+  fi
+  ROLLBACK_TRANSACTION_ACTIVE=1
+  if [ -n "$TMP_ROLLBACK_SAFE_REBUILD" ]; then
+    ROLLBACK_TOKEN=$(transaction_control begin "$TMP_ROLLBACK_BINARY" "$TMP_ROLLBACK_WRAPPER" \
+      "$TMP_ROLLBACK_DASHBOARD" "$TMP_ROLLBACK_REBUILD" "$TMP_ROLLBACK_SAFE_REBUILD" \
+      "$TMP_ROLLBACK_MANIFEST" "$TMP_ROLLBACK_STAMP" "$TMP_ROLLBACK_EVIDENCE") \
+      || die "rollback transaction could not be started"
+  else
+    ROLLBACK_TOKEN=$(transaction_control begin "$TMP_ROLLBACK_BINARY" "$TMP_ROLLBACK_WRAPPER" \
+      "$TMP_ROLLBACK_DASHBOARD" "$TMP_ROLLBACK_REBUILD" "$TMP_ROLLBACK_MANIFEST" \
+      "$TMP_ROLLBACK_STAMP" "$TMP_ROLLBACK_EVIDENCE") \
+      || die "legacy rollback transaction could not be started"
+  fi
+  [ -n "$ROLLBACK_TOKEN" ] || die "rollback transaction omitted its identity"
+  if [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ "${KIST_ROLLBACK_TEST_INTERRUPT_AFTER-}" = activation ]; then
+    [ "$INSTALL_HOME" != /Users/lukekist ] || die "test interruption hooks are forbidden for production"
+    /bin/kill -TERM "$$"
+  elif [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ "${KIST_ROLLBACK_TEST_INTERRUPT_AFTER-}" = activation-sigkill ]; then
+    [ "$INSTALL_HOME" != /Users/lukekist ] || die "test interruption hooks are forbidden for production"
+    /bin/kill -KILL "$$"
+  fi
+  require_deployment_lease exclusive
+  validate_installed_provenance_exclusive \
+    || die "restored deployment failed schema-4 provenance, evidence, or signing validation"
+  "$INSTALL_HOME/bin/kist-current" --help 9>&- >/dev/null 2>&1 \
+    || die "restored binary failed its post-rollback --help smoke check"
+  require_deployment_lease exclusive
+  transaction_control commit || die "rollback transaction could not be committed"
+  ROLLBACK_TRANSACTION_ACTIVE=0
+  trap - 0 1 2 15
+  release_deployment_lease
+  printf 'rollback committed -> %s\n' "$ROLLBACK_TARGET"
+  exit 0
+fi
+
+if [ "${1-}" = "--validate-deployment" ]; then
+  [ "$#" -eq 1 ] || die "--validate-deployment takes no values"
+  acquire_deployment_lease shared
+  VALIDATED_ROOT=$(deployed_repo) || die "installed deployment is not coherent"
+  validate_installed_dashboard || die "dashboard launcher/runtime ownership, mode, or ancestry is untrusted"
+  "$DASHBOARD_LAUNCHER" --provenance-validate 9>&- \
+    || die "dashboard artifact closure validation failed"
+  VALIDATED_MANIFEST_SHA=$(stable_sha256_file "$INSTALL_HOME/bin/kist-current.manifest") \
+    || die "cannot bind the validated installed manifest identity"
+  require_deployment_lease
+  printf 'validated deployment: %s\n' "$VALIDATED_ROOT"
+  printf 'manifest-sha256: %s\n' "$VALIDATED_MANIFEST_SHA"
+  exit 0
+fi
+
+if [ "${1-}" = "--validate-enterprise" ]; then
+  [ "$#" -eq 1 ] || die "--validate-enterprise takes no values"
+  acquire_deployment_lease shared
+  VALIDATED_ROOT=$(deployed_repo) || die "installed deployment is not coherent"
+  validate_installed_dashboard || die "dashboard launcher/runtime ownership, mode, or ancestry is untrusted"
+  "$DASHBOARD_LAUNCHER" --provenance-validate --require-enterprise 9>&- \
+    || die "installed deployment does not have valid enterprise evidence, Developer ID signing, and notarization"
+  require_deployment_lease
+  printf 'validated enterprise local-candidate deployment: %s\n' "$VALIDATED_ROOT"
+  exit 0
+fi
+
+if [ "${1-}" = "--finalize-enterprise-evidence" ]; then
+  [ "$#" -eq 2 ] || die "--finalize-enterprise-evidence requires one absolute bundle path"
+  case "$2" in /*) ;; *) die "enterprise evidence path must be absolute" ;; esac
+  EVIDENCE_INPUT=$2
+  acquire_deployment_lease exclusive
+  transaction_control recover || die "cannot recover the previous deployment transaction"
+  VALIDATED_ROOT=$(deployed_repo) || die "installed deployment is not a coherent schema-4 pilot"
+  validate_installed_provenance_exclusive || die "pilot provenance validation failed"
+  MANIFEST="$INSTALL_HOME/bin/kist-current.manifest"
+  INSTALLED_BINARY="$INSTALL_HOME/bin/kist-current"
+  CURRENT_ASSURANCE=$(/usr/bin/awk -F': ' '$1=="deployment-assurance" { if (seen++) exit 2; value=$2 } END { if (seen!=1) exit 3; print value }' "$MANIFEST") \
+    || die "pilot manifest omitted deployment assurance"
+  [ "$CURRENT_ASSURANCE" = pilot ] || die "only a schema-4 pilot may be finalized"
+  MANIFEST_SOURCE=$(/usr/bin/awk -F': ' '$1=="source-state-sha256" { if (seen++) exit 2; value=$2 } END { if (seen!=1) exit 3; print value }' "$MANIFEST") \
+    || die "pilot manifest omitted source state"
+  CURRENT_SOURCE=$(source_state "$VALIDATED_ROOT") || die "cannot re-inventory the installed source"
+  [ "$CURRENT_SOURCE" = "$MANIFEST_SOURCE" ] || die "source changed after installation; rebuild and rerun evidence"
+  MANIFEST_UNSIGNED=$(/usr/bin/awk -F': ' '$1=="unsigned-release-sha256" { if (seen++) exit 2; value=$2 } END { if (seen!=1) exit 3; print value }' "$MANIFEST") \
+    || die "pilot manifest omitted unsigned release hash"
+  CURRENT_UNSIGNED=$(sha256_file "$VALIDATED_ROOT/.build/release/kist") \
+    || die "the exact unsigned release artifact is unavailable; rebuild and rerun evidence"
+  [ "$CURRENT_UNSIGNED" = "$MANIFEST_UNSIGNED" ] || die "unsigned release artifact changed after installation"
+
+  TMP_FINAL_MANIFEST=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-current.manifest.final.XXXXXX")
+  TMP_FINAL_EVIDENCE=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-current.provenance.final.XXXXXX")
+  TMP_FINAL_PROJECTION=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-current.projection.final.XXXXXX")
+  /bin/chmod -N "$TMP_FINAL_MANIFEST" "$TMP_FINAL_EVIDENCE" "$TMP_FINAL_PROJECTION" 2>/dev/null || true
+  /bin/cp "$EVIDENCE_INPUT" "$TMP_FINAL_EVIDENCE" || die "cannot stage enterprise evidence"
+  /bin/chmod 600 "$TMP_FINAL_MANIFEST" "$TMP_FINAL_EVIDENCE" "$TMP_FINAL_PROJECTION"
+  FINALIZE_TRANSACTION_ACTIVE=0
+  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+  finalize_cleanup() {
+    finalize_status=$?
+    trap - 0 1 2 15
+    if [ "$FINALIZE_TRANSACTION_ACTIVE" -eq 1 ]; then
+      if ensure_exclusive_recovery_lease; then
+        transaction_control rollback || finalize_status=1
+      else
+        finalize_status=1
+      fi
+      FINALIZE_TRANSACTION_ACTIVE=0
+    fi
+    /bin/rm -f "$TMP_FINAL_MANIFEST" "$TMP_FINAL_EVIDENCE" "$TMP_FINAL_PROJECTION"
+    release_deployment_lease || finalize_status=1
+    exit "$finalize_status"
+  }
+  trap finalize_cleanup 0
+  trap 'exit 130' 2
+  trap 'exit 143' 15
+  enterprise_evidence_evaluate "$TMP_FINAL_EVIDENCE" "$MANIFEST" "$INSTALLED_BINARY" > "$TMP_FINAL_PROJECTION" \
+    || die "enterprise evidence is missing, stale, malformed, or inconsistent"
+  SIGNING_OUTPUT=$(signing_state "$INSTALLED_BINARY") || die "cannot inspect installed signing state"
+  SIGNING_TYPE=$(printf '%s\n' "$SIGNING_OUTPUT" | /usr/bin/awk -F= '$1=="signing-type" {if(seen++)exit 2;v=substr($0,14)} END{if(seen!=1)exit 3;print v}') || die "signing inspection omitted type"
+  SIGNING_IDENTITY=$(printf '%s\n' "$SIGNING_OUTPUT" | /usr/bin/awk -F= '$1=="signing-identity" {if(seen++)exit 2;v=substr($0,18)} END{if(seen!=1)exit 3;print v}') || die "signing inspection omitted identity"
+  NOTARIZATION=$(printf '%s\n' "$SIGNING_OUTPUT" | /usr/bin/awk -F= '$1=="notarization-status" {if(seen++)exit 2;v=substr($0,21)} END{if(seen!=1)exit 3;print v}') || die "signing inspection omitted notarization"
+  [ "$SIGNING_TYPE" = developer-id ] && [ "$NOTARIZATION" = accepted ] \
+    || die "enterprise finalization requires a notarized Developer ID payload"
+  MANIFEST_SIGNING_TYPE=$(/usr/bin/awk -F': ' '$1=="signing-type"{print $2}' "$MANIFEST")
+  MANIFEST_SIGNING_IDENTITY=$(/usr/bin/awk -F': ' '$1=="signing-identity"{print $2}' "$MANIFEST")
+  MANIFEST_NOTARIZATION=$(/usr/bin/awk -F': ' '$1=="notarization-status"{print $2}' "$MANIFEST")
+  [ "$SIGNING_TYPE" = "$MANIFEST_SIGNING_TYPE" ] && [ "$SIGNING_IDENTITY" = "$MANIFEST_SIGNING_IDENTITY" ] \
+    && [ "$NOTARIZATION" = "$MANIFEST_NOTARIZATION" ] || die "manifest signing state does not match the installed payload"
+
+  python_clean - "$MANIFEST" "$TMP_FINAL_PROJECTION" "$TMP_FINAL_MANIFEST" <<'PY'
+import os,sys
+manifest,projection_path,target=sys.argv[1:]
+projection={}
+for line in open(projection_path,encoding="utf-8"):
+    key,sep,value=line.rstrip("\n").partition("=")
+    if not sep or not key or not value or key in projection: raise SystemExit(1)
+    projection[key]=value
+extras=["candidate-manifest-sha256","full-suite-evidence-sha256","full-suite-test-count","full-suite-failures","full-suite-errors","five-canary-evidence-sha256","five-canary-count","five-canary-failures","sbom-sha256","sbom-format","enterprise-evidence-sha256"]
+if set(projection)!=set(extras)|{"deployment-evidence-sha256"}: raise SystemExit(1)
+lines=[]; seen=set()
+for raw in open(manifest,encoding="utf-8"):
+    if not raw.endswith("\n") or ":" not in raw: raise SystemExit(1)
+    key=raw.split(":",1)[0].strip().lower()
+    if key in seen: raise SystemExit(1)
+    seen.add(key)
+    if key=="deployment-assurance": raw="deployment-assurance: enterprise\n"
+    elif key=="test-evidence": raw="test-evidence: full-suite+installed-five-canaries\n"
+    elif key=="deployment-evidence-sha256": raw=f"deployment-evidence-sha256: {projection[key]}\n"
+    lines.append(raw)
+for key in extras: lines.append(f"{key}: {projection[key]}\n")
+payload="".join(lines).encode("utf-8")
+fd=os.open(target,os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+try:
+    offset=0
+    while offset<len(payload): offset+=os.write(fd,payload[offset:])
+    os.fsync(fd)
+finally: os.close(fd)
+PY
+  enterprise_evidence_evaluate "$TMP_FINAL_EVIDENCE" "$TMP_FINAL_MANIFEST" "$INSTALLED_BINARY" >/dev/null \
+    || die "final enterprise manifest did not validate before promotion"
+  FINALIZE_TRANSACTION_ACTIVE=1
+  FINALIZE_TOKEN=$(transaction_control begin-finalize "$TMP_FINAL_MANIFEST" "$TMP_FINAL_EVIDENCE") \
+    || die "enterprise finalization transaction could not be started"
+  [ -n "$FINALIZE_TOKEN" ] || die "enterprise finalization transaction omitted its identity"
+  require_deployment_lease exclusive
+  deployed_repo >/dev/null || die "finalized deployment metadata is incoherent"
+  validate_installed_provenance_exclusive \
+    || die "finalized enterprise deployment failed semantic validation"
+  require_deployment_lease exclusive
+  transaction_control commit || die "enterprise finalization transaction could not be committed"
+  FINALIZE_TRANSACTION_ACTIVE=0
+  trap - 0 1 2 15
+  /bin/rm -f "$TMP_FINAL_PROJECTION"
+  release_deployment_lease
+  printf 'enterprise local-candidate evidence finalized -> %s\n' "$INSTALL_HOME/bin/kist-current.provenance.json"
+  exit 0
+fi
+
+FORCE=0
+SIGN_IDENTITY=-
+NOTARY_PROFILE=
+FORCE_SEEN=0
+SIGNING_SEEN=0
+NOTARY_SEEN=0
+SKIP_SUITE=0
+SKIP_SUITE_SEEN=0
+EXPECTED_INSTALLED_MANIFEST=
+EXPECTED_INSTALLED_MANIFEST_SEEN=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force)
+      [ "$FORCE_SEEN" -eq 0 ] || die "--force may be supplied only once"
+      FORCE=1; FORCE_SEEN=1; shift ;;
+    --signing-identity)
+      [ "$SIGNING_SEEN" -eq 0 ] && [ "$#" -ge 2 ] && [ -n "$2" ] || die "--signing-identity requires one value and may be supplied only once"
+      SIGN_IDENTITY=$2; SIGNING_SEEN=1; shift 2 ;;
+    --notary-keychain-profile)
+      [ "$NOTARY_SEEN" -eq 0 ] && [ "$#" -ge 2 ] && [ -n "$2" ] || die "--notary-keychain-profile requires one value and may be supplied only once"
+      NOTARY_PROFILE=$2; NOTARY_SEEN=1; shift 2 ;;
+    --skip-suite)
+      [ "$SKIP_SUITE_SEEN" -eq 0 ] || die "--skip-suite may be supplied only once"
+      SKIP_SUITE=1; SKIP_SUITE_SEEN=1; shift ;;
+    --expect-installed-manifest-sha256)
+      [ "$EXPECTED_INSTALLED_MANIFEST_SEEN" -eq 0 ] && [ "$#" -ge 2 ] \
+        || die "--expect-installed-manifest-sha256 requires one digest and may be supplied only once"
+      EXPECTED_INSTALLED_MANIFEST=$2; EXPECTED_INSTALLED_MANIFEST_SEEN=1; shift 2 ;;
+    *) die "usage: kist-rebuild [--force] [--skip-suite] [--signing-identity IDENTITY] [--notary-keychain-profile NAME] [--expect-installed-manifest-sha256 SHA256]" ;;
+  esac
+done
+if [ -n "$EXPECTED_INSTALLED_MANIFEST" ]; then
+  [ "${#EXPECTED_INSTALLED_MANIFEST}" -eq 64 ] \
+    || die "expected installed manifest identity must be one lowercase SHA-256 digest"
+  case "$EXPECTED_INSTALLED_MANIFEST" in
+    *[!0-9a-f]*) die "expected installed manifest identity must be one lowercase SHA-256 digest" ;;
+  esac
+fi
+if [ "$SIGN_IDENTITY" != - ]; then
+  python_clean - "$SIGN_IDENTITY" <<'PY' || die "signing identity must be a printable single-line value of at most 512 characters"
+import sys
+value=sys.argv[1]
+if not value or len(value)>512 or any(ord(c)<32 or ord(c)==127 for c in value): raise SystemExit(1)
+PY
+fi
+if [ -n "$NOTARY_PROFILE" ]; then
+  [ "$SIGN_IDENTITY" != - ] || die "notarization requires an explicit Developer ID signing identity"
+  [ "${#NOTARY_PROFILE}" -le 128 ] || die "notary keychain profile name is too long"
+  case "$NOTARY_PROFILE" in *[!A-Za-z0-9._-]*) die "notary keychain profile name contains unsafe characters" ;; esac
+fi
+acquire_deployment_lease exclusive
+transaction_control recover || die "cannot recover the previous deployment transaction"
+require_deployment_lease exclusive
+if [ -n "$EXPECTED_INSTALLED_MANIFEST" ]; then
+  ACTUAL_INSTALLED_MANIFEST=$(stable_sha256_file "$INSTALL_HOME/bin/kist-current.manifest") \
+    || die "cannot read the expected installed manifest under the deployment lease"
+  [ "$ACTUAL_INSTALLED_MANIFEST" = "$EXPECTED_INSTALLED_MANIFEST" ] \
+    || die "installed deployment changed after selection; rerun the safe rebuild"
+fi
+
+if [ -n "${MYTHOS_REPO-}" ]; then
+  REPO=$(validated_repo "$MYTHOS_REPO") \
+    || die "MYTHOS_REPO=$MYTHOS_REPO is not one canonical Kist repo"
+elif REPO=$(deployed_repo); then
+  :
+else
+  die "no canonical Kist repo selected; set MYTHOS_REPO or repair the validated deployed provenance"
+fi
+
+git_repo() {
+  python_clean - "$GIT" "$REPO" "$@" <<'PY'
+import os,selectors,signal,subprocess,sys,time
+git,root,*arguments=sys.argv[1:]
+env={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin","HOME":"/var/empty","LANG":"C","LC_ALL":"C","GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":"/dev/null","GIT_OPTIONAL_LOCKS":"0","GIT_TERMINAL_PROMPT":"0"}
+command=[git,"-C",root,"--no-pager","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-c","core.untrackedCache=false","-c","credential.helper=","-c","maintenance.auto=false",*arguments]
+p=subprocess.Popen(command,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+s=selectors.DefaultSelector();s.register(p.stdout,selectors.EVENT_READ,0);s.register(p.stderr,selectors.EVENT_READ,1);buf=[bytearray(),bytearray()];deadline=time.monotonic()+20
+try:
+    while s.get_map():
+        if time.monotonic()>deadline: raise TimeoutError()
+        for key,_ in s.select(.1):
+            block=os.read(key.fileobj.fileno(),65536)
+            if not block:s.unregister(key.fileobj);continue
+            buf[key.data]+=block
+            if len(buf[key.data])>2*1024*1024:raise OverflowError()
+    code=p.wait(timeout=max(.1,deadline-time.monotonic()))
+except Exception:
+    try:os.killpg(p.pid,signal.SIGTERM);p.wait(timeout=1)
+    except Exception:
+        try:os.killpg(p.pid,signal.SIGKILL)
+        except ProcessLookupError:pass
+    raise SystemExit(124)
+os.write(1,buf[0]);os.write(2,buf[1]);raise SystemExit(code)
+PY
+}
+
+# Preserve the existing anti-regression promotion gate. Offline freshness is advisory; identity and
+# artifact provenance remain fail-closed regardless of network availability.
+if [ "$FORCE" -eq 0 ] && git_repo rev-parse --git-dir >/dev/null 2>&1; then
+  if git_repo fetch origin --quiet 2>/dev/null; then
+    if git_repo rev-parse --verify origin/main >/dev/null 2>&1 \
+       && ! git_repo merge-base --is-ancestor origin/main HEAD 2>/dev/null; then
+      behind=$(git_repo rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+      die "refusing to install: $REPO is behind origin/main by ${behind} commit(s); update it or use --force"
+    fi
+  else
+    echo "kist-rebuild · offline; skipping the remote freshness check"
+  fi
+fi
+
+validate_installed_dashboard || die "dashboard launcher/runtime ownership, mode, or ancestry is untrusted"
+
+BUILD_COMMIT=$(git_repo rev-parse HEAD) || die "cannot read the pre-build Git commit"
+SOURCE_SNAPSHOT=$(/usr/bin/mktemp -d "$SNAPSHOT_PARENT/kist-source-snapshot.XXXXXX") \
+  || die "cannot create a private source snapshot"
+/bin/chmod -N "$SOURCE_SNAPSHOT" 2>/dev/null || true
+/bin/chmod 700 "$SOURCE_SNAPSHOT"
+snapshot_phase_cleanup() {
+  snapshot_status=$?
+  trap - 0 1 2 15
+  cd "$INSTALL_HOME" 2>/dev/null || snapshot_status=1
+  remove_source_snapshot "$SOURCE_SNAPSHOT" || snapshot_status=1
+  SOURCE_SNAPSHOT=
+  release_deployment_lease || snapshot_status=1
+  exit "$snapshot_status"
+}
+trap snapshot_phase_cleanup 0
+trap 'exit 130' 2
+trap 'exit 143' 15
+BUILD_SOURCE_STATE=$(snapshot_source "$REPO" "$SOURCE_SNAPSHOT") \
+  || die "cannot create and hash the private source snapshot"
+BUILD_ROOT=$SOURCE_SNAPSHOT
+[ -f "$BUILD_ROOT/scripts/kist-dashboard" ] && [ ! -L "$BUILD_ROOT/scripts/kist-dashboard" ] \
+  || die "tracked canonical dashboard source is missing"
+[ -f "$BUILD_ROOT/scripts/kist-rebuild" ] && [ ! -L "$BUILD_ROOT/scripts/kist-rebuild" ] \
+  || die "tracked canonical rebuild source is missing"
+[ -f "$BUILD_ROOT/scripts/kist-wrapper" ] && [ ! -L "$BUILD_ROOT/scripts/kist-wrapper" ] \
+  || die "tracked canonical wrapper source is missing"
+[ -f "$BUILD_ROOT/scripts/kist-safe-rebuild.sh" ] && [ ! -L "$BUILD_ROOT/scripts/kist-safe-rebuild.sh" ] \
+  || die "tracked canonical safe-rebuild source is missing"
+if [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ -n "${KIST_REBUILD_TEST_AFTER_SNAPSHOT_HOOK-}" ]; then
+  [ "$INSTALL_HOME" != /Users/lukekist ] || die "source snapshot test hooks are forbidden for production"
+  case "$KIST_REBUILD_TEST_AFTER_SNAPSHOT_HOOK" in /*) ;; *) die "source snapshot test hook must be absolute" ;; esac
+  [ -x "$KIST_REBUILD_TEST_AFTER_SNAPSHOT_HOOK" ] && [ ! -L "$KIST_REBUILD_TEST_AFTER_SNAPSHOT_HOOK" ] \
+    || die "source snapshot test hook is not one executable regular file"
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    "$KIST_REBUILD_TEST_AFTER_SNAPSHOT_HOOK" "$REPO" "$BUILD_ROOT" 9>&- \
+    || die "source snapshot test hook failed"
+fi
+# Promotion requires more than a --help smoke: a green suite is the default gate. A dirty tree is
+# recorded honestly in the manifest either way; --skip-suite exists for prod-down emergencies only
+# and is stamped into test-evidence so a smoke-only deploy can never masquerade as a tested one.
+# The evidence string is built causally: the suite portion is recorded only after the suite
+# actually passes here, and the smoke portion is APPENDED later (after the release smokes pass),
+# so the manifest can never claim a check that has not yet run.
+if [ "$SKIP_SUITE" -eq 0 ]; then
+  echo "kist-rebuild · running the full test suite before promotion (--skip-suite to bypass) ..."
+  # Build the test bundle first, then run it with --skip-build. A COLD `swift test` on this
+  # package mis-discovers as "0 tests in 0 suites" (a false green the promotion gate rightly
+  # refused); building the bundle explicitly and running the built binary runs the real ~7.4k
+  # XCTests. We also require the runner to REPORT that it executed tests: a run that executed
+  # zero tests is treated as a discovery failure, never a pass.
+  ( cd "$BUILD_ROOT" && swift_clean build --scratch-path "$BUILD_ROOT/.build" --build-tests ) \
+    || die "test build failed; refusing to promote an unverified binary"
+  SUITE_LOG=$(/usr/bin/mktemp "$SNAPSHOT_PARENT/kist-rebuild-suite.XXXXXX")
+  # Force the XCTest bundle (our ~7.5k tests) and DISABLE the swift-testing runner. Mixing the two
+  # is racy on this package: swift-testing has zero @Test cases here, so a bare `swift test` can exit
+  # reporting "0 tests in 0 suites" without ever running XCTest — a false green the gate then refuses.
+  # POSIX-safe: this script is /bin/sh (no PIPESTATUS/bashisms). Capture the suite's REAL exit via
+  # `if !` around the subshell (not a `| tee`, whose exit would be tee's), then echo the log for the
+  # operator. `set -e` does not abort inside the `if` condition, so a failure is handled here.
+  if ( cd "$BUILD_ROOT" && swift_clean test --scratch-path "$BUILD_ROOT/.build" \
+       --skip-build --disable-swift-testing --enable-xctest > "$SUITE_LOG" 2>&1 ); then
+    /bin/cat "$SUITE_LOG"
+  else
+    /bin/cat "$SUITE_LOG"
+    /bin/rm -f "$SUITE_LOG"
+    die "test suite failed; refusing to promote an unverified binary"
+  fi
+  /usr/bin/grep -Eq "Executed [1-9][0-9]* test" "$SUITE_LOG" \
+    || { /bin/rm -f "$SUITE_LOG"; die "test run executed zero tests (discovery failure); refusing to promote an unverified binary"; }
+  /bin/rm -f "$SUITE_LOG"
+  TEST_EVIDENCE="suite:pass"
+else
+  echo "kist-rebuild · WARNING: suite skipped; promoting on smoke evidence only" >&2
+  TEST_EVIDENCE="suite:skipped"
+fi
+
+echo "kist-rebuild · building release from $REPO ..."
+( cd "$BUILD_ROOT" && swift_clean build --scratch-path "$BUILD_ROOT/.build" -c release ) \
+  || die "release build failed"
+BIN="$BUILD_ROOT/.build/release/kist"
+[ -x "$BIN" ] || die "build produced no runnable binary at $BIN"
+AFTER_BUILD_SOURCE_STATE=$(source_state "$BUILD_ROOT") || die "cannot hash the post-build source snapshot"
+[ "$BUILD_SOURCE_STATE" = "$AFTER_BUILD_SOURCE_STATE" ] \
+  || die "private source snapshot changed during the release build; refusing to promote"
+
+require_deployment_lease exclusive
+/bin/mkdir -p "$INSTALL_HOME/bin"
+TMP_BINARY=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-current.new.XXXXXX")
+TMP_WRAPPER=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist.wrapper.XXXXXX")
+TMP_DASHBOARD=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-dashboard.XXXXXX")
+TMP_REBUILD=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-rebuild.XXXXXX")
+TMP_SAFE_REBUILD=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-safe-rebuild.XXXXXX")
+TMP_MANIFEST=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-current.manifest.XXXXXX")
+TMP_STAMP=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-build.XXXXXX")
+TMP_EVIDENCE=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-current.provenance.XXXXXX")
+TMP_STATUS=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-status.XXXXXX")
+TMP_NOTARY_ARCHIVE=
+TMP_NOTARY_RESULT=
+/bin/chmod -N "$TMP_BINARY" "$TMP_WRAPPER" "$TMP_DASHBOARD" "$TMP_REBUILD" "$TMP_SAFE_REBUILD" \
+  "$TMP_MANIFEST" "$TMP_STAMP" "$TMP_EVIDENCE" "$TMP_STATUS" 2>/dev/null || true
+cleanup() {
+  cleanup_status=$?
+  trap - 0 1 2 15
+  if [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
+    if ensure_exclusive_recovery_lease; then
+      transaction_control rollback || cleanup_status=1
+    else
+      cleanup_status=1
+    fi
+    TRANSACTION_ACTIVE=0
+  fi
+  /bin/rm -f "$TMP_BINARY" "$TMP_WRAPPER" "$TMP_DASHBOARD" "$TMP_REBUILD" "$TMP_SAFE_REBUILD" \
+    "$TMP_MANIFEST" "$TMP_STAMP" "$TMP_EVIDENCE" "$TMP_STATUS"
+  [ -z "$TMP_NOTARY_ARCHIVE" ] || /bin/rm -f "$TMP_NOTARY_ARCHIVE"
+  [ -z "$TMP_NOTARY_RESULT" ] || /bin/rm -f "$TMP_NOTARY_RESULT"
+  cd "$INSTALL_HOME" 2>/dev/null || cleanup_status=1
+  if [ -n "$SOURCE_SNAPSHOT" ]; then
+    remove_source_snapshot "$SOURCE_SNAPSHOT" || cleanup_status=1
+    SOURCE_SNAPSHOT=
+  fi
+  release_deployment_lease || cleanup_status=1
+  exit "$cleanup_status"
+}
+trap cleanup 0
+trap 'exit 130' 2
+trap 'exit 143' 15
+
+UNSIGNED_RELEASE_HASH=$(stage_stable_executable "$BIN" "$TMP_BINARY") \
+  || die "cannot stably stage and hash the unsigned release artifact"
+require_deployment_lease exclusive
+PUBLISHED_UNSIGNED_HASH=$(publish_unsigned_artifact "$REPO" "$TMP_BINARY") \
+  || die "cannot retain the exact unsigned release artifact for evidence finalization"
+[ "$PUBLISHED_UNSIGNED_HASH" = "$UNSIGNED_RELEASE_HASH" ] \
+  || die "retained unsigned artifact did not match the private build snapshot"
+if [ "$SIGN_IDENTITY" = - ]; then
+  /usr/bin/codesign --force --sign - "$TMP_BINARY" >/dev/null 2>&1 || die "ad-hoc codesign failed"
+else
+  /usr/bin/codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$TMP_BINARY" >/dev/null 2>&1 \
+    || die "Developer ID codesign with hardened runtime and secure timestamp failed"
+fi
+PRODUCT_VERSION=$(python_clean - "$TMP_BINARY" <<'PY'
+import os,re,selectors,signal,subprocess,sys,time
+binary=sys.argv[1]
+environment={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin","HOME":"/var/empty","LANG":"C","LC_ALL":"C"}
+def stop_group(process):
+    try: os.killpg(process.pid,signal.SIGTERM)
+    except ProcessLookupError: return
+    if process.poll() is None:
+        try: process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try: os.killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait()
+def probe(argument,capture=False):
+    process=subprocess.Popen([binary,argument],stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+        env=environment,start_new_session=True,close_fds=True)
+    deadline=time.monotonic()+10
+    data=bytearray()
+    try:
+        if capture:
+            if process.stdout is None: raise RuntimeError()
+            os.set_blocking(process.stdout.fileno(),False)
+            selector=selectors.DefaultSelector(); selector.register(process.stdout,selectors.EVENT_READ)
+            try:
+                while selector.get_map():
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0: raise TimeoutError()
+                    for key,_ in selector.select(min(0.2,remaining)):
+                        try: chunk=os.read(key.fileobj.fileno(),4096)
+                        except BlockingIOError: continue
+                        if not chunk: selector.unregister(key.fileobj); continue
+                        data.extend(chunk)
+                        if len(data)>256: raise OverflowError()
+            finally: selector.close()
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError()
+        process.wait(timeout=remaining)
+        if process.returncode: raise RuntimeError()
+        return bytes(data)
+    finally:
+        stop_group(process)
+        if process.stdout is not None: process.stdout.close()
+try:
+    probe("--help")
+    raw=probe("--version",True)
+    text=raw.decode("ascii").strip()
+except (OSError,UnicodeDecodeError,RuntimeError,TimeoutError,OverflowError,subprocess.SubprocessError):
+    raise SystemExit(1)
+semver=r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+match=re.fullmatch("kist ("+semver+")",text)
+if not match: raise SystemExit(1)
+print(match.group(1))
+PY
+) || die "the freshly built binary failed its bounded --help/--version probes"
+SIGNING_OUTPUT=$(signing_state "$TMP_BINARY") || die "cannot inspect the freshly signed payload"
+SIGNING_TYPE=$(printf '%s\n' "$SIGNING_OUTPUT" | /usr/bin/awk -F= '$1=="signing-type" {if(seen++)exit 2;v=substr($0,14)} END{if(seen!=1)exit 3;print v}') || die "signing inspection omitted type"
+SIGNING_IDENTITY=$(printf '%s\n' "$SIGNING_OUTPUT" | /usr/bin/awk -F= '$1=="signing-identity" {if(seen++)exit 2;v=substr($0,18)} END{if(seen!=1)exit 3;print v}') || die "signing inspection omitted identity"
+NOTARIZATION_STATUS=$(printf '%s\n' "$SIGNING_OUTPUT" | /usr/bin/awk -F= '$1=="notarization-status" {if(seen++)exit 2;v=substr($0,21)} END{if(seen!=1)exit 3;print v}') || die "signing inspection omitted notarization"
+NOTARIZATION_SUBMISSION_ID=none
+NOTARIZATION_PACKAGE_HASH=none
+if [ -n "$NOTARY_PROFILE" ]; then
+  [ "$SIGNING_TYPE" = developer-id ] || die "notarization requires an actual Developer ID Application signature"
+  SIGNED_BEFORE_NOTARY=$(sha256_file "$TMP_BINARY") || die "cannot hash the signed notarization candidate"
+  TMP_NOTARY_ARCHIVE=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-notary-archive.XXXXXX")
+  TMP_NOTARY_RESULT=$(/usr/bin/mktemp "$INSTALL_HOME/bin/.kist-notary-result.XXXXXX")
+  /bin/chmod -N "$TMP_NOTARY_ARCHIVE" "$TMP_NOTARY_RESULT" 2>/dev/null || true
+  /bin/rm -f "$TMP_NOTARY_ARCHIVE"
+  /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$TMP_BINARY" "$TMP_NOTARY_ARCHIVE" \
+    || die "cannot package the signed payload for notarization"
+  /bin/chmod 600 "$TMP_NOTARY_ARCHIVE" "$TMP_NOTARY_RESULT"
+  NOTARIZATION_PACKAGE_HASH=$(sha256_file "$TMP_NOTARY_ARCHIVE") || die "cannot hash the notarization package"
+  /usr/bin/xcrun notarytool submit "$TMP_NOTARY_ARCHIVE" --keychain-profile "$NOTARY_PROFILE" \
+    --wait --output-format json > "$TMP_NOTARY_RESULT" 2>/dev/null \
+    || die "notary service rejected or could not evaluate the signed payload"
+  NOTARIZATION_SUBMISSION_ID=$(python_clean - "$TMP_NOTARY_RESULT" <<'PY'
+import json,re,sys
+with open(sys.argv[1],"rb") as stream: raw=stream.read(1024*1024+1)
+if len(raw)>1024*1024: raise SystemExit(1)
+value=json.loads(raw)
+if type(value) is not dict or value.get("status")!="Accepted": raise SystemExit(1)
+identifier=value.get("id")
+if type(identifier) is not str or not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",identifier): raise SystemExit(1)
+print(identifier.lower())
+PY
+  ) || die "notary response was not a canonical accepted submission"
+  SIGNED_AFTER_NOTARY=$(sha256_file "$TMP_BINARY") || die "cannot rehash the notarized payload"
+  [ "$SIGNED_AFTER_NOTARY" = "$SIGNED_BEFORE_NOTARY" ] || die "the staged payload changed during notarization"
+  notarization_attempt=0
+  while [ "$notarization_attempt" -lt 5 ]; do
+    SIGNING_OUTPUT=$(signing_state "$TMP_BINARY") || die "cannot re-inspect the notarized payload"
+    NOTARIZATION_STATUS=$(printf '%s\n' "$SIGNING_OUTPUT" | /usr/bin/awk -F= '$1=="notarization-status" {if(seen++)exit 2;v=substr($0,21)} END{if(seen!=1)exit 3;print v}') || die "notarization inspection omitted status"
+    [ "$NOTARIZATION_STATUS" = accepted ] && break
+    notarization_attempt=$((notarization_attempt + 1)); /bin/sleep 2
+  done
+  [ "$NOTARIZATION_STATUS" = accepted ] \
+    || die "notary accepted the standalone payload, but online Gatekeeper acceptance is not yet observable"
+  /bin/rm -f "$TMP_NOTARY_ARCHIVE" "$TMP_NOTARY_RESULT"
+  TMP_NOTARY_ARCHIVE=
+  TMP_NOTARY_RESULT=
+elif [ "$NOTARIZATION_STATUS" = accepted ]; then
+  die "Gatekeeper reports notarization, but no retained notary submission was requested; use --notary-keychain-profile"
+fi
+# Exercise a real code path in the RELEASE binary, not just argv parsing: the suite runs in debug,
+# so release-only miscompiles (e.g. optimizer-invalidated pointer lifetimes) slip past a green
+# suite and a --help smoke. --list-providers walks config, key store, and the provider catalog.
+"$TMP_BINARY" --list-providers 9>&- >/dev/null 2>&1 \
+  || die "the freshly built release binary failed its --list-providers functional smoke"
+# All release smokes passed — only now is it honest to claim them in the manifest evidence.
+TEST_EVIDENCE="${TEST_EVIDENCE}+smoke:--help,--version,--list-providers"
+
+stage_stable_executable "$BUILD_ROOT/scripts/kist-wrapper" "$TMP_WRAPPER" >/dev/null \
+  || die "cannot stably stage the canonical wrapper"
+stage_stable_executable "$BUILD_ROOT/scripts/kist-dashboard" "$TMP_DASHBOARD" >/dev/null \
+  || die "cannot stably stage the canonical dashboard"
+stage_stable_executable "$BUILD_ROOT/scripts/kist-rebuild" "$TMP_REBUILD" >/dev/null \
+  || die "cannot stably stage the canonical rebuild gate"
+stage_stable_executable "$BUILD_ROOT/scripts/kist-safe-rebuild.sh" "$TMP_SAFE_REBUILD" >/dev/null \
+  || die "cannot stably stage the canonical safe-rebuild helper"
+
+FULL_SHA=$(git_repo rev-parse HEAD) || die "cannot read full Git commit"
+[ "$FULL_SHA" = "$BUILD_COMMIT" ] || die "Git commit changed during the release build; retry"
+SHORT_SHA=$(git_repo rev-parse --short=12 HEAD) || die "cannot read short Git commit"
+BRANCH=$(git_repo rev-parse --abbrev-ref HEAD) || die "cannot read Git branch"
+TOP=$(git_repo rev-parse --show-toplevel) || die "cannot read Git worktree root"
+TOP=$(validated_repo "$TOP") || die "Git top level is not the selected Kist repo"
+[ "$TOP" = "$REPO" ] || die "selected repo does not match its Git top level"
+COMMON_RAW=$(git_repo rev-parse --git-common-dir) || die "cannot read Git common directory"
+case "$COMMON_RAW" in /*) COMMON_PATH=$COMMON_RAW ;; *) COMMON_PATH="$REPO/$COMMON_RAW" ;; esac
+COMMON=$(cd -P -- "$COMMON_PATH" 2>/dev/null && pwd) || die "cannot canonicalize Git common directory"
+REMOTE=$(git_repo config --get remote.origin.url 2>/dev/null || printf '%s' '(none)')
+REMOTE_HASH=$(python_clean - "$REMOTE" <<'PY'
+import hashlib,sys
+value=sys.argv[1]
+if not value or any(c.isspace() or c=="\0" for c in value): raise SystemExit(1)
+cuts=[i for i in (value.find("?"),value.find("#")) if i>=0]
+value=value[:min(cuts)] if cuts else value
+if "://" in value:
+    scheme,rest=value.split("://",1); authority,sep,path=rest.partition("/"); authority=authority.rsplit("@",1)[-1]
+    if not scheme or not authority: raise SystemExit(1)
+    value=scheme.lower()+"://"+authority.lower()+(sep+path if sep else "")
+else:
+    colon=value.find(":"); slash=value.find("/")
+    if colon>=0 and (slash<0 or colon<slash):
+        host=value[:colon].rsplit("@",1)[-1]
+        if not host: raise SystemExit(1)
+        value=host.lower()+value[colon:]
+print(hashlib.sha256(value.encode()).hexdigest())
+PY
+) || die "remote origin is not a canonical credential-free identity"
+REPOSITORY_ID=$(printf '%s\n%s\n' "$REMOTE_HASH" "$COMMON" | "$SHASUM" -a 256 | /usr/bin/awk '{print $1}')
+
+# Repository-root usage telemetry and per-run proof streams are operational state, even where
+# legacy history tracked them. Other root .kist content (agents, policy/learning, and plan inputs)
+# remains part of both the source snapshot and the dirty projection.
+git_repo status --porcelain=v1 --untracked-files=all -- . \
+  ':(exclude,top).kist/usage.jsonl' \
+  ':(exclude,top).kist/runs' ':(exclude,top).kist/runs/**' > "$TMP_STATUS" \
+  || die "cannot inspect Git status"
+if [ -s "$TMP_STATUS" ]; then SOURCE_DIRTY=yes; else SOURCE_DIRTY=no; fi
+STATE_AFTER=$(source_state "$REPO") || die "cannot hash the final source state"
+[ "$BUILD_SOURCE_STATE" = "$STATE_AFTER" ] \
+  || die "source tree changed while deployment metadata was being captured; retry"
+
+CLOSURE_OUTPUT=$("$TMP_DASHBOARD" --provenance-evaluate "$TMP_BINARY" "$TMP_WRAPPER" \
+  "$TMP_DASHBOARD" "$TMP_REBUILD" "$TMP_SAFE_REBUILD" 9>&-) \
+  || die "cannot compute the deployment artifact closure"
+closure_value() {
+  printf '%s\n' "$CLOSURE_OUTPUT" | /usr/bin/awk -F= -v key="$1" '$1==key { if (seen++) exit 2; print substr($0,length(key)+2) } END { if (!seen) exit 3 }'
+}
+BINARY_HASH=$(closure_value binary-sha256) || die "missing binary closure hash"
+WRAPPER_HASH=$(closure_value wrapper-sha256) || die "missing wrapper closure hash"
+LAUNCHER_HASH=$(closure_value dashboard-launcher-sha256) || die "missing dashboard closure hash"
+REBUILD_HASH=$(closure_value rebuild-sha256) || die "missing rebuild closure hash"
+SAFE_REBUILD_HASH=$(closure_value safe-rebuild-sha256) || die "missing safe-rebuild closure hash"
+ARTIFACT_CLOSURE_HASH=$(closure_value artifact-closure-sha256) || die "missing aggregate closure hash"
+ARTIFACT_CLOSURE_COUNT=$(closure_value artifact-closure-count) || die "missing aggregate closure count"
+python_clean - "$STATE_AFTER" "$UNSIGNED_RELEASE_HASH" "$BINARY_HASH" "$PRODUCT_VERSION" > "$TMP_EVIDENCE" <<'PY'
+import json,sys
+source,unsigned,signed,version=sys.argv[1:]
+payload={"schema":1,"assurance":"pilot","provenance_kind":"local-candidate","product_version":version,"source_state_sha256":source,"unsigned_release_sha256":unsigned,"signed_installed_sha256":signed}
+print(json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=True))
+PY
+DEPLOYMENT_EVIDENCE_HASH=$(sha256_file "$TMP_EVIDENCE") || die "cannot hash pilot provenance evidence"
+DEPLOYED_AT=$(/bin/date '+%Y-%m-%d %H:%M:%S')
+STAMP="$SHORT_SHA · $BRANCH · $DEPLOYED_AT · $REPO"
+
+{
+  printf 'schema: 4\n'
+  printf 'stamp: %s\n' "$STAMP"
+  printf 'deployed: %s\n' "$DEPLOYED_AT"
+  printf 'worktree: %s\n' "$REPO"
+  printf 'branch: %s\n' "$BRANCH"
+  printf 'commit: %s\n' "$FULL_SHA"
+  printf 'remote-origin-sha256: %s\n' "$REMOTE_HASH"
+  printf 'repository-id: %s\n' "$REPOSITORY_ID"
+  printf 'source-dirty: %s\n' "$SOURCE_DIRTY"
+  printf 'source-state-sha256: %s\n' "$STATE_AFTER"
+  printf 'binary-sha256: %s\n' "$BINARY_HASH"
+  printf 'wrapper-sha256: %s\n' "$WRAPPER_HASH"
+  printf 'dashboard-launcher-sha256: %s\n' "$LAUNCHER_HASH"
+  printf 'rebuild-sha256: %s\n' "$REBUILD_HASH"
+  printf 'safe-rebuild-sha256: %s\n' "$SAFE_REBUILD_HASH"
+  printf 'artifact-closure-sha256: %s\n' "$ARTIFACT_CLOSURE_HASH"
+  printf 'artifact-closure-count: %s\n' "$ARTIFACT_CLOSURE_COUNT"
+  printf 'test-evidence: %s\n' "$TEST_EVIDENCE"
+  printf 'deployment-assurance: pilot\n'
+  printf 'provenance-kind: local-candidate\n'
+  printf 'product-version: %s\n' "$PRODUCT_VERSION"
+  printf 'unsigned-release-sha256: %s\n' "$UNSIGNED_RELEASE_HASH"
+  printf 'signed-installed-sha256: %s\n' "$BINARY_HASH"
+  printf 'signing-type: %s\n' "$SIGNING_TYPE"
+  printf 'signing-identity: %s\n' "$SIGNING_IDENTITY"
+  printf 'notarization-status: %s\n' "$NOTARIZATION_STATUS"
+  printf 'notarization-submission-id: %s\n' "$NOTARIZATION_SUBMISSION_ID"
+  printf 'notarization-package-sha256: %s\n' "$NOTARIZATION_PACKAGE_HASH"
+  printf 'deployment-evidence-sha256: %s\n' "$DEPLOYMENT_EVIDENCE_HASH"
+} > "$TMP_MANIFEST"
+printf '%s\n' "$STAMP" > "$TMP_STAMP"
+/bin/chmod 600 "$TMP_MANIFEST" "$TMP_STAMP" "$TMP_EVIDENCE" "$TMP_STATUS"
+
+python_clean - "$TMP_BINARY" "$TMP_WRAPPER" "$TMP_DASHBOARD" "$TMP_REBUILD" "$TMP_SAFE_REBUILD" \
+  "$TMP_MANIFEST" "$TMP_STAMP" "$TMP_EVIDENCE" "$INSTALL_HOME/bin" <<'PY'
+import os,sys
+for path in sys.argv[1:-1]:
+    fd=os.open(path,os.O_RDONLY); os.fsync(fd); os.close(fd)
+fd=os.open(sys.argv[-1],os.O_RDONLY); os.fsync(fd); os.close(fd)
+PY
+
+# Backups and a durable journal precede every replacement. Any error or signal before commit runs
+# rollback under the same exclusive lease; SIGKILL is recovered by the next exclusive rebuild.
+TRANSACTION_ACTIVE=1
+TRANSACTION_TOKEN=$(transaction_control begin "$TMP_BINARY" "$TMP_WRAPPER" "$TMP_DASHBOARD" \
+  "$TMP_REBUILD" "$TMP_SAFE_REBUILD" "$TMP_MANIFEST" "$TMP_STAMP" "$TMP_EVIDENCE") \
+  || die "transactional promotion could not be started"
+[ -n "$TRANSACTION_TOKEN" ] || die "transactional promotion omitted its identity"
+if [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ "${KIST_REBUILD_TEST_INTERRUPT_AFTER-}" = activation ]; then
+  [ "$INSTALL_HOME" != /Users/lukekist ] || die "test interruption hooks are forbidden for production"
+  /bin/kill -TERM "$$"
+fi
+if [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ -n "${KIST_REBUILD_TEST_AFTER_ACTIVATION_HOOK-}" ]; then
+  [ "$INSTALL_HOME" != /Users/lukekist ] || die "after-activation test hooks are forbidden for production"
+  case "$KIST_REBUILD_TEST_AFTER_ACTIVATION_HOOK" in
+    /*) ;;
+    *) die "after-activation test hook must be absolute" ;;
+  esac
+  [ -x "$KIST_REBUILD_TEST_AFTER_ACTIVATION_HOOK" ] \
+    && [ ! -L "$KIST_REBUILD_TEST_AFTER_ACTIVATION_HOOK" ] \
+    || die "after-activation test hook is not one executable regular file"
+  if [ "${KIST_REBUILD_TEST_CLOSE_DEPLOYMENT_LEASE_AFTER_ACTIVATION-}" = 1 ]; then
+    exec 9>&-
+  fi
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    "$KIST_REBUILD_TEST_AFTER_ACTIVATION_HOOK" "$REPO" "$BUILD_ROOT" 9>&- \
+    || die "after-activation test hook failed"
+fi
+require_deployment_lease exclusive
+POST_ROOT=$(deployed_repo) || die "post-promotion schema-4 deployment validation failed"
+[ "$POST_ROOT" = "$REPO" ] || die "post-promotion repository identity changed"
+validate_installed_provenance_exclusive \
+  || die "post-promotion evidence, signing, or artifact provenance validation failed"
+/usr/bin/cmp -s "$REPO/scripts/kist-wrapper" "$INSTALL_HOME/bin/kist" \
+  || die "installed wrapper bytes differ from their canonical source"
+/usr/bin/cmp -s "$REPO/scripts/kist-dashboard" "$INSTALL_HOME/bin/kist-dashboard" \
+  || die "installed dashboard bytes differ from their canonical source"
+/usr/bin/cmp -s "$REPO/scripts/kist-rebuild" "$INSTALL_HOME/bin/kist-rebuild" \
+  || die "installed rebuild bytes differ from their canonical source"
+/usr/bin/cmp -s "$REPO/scripts/kist-safe-rebuild.sh" "$INSTALL_HOME/bin/kist-safe-rebuild.sh" \
+  || die "installed safe-rebuild bytes differ from their canonical source"
+"$INSTALL_HOME/bin/kist-current" --help 9>&- >/dev/null 2>&1 \
+  || die "installed binary failed its post-promotion --help smoke check"
+require_deployment_lease exclusive
+FINAL_SOURCE_STATE=$(source_state "$REPO") \
+  || die "cannot perform the final source-state compare before commit"
+FINAL_HEAD=$(git_repo rev-parse HEAD) || die "cannot perform the final Git HEAD compare before commit"
+FINAL_BRANCH=$(git_repo rev-parse --abbrev-ref HEAD) \
+  || die "cannot perform the final Git branch compare before commit"
+[ "$FINAL_SOURCE_STATE" = "$STATE_AFTER" ] && [ "$FINAL_HEAD" = "$FULL_SHA" ] \
+  && [ "$FINAL_BRANCH" = "$BRANCH" ] \
+  || die "source state, Git HEAD, or branch changed after activation; rolling back"
+require_deployment_lease exclusive
+transaction_control commit || die "deployment transaction could not be committed"
+TRANSACTION_ACTIVE=0
+
+cd "$INSTALL_HOME"
+remove_source_snapshot "$SOURCE_SNAPSHOT" || die "installed deployment committed but private source snapshot cleanup failed"
+SOURCE_SNAPSHOT=
+trap - 0 1 2 15
+cleanup_status=0
+/bin/rm -f "$TMP_STATUS"
+release_deployment_lease
+echo "installed OK -> $INSTALL_HOME/bin/kist"
+echo "   build: $STAMP"
