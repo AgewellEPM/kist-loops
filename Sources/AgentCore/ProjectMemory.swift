@@ -33,9 +33,14 @@ public struct ProjectMemory: Sendable {
 
     /// Project facts = curated `.mythos/memory/facts.md` + ingested AGENTS.md / CLAUDE.md from the root
     /// (the "stop re-explaining the project" memory). Concatenated, bounded, in priority order.
+    ///
+    /// The AGENTS.md source is resolved via `AgentConfigResolver` so an `AGENTS/` directory (with a
+    /// per-agent `AGENTS/<agent>/AGENTS.md` or `AGENTS/default/AGENTS.md`) takes precedence over a bare
+    /// root `AGENTS.md` — no merging, one file wins (see AgentConfigResolver).
     public func facts() -> String {
         var parts: [String] = []
-        for path in [factsPath, root + "/AGENTS.md", root + "/CLAUDE.md"] {
+        let agentsPath = AgentConfigResolver.resolve(root: root)
+        for path in [factsPath, agentsPath, root + "/CLAUDE.md"] {
             if let s = try? String(contentsOfFile: path, encoding: .utf8) {
                 let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !t.isEmpty { parts.append(t) }
