@@ -84,6 +84,9 @@ struct KistREPL {
     var autoApproveClipboardVision = false
     /// R2b: pin the input bar to the bottom via a scroll region (default on for TTYs; --no-pinned-bar off).
     var pinnedBarEnabled = true
+    /// R2b+ trial: keep the pinned box glued to the bottom DURING a turn (never suspend the region), so the
+    /// input bar is there 24/7 and you can type into it mid-turn. Off by default until proven corruption-free.
+    var stickyTurnsEnabled = false
     /// Whether a given (provider, model) can interpret images/media — drives one-turn media routing.
     var providerSupportsVision: ((ProviderBinding) -> Bool)? = nil
     /// Upload over-cap media to the Gemini Files API, returning fileURI attachments (set by the
@@ -951,11 +954,22 @@ struct KistREPL {
             if pinnedBar.active {
                 FileHandle.standardOutput.write(Data((pinnedBar.transcriptLead()
                     + "\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
-                // Tear the scroll region down for the turn: the submitted text must not linger frozen in
-                // the pinned box, AND a persistent DECSTBM region + a scroll-region-unaware sink dumping a
-                // plan/long output is what blanks the band on Terminal.app. Turn output now flows in plain
-                // full-screen mode (like the inline path); the strip re-pins at the next prompt (resume()).
-                pinnedBar.suspend()
+                if stickyTurnsEnabled {
+                    // TRIAL (--sticky-turns): DON'T suspend — keep the region pinned so the box stays glued
+                    // to the bottom while the turn streams above it. Repaint the strip as an empty, ready
+                    // input box (type-ahead queues into TurnInputQueue and lands next prompt) so the bar is
+                    // visibly there 24/7 instead of freezing on the just-submitted text.
+                    let hint = perm.barHint(includeInterrupt: true)
+                    FileHandle.standardOutput.write(Data((panelLead + status + "\n" + topBorder + "\n"
+                        + promptColor + "\n" + PromptBar.bottomBorder(width: boxWidth) + "\n"
+                        + "\u{001B}[2m\(hint)\u{001B}[0m" + pinnedBar.transcriptLead()).utf8))
+                } else {
+                    // Tear the scroll region down for the turn: the submitted text must not linger frozen in
+                    // the pinned box, AND a persistent DECSTBM region + a scroll-region-unaware sink dumping a
+                    // plan/long output is what blanks the band on Terminal.app. Turn output now flows in plain
+                    // full-screen mode (like the inline path); the strip re-pins at the next prompt (resume()).
+                    pinnedBar.suspend()
+                }
             }
             recorder?.reset()                 // fresh trajectory per turn for self-monitoring
 

@@ -486,6 +486,7 @@ enum KistRunner {
                 repl.defaultAgents = opts.agents
                 repl.autoApproveClipboardVision = opts.auto
                 repl.pinnedBarEnabled = opts.pinnedBar   // R2b: bottom-glued input bar (default on for TTYs)
+                repl.stickyTurnsEnabled = opts.stickyTurns   // R2b+ trial: keep the box pinned DURING turns
                 // Permission bar (shift+tab): the tool classification + the tier the session launched in.
                 repl.sensitiveTools = sensitiveTools
                 repl.editTools = editTools

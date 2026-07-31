@@ -95,6 +95,9 @@ struct KistOptions {
     var tui = false                 // --tui: raw-mode persistent-input TUI (PROTOTYPE; off by default)
     var pinnedBar = true            // R2b: input bar glued to the bottom (scroll-region pinned). Default
                                     // ON for interactive TTYs; `--no-pinned-bar` reverts to the inline box.
+    var stickyTurns = false         // R2b+: keep the pinned box glued to the bottom DURING a turn too
+                                    // (never suspend the region). Trial flag — `--sticky-turns`. Default OFF
+                                    // until proven corruption-free on Terminal.app; then it becomes default.
     var fetchAllowedHosts: [String] = []  // --fetch-host <host>: restrict fetch_url to exact/wildcard hosts
     var providerHealth = false     // --health: offline provider/model/router health report
     var probeProviders = false     // --probe-providers: live one-token provider probes
@@ -244,6 +247,8 @@ struct KistOptions {
             case "--tui":                   o.tui = true
             case "--no-pinned-bar":         o.pinnedBar = false
             case "--pinned-bar":            o.pinnedBar = true
+            case "--sticky-turns":          o.stickyTurns = true
+            case "--no-sticky-turns":       o.stickyTurns = false
             case "--tools":                 if let v = next()?.lowercased(), ["auto", "native", "text"].contains(v) { o.toolMode = v }
             case "--fetch-host":            if let v = next() { o.fetchAllowedHosts.append(v) }
             case "--health":                o.providerHealth = true
