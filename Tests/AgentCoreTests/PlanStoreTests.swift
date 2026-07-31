@@ -16,6 +16,30 @@ final class PlanStoreTests: XCTestCase {
         XCTAssertEqual(PlanStore(path: path).load().tasks.count, 2)   // survives a reopen
     }
 
+    func testCompleteAndAdvancePromotesNextActionable() {
+        let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
+        store.add(title: "build A", kind: .action)          // id 1
+        store.add(title: "build B", kind: .action)          // id 2
+        store.add(title: "study fleet", kind: .research)    // id 3 — must NOT be auto-started
+        let (completed, nowActive) = store.completeAndAdvance(id: 1)
+        XCTAssertEqual(completed?.id, 1)
+        XCTAssertEqual(completed?.status, .done)
+        XCTAssertEqual(nowActive?.id, 2, "the next actionable (non-research) task becomes active")
+        XCTAssertEqual(store.load().tasks.first { $0.id == 2 }?.status, .inProgress)   // persisted
+        XCTAssertEqual(store.load().tasks.first { $0.id == 3 }?.status, .todo, "research is not auto-started")
+    }
+
+    func testCompleteAndAdvanceKeepsExistingActiveAndClearsWhenDone() {
+        let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
+        store.add(title: "A"); store.add(title: "B")
+        _ = store.update(id: 2, status: .inProgress)         // B already running
+        let r1 = store.completeAndAdvance(id: 1)
+        XCTAssertEqual(r1.nowActive?.id, 2, "don't yank focus off an already-active task")
+        let r2 = store.completeAndAdvance(id: 2)             // finish the last one
+        XCTAssertEqual(r2.completed?.id, 2)
+        XCTAssertNil(r2.nowActive, "nothing left to advance to → queue clear")
+    }
+
     func testUpdateStatusAndDoneCount() {
         let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
         store.add(title: "a"); store.add(title: "b")

@@ -99,6 +99,28 @@ public struct PlanStore: Sendable {
         return update(id: n.id, status: .inProgress)
     }
 
+    /// The self-advancing loop Luke asked for (2026-07-31): mark a task DONE and, if nothing else is in
+    /// progress, immediately promote the next actionable (non-research) todo to inProgress — so completing
+    /// a task auto-advances the board to "the next request it needs" instead of the human/agent having to
+    /// re-select. Returns what was completed and what's now active (either may be nil). One locked RMW.
+    @discardableResult
+    public func completeAndAdvance(id: Int) -> (completed: PlanTask?, nowActive: PlanTask?) {
+        withLock {
+            var plan = load()
+            guard let idx = plan.tasks.firstIndex(where: { $0.id == id }) else { return (nil, nil) }
+            plan.tasks[idx].status = .done
+            let completed = plan.tasks[idx]
+            var nowActive = plan.active                       // keep an already-running task if there is one
+            if nowActive == nil, let next = plan.nextActionable,
+               let ni = plan.tasks.firstIndex(where: { $0.id == next.id }) {
+                plan.tasks[ni].status = .inProgress
+                nowActive = plan.tasks[ni]
+            }
+            save(plan)
+            return (completed, nowActive)
+        }
+    }
+
     public func save(_ plan: Plan) {
         var plan = plan
         let minNextID = (plan.tasks.map(\.id).max() ?? 0) + 1

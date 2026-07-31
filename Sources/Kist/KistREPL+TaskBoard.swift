@@ -39,8 +39,12 @@ extension KistREPL {
             let task = Int(rest).flatMap { store.update(id: $0, status: .inProgress) } ?? store.startNext()
             return task.map { "started [\($0.id)] \($0.title)\n" } ?? "no task to start\n" + store.load().render()
         case "done", "complete":
-            guard let id = Int(rest), let t = store.update(id: id, status: .done) else { return "usage: /tasks done <id>" }
-            return "done [\(t.id)] \(t.title)\n" + store.load().render()
+            guard let id = Int(rest) else { return "usage: /tasks done <id>" }
+            let (completed, nowActive) = store.completeAndAdvance(id: id)   // self-advance to the next task
+            guard let t = completed else { return "usage: /tasks done <id>" }
+            let advance = nowActive.map { "▶ advanced to [\($0.id)] \($0.boardTitle)\n" }
+                ?? "✓ build queue clear\n"
+            return "done [\(t.id)] \(t.title)\n" + advance + store.load().render()
         case "block":
             let bits = rest.split(separator: " ", maxSplits: 1).map(String.init)
             guard let id = bits.first.flatMap(Int.init),

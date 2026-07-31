@@ -15,9 +15,12 @@ final class TasksCommandTests: XCTestCase {
         XCTAssertTrue(started.contains("started [1]"))
         let done = KistREPL.handleTasks("done 1", projectRoot: dir)
         XCTAssertTrue(done.contains("done [1]"))
+        // Self-advance: completing task 1 auto-promotes task 2 to ACTIVE (the "go to the next request" loop),
+        // so it's announced on done and shown as the active task — not merely queued as "next".
+        XCTAssertTrue(done.contains("▶ advanced to [2] ship it"))
         let show = KistREPL.handleTasks("", projectRoot: dir)
         XCTAssertTrue(show.contains("1/2 done"))
-        XCTAssertTrue(show.contains("→ next: [2] ship it"))
+        XCTAssertTrue(show.contains("active task: [2] ship it"))
     }
 
     func testBareTaskNumberSelectsBoardTaskForExecution() {
