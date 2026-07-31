@@ -296,6 +296,8 @@ final class KistREPLTests: XCTestCase {
         let now = Date()
         let spans = [AgentSpan(id: "s1", traceId: "t", kind: .llmCall, vendor: "openai",
                                promptTokens: 100, completionTokens: 20, startedAt: now, endedAt: now)]
+        // A board-WORKING turn (a real file mutation) — only then does the summary nudge the next board
+        // task (the 2026-07-29 loop-restart fix gates the nudge to turns that actually touched the board).
         let trajectory = [ActionRecord(tool: "write_file", argsFingerprint: "a", success: true)]
 
         let summary = KistREPL.renderSimpleSummary(projectRoot: dir, spans: spans, trajectory: trajectory)

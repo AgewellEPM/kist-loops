@@ -15,9 +15,29 @@ final class TasksCommandTests: XCTestCase {
         XCTAssertTrue(started.contains("started [1]"))
         let done = KistREPL.handleTasks("done 1", projectRoot: dir)
         XCTAssertTrue(done.contains("done [1]"))
+        // Self-advance: completing task 1 auto-promotes task 2 to ACTIVE (the "go to the next request" loop),
+        // so it's announced on done and shown as the active task — not merely queued as "next".
+        XCTAssertTrue(done.contains("▶ advanced to [2] ship it"))
         let show = KistREPL.handleTasks("", projectRoot: dir)
         XCTAssertTrue(show.contains("1/2 done"))
-        XCTAssertTrue(show.contains("→ next: [2] ship it"))
+        XCTAssertTrue(show.contains("active task: [2] ship it"))
+    }
+
+    func testTasksDoneDistinguishesExistingActiveAndBlockedQueue() {
+        let dir = NSTemporaryDirectory() + "replplan_\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        _ = KistREPL.handleTasks("add first", projectRoot: dir)
+        _ = KistREPL.handleTasks("add already running", projectRoot: dir)
+        _ = KistREPL.handleTasks("start 2", projectRoot: dir)
+        let existing = KistREPL.handleTasks("done 1", projectRoot: dir)
+        XCTAssertTrue(existing.contains("▶ active remains [2] already running"))
+        XCTAssertFalse(existing.contains("advanced to [2]"))
+
+        _ = KistREPL.handleTasks("block 2 waiting", projectRoot: dir)
+        let retry = KistREPL.handleTasks("done 1", projectRoot: dir)
+        XCTAssertTrue(retry.contains("⚠ no actionable task — blocked work remains"))
     }
 
     func testBareTaskNumberSelectsBoardTaskForExecution() {

@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import AgentCore
 
@@ -14,6 +15,76 @@ final class PlanStoreTests: XCTestCase {
         let b = store.add(title: "second")
         XCTAssertEqual(a.id, 1); XCTAssertEqual(b.id, 2)
         XCTAssertEqual(PlanStore(path: path).load().tasks.count, 2)   // survives a reopen
+    }
+
+    func testCompleteAndAdvancePromotesNextActionable() {
+        let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
+        store.add(title: "build A", kind: .action)          // id 1
+        store.add(title: "build B", kind: .action)          // id 2
+        store.add(title: "study fleet", kind: .research)    // id 3 — must NOT be auto-started
+        let result = store.completeAndAdvance(id: 1)
+        XCTAssertEqual(result.completed?.id, 1)
+        XCTAssertEqual(result.completed?.status, .done)
+        XCTAssertEqual(result.nowActive?.id, 2, "the next actionable (non-research) task becomes active")
+        XCTAssertTrue(result.didAdvance)
+        XCTAssertEqual(store.load().tasks.first { $0.id == 2 }?.status, .inProgress)   // persisted
+        XCTAssertEqual(store.load().tasks.first { $0.id == 3 }?.status, .todo, "research is not auto-started")
+    }
+
+    func testCompleteAndAdvanceKeepsExistingActiveAndClearsWhenDone() {
+        let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
+        store.add(title: "A"); store.add(title: "B")
+        _ = store.update(id: 2, status: .inProgress)         // B already running
+        let r1 = store.completeAndAdvance(id: 1)
+        XCTAssertEqual(r1.nowActive?.id, 2, "don't yank focus off an already-active task")
+        XCTAssertFalse(r1.didAdvance, "an existing active task was not newly promoted")
+        let r2 = store.completeAndAdvance(id: 2)             // finish the last one
+        XCTAssertEqual(r2.completed?.id, 2)
+        XCTAssertNil(r2.nowActive, "nothing left to advance to → queue clear")
+        XCTAssertFalse(r2.didAdvance)
+    }
+
+    func testCompleteAndAdvanceRetryDoesNotSkipAhead() {
+        let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
+        store.add(title: "A")
+        store.add(title: "B")
+        store.add(title: "C")
+        XCTAssertTrue(store.completeAndAdvance(id: 1).didAdvance)    // B becomes active
+        _ = store.update(id: 2, status: .blocked)
+
+        let retry = store.completeAndAdvance(id: 1)
+
+        XCTAssertEqual(retry.completed?.id, 1)
+        XCTAssertNil(retry.nowActive)
+        XCTAssertFalse(retry.didAdvance)
+        XCTAssertEqual(store.load().tasks.first { $0.id == 3 }?.status, .todo,
+                       "retrying an already-done task must not promote unrelated work")
+    }
+
+    func testConcurrentStartNextAndCompleteNeverResurrectCompletedTask() {
+        for iteration in 0..<100 {
+            let (store, path) = tempStore()
+            store.add(title: "A")
+            store.add(title: "B")
+            let queue = DispatchQueue(label: "plan-store-race-\(iteration)", attributes: .concurrent)
+            let group = DispatchGroup()
+            group.enter()
+            queue.async {
+                _ = store.startNext()
+                group.leave()
+            }
+            group.enter()
+            queue.async {
+                _ = store.completeAndAdvance(id: 1)
+                group.leave()
+            }
+            group.wait()
+
+            XCTAssertEqual(store.load().tasks.first { $0.id == 1 }?.status, .done,
+                           "startNext must not resurrect a concurrently completed task")
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.removeItem(atPath: path + ".lock")
+        }
     }
 
     func testUpdateStatusAndDoneCount() {
@@ -175,6 +246,25 @@ final class PlanStoreTests: XCTestCase {
         XCTAssertTrue(done.output.contains("☑"))
         let list = try await tool.execute(arguments: ["action": "list"], context: ctx)
         XCTAssertTrue(list.output.contains("1/1 done"))
+    }
+
+    func testToolDoneReportsExistingActiveAndBlockedQueueAccurately() async throws {
+        let dir = NSTemporaryDirectory() + "plantool_\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ctx = ToolContext(projectRoot: dir)
+        let tool = ManageTasksTool()
+
+        _ = try await tool.execute(arguments: ["action": "add", "title": "first"], context: ctx)
+        _ = try await tool.execute(arguments: ["action": "add", "title": "already running"], context: ctx)
+        _ = try await tool.execute(arguments: ["action": "start", "id": 2], context: ctx)
+        let existing = try await tool.execute(arguments: ["action": "done", "id": 1], context: ctx)
+        XCTAssertTrue(existing.output.contains("▶ active remains [2] already running"))
+        XCTAssertFalse(existing.output.contains("advanced to [2]"))
+
+        _ = try await tool.execute(arguments: ["action": "block", "id": 2], context: ctx)
+        let retry = try await tool.execute(arguments: ["action": "done", "id": 1], context: ctx)
+        XCTAssertTrue(retry.output.contains("⚠ no actionable task — blocked work remains"))
     }
 
     func testToolValidateReportsContractIssues() async throws {

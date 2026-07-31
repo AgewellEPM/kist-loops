@@ -94,9 +94,47 @@ public struct PlanStore: Sendable {
     /// Mark the lowest todo task in progress and return it (drives "start the next task").
     @discardableResult
     public func startNext() -> PlanTask? {
-        let plan = load()
-        guard let n = plan.next else { return nil }
-        return update(id: n.id, status: .inProgress)
+        withLock {
+            var plan = load()
+            guard let next = plan.next,
+                  let index = plan.tasks.firstIndex(where: { $0.id == next.id }) else {
+                return nil
+            }
+            plan.tasks[index].status = .inProgress
+            save(plan)
+            return plan.tasks[index]
+        }
+    }
+
+    /// The self-advancing loop Luke asked for (2026-07-31): mark a task DONE and, if nothing else is in
+    /// progress, immediately promote the next actionable (non-research) todo to inProgress — so completing
+    /// a task auto-advances the board to "the next request it needs" instead of the human/agent having to
+    /// re-select. A retry of an already-completed task is idempotent and never advances again.
+    /// Returns what was completed, what's now active, and whether this call performed the promotion.
+    @discardableResult
+    public func completeAndAdvance(id: Int)
+        -> (completed: PlanTask?, nowActive: PlanTask?, didAdvance: Bool) {
+        withLock {
+            var plan = load()
+            guard let idx = plan.tasks.firstIndex(where: { $0.id == id }) else {
+                return (nil, plan.active, false)
+            }
+            if plan.tasks[idx].status == .done {
+                return (plan.tasks[idx], plan.active, false)
+            }
+            plan.tasks[idx].status = .done
+            let completed = plan.tasks[idx]
+            var nowActive = plan.active                       // keep an already-running task if there is one
+            var didAdvance = false
+            if nowActive == nil, let next = plan.nextActionable,
+               let ni = plan.tasks.firstIndex(where: { $0.id == next.id }) {
+                plan.tasks[ni].status = .inProgress
+                nowActive = plan.tasks[ni]
+                didAdvance = true
+            }
+            save(plan)
+            return (completed, nowActive, didAdvance)
+        }
     }
 
     public func save(_ plan: Plan) {

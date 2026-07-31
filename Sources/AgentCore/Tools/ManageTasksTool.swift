@@ -62,11 +62,27 @@ public struct ManageTasksTool: AgentTool {
             guard let task else { return .failure(id == nil ? "no todo tasks to start" : "no task with id \(id!)") }
             return ToolResult(success: true, output: "started [\(task.id)] \(task.title)\n\n" + store.load().render())
         case "done", "complete":
-            guard let id, let t = store.update(id: id, status: .done) else { return .failure("no task with id \(id ?? -1)") }
+            guard let id else { return .failure("done needs an id") }
+            // Self-advancing loop: mark done AND promote the next actionable todo to active, so the board
+            // moves itself to the next request instead of stalling on the completed one.
+            let (completed, nowActive, didAdvance) = store.completeAndAdvance(id: id)
+            guard let t = completed else { return .failure("no task with id \(id)") }
             let plan = store.load()
             let issues = PlanContractValidator.validate(plan).filter { $0.taskId == t.id }
             let warning = issues.isEmpty ? "" : "\n\n" + PlanContractValidator.render(issues)
-            return ToolResult(success: true, output: "done [\(t.id)] \(t.title)\n\n" + plan.render() + warning)
+            let advance: String
+            if didAdvance, let nowActive {
+                advance = "\n▶ advanced to [\(nowActive.id)] \(nowActive.boardTitle)"
+            } else if let nowActive {
+                advance = "\n▶ active remains [\(nowActive.id)] \(nowActive.boardTitle)"
+            } else if let next = plan.nextActionable {
+                advance = "\n→ next remains [\(next.id)] \(next.boardTitle)"
+            } else if plan.buildQueue().contains(where: { $0.status == .blocked }) {
+                advance = "\n⚠ no actionable task — blocked work remains"
+            } else {
+                advance = "\n✓ build queue clear — no actionable task left"
+            }
+            return ToolResult(success: true, output: "done [\(t.id)] \(t.title)\(advance)\n\n" + plan.render() + warning)
         case "block":
             guard let id, let t = store.update(id: id, status: .blocked, detail: arguments["detail"] as? String) else {
                 return .failure("no task with id \(id ?? -1)")

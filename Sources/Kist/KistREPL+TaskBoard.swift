@@ -39,8 +39,23 @@ extension KistREPL {
             let task = Int(rest).flatMap { store.update(id: $0, status: .inProgress) } ?? store.startNext()
             return task.map { "started [\($0.id)] \($0.title)\n" } ?? "no task to start\n" + store.load().render()
         case "done", "complete":
-            guard let id = Int(rest), let t = store.update(id: id, status: .done) else { return "usage: /tasks done <id>" }
-            return "done [\(t.id)] \(t.title)\n" + store.load().render()
+            guard let id = Int(rest) else { return "usage: /tasks done <id>" }
+            let (completed, nowActive, didAdvance) = store.completeAndAdvance(id: id)
+            guard let t = completed else { return "usage: /tasks done <id>" }
+            let plan = store.load()
+            let advance: String
+            if didAdvance, let nowActive {
+                advance = "▶ advanced to [\(nowActive.id)] \(nowActive.boardTitle)\n"
+            } else if let nowActive {
+                advance = "▶ active remains [\(nowActive.id)] \(nowActive.boardTitle)\n"
+            } else if let next = plan.nextActionable {
+                advance = "→ next remains [\(next.id)] \(next.boardTitle)\n"
+            } else if plan.buildQueue().contains(where: { $0.status == .blocked }) {
+                advance = "⚠ no actionable task — blocked work remains\n"
+            } else {
+                advance = "✓ build queue clear\n"
+            }
+            return "done [\(t.id)] \(t.title)\n" + advance + plan.render()
         case "block":
             let bits = rest.split(separator: " ", maxSplits: 1).map(String.init)
             guard let id = bits.first.flatMap(Int.init),
