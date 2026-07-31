@@ -22,6 +22,10 @@ DASHBOARD_RUNTIME="$INSTALL_HOME/.kist/scripts/kist_runtime.py"
 # enumerate a shared sticky directory for stale names: a different local UID must not be able to
 # wedge recovery by reserving one of our fixed-format names.
 SNAPSHOT_PARENT="$INSTALL_HOME/.kist-rebuild-private-tmp"
+# The exact unsigned candidate used by enterprise evidence belongs to Kist, not SwiftPM's mutable
+# convenience layout (`.build/release` is normally a symlink). Both publication and finalization
+# traverse this fixed namespace with no-follow directory descriptors.
+UNSIGNED_PROVENANCE_DIR=.kist-provenance
 
 die() { echo "error: $*" >&2; exit 1; }
 [ -x "$PYTHON" ] && [ ! -L "$PYTHON" ] || die "trusted system python is unavailable"
@@ -124,13 +128,17 @@ PY
 }
 
 publish_unsigned_artifact() {
-  python_clean - "$1" "$2" <<'PY'
+  python_clean - "$1" "$2" "$UNSIGNED_PROVENANCE_DIR" <<'PY'
 import hashlib,os,re,secrets,stat,sys
-root,source=sys.argv[1:]; uid=os.geteuid()
+root,source,namespace=sys.argv[1:]; uid=os.geteuid()
 if os.path.realpath(root)!=root: raise SystemExit(1)
+if namespace!=".kist-provenance": raise SystemExit(1)
+MAX_RETAINED=64; MAX_RETAINED_BYTES=8*1024*1024*1024
 def fp(value):
     return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
             value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def dfp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid)
 def open_directory_at(parent,name,create=False):
     try: named=os.stat(name,dir_fd=parent,follow_symlinks=False)
     except FileNotFoundError:
@@ -140,25 +148,17 @@ def open_directory_at(parent,name,create=False):
     if not stat.S_ISDIR(named.st_mode) or named.st_uid!=uid or named.st_mode&0o022:
         raise SystemExit(1)
     fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
-    if fp(os.fstat(fd))!=fp(named): os.close(fd); raise SystemExit(1)
-    return fd
+    if dfp(os.fstat(fd))!=dfp(named): os.close(fd); raise SystemExit(1)
+    return fd,dfp(named)
 rst=os.lstat(root)
-if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid: raise SystemExit(1)
+if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid or rst.st_mode&0o022:
+    raise SystemExit(1)
 rfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-temp=".kist-unsigned."+secrets.token_hex(16); sfd=None; dfd=None; bfd=None; out=None
+temp=".unsigned-kist."+secrets.token_hex(16); sfd=None; dfd=None; bfd=None; out=None
 try:
-    if fp(os.fstat(rfd))!=fp(rst): raise SystemExit(1)
-    bfd=open_directory_at(rfd,".build",True)
-    dfd=open_directory_at(bfd,"release",True)
-    removed=False
-    for name in os.listdir(dfd):
-        if re.fullmatch(r"\.kist-unsigned\.[0-9a-f]{32}",name):
-            stale=os.stat(name,dir_fd=dfd,follow_symlinks=False)
-            if (not stat.S_ISREG(stale.st_mode) or stale.st_uid!=uid or stale.st_nlink!=1
-                    or stale.st_mode&0o022):
-                raise SystemExit(1)
-            os.unlink(name,dir_fd=dfd); removed=True
-    if removed: os.fsync(dfd)
+    if dfp(os.fstat(rfd))!=dfp(rst): raise SystemExit(1)
+    bfd,bid=open_directory_at(rfd,".build",True)
+    dfd,did=open_directory_at(bfd,namespace,True)
     before=os.lstat(source); identity=fp(before)
     if (not stat.S_ISREG(before.st_mode) or before.st_uid!=uid or before.st_nlink!=1
             or before.st_mode&0o022 or before.st_size>512*1024*1024):
@@ -178,8 +178,48 @@ try:
         digest.update(block); total+=len(block)
     if total!=before.st_size or fp(os.fstat(sfd))!=identity or fp(os.lstat(source))!=identity:
         raise SystemExit(1)
-    os.fchmod(out,0o755); os.fsync(out); os.close(out); out=None
-    os.replace(temp,"kist",src_dir_fd=dfd,dst_dir_fd=dfd); os.fsync(dfd)
+    target=digest.hexdigest(); count=0; retained_bytes=0; removed=False
+    for name in os.listdir(dfd):
+        if name==temp: continue
+        if re.fullmatch(r"\.unsigned-kist\.[0-9a-f]{32}",name):
+            stale=os.stat(name,dir_fd=dfd,follow_symlinks=False)
+            if (not stat.S_ISREG(stale.st_mode) or stale.st_uid!=uid or stale.st_nlink!=1
+                    or stale.st_mode&0o022):
+                raise SystemExit(1)
+            os.unlink(name,dir_fd=dfd); removed=True
+        elif re.fullmatch(r"[0-9a-f]{64}",name):
+            if name==target: continue
+            retained=os.stat(name,dir_fd=dfd,follow_symlinks=False)
+            if (not stat.S_ISREG(retained.st_mode) or retained.st_uid!=uid
+                    or retained.st_nlink!=1 or retained.st_mode&0o022
+                    or retained.st_size>512*1024*1024):
+                raise SystemExit(1)
+            count+=1; retained_bytes+=retained.st_size
+        else:
+            raise SystemExit(1)
+    if removed: os.fsync(dfd)
+    if count>=MAX_RETAINED or retained_bytes+before.st_size>MAX_RETAINED_BYTES:
+        raise SystemExit(1)
+    os.fchmod(out,0o755); os.fsync(out)
+    if (dfp(os.fstat(dfd))!=did
+            or dfp(os.stat(namespace,dir_fd=bfd,follow_symlinks=False))!=did
+            or dfp(os.fstat(bfd))!=bid
+            or dfp(os.stat(".build",dir_fd=rfd,follow_symlinks=False))!=bid
+            or dfp(os.fstat(rfd))!=dfp(rst)
+            or dfp(os.lstat(root))!=dfp(rst)):
+        raise SystemExit(1)
+    os.replace(temp,target,src_dir_fd=dfd,dst_dir_fd=dfd)
+    published=fp(os.fstat(out))
+    if fp(os.stat(target,dir_fd=dfd,follow_symlinks=False))!=published:
+        raise SystemExit(1)
+    os.fsync(dfd)
+    if (dfp(os.fstat(dfd))!=did
+            or dfp(os.stat(namespace,dir_fd=bfd,follow_symlinks=False))!=did
+            or dfp(os.fstat(bfd))!=bid
+            or dfp(os.stat(".build",dir_fd=rfd,follow_symlinks=False))!=bid
+            or dfp(os.fstat(rfd))!=dfp(rst)
+            or dfp(os.lstat(root))!=dfp(rst)):
+        raise SystemExit(1)
     print(digest.hexdigest())
 finally:
     if out is not None: os.close(out)
@@ -188,6 +228,66 @@ finally:
         try: os.unlink(temp,dir_fd=dfd)
         except FileNotFoundError: pass
         os.close(dfd)
+    if bfd is not None: os.close(bfd)
+    os.close(rfd)
+PY
+}
+
+retained_unsigned_artifact_sha256() {
+  python_clean - "$1" "$2" "$UNSIGNED_PROVENANCE_DIR" <<'PY'
+import hashlib,os,re,stat,sys
+root,target,namespace=sys.argv[1:]; uid=os.geteuid()
+if os.path.realpath(root)!=root: raise SystemExit(1)
+if namespace!=".kist-provenance" or not re.fullmatch(r"[0-9a-f]{64}",target):
+    raise SystemExit(1)
+def fp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_size,
+            value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+def dfp(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_uid)
+def open_directory_at(parent,name):
+    named=os.stat(name,dir_fd=parent,follow_symlinks=False)
+    if not stat.S_ISDIR(named.st_mode) or named.st_uid!=uid or named.st_mode&0o022:
+        raise SystemExit(1)
+    fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+    if dfp(os.fstat(fd))!=dfp(named): os.close(fd); raise SystemExit(1)
+    return fd,dfp(named)
+rst=os.lstat(root)
+if not stat.S_ISDIR(rst.st_mode) or rst.st_uid!=uid or rst.st_mode&0o022:
+    raise SystemExit(1)
+rfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+bfd=None; dfd=None; fd=None
+try:
+    if dfp(os.fstat(rfd))!=dfp(rst): raise SystemExit(1)
+    bfd,bid=open_directory_at(rfd,".build")
+    dfd,did=open_directory_at(bfd,namespace)
+    before=os.stat(target,dir_fd=dfd,follow_symlinks=False); identity=fp(before)
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid!=uid or before.st_nlink!=1
+            or before.st_mode&0o022 or not before.st_mode&stat.S_IXUSR
+            or before.st_size>512*1024*1024):
+        raise SystemExit(1)
+    fd=os.open(target,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=dfd)
+    if fp(os.fstat(fd))!=identity: raise SystemExit(1)
+    digest=hashlib.sha256(); remaining=before.st_size
+    while remaining:
+        block=os.read(fd,min(1024*1024,remaining))
+        if not block: raise SystemExit(1)
+        digest.update(block); remaining-=len(block)
+    if (os.read(fd,1) or fp(os.fstat(fd))!=identity
+            or fp(os.stat(target,dir_fd=dfd,follow_symlinks=False))!=identity
+            or dfp(os.fstat(dfd))!=did
+            or dfp(os.stat(namespace,dir_fd=bfd,follow_symlinks=False))!=did
+            or dfp(os.fstat(bfd))!=bid
+            or dfp(os.stat(".build",dir_fd=rfd,follow_symlinks=False))!=bid
+            or dfp(os.fstat(rfd))!=dfp(rst)
+            or dfp(os.lstat(root))!=dfp(rst)):
+        raise SystemExit(1)
+    value=digest.hexdigest()
+    if value!=target: raise SystemExit(1)
+    print(value)
+finally:
+    if fd is not None: os.close(fd)
+    if dfd is not None: os.close(dfd)
     if bfd is not None: os.close(bfd)
     os.close(rfd)
 PY
@@ -613,6 +713,28 @@ if [ "${1-}" = "--test-snapshot-source" ]; then
   SNAPSHOT_TEST_ROOT=$(validated_repo "$2") || die "snapshot test root is not one canonical Kist repo"
   case "$3" in /*) ;; *) die "snapshot test destination must be absolute" ;; esac
   snapshot_source "$SNAPSHOT_TEST_ROOT" "$3" || die "source snapshot test failed"
+  exit 0
+fi
+if [ "${1-}" = "--test-publish-unsigned-artifact" ]; then
+  [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ "$INSTALL_HOME" != /Users/lukekist ] \
+    || die "unsigned artifact test seam is unavailable in production"
+  [ "$#" -eq 3 ] || die "--test-publish-unsigned-artifact requires ABSOLUTE_REPO ABSOLUTE_SOURCE"
+  UNSIGNED_TEST_ROOT=$(validated_repo "$2") \
+    || die "unsigned artifact test root is not one canonical Kist repo"
+  case "$3" in /*) ;; *) die "unsigned artifact test source must be absolute" ;; esac
+  publish_unsigned_artifact "$UNSIGNED_TEST_ROOT" "$3" \
+    || die "unsigned artifact publication test failed"
+  exit 0
+fi
+if [ "${1-}" = "--test-hash-retained-unsigned-artifact" ]; then
+  [ "${KIST_REBUILD_TESTING-}" = 1 ] && [ "$INSTALL_HOME" != /Users/lukekist ] \
+    || die "unsigned artifact test seam is unavailable in production"
+  [ "$#" -eq 3 ] \
+    || die "--test-hash-retained-unsigned-artifact requires ABSOLUTE_REPO SHA256"
+  UNSIGNED_TEST_ROOT=$(validated_repo "$2") \
+    || die "unsigned artifact test root is not one canonical Kist repo"
+  retained_unsigned_artifact_sha256 "$UNSIGNED_TEST_ROOT" "$3" \
+    || die "retained unsigned artifact test failed"
   exit 0
 fi
 if [ "${1-}" = "--evidence-evaluate" ]; then
@@ -2237,7 +2359,7 @@ if [ "${1-}" = "--finalize-enterprise-evidence" ]; then
   [ "$CURRENT_SOURCE" = "$MANIFEST_SOURCE" ] || die "source changed after installation; rebuild and rerun evidence"
   MANIFEST_UNSIGNED=$(/usr/bin/awk -F': ' '$1=="unsigned-release-sha256" { if (seen++) exit 2; value=$2 } END { if (seen!=1) exit 3; print value }' "$MANIFEST") \
     || die "pilot manifest omitted unsigned release hash"
-  CURRENT_UNSIGNED=$(sha256_file "$VALIDATED_ROOT/.build/release/kist") \
+  CURRENT_UNSIGNED=$(retained_unsigned_artifact_sha256 "$VALIDATED_ROOT" "$MANIFEST_UNSIGNED") \
     || die "the exact unsigned release artifact is unavailable; rebuild and rerun evidence"
   [ "$CURRENT_UNSIGNED" = "$MANIFEST_UNSIGNED" ] || die "unsigned release artifact changed after installation"
 
@@ -2576,6 +2698,10 @@ PUBLISHED_UNSIGNED_HASH=$(publish_unsigned_artifact "$REPO" "$TMP_BINARY") \
   || die "cannot retain the exact unsigned release artifact for evidence finalization"
 [ "$PUBLISHED_UNSIGNED_HASH" = "$UNSIGNED_RELEASE_HASH" ] \
   || die "retained unsigned artifact did not match the private build snapshot"
+READ_BACK_UNSIGNED_HASH=$(retained_unsigned_artifact_sha256 "$REPO" "$UNSIGNED_RELEASE_HASH") \
+  || die "cannot read back the retained unsigned release artifact"
+[ "$READ_BACK_UNSIGNED_HASH" = "$UNSIGNED_RELEASE_HASH" ] \
+  || die "retained unsigned artifact bytes did not match the private build snapshot"
 if [ "$SIGN_IDENTITY" = - ]; then
   /usr/bin/codesign --force --sign - "$TMP_BINARY" >/dev/null 2>&1 || die "ad-hoc codesign failed"
 else

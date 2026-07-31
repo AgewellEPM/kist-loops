@@ -42,7 +42,7 @@ for path in [home/"bin",home/".kist/scripts",home/".kist/cortex/live/assets",hom
     path.mkdir(parents=True,exist_ok=True)
 os.chmod(home,0o700); os.chmod(home/".kist",0o700)
 project=home/"project"; (project/"fixture.txt").write_text("release registry source\n")
-(project/".gitignore").write_text(".build-local/\n")
+(project/".gitignore").write_text(".build/\n.build-local/\n")
 (project/"Sources/Kist").mkdir(parents=True)
 (project/"Sources/AgentCore").mkdir(parents=True)
 (project/"Tests/KistTests").mkdir(parents=True)
@@ -64,6 +64,11 @@ for args in [["init"],["config","user.name","Kist Test"],["config","user.email",
              ["add","--all"],["commit","-m","fixture"],["branch","-M","main"]]:
     subprocess.run(["/usr/bin/git","-C",str(project),*args],env=git_env,
                    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+swiftpm_release=project/".build/arm64-apple-macosx/release"
+swiftpm_release.mkdir(parents=True)
+(swiftpm_release/"kist").write_text("#!/bin/sh\n# SwiftPM release sentinel\n")
+(swiftpm_release/"kist").chmod(0o755)
+(project/".build/release").symlink_to("arm64-apple-macosx/release",target_is_directory=True)
 runtime=project/".kist"; run=runtime/"runs/1785376007-155a334c"
 run.mkdir(parents=True)
 (runtime/"usage.jsonl").write_text('{"fixture":"preexisting"}\n')
@@ -520,6 +525,18 @@ set -e
 [[ ! -e "$FIXTURE/bin/.kist-rebuild-journal" ]]
 [[ $("$FIXTURE/bin/kist-rebuild" --release-status | json_value current_release_id) = "$A_ID" ]]
 /usr/bin/grep -q '^# fixture-release: alpha$' "$FIXTURE/bin/kist-safe-rebuild.sh"
+[[ -L "$FIXTURE/project/.build/release" ]]
+[[ $(/usr/bin/readlink "$FIXTURE/project/.build/release") = arm64-apple-macosx/release ]]
+/usr/bin/grep -q '^# SwiftPM release sentinel$' \
+  "$FIXTURE/project/.build/arm64-apple-macosx/release/kist"
+RETAINED_UNSIGNED_PATHS=("$FIXTURE/project/.build/.kist-provenance"/*)
+[[ "${#RETAINED_UNSIGNED_PATHS[@]}" -eq 1 ]]
+RETAINED_UNSIGNED_HASH=$(/usr/bin/basename "${RETAINED_UNSIGNED_PATHS[0]}")
+[[ "$RETAINED_UNSIGNED_HASH" =~ ^[a-f0-9]{64}$ ]]
+[[ -x "${RETAINED_UNSIGNED_PATHS[0]}" ]]
+[[ $("/usr/bin/env" KIST_REBUILD_TESTING=1 \
+  "$FIXTURE/bin/kist-rebuild" --test-hash-retained-unsigned-artifact \
+  "$FIXTURE/project" "$RETAINED_UNSIGNED_HASH") = "$RETAINED_UNSIGNED_HASH" ]]
 if compgen -G "$STALE_PARENT/kist-source-snapshot.??????" >/dev/null; then
   printf 'private source snapshot survived rejected after-activation churn\n' >&2
   exit 1
