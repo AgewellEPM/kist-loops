@@ -219,13 +219,27 @@ extension KistREPL {
         let modelCalls = spans.filter { $0.kind == .llmCall }.count
         let usage = UsageCost.summarize(spans: spans).render(label: "usage")
         let next = plan.active ?? plan.next
+        // Only NUDGE toward the board when THIS turn actually worked it — a successful file mutation
+        // (a build) or a `tasks` tool call. A pure chat / research / Q&A turn must NOT push the board's
+        // next item: otherwise a stale objective hijacks every unrelated turn and the user feels the
+        // Captain "re-ran the original loop and lost my thread" (2026-07-29 loop-restart bug). The board
+        // is still visible via /goals and the status panel — this only stops the actionable "type N" push.
+        let workedBoard = trajectory.contains { ($0.success && Copilot.mutatingTools.contains($0.tool)) || $0.tool == "tasks" }
+        let nextLine: String
+        if let next, workedBoard {
+            nextLine = "[\(next.id)] \(next.title) — type \(next.id) to run it"
+        } else if next != nil {
+            nextLine = "this turn didn't touch the board — ask for the next step, or `/goals` to see it"
+        } else {
+            nextLine = "set a goal with /goals add <step> or ask the agent for the next action"
+        }
 
         return """
         Summary
         What happened: \(modelCalls) model call(s), \(toolCalls) tool call(s), \(usage).
         What changed: check the task board and `git diff`; Kist does not infer correctness from edits.
         Tool errors: \(toolErrorSummary(trajectory)).
-        What to do next: \(next.map { "[\($0.id)] \($0.title) — type \($0.id) to run it" } ?? "set a goal with /goals add <step> or ask the agent for the next action").
+        What to do next: \(nextLine)
         """
     }
 
