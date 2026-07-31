@@ -16,11 +16,33 @@ final class KistREPLTests: XCTestCase {
 
     func testRealSlashCommandsStillParse() {
         for cmd in ["/help", "/exit", "/model", "/fleet-status", "/tasks", "/clear", "/role gemini",
+                    "/research audit provenance", "/deepdive audit provenance",
                     "/fleet --agents 3 build it", "/cockpit"] {
             XCTAssertTrue(KistREPL.isSlashCommand(cmd), "\(cmd) should be a command")
         }
         XCTAssertFalse(KistREPL.isSlashCommand("hello world"))        // no leading slash
         XCTAssertFalse(KistREPL.isSlashCommand(""))
+    }
+
+    func testResearchSlashCommandKeepsEvidencePipelineAndNoEstateBypass() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
+            encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: #"case "research", "deepdive", "sweep", "deep":"#))
+        let tail = source[start.lowerBound...]
+        let end = try XCTUnwrap(tail.range(of: "\n                default:"))
+        let command = String(tail[..<end.lowerBound])
+
+        XCTAssertTrue(command.contains("guard let research"))
+        XCTAssertTrue(command.contains("await research(researchGoal, roleSelection.bindings)"))
+        XCTAssertFalse(source.contains("runSymbolicResearch"))
+        XCTAssertFalse(command.contains("EstateSearch"))
+        XCTAssertFalse(command.contains("/Volumes/PRO-G40"))
+        XCTAssertFalse(command.contains("runTurnInterruptible"))
     }
 
     func testFleetArgsUseDefaultAgents() {

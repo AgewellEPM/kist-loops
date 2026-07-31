@@ -273,22 +273,6 @@ struct KistREPL {
                 .retrievalContext(objective: clean, strategy: strategy, limit: 6)
         }
 
-        // SYMBOLIC RESEARCH bridge — route /research through the Jeeves link-wheel instead of a heavy
-        // cloud LLM: Tavily gathers verbatim web content → PEEL-tile promotion (contradiction gate +
-        // proof-score) → GraphReasoner answers grounded on TRUE FACTS, wrapped by a local ollama
-        // naturalizer. Streams live (inherits stdout/stderr). Returns false if the bridge isn't
-        // installed, so the caller can fall back to the model research pipeline.
-        func runSymbolicResearch(_ goal: String) -> Bool {
-            let bridge = (NSHomeDirectory() as NSString).appendingPathComponent("bin/jeeves-research")
-            guard FileManager.default.isExecutableFile(atPath: bridge) else { return false }
-            print("\u{001B}[36m🔬 symbolic research\u{001B}[0m \u{001B}[2m· Tavily → PEEL link-wheel → GraphReasoner · grounded on true facts, local models\u{001B}[0m")
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: bridge)
-            proc.arguments = [goal]
-            do { try proc.run(); proc.waitUntilExit() } catch { return false }
-            return proc.terminationStatus == 0
-        }
-
         func attachCaptainContext(to compiled: String, objective: String) -> String {
             // SELF-AWARENESS: the Captain must always know WHAT IT IS. Without this, a bare
             // "assess this system" gets a generic "what system do you mean?" — because the model has
@@ -1849,38 +1833,20 @@ struct KistREPL {
                     continue
                 case "research", "deepdive", "sweep", "deep":
                     let researchGoal = args.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !researchGoal.isEmpty else { print("usage: /research <question> — deep sweep of our own files + a grounded deep-dive analysis"); continue }
-                    // DEEP LOCAL SWEEP (2026-07-31, Luke): fire a question → sweep our OWN estate/system files
-                    // in-process (bypasses the tool sandbox — reaches ~ and /Volumes/PRO-G40/kist-loops) and
-                    // ground a thorough deep-dive analysis in the real files, so it stops answering from memory.
-                    print("\u{001B}[35m🔎 deep sweep of our system files for: \(researchGoal)…\u{001B}[0m")
-                    let deepSearch = EstateSearch(maxFiles: 16, maxTotalChars: 16_000)
-                    let goalCopy = researchGoal
-                    let grounding = await Task.detached(priority: .userInitiated, operation: { deepSearch.groundingBlock(for: goalCopy) }).value
-                    if let g = grounding {
-                        let n = max(0, g.components(separatedBy: "\n### ").count - 1)
-                        print("\u{001B}[35m🔎 swept \(n) file(s) from our estate — running the deep-dive analysis\u{001B}[0m")
-                    } else {
-                        print("\u{001B}[37m🔎 no pre-matched files — the analysis will list_files/read_file the project + /Volumes/PRO-G40/kist-loops directly\u{001B}[0m")
+                    guard !researchGoal.isEmpty else {
+                        print("usage: /research <goal> — evidence dossier → council → task board")
+                        continue
                     }
-                    armTurnLoop()
-                    let researchBrief = """
-                    DEEP RESEARCH — a thorough, grounded deep-dive analysis answering this question:
-                    \(researchGoal)
-
-                    You've been handed REAL files swept from our OWN estate below. READ them, and use \
-                    list_files / read_file to go DEEPER into the most relevant ones (our source lives at \
-                    /Volumes/PRO-G40/kist-loops). Ground EVERY claim in specific files and cite their paths. \
-                    Do NOT answer from memory or guess — if the swept files don't cover something, read more \
-                    files or say plainly what's missing. Be comprehensive and concrete.
-
-                    \(grounding ?? "(no files pre-swept — start with list_files on the project root and /Volumes/PRO-G40/kist-loops, then read the relevant ones.)")
-                    """
-                    let researchOC = await runTurnInterruptible(loop: loop, userInput: researchBrief)
-                    rememberHumanTurn(user: "/research \(researchGoal)", assistantSummary: researchOC.summary)
-                    await printTurnSummary(outcomeSummary: researchOC.summary, success: researchOC.success)
-                    await runCopilotReview(task: researchGoal, answer: researchOC.summary, allowAdvisory: true)
-                    await printTurnUsage()
+                    // Keep research on the dedicated evidence pipeline. That path enforces the current
+                    // ToolContext read grants, records its search/repo evidence, remains ESC/typeahead
+                    // interruptible, runs the role-bound council, and seeds the durable task board.
+                    // Never inject an in-process HOME/Volumes crawl into an ordinary model turn.
+                    guard let research else {
+                        print("\u{001B}[31m/research isn't available here\u{001B}[0m")
+                        continue
+                    }
+                    print("\u{001B}[2m↳ evidence dossier → role-bound council → durable task board\u{001B}[0m")
+                    await research(researchGoal, roleSelection.bindings)
                     continue
                 default:
                     if let expanded = commands.expand(name, args: args) {
