@@ -73,14 +73,26 @@ final class DeploymentProvenanceTests: XCTestCase {
         return canonical
     }
 
-    private func repositoryScratchDirectory(named name: String) throws -> URL {
-        let raw = repositoryRoot
-            .appendingPathComponent(".build", isDirectory: true)
-            .appendingPathComponent(
-                "kist-provenance-\(name)-\(UUID().uuidString)",
-                isDirectory: true)
+    /// `--provenance-evaluate` deliberately accepts candidates only beneath the
+    /// installation home. Keep evaluator fixtures there so the valid-path tests
+    /// exercise payload validation instead of failing early when the checkout is
+    /// on an external volume.
+    private func evaluatorScratchDirectory(named name: String) throws -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let raw = home.appendingPathComponent(
+            ".kist-provenance-\(name)-\(UUID().uuidString)",
+            isDirectory: true)
         try FileManager.default.createDirectory(at: raw, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: raw.path)
         let canonical = try canonicalURL(raw)
+        guard canonical.path.hasPrefix(home.path + "/") else {
+            throw NSError(
+                domain: "DeploymentProvenanceTests",
+                code: 2,
+                userInfo: [NSFilePathErrorKey: canonical.path])
+        }
         addTeardownBlock {
             try? FileManager.default.removeItem(at: canonical)
         }
@@ -362,7 +374,7 @@ final class DeploymentProvenanceTests: XCTestCase {
     }
 
     func testV3ClosureEvaluatorHasExactArityAndBindsSafeRebuildBytes() throws {
-        let root = try repositoryScratchDirectory(named: "closure-v3")
+        let root = try evaluatorScratchDirectory(named: "closure-v3")
         let payloads = try (0..<5).map { index -> URL in
             let path = root.appendingPathComponent("payload-\(index)")
             try write("#!/bin/sh\n# payload \(index)\n", to: path, executable: true)
@@ -484,7 +496,7 @@ final class DeploymentProvenanceTests: XCTestCase {
     }
 
     func testClosureEvaluatorRejectsHardlinkedPayload() throws {
-        let root = try repositoryScratchDirectory(named: "closure-hardlink")
+        let root = try evaluatorScratchDirectory(named: "closure-hardlink")
         let payloads = try (0..<5).map { index -> URL in
             let path = root.appendingPathComponent("payload-\(index)")
             try write("#!/bin/sh\n# payload \(index)\n", to: path, executable: true)
