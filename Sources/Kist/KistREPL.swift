@@ -1880,6 +1880,18 @@ struct KistREPL {
                     }
                     await fleet(invocation.goal, invocation.agents, roleSelection.bindings)
                     continue
+                case "bughunt", "monkey", "monkeybash", "hunt", "breakit":
+                    // Real-life bug hunt / monkey-bash (Luke 2026-08-01): spin up a FLEET of isolated
+                    // hunters (each its own sandbox/worktree, headless, spin up as many as needed) that
+                    // actually RUN the target and try to BREAK it — reporting only reproduced failure points.
+                    guard let fleet else { print("\u{001B}[31m/bughunt isn't available here\u{001B}[0m"); continue }
+                    guard let inv = Self.parseFleetArgs(args, defaultAgents: max(3, defaultAgents)) else {
+                        print("usage: /bughunt [--agents N] <app or target> — a fleet of isolated hunters runs it + tries to break it")
+                        continue
+                    }
+                    print("\u{001B}[35m🐛 bug hunt · \(inv.agents) isolated hunters running + hammering: \(inv.goal)\u{001B}[0m")
+                    await fleet(Self.bugHuntBrief(inv.goal), inv.agents, roleSelection.bindings)
+                    continue
                 case "plan-execute", "pe", "dag":
                     guard let planExecute else { print("\u{001B}[31m/plan-execute isn't available here\u{001B}[0m"); continue }
                     guard !args.isEmpty else { print("usage: /plan-execute <goal>"); continue }

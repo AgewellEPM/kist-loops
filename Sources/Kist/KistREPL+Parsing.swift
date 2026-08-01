@@ -60,6 +60,28 @@ extension KistREPL {
     }
 
 
+    /// The adversarial brief each fleet hunter runs for `/bughunt` — RUN the target for real, then try to
+    /// BREAK it, and report only REPRODUCED failure points with proof. Each hunter is in its own isolated
+    /// sandbox/worktree (headless) and may spin up as many sub-sandboxes/VMs as it needs.
+    static func bugHuntBrief(_ target: String) -> String {
+        """
+        BUG HUNT — adversarially test this target for REAL failure points: \(target)
+
+        You are one hunter in a fleet, each in your OWN isolated sandbox/worktree (headless). Spin up as
+        many sub-sandboxes / VMs as you need (run_command is kernel-sandboxed; use the app's own run/test).
+
+        DO, don't theorize:
+        1. RUN it for real — build it, launch it, run its tests/CLI/endpoints in your sandbox.
+        2. Then BREAK it — hammer it like a monkey: malformed / huge / empty / boundary / wrong-type inputs,
+           concurrent + racing calls, kill it mid-operation, exhaust resources/disk, adversarial/unicode
+           data, replay, out-of-order, missing files, bad config, network off.
+        3. Capture every REPRODUCED failure: crash, hang, wrong output, unhandled error, data loss, silent
+           failure, leak — each with the EXACT repro (command + input) and evidence (output / log / exit code).
+        4. Report ONLY failures you actually reproduced, with proof. No hypotheticals. If it survives a real
+           beating, say so plainly and list what you threw at it.
+        """
+    }
+
     static func parseFleetArgs(_ args: String, defaultAgents: Int) -> FleetInvocation? {
         let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }

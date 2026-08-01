@@ -59,6 +59,27 @@ final class KistREPLTests: XCTestCase {
                        KistREPL.FleetInvocation(goal: "build the modules", agents: 2))
     }
 
+    func testBugHuntBriefIsAdversarialAndRealRun() {
+        let brief = KistREPL.bugHuntBrief("the payments API")
+        XCTAssertTrue(brief.contains("the payments API"))
+        // It must tell hunters to actually RUN and BREAK it, in isolated sandboxes, reporting only real repros.
+        XCTAssertTrue(brief.contains("RUN it for real"))
+        XCTAssertTrue(brief.contains("BREAK it"))
+        XCTAssertTrue(brief.lowercased().contains("isolated sandbox") || brief.lowercased().contains("own isolated"))
+        XCTAssertTrue(brief.contains("REPRODUCED") || brief.contains("reproduced"))
+        XCTAssertFalse(brief.lowercased().contains("hypothetical") && !brief.contains("No hypotheticals"))
+    }
+
+    func testBugHuntCommandDispatchesAFleet() {
+        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("case \"bughunt\", \"monkey\", \"monkeybash\", \"hunt\", \"breakit\":"),
+                      "/bughunt (and aliases) must be a command")
+        XCTAssertTrue(repl.contains("await fleet(Self.bugHuntBrief(inv.goal), inv.agents, roleSelection.bindings)"),
+                      "bug hunt must dispatch a FLEET of isolated hunters with the adversarial brief")
+    }
+
     func testFleetArgsRejectMalformedAgentCounts() {
         XCTAssertNil(KistREPL.parseFleetArgs("", defaultAgents: 5))
         XCTAssertNil(KistREPL.parseFleetArgs("--agents", defaultAgents: 5))
