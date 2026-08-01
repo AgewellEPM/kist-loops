@@ -295,7 +295,10 @@ final class TerminalScreenCoordinator: @unchecked Sendable {
             guard size.rows >= PinnedBar.minTerminalRows else { return }
             let next = PinnedBarLayout(rows: size.rows, cols: size.cols, panelRows: PinnedBar.panelRows)
             layout = next
-            _ = activateScreen(next.activateSequence)
+            // Scroll turn-trailing output up by panelRows BEFORE re-pinning so the panel band the loop
+            // is about to clear holds no content — otherwise the last panelRows rows of the turn (the
+            // second-opinion review) are erased, not saved to scrollback. See reReserveSequence.
+            _ = activateScreen(next.reReserveSequence)
             }
         }
     }

@@ -120,6 +120,39 @@ final class ProcessGroupRunnerTests: XCTestCase {
                                        cwd: cwd, env: env, timeoutSeconds: 10, capPerStream: 100_000)
         XCTAssertFalse(o.timedOut)
         XCTAssertEqual(o.exitCode, 7)
+        XCTAssertFalse(o.wasSignalled, "a clean exit(7) is NOT a signal kill")
+    }
+
+    // A process KILLED BY A SIGNAL must report wasSignalled=true + 128+signal — the signature
+    // RunCommandTool uses to tell an OS-sandbox/resource-limit kill apart from a clean non-zero exit.
+    func testSignalKillSetsWasSignalled() {
+        let o = ProcessGroupRunner.run(launchPath: "/bin/sh", launchArgs: ["-c", "kill -KILL $$"],
+                                       cwd: cwd, env: env, timeoutSeconds: 10, capPerStream: 100_000)
+        XCTAssertFalse(o.timedOut)
+        XCTAssertTrue(o.wasSignalled, "SIGKILL must set wasSignalled")
+        XCTAssertGreaterThanOrEqual(o.exitCode, 128, "signalled → 128+signal (got \(o.exitCode))")
+    }
+
+    // THE FIX (2026-08-01): a clean non-zero exit with no output (e.g. `which nasm` when nasm is
+    // absent) must NOT be misreported as an OS-sandbox / resource-limit kill.
+    func testRunCommandCleanNonZeroIsNotMisreportedAsKill() async {
+        let r = await RunCommandTool.spawnAndCollect(launchPath: "/bin/sh", launchArgs: ["-c", "exit 1"],
+                                                     cwd: cwd, timeout: 10)
+        XCTAssertFalse(r.success)
+        let err = (r.error ?? "").lowercased()
+        XCTAssertFalse(err.contains("sandbox"), "clean exit 1 wrongly blamed on the sandbox: \(err)")
+        XCTAssertFalse(err.contains("resource limit"), "clean exit 1 wrongly blamed on a resource limit: \(err)")
+        XCTAssertTrue(err.contains("normal non-zero"), "should read as a normal non-zero result: \(err)")
+    }
+
+    // A genuine signal kill SHOULD still surface the sandbox/resource-limit framing.
+    func testRunCommandSignalKillIsReportedAsSignal() async {
+        let r = await RunCommandTool.spawnAndCollect(launchPath: "/bin/sh", launchArgs: ["-c", "kill -KILL $$"],
+                                                     cwd: cwd, timeout: 10)
+        XCTAssertFalse(r.success)
+        let err = (r.error ?? "").lowercased()
+        XCTAssertTrue(err.contains("signal") && err.contains("resource limit"),
+                      "a real signal kill should name the signal + resource-limit cause: \(err)")
     }
 
     func testStderrIsCaptured() {

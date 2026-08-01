@@ -36,6 +36,10 @@ enum ProcessGroupRunner {
         // compiling unchanged; only the success path fills them in.
         var stdout: String = ""
         var stderr: String = ""
+        /// True when the child was terminated BY A SIGNAL (WIFSIGNALED) — `exitCode` is then 128+signal.
+        /// This is the real signature of an OS-sandbox / resource-limit kill (SIGKILL/SIGXCPU/SIGSEGV/…),
+        /// distinct from a clean non-zero exit like `which`/`grep`/`test` returning 1 with no output.
+        var wasSignalled: Bool = false
     }
 
     /// Blocking — call OFF the main actor (RunCommandTool wraps it in a continuation on a
@@ -267,8 +271,10 @@ enum ProcessGroupRunner {
         // If we couldn't reap (auto-reap host config), the exit status is unknown — report a
         // non-zero/unknown code rather than a fabricated success.
         let code: Int32 = reaped ? Self.exitCode(from: status) : -1
+        let signalled = reaped && (status & 0x7f) != 0    // WIFSIGNALED (matches exitCode's 128+signal path)
         return Outcome(combined: combined, exitCode: code, timedOut: timedOut,
-                       stdout: collector.stdoutText(), stderr: collector.stderrText())
+                       stdout: collector.stdoutText(), stderr: collector.stderrText(),
+                       wasSignalled: signalled)
     }
 
     // MARK: - Internals

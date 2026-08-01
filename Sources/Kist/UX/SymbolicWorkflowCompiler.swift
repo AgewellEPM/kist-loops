@@ -328,7 +328,7 @@ struct SymbolicWorkflowStore: Sendable {
         let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !clean.isEmpty { return clean }
         if let active = plan.active { return active.boardTitle }
-        if let next = plan.next { return next.boardTitle }
+        if let next = plan.nextActionable ?? plan.next { return next.boardTitle }
         if let done = plan.tasks.filter({ $0.status == .done }).last { return done.boardTitle }
         return plan.title
     }

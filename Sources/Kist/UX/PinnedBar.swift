@@ -174,6 +174,18 @@ struct PinnedBarLayout: Equatable {
             + TerminalANSI.moveTo(row: transcriptBottom, col: 1)
     }
 
+    /// Re-pin AFTER a turn ran with the region torn down. A turn's trailing output (the last thing
+    /// printed — e.g. the second-opinion review) can occupy the bottom `panelRows` rows; the very next
+    /// step draws the input panel there via `clearPanelSequence`, which would ERASE those rows (the
+    /// review's tail) instead of preserving them in scrollback. So FIRST scroll the transcript up by
+    /// `panelRows` with plain newlines — the region is still reset at re-pin time, so these scroll the
+    /// whole screen, pushing any bottom-band content safely up — THEN set the region + park the cursor
+    /// exactly as `activateSequence`. (Startup `activate()` deliberately keeps the plain sequence: there
+    /// is no prior turn output to protect and a leading scroll would shove the banner. Fix 2026-08-01.)
+    var reReserveSequence: String {
+        String(repeating: "\n", count: panelRows) + activateSequence
+    }
+
     /// Release the region, drop to the real last row, show the cursor, and newline off the panel.
     var deactivateSequence: String {
         TerminalANSI.resetScrollRegion

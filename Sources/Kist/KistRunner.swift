@@ -545,10 +545,15 @@ enum KistRunner {
                 }
                 // /copilot co-reviewer: complete on an ARBITRARY (provider, model), not just the session model.
                 repl.modelComplete = { coProvider, coModel, system, user in
+                    // A second-opinion review is short prose, but 700 tokens truncated real reviews mid-word
+                    // on any REASONING reviewer (hidden reasoning eats the budget; the completeWithUsage
+                    // self-heal only rescues an EMPTY answer, not a partially-truncated one). 4000 gives the
+                    // visible answer ample room after reasoning. (claude-cli ignores maxTokens entirely — its
+                    // truncation was a separate display bug in the pinned bar's re-pin; see reReserveSequence.)
                     try? await bountyRegistry.complete(
                         providerId: coProvider, model: coModel,
                         messages: [ChatMessage(role: .system, content: system), ChatMessage(role: .user, content: user)],
-                        settings: ModelSettings(temperature: 0.0, maxTokens: 700))
+                        settings: ModelSettings(temperature: 0.0, maxTokens: 4000))
                 }
                 // /compact: summarize older history on the ACTIVE model (the REPL passes the current binding,
                 // so compaction follows /model switches). Bigger token budget for a real summary.

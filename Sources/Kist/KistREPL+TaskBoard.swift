@@ -95,7 +95,10 @@ extension KistREPL {
             "run the next task", "start the next task", "do the next task",
             "continue", "keep going", "go", "go next"
         ]
-        if nextPhrases.contains(lower) { return plan.active ?? plan.next }
+        // Prefer a genuinely-active task, then the next ACTIONABLE (non-research) todo, and only then a
+        // bare research todo — so a stuck .inProgress research task cannot hijack 'next' while build work
+        // remains, and `active` still wins for real in-flight multi-turn work.
+        if nextPhrases.contains(lower) { return plan.active ?? plan.nextActionable ?? plan.next }
         return nil
     }
 
@@ -119,7 +122,7 @@ extension KistREPL {
             .filter { !boardReferenceGlue.contains($0) }
         guard meaningful.isEmpty else { return trimmed }
         let plan = PlanStore(projectRoot: projectRoot).load()
-        guard let task = plan.active ?? plan.next else { return trimmed }
+        guard let task = plan.active ?? plan.nextActionable ?? plan.next else { return trimmed }
         _ = PlanStore(projectRoot: projectRoot).update(id: task.id, status: .inProgress)
         return executionBrief(for: task, userInput: trimmed)
     }
@@ -233,7 +236,9 @@ extension KistREPL {
         let toolCalls = trajectory.count
         let modelCalls = spans.filter { $0.kind == .llmCall }.count
         let usage = UsageCost.summarize(spans: spans).render(label: "usage")
-        let next = plan.active ?? plan.next
+        // Mirror the selectors: prefer a real active task, then the next ACTIONABLE todo, so a stuck
+        // research task doesn't dominate the "next" nudge while build work remains.
+        let next = plan.active ?? plan.nextActionable ?? plan.next
         // Only NUDGE toward the board when THIS turn actually worked it — a successful file mutation
         // (a build) or a `tasks` tool call. A pure chat / research / Q&A turn must NOT push the board's
         // next item: otherwise a stale objective hijacks every unrelated turn and the user feels the

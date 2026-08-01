@@ -489,7 +489,7 @@ public struct HeadlessAgentLoop: Sendable {
                 continue
             }
             // 4a) Plan mode: refuse state-changing tools (propose, don't execute).
-            if let block = planModeBlock(tool: tool) {
+            if let block = planModeBlock(tool: tool, args: action.parameters) {
                 sink.emit(.actionFinished(index: iteration, success: false, output: "", error: "blocked by plan mode"))
                 cp.messages.append(ChatMessage(role: .user, content: block))
                 cp.iteration = iteration; persist(&cp)
@@ -752,7 +752,7 @@ public struct HeadlessAgentLoop: Sendable {
             cp.messages.append(ChatMessage(role: .assistant, content: text, toolCalls: calls))
             for call in calls {
                 let args = Self.parseArgs(call.argumentsJSON)
-                if let block = planModeBlock(tool: call.name) {
+                if let block = planModeBlock(tool: call.name, args: args) {
                     // Plan mode is a deliberate read-only setting — a blocked write is the user's CHOICE,
                     // not a tool failure. Don't feed the re-plan spiral (matches the text loop). (Codex Q3:
                     // same native/text divergence as the decline bug.)
@@ -846,8 +846,24 @@ public struct HeadlessAgentLoop: Sendable {
 
     /// In plan mode, block any tool that isn't read-only and return the steering message to feed
     /// back (nil = allowed). Keeps the agent investigating + proposing rather than executing.
-    private func planModeBlock(tool: String) -> String? {
+    /// Read-only `tasks` subactions (viewing/validating the board) never mutate plan.json, so they are
+    /// safe in plan mode even though the `tasks` tool as a whole is a writer. Kept in sync with
+    /// ManageTasksTool: `list`, `validate`, `check`, and the default (no action == list).
+    static let readOnlyTaskActions: Set<String> = ["list", "validate", "check"]
+
+    /// Pure, testable: a `tasks` call that only READS the board (safe in plan mode). A plan-mode agent
+    /// must be able to READ the shared board to ground its proposal; only board WRITES (add/start/done/
+    /// block/update/evidence/clear) stay blocked. Default (no action) is `list` — a read. Mirrors
+    /// ManageTasksTool.execute's action normalization exactly.
+    static func isReadOnlyTasksCall(tool: String, args: [String: Any]) -> Bool {
+        guard tool == "tasks" else { return false }
+        let action = (args["action"] as? String ?? "list").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return readOnlyTaskActions.contains(action)
+    }
+
+    private func planModeBlock(tool: String, args: [String: Any] = [:]) -> String? {
         guard planMode, !Self.readOnlyTools.contains(tool) else { return nil }
+        if Self.isReadOnlyTasksCall(tool: tool, args: args) { return nil }
         return "PLAN MODE is ON — \"\(tool)\" would modify state, so it was NOT run. Only read/search " +
             "tools are allowed (\(Self.readOnlyTools.sorted().joined(separator: ", "))). Investigate further, " +
             "using read_file, context_brain, search_code, list_files, or glob_files; do NOT retry blocked " +

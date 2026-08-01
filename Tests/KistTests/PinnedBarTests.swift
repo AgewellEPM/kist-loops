@@ -19,6 +19,20 @@ final class PinnedBarTests: XCTestCase {
         XCTAssertEqual(l.activateSequence, "\u{001B}[1;34r" + "\u{001B}[34;1H")
     }
 
+    func testReReserveScrollsTranscriptUpBeforePinning() {
+        let l = PinnedBarLayout(rows: 40, cols: 100, panelRows: 6)
+        // Re-pin after a turn must FIRST scroll the transcript up by panelRows so turn-trailing output
+        // (the second-opinion review) in the bottom band is preserved in scrollback, NOT clobbered by
+        // the panel clear that follows. Then it pins exactly like activate.
+        XCTAssertEqual(l.reReserveSequence, String(repeating: "\n", count: 6) + l.activateSequence)
+        XCTAssertTrue(l.reReserveSequence.hasPrefix("\n\n\n\n\n\n"),
+                      "must scroll up one row per reserved panel row before pinning")
+        XCTAssertTrue(l.reReserveSequence.hasSuffix(l.activateSequence),
+                      "after the scroll-up it still sets the region + parks the cursor")
+        // The scroll-up count is exactly panelRows — never eats more transcript than the band it protects.
+        XCTAssertEqual(l.reReserveSequence.prefix(while: { $0 == "\n" }).count, l.panelRows)
+    }
+
     func testDeactivateReleasesRegionAndRestores() {
         let l = PinnedBarLayout(rows: 40, cols: 100, panelRows: 6)
         XCTAssertEqual(l.deactivateSequence,

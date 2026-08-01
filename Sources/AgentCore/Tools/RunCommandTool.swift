@@ -171,12 +171,26 @@ public struct RunCommandTool: AgentTool {
         let failError: String?
         if success { failError = nil }
         else if outcome.timedOut { failError = "command timed out after \(timeout)s" }
+        else if outcome.wasSignalled {
+            // KILLED BY A SIGNAL (exit is 128+signal) — the real signature of an OS sandbox /
+            // resource-limit kill (SIGKILL/SIGXCPU/SIGSEGV/SIGXFSZ), whether or not it wrote output.
+            let sig = outcome.exitCode - 128
+            failError = "killed by signal \(sig) (exit \(outcome.exitCode))\(combined.isEmpty ? ", no output" : "") — "
+                + "likely the OS sandbox or a resource limit (memory/CPU/file-size). If this is a build/test, "
+                + "run it DIRECTLY via run_command executable+args (not custom_tool) to see its real output."
+        }
+        else if outcome.exitCode < 0 {
+            failError = combined.isEmpty ? "the command could not be launched (internal error)" : combined
+        }
         else if combined.isEmpty {
-            failError = "exit code \(outcome.exitCode) with NO output captured — the process was likely "
-                + "terminated by the OS sandbox or a resource limit, or it wrote nothing. If this is a "
-                + "build/test, run it DIRECTLY via run_command executable+args (not custom_tool) to see its "
-                + "real output."
-        } else { failError = "exit code \(outcome.exitCode)" }
+            // A CLEAN non-zero exit with no output is a NORMAL result for many tools — `which`/`type`
+            // (not found), `grep`/`rg` (no match), `test`/`[`/`cmp`/`diff` (false/differ), `find` (none).
+            // Report it plainly and let the agent read the exit code; do NOT cry "sandbox/resource kill"
+            // (a plain exit 1 is not a termination). Codex/Luke fix 2026-08-01.
+            failError = "exit code \(outcome.exitCode), no output — commonly a NORMAL non-zero result "
+                + "(e.g. `which`/`grep`/`test` when nothing matched or a file was absent), not necessarily an error."
+        }
+        else { failError = "exit code \(outcome.exitCode)" }
         return ToolResult(
             success: success,
             output: combined.isEmpty ? (success ? "(no output)" : "(no output, exit \(outcome.exitCode))") : combined,

@@ -37,7 +37,11 @@ final class CapabilityDenialSteerTests: XCTestCase {
         let r = await RunCommandTool.spawnAndCollect(
             launchPath: "/usr/bin/false", launchArgs: [], cwd: NSTemporaryDirectory(), timeout: 10)
         XCTAssertFalse(r.success)
-        XCTAssertTrue((r.error ?? "").contains("NO output captured"),
-                      "an empty failure must explain itself, not just 'exit code 1': \(r.error ?? "nil")")
+        // An empty non-zero exit must EXPLAIN itself — the message names it as a commonly-NORMAL result
+        // (e.g. `which`/`grep`/`test` matched nothing) rather than a bare "exit code 1" or a false
+        // "sandbox/resource kill" cry.
+        let e = r.error ?? ""
+        XCTAssertTrue(e.contains("no output") && e.contains("NORMAL"),
+                      "an empty non-zero exit must explain itself, not just 'exit code 1': \(e)")
     }
 }
