@@ -475,26 +475,37 @@ struct KistREPL {
             guard let loopFactory else { return }
             let roster = ultraRoster(excluding: activeBinding)
             guard !roster.isEmpty else { print("\u{001B}[37m⎇ ultra · no other minds configured — add models with /model\u{001B}[0m"); return }
+            let maxPasses = 2   // bound so a stubborn nitpick can't loop forever; FLAWLESS = a full pass all-clean
             print("\u{001B}[35m⎇ ultra · consensus of minds: \(roster.map { TeamLanguage.displayName($0.providerId) }.joined(separator: " → "))\u{001B}[0m")
+            print("\u{001B}[2m  up to \(maxPasses) passes · FLAWLESS = every mind signs off in one full pass\u{001B}[0m")
             var current = answer
-            for mind in roster {
+            for pass in 1...maxPasses {
                 guard !lastTurnInterrupted else { return }
-                guard let review = await runOneReview(task: task, answer: current, reviewer: mind) else { continue }
-                if Copilot.reviewIsClean(review) {
-                    print("\u{001B}[32m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) signs off ✓\u{001B}[0m")
-                    continue
+                var allClean = true   // did EVERY mind sign off this pass (no fix needed)?
+                for mind in roster {
+                    guard !lastTurnInterrupted else { return }
+                    guard let review = await runOneReview(task: task, answer: current, reviewer: mind) else { continue }
+                    if Copilot.reviewIsClean(review) {
+                        print("\u{001B}[32m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) signs off ✓ (pass \(pass))\u{001B}[0m")
+                        continue
+                    }
+                    // Not clean → this mind goes in and fixes it; the improved work is what the rest review.
+                    allClean = false
+                    print("\u{001B}[35m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) going in to fix its findings (pass \(pass))…\u{001B}[0m")
+                    armTurnLoop()
+                    let fixLoop = perm.arm(loopFactory(mind, roleSelection.bindings, perm.mode.isPlan,
+                                                       showReasoning, extendedThinking))
+                    recorder?.reset()
+                    let oc = await runTurnInterruptible(loop: fixLoop, userInput: Copilot.fixPrompt(task: task, review: review))
+                    await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
+                    current = oc.summary
                 }
-                // Not clean → this mind goes in and fixes what it found, then the next mind reviews the fix.
-                print("\u{001B}[35m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) going in to fix its findings…\u{001B}[0m")
-                armTurnLoop()
-                let fixLoop = perm.arm(loopFactory(mind, roleSelection.bindings, perm.mode.isPlan,
-                                                   showReasoning, extendedThinking))
-                recorder?.reset()
-                let oc = await runTurnInterruptible(loop: fixLoop, userInput: Copilot.fixPrompt(task: task, review: review))
-                await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-                current = oc.summary   // the improved work is what the NEXT mind reviews
+                if allClean {
+                    print("\u{001B}[1;32m⎇ ultra · FLAWLESS — all \(roster.count) minds signed off (pass \(pass))\u{001B}[0m")
+                    return
+                }
             }
-            print("\u{001B}[32m⎇ ultra · consensus pass complete\u{001B}[0m")
+            print("\u{001B}[33m⎇ ultra · reached the \(maxPasses)-pass limit — not every mind is satisfied yet; best effort committed\u{001B}[0m")
         }
 
         // R4: the coder↔reviewer partnership. The co-reviewer critiques the diff; if it flags blocking

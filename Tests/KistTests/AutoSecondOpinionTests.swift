@@ -71,6 +71,10 @@ final class AutoSecondOpinionTests: XCTestCase {
                       "the consensus chain + capability-ordered roster must exist")
         XCTAssertTrue(repl.contains("reviewer: mind") && repl.contains("loopFactory(mind,"),
                       "each mind must both REVIEW (as reviewer) and FIX (as the fix loop's model)")
+        XCTAssertTrue(repl.contains("for pass in 1...maxPasses") && repl.contains("let maxPasses = 2"),
+                      "consensus must loop bounded passes (cap so it can't run forever)")
+        XCTAssertTrue(repl.contains("var allClean = true") && repl.contains("FLAWLESS — all"),
+                      "FLAWLESS requires a FULL pass where EVERY mind signs off — not just the first clean review")
         XCTAssertTrue(repl.contains("case \"ultra\", \"consensus\", \"flawless\":"), "the /ultra command must exist")
         XCTAssertTrue(CopilotConfig().ultra == false, "ultra is off by default")
     }
