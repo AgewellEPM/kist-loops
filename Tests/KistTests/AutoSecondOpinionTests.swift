@@ -61,6 +61,20 @@ final class AutoSecondOpinionTests: XCTestCase {
         XCTAssertTrue(repl.contains("loopFactory(fixer,"), "the fix turn must run on the reviewer/fixer, not the primary")
     }
 
+    // ULTRA MODE (Luke 2026-08-01): /mode ultra runs a CONSENSUS chain — every reachable mind reviews→fixes
+    // in turn until flawless. Pinned at the source (the chain lives in the REPL run loop, not unit-reachable).
+    func testUltraModeConsensusChainWired() {
+        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("if copilot.ultra { await runUltraReview(task: task, answer: answer); return }"),
+                      "ultra mode must route to the consensus chain instead of the single second opinion")
+        XCTAssertTrue(repl.contains("func runUltraReview(") && repl.contains("func ultraRoster("),
+                      "the consensus chain + capability-ordered roster must exist")
+        XCTAssertTrue(repl.contains("reviewer: mind") && repl.contains("loopFactory(mind,"),
+                      "each mind must both REVIEW (as reviewer) and FIX (as the fix loop's model)")
+        XCTAssertTrue(repl.contains("case \"ultra\", \"consensus\", \"flawless\":"), "the /ultra command must exist")
+        XCTAssertTrue(CopilotConfig().ultra == false, "ultra is off by default")
+    }
+
     // The fix ask must work for ANSWER critiques too (Luke's case: the answer dodged / never ran it), not
     // just code edits — otherwise a harsh answer-review is still a dead end.
     func testFixPromptHandlesAnswerCritiquesNotJustCode() {

@@ -15,6 +15,10 @@ struct CopilotConfig: Equatable {
     /// edits. This is the "consult the minds instead of trusting one model" behavior applied automatically.
     /// Distinct from `enabled` (team mode, which adds the review→FIX loop). `/copilot off` clears both.
     var autoSecondOpinion = true
+    /// ULTRA MODE (`/mode ultra`): after a turn, run the CONSENSUS OF MINDS — every reachable model, ordered
+    /// by capability (Claude → Codex → DeepSeek → …), reviews the work and fixes what it finds, in turn,
+    /// until a mind signs off clean. The full slider beyond the single second opinion. Off by default.
+    var ultra = false
     var lead: ProviderBinding? = nil   // who writes the code (nil ⇒ the session default model)
     var co: ProviderBinding? = nil     // who reviews the diff (nil ⇒ the session default model)
     /// R4: close the loop — when the co-reviewer flags blocking issues, the lead runs a FIX turn to

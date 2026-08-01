@@ -417,9 +417,11 @@ struct KistREPL {
         // One review pass. Reviews the working-tree DIFF for a coding turn, else the substantive ANSWER
         // text. Reviewer is a DIFFERENT model than the one that answered (autoReviewer). Returns the review
         // text (nil = nothing worth reviewing / no distinct reviewer / no response).
-        func runOneReview(task: String, answer: String = "") async -> String? {
+        func runOneReview(task: String, answer: String = "", reviewer: ProviderBinding? = nil) async -> String? {
             guard let modelComplete else { return nil }
-            guard let co = autoReviewer(answeredBy: activeBinding) else { return nil }
+            // `reviewer` lets ULTRA mode rotate the second opinion through a roster of minds; nil ⇒ the
+            // default top-ranked distinct reviewer.
+            guard let co = reviewer ?? autoReviewer(answeredBy: activeBinding) else { return nil }
             let isCoding = Copilot.shouldReview(trajectory: recorder?.snapshot() ?? [])
             let diff = isCoding ? Self.workingTreeDiff(projectRoot: projectRoot) : ""
             // Ground the reviewer in the SAME context the primary turn had — its self-identity brief plus
@@ -454,6 +456,47 @@ struct KistREPL {
             return review
         }
 
+        // ULTRA MODE (Luke 2026-08-01): the consensus of minds. The captain orders every reachable model by
+        // capability (Claude → Codex → DeepSeek → …); each mind REVIEWS the current work and, if it's not
+        // clean, GOES IN AND FIXES it, handing the improved work to the next mind — until a mind signs off
+        // clean (flawless) or the roster is exhausted. `/mode ultra` turns it on; `/mode normal` off.
+        func ultraRoster(excluding answered: ProviderBinding) -> [ProviderBinding] {
+            let configured = Set(providerAliases.values)
+            // Capability order — Claude leads, Codex second, then the rest (matches the operator's mental model).
+            let prefer = ["claude-cli", "codex-cli", "gemini", "deepseek", "mimo", "moonshot", "zhipu", "grok", "openai", "anthropic"]
+            var seen = Set<String>(); var out: [ProviderBinding] = []
+            for pid in prefer where configured.contains(pid) && pid != answered.providerId && seen.insert(pid).inserted {
+                out.append(ProviderBinding(providerId: pid))
+            }
+            return out
+        }
+
+        func runUltraReview(task: String, answer: String) async {
+            guard let loopFactory else { return }
+            let roster = ultraRoster(excluding: activeBinding)
+            guard !roster.isEmpty else { print("\u{001B}[37m⎇ ultra · no other minds configured — add models with /model\u{001B}[0m"); return }
+            print("\u{001B}[35m⎇ ultra · consensus of minds: \(roster.map { TeamLanguage.displayName($0.providerId) }.joined(separator: " → "))\u{001B}[0m")
+            var current = answer
+            for mind in roster {
+                guard !lastTurnInterrupted else { return }
+                guard let review = await runOneReview(task: task, answer: current, reviewer: mind) else { continue }
+                if Copilot.reviewIsClean(review) {
+                    print("\u{001B}[32m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) signs off ✓\u{001B}[0m")
+                    continue
+                }
+                // Not clean → this mind goes in and fixes what it found, then the next mind reviews the fix.
+                print("\u{001B}[35m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) going in to fix its findings…\u{001B}[0m")
+                armTurnLoop()
+                let fixLoop = perm.arm(loopFactory(mind, roleSelection.bindings, perm.mode.isPlan,
+                                                   showReasoning, extendedThinking))
+                recorder?.reset()
+                let oc = await runTurnInterruptible(loop: fixLoop, userInput: Copilot.fixPrompt(task: task, review: review))
+                await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
+                current = oc.summary   // the improved work is what the NEXT mind reviews
+            }
+            print("\u{001B}[32m⎇ ultra · consensus pass complete\u{001B}[0m")
+        }
+
         // R4: the coder↔reviewer partnership. The co-reviewer critiques the diff; if it flags blocking
         // issues AND auto-fix is armed (team mode), the LEAD runs a bounded fix turn to address them,
         // then the reviewer re-checks — a real team accomplishing the goal, not an advisory print.
@@ -465,6 +508,9 @@ struct KistREPL {
             // to this DIRECT turn (allowAdvisory). Team mode adds the fix loop below; advisory just prints.
             let advisory = allowAdvisory && copilot.autoSecondOpinion
             guard copilot.enabled || advisory else { return }
+            // ULTRA MODE: hand off to the consensus-of-minds chain (every mind reviews→fixes in turn) instead
+            // of the single second opinion.
+            if copilot.ultra { await runUltraReview(task: task, answer: answer); return }
             guard var review = await runOneReview(task: task, answer: answer) else { return }
 
             // AUTO-FIX BY DEFAULT (Luke 2026-08-01): the reviewer must JUMP IN THE DRIVER'S SEAT and fix
@@ -1840,6 +1886,25 @@ struct KistREPL {
                     guard let digDeep else { print("\u{001B}[31m/dig isn't available here\u{001B}[0m"); continue }
                     guard !args.isEmpty else { print("usage: /dig <question> — ask every reachable model in parallel and synthesize"); continue }
                     await digDeep(args, roleSelection.bindings)
+                    continue
+                case "ultra", "consensus", "flawless":
+                    // The review "slider" (/mode is taken by persona): /ultra → consensus of minds (every
+                    // reachable model reviews→fixes in turn until flawless); /ultra off → single second opinion.
+                    let level = args.trimmingCharacters(in: .whitespaces).lowercased()
+                    switch level {
+                    case "", "on", "ultra", "max", "consensus":
+                        copilot.ultra = true; copilot.autoSecondOpinion = true
+                        let roster = ultraRoster(excluding: activeBinding).map { TeamLanguage.displayName($0.providerId) }
+                        print("\u{001B}[35m⎇ ULTRA on — consensus of minds after each turn (review→fix until flawless)\u{001B}[0m")
+                        print("\u{001B}[2m  order: \(roster.isEmpty ? "(no other minds configured — add with /model)" : roster.joined(separator: " → "))\u{001B}[0m")
+                    case "off", "normal", "single", "review":
+                        copilot.ultra = false
+                        print("\u{001B}[35m⎇ ULTRA off — single second opinion (review→fix)\u{001B}[0m")
+                    case "status", "?":
+                        print("ultra: \(copilot.ultra ? "ON (consensus of minds)" : "off (single second opinion)") · /ultra | /ultra off")
+                    default:
+                        print("usage: /ultra | /ultra off   (ultra = every reachable mind reviews→fixes until flawless)")
+                    }
                     continue
                 case "research", "deepdive", "sweep", "deep":
                     let researchGoal = args.trimmingCharacters(in: .whitespacesAndNewlines)
