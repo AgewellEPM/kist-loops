@@ -159,20 +159,26 @@ enum Copilot {
         return false
     }
 
-    /// The fix ask handed BACK to the lead (coder) so the reviewer's findings get addressed in the same
-    /// working tree — closes the loop Luke asked for ("review, catch errors, THEN fix it").
+    /// The fix ask handed BACK to the lead so the reviewer's findings get ADDRESSED — the "jump in the
+    /// driver's seat and fix it" loop. Works for BOTH a code turn (edit the files) AND an answer/analysis
+    /// turn (actually do the thing the review says you dodged, then give the corrected answer) — so a
+    /// harsh critique of an answer isn't a dead end either.
     static func fixPrompt(task: String, review: String) -> String {
         """
-        Your teammate reviewed the code you just wrote for this task:
+        A skeptical reviewer just critiqued what you produced for this task:
         \(task.isEmpty ? "(not specified)" : task)
 
-        Their review findings:
+        Their findings:
         \(review.trimmingCharacters(in: .whitespacesAndNewlines))
 
-        Address the ACTIONABLE findings above by editing the files. Fix real correctness/security/\
-        edge-case issues; skip anything that's a matter of taste or that you can justify keeping. Make \
-        the minimal edits that resolve the findings — do not rewrite unrelated code. If a finding is \
-        wrong, briefly say why instead of changing the code.
+        Now FIX it — don't just acknowledge the findings, resolve them:
+        • If you wrote CODE: edit the files to fix the real correctness/security/edge-case issues (minimal \
+        edits, don't rewrite unrelated code).
+        • If you gave an ANSWER/analysis and it dodged or was wrong (e.g. "next step: you do it", never \
+        actually ran/verified, bad math): DO the work now — call the tools, run it, verify, read the files \
+        — and give the corrected, evidence-backed answer.
+        Skip anything that's a matter of taste or that you can justify keeping (say briefly why). Otherwise, \
+        act — the point is the finding is RESOLVED, not restated.
         """
     }
 }

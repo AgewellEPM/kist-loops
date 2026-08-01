@@ -467,12 +467,17 @@ struct KistREPL {
             guard copilot.enabled || advisory else { return }
             guard var review = await runOneReview(task: task, answer: answer) else { return }
 
-            guard copilot.enabled, copilot.autoFix, let loopFactory else { return }   // advisory-only unless team mode armed
+            // AUTO-FIX BY DEFAULT (Luke 2026-08-01): the reviewer must JUMP IN THE DRIVER'S SEAT and fix
+            // what it finds — not critique and stop. Any non-clean review with a lead loop now closes the
+            // loop and fixes it (team mode `/copilot on` is just the explicit form). The reviewer is already
+            // a DISTINCT model from the lead (autoReviewer), so this is never a self-fix. `/copilot off`
+            // disables it. Bounded by maxFixRounds so a stubborn critique can't loop forever.
+            guard let loopFactory, !Copilot.reviewIsClean(review) else { return }
             var round = 0
             while round < max(1, copilot.maxFixRounds), !Copilot.reviewIsClean(review) {
                 round += 1
                 let lead = copilot.lead ?? roleSelection.fallback
-                print("\u{001B}[35m⎇ team · \(TeamLanguage.displayName(lead.providerId)) fixing the findings (round \(round))…\u{001B}[0m")
+                print("\u{001B}[35m⎇ reviewer flagged issues → \(TeamLanguage.displayName(lead.providerId)) jumping in to fix (round \(round))…\u{001B}[0m")
                 armTurnLoop()
                 let fixLoop = perm.arm(loopFactory(lead, roleSelection.bindings, perm.mode.isPlan,
                                                    showReasoning, extendedThinking))
@@ -883,7 +888,7 @@ struct KistREPL {
                               mode: modeLabel,
                               cost: cost,
                               activeTask: plan.active.map { "[\($0.id)] \($0.title)" },
-                              nextStep: plan.next.map { "[\($0.id)] \($0.title)" }).render()
+                              nextStep: (plan.active ?? plan.nextActionable ?? plan.next).map { "[\($0.id)] \($0.title)" }).render()
         }
 
         func completionCandidates() -> [String] {
@@ -1885,6 +1890,15 @@ struct KistREPL {
                     await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
                     await runCopilotReview(task: taskPrompt)
                     await printTurnUsage()
+                    // LOOP FIX: a RESEARCH item is a single-shot digest-and-decide unit (see ManageTasksTool),
+                    // yet a plain research answer never calls `tasks done`, so `plan.active` re-served the same
+                    // research task on every 'next'/'continue' forever. When a research-kind driving task's turn
+                    // succeeds and was not interrupted, auto-close it (+advance) so it can never be re-selected.
+                    if task.kind == .research, oc.success, !lastTurnInterrupted, !perm.mode.isPlan {
+                        let store = PlanStore(projectRoot: projectRoot)
+                        _ = store.update(id: task.id, appendEvidence: ["auto-closed after research turn: " + oc.summary.prefix(160)])
+                        _ = store.completeAndAdvance(id: task.id)
+                    }
                 }
                 continue
             }

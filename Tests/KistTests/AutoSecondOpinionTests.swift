@@ -45,6 +45,26 @@ final class AutoSecondOpinionTests: XCTestCase {
         XCTAssertTrue(diffP.contains("autonomous coding + research Captain"))
     }
 
+    // AUTO-FIX BY DEFAULT (Luke 2026-08-01): a non-clean review must make the lead JUMP IN and fix it —
+    // the fix loop can no longer be gated behind team mode (`copilot.enabled`). Pinned at the source so a
+    // revert to advisory-only is caught.
+    func testNonCleanReviewAutoFixesWithoutTeamMode() {
+        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("guard let loopFactory, !Copilot.reviewIsClean(review) else { return }"),
+                      "the fix loop must fire on ANY non-clean review with a lead loop — not only in team mode")
+        XCTAssertFalse(repl.contains("guard copilot.enabled, copilot.autoFix, let loopFactory else { return }"),
+                      "the old team-mode-only gate must be gone")
+    }
+
+    // The fix ask must work for ANSWER critiques too (Luke's case: the answer dodged / never ran it), not
+    // just code edits — otherwise a harsh answer-review is still a dead end.
+    func testFixPromptHandlesAnswerCritiquesNotJustCode() {
+        let p = Copilot.fixPrompt(task: "did it open in the VM", review: "The answer dodged with 'next step'")
+        XCTAssertTrue(p.contains("ANSWER"), "the fix ask must cover answer/analysis turns")
+        XCTAssertTrue(p.lowercased().contains("run it") || p.lowercased().contains("verify"),
+                      "an answer-fix must tell the lead to actually DO/verify the work, not restate")
+    }
+
     // Backward-compat: an empty projectContext builds the SAME prompt as before (no stray background block),
     // so ungrounded callers/tests are unaffected.
     func testEmptyProjectContextAddsNoGrounding() {
