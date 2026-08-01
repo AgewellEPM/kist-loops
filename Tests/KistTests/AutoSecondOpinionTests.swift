@@ -54,6 +54,11 @@ final class AutoSecondOpinionTests: XCTestCase {
                       "the fix loop must fire on ANY non-clean review with a lead loop — not only in team mode")
         XCTAssertFalse(repl.contains("guard copilot.enabled, copilot.autoFix, let loopFactory else { return }"),
                       "the old team-mode-only gate must be gone")
+        // The REVIEWER (Claude, the one that found the problem) goes in and fixes — LAST, after the review —
+        // not the primary model that produced the bad work.
+        XCTAssertTrue(repl.contains("let fixer = autoReviewer(answeredBy: activeBinding) ?? copilot.lead ?? roleSelection.fallback"),
+                      "the fixer must be the reviewer (found the problem), falling back to lead/session only")
+        XCTAssertTrue(repl.contains("loopFactory(fixer,"), "the fix turn must run on the reviewer/fixer, not the primary")
     }
 
     // The fix ask must work for ANSWER critiques too (Luke's case: the answer dodged / never ran it), not

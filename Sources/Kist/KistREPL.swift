@@ -469,17 +469,22 @@ struct KistREPL {
 
             // AUTO-FIX BY DEFAULT (Luke 2026-08-01): the reviewer must JUMP IN THE DRIVER'S SEAT and fix
             // what it finds — not critique and stop. Any non-clean review with a lead loop now closes the
-            // loop and fixes it (team mode `/copilot on` is just the explicit form). The reviewer is already
-            // a DISTINCT model from the lead (autoReviewer), so this is never a self-fix. `/copilot off`
-            // disables it. Bounded by maxFixRounds so a stubborn critique can't loop forever.
+            // loop and fixes it (team mode `/copilot on` is just the explicit form). `/copilot off` disables
+            // it. Bounded by maxFixRounds so a stubborn critique can't loop forever.
+            //
+            // WHO fixes (Luke 2026-08-01): the REVIEWER goes in LAST and fixes it — the capable model that
+            // FOUND the problem (Claude, via autoReviewer), NOT the primary model that already produced the
+            // bad work and would just botch it again. Order is: primary works → reviewer critiques →
+            // reviewer goes in and fixes. Fall back to the team lead / session model only if there's no
+            // distinct reviewer.
             guard let loopFactory, !Copilot.reviewIsClean(review) else { return }
             var round = 0
             while round < max(1, copilot.maxFixRounds), !Copilot.reviewIsClean(review) {
                 round += 1
-                let lead = copilot.lead ?? roleSelection.fallback
-                print("\u{001B}[35m⎇ reviewer flagged issues → \(TeamLanguage.displayName(lead.providerId)) jumping in to fix (round \(round))…\u{001B}[0m")
+                let fixer = autoReviewer(answeredBy: activeBinding) ?? copilot.lead ?? roleSelection.fallback
+                print("\u{001B}[35m⎇ review done → \(TeamLanguage.displayName(fixer.providerId)) going in to fix the findings (round \(round))…\u{001B}[0m")
                 armTurnLoop()
-                let fixLoop = perm.arm(loopFactory(lead, roleSelection.bindings, perm.mode.isPlan,
+                let fixLoop = perm.arm(loopFactory(fixer, roleSelection.bindings, perm.mode.isPlan,
                                                    showReasoning, extendedThinking))
                 // Fresh trajectory for the fix turn so the re-review's shouldReview reflects ONLY what
                 // the fix changed — a no-op fix (coder pushed back) then converges instead of
