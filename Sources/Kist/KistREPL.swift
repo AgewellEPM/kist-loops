@@ -760,7 +760,7 @@ struct KistREPL {
                                                 trajectory: trajectory, grounded: grounded)
             lastConfidenceReport = dashboard.confidenceReport
             let compact = !success || !Self.turnHasMutatingWork(trajectory)
-            let panelColor = Self.stdoutColorEnabled
+            let panelColor = Self.stdoutColorEnabled(projectRoot: projectRoot)
             print(compact ? dashboard.renderCompact(color: panelColor) : dashboard.render(color: panelColor))
             let hint = "proof: /logs · cost: /usage · board: /tasks · /summary for detail"
             print(panelColor ? "\u{001B}[2m\(hint)\u{001B}[0m" : hint)
@@ -1215,7 +1215,7 @@ struct KistREPL {
                     // Explain the exact report the panel showed for the last completed turn. Do not
                     // consult the recorder here: it was intentionally reset before slash dispatch.
                     if let report = lastConfidenceReport {
-                        print(report.renderBreakdown(color: Self.stdoutColorEnabled))
+                        print(report.renderBreakdown(color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
                     } else {
                         print("No confidence to explain yet — that turn used no tools (a plain answer). Run a turn that reads/edits/searches first.")
                     }

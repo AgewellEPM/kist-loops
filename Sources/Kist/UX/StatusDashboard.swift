@@ -304,16 +304,23 @@ public struct StatusDashboard: Sendable, Equatable {
         if !tasks.isEmpty {
             out += "\n" + header("📋", "Build Queue", Cat.build, color) + "\n"
             for task in tasks.prefix(3) {
-                let mark: String
+                let plainMark: String
+                let renderedMark: String
                 switch task.state {
-                case .done: mark = c("92;1", "✓", color)
-                case .pending: mark = c("93;1", "⏳", color)
-                case .blocked: mark = c("91;1", "⊘", color)
+                case .done:
+                    plainMark = "✓"
+                    renderedMark = c("92;1", plainMark, color)
+                case .pending:
+                    plainMark = "⏳"
+                    renderedMark = c("93;1", plainMark, color)
+                case .blocked:
+                    plainMark = "⊘"
+                    renderedMark = c("91;1", plainMark, color)
                 }
-                out += wrappedLine(task.title, firstPrefix: "· ", continuationPrefix: "  ",
-                                   firstRenderedPrefix: mark + " ")
+                out += wrappedLine(task.title, firstPrefix: plainMark + " ", continuationPrefix: "  ",
+                                   firstRenderedPrefix: renderedMark + " ")
             }
-            if tasks.count > 3 { out += c("2", "… +\(tasks.count - 3) more · /tasks", color) + "\n" }
+            if tasks.count > 3 { out += wrappedLine("… +\(tasks.count - 3) more · /tasks") }
             out += rule + "\n"
         }
         if !research.isEmpty {
@@ -340,26 +347,45 @@ public struct StatusDashboard: Sendable, Equatable {
                              firstPrefix: String = "",
                              continuationPrefix: String? = nil,
                              firstRenderedPrefix: String? = nil) -> String {
-        let restPrefix = continuationPrefix ?? String(repeating: " ", count: firstPrefix.count)
-        let renderedFirst = firstRenderedPrefix ?? firstPrefix
+        let cleanText = TerminalCellText.stripANSI(text)
+        let cleanFirst = TerminalCellText.stripANSI(firstPrefix)
+            .replacingOccurrences(of: "\n", with: " ")
+        let requestedRest = TerminalCellText.stripANSI(
+            continuationPrefix ?? String(repeating: " ", count: cleanFirst.count))
+            .replacingOccurrences(of: "\n", with: " ")
+        let renderedFirst = firstRenderedPrefix ?? cleanFirst
+        let firstCells = max(TerminalCellText.width(cleanFirst), TerminalCellText.width(renderedFirst))
+        let restCells = TerminalCellText.width(requestedRest)
+        let prefixesFit = firstCells <= width - 2 && restCells <= width - 2
+        let restPrefix = prefixesFit ? requestedRest : ""
         var out = ""
-        for paragraph in text.replacingOccurrences(of: "\r", with: "\n").split(separator: "\n", omittingEmptySubsequences: false) {
-            let lines = wrapParagraph(String(paragraph), firstPrefix: firstPrefix, continuationPrefix: restPrefix)
+        for paragraph in cleanText.replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false) {
+            let paragraphText = String(paragraph)
+            let lines = prefixesFit
+                ? wrapParagraph(paragraphText,
+                                firstPrefixCells: firstCells,
+                                continuationPrefixCells: restCells)
+                : wrapParagraph(cleanFirst + paragraphText,
+                                firstPrefixCells: 0,
+                                continuationPrefixCells: 0)
             for (index, line) in lines.enumerated() {
-                out += (index == 0 ? renderedFirst : restPrefix) + line + "\n"
+                out += (prefixesFit ? (index == 0 ? renderedFirst : restPrefix) : "") + line + "\n"
             }
         }
         return out
     }
 
-    private func wrapParagraph(_ text: String, firstPrefix: String, continuationPrefix: String) -> [String] {
+    private func wrapParagraph(_ text: String,
+                               firstPrefixCells: Int,
+                               continuationPrefixCells: Int) -> [String] {
         let words = text.split { $0.isWhitespace }.map(String.init)
         guard !words.isEmpty else { return [""] }
 
         var lines: [String] = []
         var current = ""
-        var capacity = max(1, width - firstPrefix.count)
-        let continuationCapacity = max(1, width - continuationPrefix.count)
+        var capacity = max(2, width - firstPrefixCells)
+        let continuationCapacity = max(2, width - continuationPrefixCells)
 
         func pushCurrent() {
             lines.append(current)
@@ -371,16 +397,29 @@ public struct StatusDashboard: Sendable, Equatable {
             var remaining = word
             while !remaining.isEmpty {
                 if current.isEmpty {
-                    if remaining.count <= capacity {
+                    if TerminalCellText.width(remaining) <= capacity {
                         current = remaining
                         remaining = ""
                     } else {
-                        let splitIndex = remaining.index(remaining.startIndex, offsetBy: capacity)
+                        var used = 0
+                        var splitIndex = remaining.startIndex
+                        while splitIndex < remaining.endIndex {
+                            let next = remaining.index(after: splitIndex)
+                            let cells = TerminalCellText.width(String(remaining[splitIndex..<next]))
+                            guard used + cells <= capacity else { break }
+                            used += cells
+                            splitIndex = next
+                        }
+                        // `capacity` is always at least two cells, which fits every character
+                        // TerminalCellText recognizes. Keep a defensive progress path regardless.
+                        if splitIndex == remaining.startIndex {
+                            splitIndex = remaining.index(after: splitIndex)
+                        }
                         lines.append(String(remaining[..<splitIndex]))
                         remaining = String(remaining[splitIndex...])
                         capacity = continuationCapacity
                     }
-                } else if current.count + 1 + remaining.count <= capacity {
+                } else if TerminalCellText.width(current) + 1 + TerminalCellText.width(remaining) <= capacity {
                     current += " " + remaining
                     remaining = ""
                 } else {

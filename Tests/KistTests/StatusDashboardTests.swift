@@ -184,8 +184,11 @@ final class StatusDashboardTests: XCTestCase {
                       raise: "re-run or drop every failing step so the trajectory comes back clean")
             ])
         let dashboard = StatusDashboard(
+            tasks: [
+                .init(title: String(repeating: "a", count: 19) + "👩‍💻⏳", state: .pending)
+            ],
             research: [
-                .init(title: "Fourteen chars!",
+                .init(title: "Study ©️ ❤️ 1️⃣ and wide glyphs 🧪",
                       priority: .high,
                       reason: "test",
                       visit: "test",
@@ -193,16 +196,54 @@ final class StatusDashboardTests: XCTestCase {
                       estimatedLearning: "test",
                       expectedBenefit: ["test"])
             ],
+            knowledgeDebt: [
+                .init(need: "An intentionally overlong 🧠 research prefix",
+                      topic: "must wrap without overflowing",
+                      impact: "cell-safe", severity: 3)
+            ],
             confidenceReport: confidence,
             width: 16)
         XCTAssertEqual(dashboard.width, 24, "dashboard minimum must fit its fixed operator labels")
 
         for rendered in [dashboard.render(color: true), dashboard.renderCompact(color: true)] {
+            XCTAssertTrue(TerminalCellText.stripANSI(rendered).contains("👩‍💻"))
             for line in TerminalCellText.stripANSI(rendered)
                 .split(separator: "\n", omittingEmptySubsequences: false) {
                 XCTAssertLessThanOrEqual(
-                    line.count, dashboard.width,
-                    "colored dashboard line exceeded configured width: \(line)")
+                    TerminalCellText.width(String(line)), dashboard.width,
+                    "colored dashboard line exceeded configured terminal cells: \(line)")
+            }
+        }
+    }
+
+    func testDashboardSanitizesHostileDynamicFields() {
+        let hostile = "safe\u{001B}[2J"
+            + "\u{001B}]0;owned-title\u{0007}"
+            + "\u{202E}bidi-end"
+        let dashboard = StatusDashboard(
+            minds: [.init(name: hostile, role: hostile)],
+            tasks: [.init(title: hostile, state: .pending)],
+            learned: [hostile],
+            research: [
+                .init(title: hostile, priority: .high, reason: hostile, visit: hostile,
+                      impact: 5, estimatedLearning: hostile, expectedBenefit: [hostile])
+            ],
+            knowledgeDebt: [
+                .init(need: hostile, topic: hostile, impact: hostile, severity: 5)
+            ],
+            questions: [hostile],
+            futureEvolution: .init(capability: hostile, estimatedImpact: hostile),
+            observation: .init(message: hostile, recommendedReading: [hostile], expectedROI: hostile),
+            next: hostile,
+            width: 24)
+
+        for rendered in [dashboard.render(color: true), dashboard.renderCompact(color: true)] {
+            XCTAssertFalse(rendered.contains("\u{001B}[2J"))
+            XCTAssertFalse(rendered.contains("owned-title"))
+            XCTAssertFalse(rendered.contains("\u{202E}"))
+            for line in TerminalCellText.stripANSI(rendered)
+                .split(separator: "\n", omittingEmptySubsequences: false) {
+                XCTAssertLessThanOrEqual(TerminalCellText.width(String(line)), dashboard.width)
             }
         }
     }

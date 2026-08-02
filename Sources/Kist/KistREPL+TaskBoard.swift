@@ -231,16 +231,23 @@ extension KistREPL {
     }
 
 
-    /// Whether stdout should carry ANSI color: a real terminal AND `NO_COLOR` unset. The single
-    /// decision so every REPL surface (summary, /confidence, the end-of-turn panel) honors the
-    /// NO_COLOR convention identically instead of each re-deriving it from a bare `isatty`.
-    static var stdoutColorEnabled: Bool {
-        isatty(fileno(stdout)) != 0 && ProcessInfo.processInfo.environment["NO_COLOR"] == nil
+    /// Whether stdout should carry ANSI color. A real TTY is necessary, while either `NO_COLOR`
+    /// or the configured screen-reader `mono` theme disables escapes for every REPL surface.
+    /// Injectable terminal/environment inputs keep the accessibility decision directly testable.
+    static func stdoutColorEnabled(
+        projectRoot: String,
+        isTTY: Bool = isatty(fileno(stdout)) != 0,
+        noColorEnv: Bool = ProcessInfo.processInfo.environment["NO_COLOR"] != nil
+    ) -> Bool {
+        guard isTTY else { return false }
+        let configured = KistSettingsStore(projectRoot: projectRoot).load().theme
+        return Theme.resolve(configured, noColorEnv: noColorEnv).name != Theme.mono.name
     }
 
     static func renderSimpleSummary(projectRoot: String, spans: [AgentSpan], trajectory: [ActionRecord],
-                                    color: Bool = KistREPL.stdoutColorEnabled) -> String {
-        func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
+                                    color: Bool? = nil) -> String {
+        let useColor = color ?? stdoutColorEnabled(projectRoot: projectRoot)
+        func c(_ code: String, _ s: String) -> String { useColor ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
         let plan = PlanStore(projectRoot: projectRoot).load()
         let toolCalls = trajectory.count
         let modelCalls = spans.filter { $0.kind == .llmCall }.count

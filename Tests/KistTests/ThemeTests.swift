@@ -1,4 +1,5 @@
 import XCTest
+import AgentCore
 @testable import Kist
 
 /// Pins the /theme palette system, with emphasis on the accessibility guarantees.
@@ -20,6 +21,24 @@ final class ThemeTests: XCTestCase {
     func testNoColorEnvForcesMono() {
         XCTAssertEqual(Theme.resolve("dark", noColorEnv: true).name, "mono",
                        "NO_COLOR wins over any configured theme")
+    }
+
+    func testREPLColorDecisionHonorsConfiguredMonoAndTTY() throws {
+        let root = NSTemporaryDirectory() + "kist-theme-output-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let store = KistSettingsStore(projectRoot: root)
+
+        XCTAssertTrue(store.save(KistSettings(theme: "mono"), to: .project))
+        XCTAssertFalse(KistREPL.stdoutColorEnabled(projectRoot: root, isTTY: true, noColorEnv: false),
+                       "configured mono must suppress ANSI even on a TTY")
+
+        XCTAssertTrue(store.save(KistSettings(theme: "dark"), to: .project))
+        XCTAssertTrue(KistREPL.stdoutColorEnabled(projectRoot: root, isTTY: true, noColorEnv: false))
+        XCTAssertFalse(KistREPL.stdoutColorEnabled(projectRoot: root, isTTY: false, noColorEnv: false),
+                       "redirected stdout must remain plain")
+        XCTAssertFalse(KistREPL.stdoutColorEnabled(projectRoot: root, isTTY: true, noColorEnv: true),
+                       "NO_COLOR must override a configured color theme")
     }
 
     // MARK: accessibility invariants
