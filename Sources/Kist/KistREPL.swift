@@ -284,7 +284,7 @@ struct KistREPL {
             // ambiguous, and self-assessment reads its OWN source instead of asking clarifying questions.
             var out = kistSelfContext() + "\n\n" + compiled
             if let retrieval = retrievalContext(for: objective) {
-                print("\u{001B}[37m↳ Captain retrieval · \(retrieval.retrieved.count) memory · \(retrieval.decisionCards.count) decision cards\u{001B}[0m")
+                print("\u{001B}[2m↳ \u{001B}[0m\u{001B}[96;1m🧠 Captain retrieval\u{001B}[0m\u{001B}[2m · \(retrieval.retrieved.count) memory · \(retrieval.decisionCards.count) decision cards\u{001B}[0m")
                 out = Self.attachCaptainRetrievalContext(to: out, retrieval: retrieval)
             }
             return out
@@ -1970,7 +1970,7 @@ struct KistREPL {
                 default:
                     if let expanded = commands.expand(name, args: args) {
                         proofStore?.startTurn(goal: expanded)
-                        if let display = personaDisplay?(expanded) { print("\u{001B}[37m↳ \(display)\u{001B}[0m") }
+                        if let display = personaDisplay?(expanded) { print("\u{001B}[95;1m🎭 \(display)\u{001B}[0m") }
                         armTurnLoop()   // arm the permission tier — never run a turn on a stale loop
                         let compiled = briefCompiler?(expanded, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? expanded
                         let enriched = attachCaptainContext(to: compiled, objective: expanded)
@@ -2201,12 +2201,12 @@ struct KistREPL {
                     }
                     activeBinding = decision.binding
                 }
-                print("\u{001B}[37m↳ routed to \(Self.render(decision.binding)) (\(decision.reason))\u{001B}[0m")
+                print("\u{001B}[2m↳ 🧭 routed to \u{001B}[0m\u{001B}[94;1m\(Self.render(decision.binding))\u{001B}[0m\u{001B}[2m (\(decision.reason))\u{001B}[0m")
             }
 
             armTurnLoop()   // apply the permission tier (plan/approvals); confirm bypass if just armed
             let compiled = briefCompiler?(messageText, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? messageText
-            if let display = personaDisplay?(messageText) { print("\u{001B}[37m↳ \(display)\u{001B}[0m") }
+            if let display = personaDisplay?(messageText) { print("\u{001B}[95;1m🎭 \(display)\u{001B}[0m") }
             var enriched = attachCaptainContext(to: compiled, objective: messageText)
             // AUTO-EXPLORE: a lookup/find/self question ("find what we did for tinkyspeak", "how does your
             // X work") is answered from OUR OWN FILES, not the model's memory. Search the estate in-process

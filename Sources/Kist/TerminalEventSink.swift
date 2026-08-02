@@ -25,6 +25,10 @@ struct TerminalEventSink: RuntimeEventSink {
         // before `.completed` renders, so a streamedChars-based guard is always false by then and the whole
         // answer double-prints as the "done" tail. This flag survives that reset. (Bug fix 2026-07-29.)
         var textWasStreamed = false
+        // Prose markdown coloring needs to know whether the NEXT streamed chunk begins at a real line
+        // boundary — else a chunk that happens to start with "- " or "1. " mid-sentence gets falsely
+        // bulletized. True at turn start and after any chunk that ended in "\n".
+        var proseAtLineStart = true
         var promptTokens = 0
         var completionTokens = 0
         var usageEstimated = false
@@ -128,7 +132,9 @@ struct TerminalEventSink: RuntimeEventSink {
             state.streamedChars += t.count
             state.textWasStreamed = true                                   // final answer shown inline ⇒ don't reprint on "done"
             finishLiveStatus(clearOnly: true)
-            write(Self.spaceListItems(t))                                  // assistant prose, list-spaced
+            let spaced = Self.spaceListItems(t)                             // list-spaced prose
+            write(Self.emphasizeProse(spaced, color: color, firstIsLineStart: state.proseAtLineStart))
+            state.proseAtLineStart = spaced.hasSuffix("\n")                 // next chunk's line-start state
         case .usage(let promptTokens, let completionTokens, let estimated):
             state.promptTokens += max(0, promptTokens)
             state.completionTokens += max(0, completionTokens)
@@ -152,10 +158,11 @@ struct TerminalEventSink: RuntimeEventSink {
             state.toolByIndex[index] = label
             proofStore?.record(.init(kind: .actionStarted, tool: label, success: nil, text: detail))
             if style == .calm {
-                var line = "\n" + c("36", "│ ") + c("36;1", glyph(for: label) + " " + label) + c("37", " working")
+                let name = c(toolColor(for: label), glyph(for: label) + " " + label)
+                var line = "\n" + c("2", "│ ") + name + c("2", " working")
                 if state.planStepCount > 0 {
-                    line = "\n" + c("36", "│ ") + c("35;1", Self.stepPosition(wave: state.currentWave, index: index, total: state.planStepCount))
-                        + " " + c("36;1", glyph(for: label) + " " + label) + c("37", " working")
+                    line = "\n" + c("2", "│ ") + c("35;1", Self.stepPosition(wave: state.currentWave, index: index, total: state.planStepCount))
+                        + " " + name + c("2", " working")
                 }
                 if !detail.isEmpty, detail != label { line += c("2", " · " + truncate(detail, 110)) }
                 print(line)
@@ -184,7 +191,7 @@ struct TerminalEventSink: RuntimeEventSink {
                     if finishedTool == "web_search", let trail = Self.searchTrail(output: output, color: color) {
                         print(tokenAnnotatedSearchTrail(trail, output: output))
                     } else {
-                        print(c("36", "│ ") + c("32;1", "✓ ") + c("37", tokenAnnotated(Self.calmSuccessSummary(tool: finishedTool, output: output), output: output)))
+                        print(c("2", "│ ") + c("32;1", "✓ ") + colorizeSummary(tokenAnnotated(Self.calmSuccessSummary(tool: finishedTool, output: output), output: output)))
                     }
                     break
                 }
@@ -196,7 +203,7 @@ struct TerminalEventSink: RuntimeEventSink {
             } else {
                 // Recovery language, not a raw status code (#11): say what failed + the next move.
                 let raw = (error ?? output).trimmingCharacters(in: .whitespacesAndNewlines)
-                print(c("36", "│ ") + c("31;1", "✗ ") + c("31", truncate(ErrorHumanizer.humanize(raw, tool: finishedTool), 220)))
+                print(c("2", "│ ") + c("31;1", "✗ ") + c("31", truncate(ErrorHumanizer.humanize(raw, tool: finishedTool), 220)))
             }
         case .replanStarted(let reason):
             finishLiveStatus(clearOnly: true)
@@ -226,12 +233,14 @@ struct TerminalEventSink: RuntimeEventSink {
             let tail = (state.textWasStreamed || summary.isEmpty) ? "" : c("37", " · " + summary)
             print("\n" + c("32;1", "●") + c("32", " done") + tail)
             state.textWasStreamed = false                         // turn over — next turn starts un-streamed
+            state.proseAtLineStart = true                          // next turn's prose starts at a line boundary
         case .failed(let reason):
             finishLiveStatus()
             state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             proofStore?.record(.init(kind: .failed, tool: nil, success: false, text: reason))
             print("\n" + c("31;1", "●") + c("31", " failed") + c("37", " · " + ErrorHumanizer.humanize(reason)))
             state.textWasStreamed = false                         // turn over
+            state.proseAtLineStart = true
         case .contextCompacted(let omitted):
             finishLiveStatus(clearOnly: true)
             print(c("2", "⟢ compacted \(omitted) earlier step(s) into a summary — staying within context"))
@@ -240,6 +249,7 @@ struct TerminalEventSink: RuntimeEventSink {
             state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             print("\n" + c("33;1", "●") + c("33", " stopped"))
             state.textWasStreamed = false                         // turn over
+            state.proseAtLineStart = true
         case .planReady(let summary, let stepCount):
             // R0.1 (2026-07-28): this event was previously UNHANDLED (fell into `default: break`),
             // so the planning spinner's 1s timer kept overwriting the approval prompt's input line —
@@ -505,19 +515,51 @@ struct TerminalEventSink: RuntimeEventSink {
         return " · ~\(formatTokenCount(tokens)) tok"
     }
 
-    /// A small glyph per common tool so the lane reads at a glance.
+    /// A real emoji per common tool so the lane reads at a glance — the eye anchors on the icon
+    /// before reading a word. Luke: "more emojis, easier to read."
     private func glyph(for tool: String) -> String {
         switch tool {
-        case "write_file": return "✎"
-        case "edit_file": return "✎"
-        case "read_file": return "◇"
-        case "run_command": return "❯"
-        case "list_files", "search": return "⌕"
+        case "write_file", "make_dir", "create_directory": return "📝"
+        case "edit_file", "apply_patch", "notebook_edit": return "✏️"
+        case "read_file": return "📖"
+        case "run_command": return "⚡"
+        case "list_files": return "📂"
+        case "search", "grep", "search_code": return "🔍"
         case "web_fetch", "web_search": return "🌐"
-        case "spawn_agent": return "⚇"
-        case "computer_control": return "▣"
-        default: return "⚙"
+        case "spawn_agent": return "🤖"
+        case "computer_control": return "🖥️"
+        case "recall", "retrieve", "memory": return "🧠"
+        case "move_file": return "📦"
+        case "tasks": return "📋"
+        default: return "🔧"
         }
+    }
+
+    /// A bright category hue per tool so the lane is colorful and the KIND of action reads instantly:
+    /// green = mutations, cyan = reads, blue = search/web, yellow = exec, magenta = delegation/memory.
+    private func toolColor(for tool: String) -> String {
+        switch tool {
+        case "write_file", "edit_file", "apply_patch", "notebook_edit", "move_file", "make_dir", "create_directory":
+            return "92;1"   // green — it changed state
+        case "read_file", "list_files":
+            return "96;1"   // cyan — it read state
+        case "search", "grep", "search_code", "web_search", "web_fetch":
+            return "94;1"   // blue — it searched
+        case "run_command":
+            return "93;1"   // yellow — it executed
+        case "spawn_agent", "recall", "retrieve", "memory", "tasks":
+            return "95;1"   // magenta — delegation / memory / board
+        default:
+            return "96;1"
+        }
+    }
+
+    /// Colorize a calm success summary: the head (what happened) stays bright and readable, the
+    /// `· N tok · /logs …` metadata tail goes dim so the eye lands on the content, not the plumbing.
+    private func colorizeSummary(_ s: String) -> String {
+        let parts = s.components(separatedBy: " · ")
+        guard parts.count > 1 else { return c("37;1", s) }
+        return c("37;1", parts[0]) + c("2", " · " + parts.dropFirst().joined(separator: " · "))
     }
 
     private func truncate(_ s: String, _ n: Int) -> String {
@@ -604,6 +646,84 @@ struct TerminalEventSink: RuntimeEventSink {
             out.append(line)
         }
         return out.joined(separator: "\n")
+    }
+
+    /// Light up markdown emphasis in streamed prose so a research answer isn't a wall of white:
+    /// `**bold**` → bright, `` `code` `` → cyan, and markdown headers/bullets get a colored lead.
+    /// Applied per streamed chunk, so it ONLY transforms patterns fully contained in this chunk —
+    /// an emphasis marker split across two chunks is left literal (never emits an unbalanced escape,
+    /// so it can't corrupt the stream). Bold is stripped of its `**` markers when colored.
+    static func emphasizeProse(_ text: String, color: Bool, firstIsLineStart: Bool = true) -> String {
+        guard color, !text.isEmpty else { return text }
+        var out = colorizePairs(text, marker: "**", code: "97;1")   // bold → bright white
+        out = colorizePairs(out, marker: "`", code: "96")           // inline code → cyan
+        out = colorizeLineLeads(out, firstIsLineStart: firstIsLineStart)  // #headers / -•* bullets / 1. lists
+        return out
+    }
+
+    /// Replace every COMPLETE `marker … marker` pair on a single line with an ANSI-colored run,
+    /// dropping the markers. Unbalanced/multiline markers are left untouched. Balanced escapes only.
+    private static func colorizePairs(_ s: String, marker: String, code: String) -> String {
+        guard s.contains(marker) else { return s }
+        let m = Array(marker), chars = Array(s)
+        func matchAt(_ i: Int) -> Bool {
+            guard i + m.count <= chars.count else { return false }
+            for k in 0..<m.count where chars[i + k] != m[k] { return false }
+            return true
+        }
+        var result = "", i = 0
+        while i < chars.count {
+            if matchAt(i) {
+                var j = i + m.count, close = -1
+                while j < chars.count, chars[j] != "\n" {
+                    if matchAt(j) { close = j; break }
+                    j += 1
+                }
+                if close > i + m.count {   // non-empty content between the markers
+                    result += "\u{001B}[\(code)m" + String(chars[(i + m.count)..<close]) + "\u{001B}[0m"
+                    i = close + m.count
+                    continue
+                }
+            }
+            result.append(chars[i]); i += 1
+        }
+        return result
+    }
+
+    /// Color the LEAD of complete markdown lines: `#`/`##`/`###` headers get a neon heading color and
+    /// their `#` markers dropped; `- `/`* `/`+ `/`• ` bullets and `N.`/`N)` numbers get a colored
+    /// glyph. Only fully-terminated lines (ending in "\n") are touched, so a partial trailing line in
+    /// this chunk is left raw and re-processed when it completes in the next chunk.
+    private static func colorizeLineLeads(_ s: String, firstIsLineStart: Bool) -> String {
+        guard s.contains("\n") else { return s }
+        var lines = s.components(separatedBy: "\n")
+        let lastIndex = lines.count - 1                       // trailing partial (no newline) — leave raw
+        // Line 0 is only a genuine line start if the previous chunk ended at a boundary; otherwise it's
+        // a mid-sentence continuation and must not be treated as a bullet/header lead.
+        let start = firstIsLineStart ? 0 : 1
+        guard start < lastIndex else { return s }
+        for idx in start..<lastIndex {
+            let line = lines[idx]
+            let trimmed = line.drop { $0 == " " }
+            let indent = String(line.prefix(line.count - trimmed.count))
+            if trimmed.hasPrefix("#") {
+                let hashes = trimmed.prefix { $0 == "#" }
+                let title = trimmed.dropFirst(hashes.count).drop { $0 == " " }
+                guard !title.isEmpty else { continue }
+                lines[idx] = indent + "\u{001B}[95;1m▸ " + title + "\u{001B}[0m"   // header → magenta
+            } else if let f = trimmed.first, "-*+•".contains(f), trimmed.dropFirst().first == " " {
+                lines[idx] = indent + "\u{001B}[96;1m•\u{001B}[0m " + String(trimmed.dropFirst(2))  // bullet → cyan dot
+            } else {
+                let digits = trimmed.prefix { $0.isNumber }
+                if !digits.isEmpty, digits.count <= 3,
+                   let marker = trimmed.dropFirst(digits.count).first, marker == "." || marker == ")",
+                   trimmed.dropFirst(digits.count + 1).first == " " {
+                    let rest = String(trimmed.dropFirst(digits.count + 2))
+                    lines[idx] = indent + "\u{001B}[93;1m\(digits)\(marker)\u{001B}[0m " + rest  // number → yellow
+                }
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// A markdown-ish list item: `- `, `* `, `+ `, `• `, or `1.` / `2)` numbered.
