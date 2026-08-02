@@ -2545,10 +2545,14 @@ struct KistREPL {
             let healthy = TrajectoryAnalyzer.analyze(trajectory).healthy
             confidence = min(0.98, max(0.30, 0.95 - rate * 0.4 - (healthy ? 0 : 0.15) - (grounded ? 0 : 0.15)))
         }
-        let next = plan.active?.boardTitle
-            ?? plan.nextActionable?.boardTitle
-            ?? plan.next?.boardTitle
-            ?? "Continue"
+        // "Next" must not FREEZE on a stale board task when the user just asked a QUESTION that never
+        // touched the board (Luke's "I asked something and Next never changed" bug — a task stuck
+        // inProgress made plan.active return it forever). Only surface a specific board Next when THIS
+        // turn actually worked the board (a file mutation or the `tasks` tool); otherwise "Continue".
+        let workedBoard = trajectory.contains { ($0.success && Copilot.mutatingTools.contains($0.tool)) || $0.tool == "tasks" }
+        let next = workedBoard
+            ? (plan.active?.boardTitle ?? plan.nextActionable?.boardTitle ?? plan.next?.boardTitle ?? "Continue")
+            : "Continue"
         return StatusDashboard(minds: minds,
                                tasks: Array(tasks),
                                learned: latestCapsule?.learned ?? [],

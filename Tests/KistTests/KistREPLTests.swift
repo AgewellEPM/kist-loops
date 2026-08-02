@@ -70,6 +70,18 @@ final class KistREPLTests: XCTestCase {
         XCTAssertFalse(brief.lowercased().contains("hypothetical") && !brief.contains("No hypotheticals"))
     }
 
+    func testDashboardNextDoesNotFreezeOnNonBoardTurns() {
+        // Regression (Luke's frozen-"Next" bug): a task stuck inProgress made the dashboard "Next" repeat
+        // forever even for plain question turns. "Next" must gate on whether THIS turn worked the board.
+        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("let next = workedBoard"),
+                      "the dashboard Next must be gated on workedBoard so it can't freeze on a stale task")
+        XCTAssertTrue(repl.contains("? (plan.active?.boardTitle") && repl.contains(": \"Continue\""),
+                      "a non-board turn shows 'Continue', not a frozen inProgress task")
+    }
+
     func testBugHuntCommandDispatchesAFleet() {
         let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
