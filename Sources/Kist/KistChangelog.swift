@@ -48,77 +48,35 @@ enum KistChangelog {
                        version: String = KistBuildInfo.productVersion,
                        color: Bool,
                        width: Int = 76) -> String {
-        func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
-        let W = max(48, width)
-        let inner = W - 4                               // "│ " + content + " │"
         let cur = current(version: version)
+        return TerminalCard.build(title: "🚀 kist v\(version)", color: color, width: width) { b in
+            if let h = cur?.headline { b.bullet(" ", glyphCode: "2", h, textCode: "37;1") }
+            b.blank()
 
-        func pad(_ s: String) -> String {
-            let w = TerminalCellText.width(s)
-            return w >= inner ? s : s + String(repeating: " ", count: inner - w)
-        }
-        func row(_ content: String) -> String { c("2", "│ ") + pad(content) + c("2", " │") + "\n" }
-        func blank() -> String { row("") }
-        func wrap(_ text: String, _ w: Int) -> [String] {
-            guard w > 4 else { return [text] }
-            var lines: [String] = []; var cur = ""
-            for word in text.split(separator: " ").map(String.init) {
-                let cand = cur.isEmpty ? word : cur + " " + word
-                if TerminalCellText.width(cand) <= w { cur = cand }
-                else { if !cur.isEmpty { lines.append(cur) }; cur = word }
+            // Build stamp — the honest "when / what shipped" line.
+            var stamp: [String] = []
+            if let sc = provenance.shortCommit { stamp.append(b.c("94", sc)) }
+            if let br = provenance.branch { stamp.append(b.c("94", br)) }
+            if let d = provenance.builtAt { stamp.append(b.c("94", isoStamp(d))) }
+            if provenance.sourceDirty == true { stamp.append(b.c("33;1", "dirty")) }
+            b.row(stamp.isEmpty ? b.c("2", "build stamp unavailable (unmanaged build)")
+                                : b.c("2", "build ") + stamp.joined(separator: b.c("2", " · ")))
+            b.blank()
+
+            if let cur {
+                b.row(b.c("95;1", "What's new in \(cur.version)") + b.c("2", " · \(cur.date)"))
+                for change in cur.changes { b.bullet("•", glyphCode: "92;1", change) }
+                b.blank()
             }
-            if !cur.isEmpty { lines.append(cur) }
-            return lines.isEmpty ? [""] : lines
-        }
-        // A bulleted, wrapped content block: colored bullet on line 0, aligned continuations.
-        func bullet(_ glyphCode: String, _ glyph: String, _ text: String, textCode: String) -> String {
-            let lead = glyph + " "
-            let leadCells = TerminalCellText.width(lead)
-            let wrapped = wrap(text, inner - leadCells)
-            var s = row(c(glyphCode, lead) + c(textCode, wrapped[0]))
-            for cont in wrapped.dropFirst() {
-                s += row(String(repeating: " ", count: leadCells) + c(textCode, cont))
-            }
-            return s
-        }
 
-        // Top border carries the title, Codex-style: ╭─ 🚀 kist v0.17.0 ─────╮
-        let title = "🚀 kist v\(version)"
-        let titleCells = TerminalCellText.width(title)
-        let trailingDashes = max(0, W - 5 - titleCells)          // ╭ + "─ " + title + " " + dashes + ╮
-        var out = "\n" + c("2", "╭─ ") + c("96;1", title) + c("2", " " + String(repeating: "─", count: trailingDashes) + "╮") + "\n"
-
-        if let h = cur?.headline { out += bullet("2", " ", h, textCode: "37;1") }
-        out += blank()
-
-        // Build stamp — the honest "when / what shipped" line.
-        var stamp: [String] = []
-        if let sc = provenance.shortCommit { stamp.append(c("94", sc)) }
-        if let b = provenance.branch { stamp.append(c("94", b)) }
-        if let d = provenance.builtAt { stamp.append(c("94", isoStamp(d))) }
-        if provenance.sourceDirty == true { stamp.append(c("33;1", "dirty")) }
-        if stamp.isEmpty {
-            out += row(c("2", "build stamp unavailable (unmanaged build)"))
-        } else {
-            out += row(c("2", "build ") + stamp.joined(separator: c("2", " · ")))
-        }
-        out += blank()
-
-        if let cur {
-            out += row(c("95;1", "What's new in \(cur.version)") + c("2", " · \(cur.date)"))
-            for change in cur.changes { out += bullet("92;1", "•", change, textCode: "37") }
-            out += blank()
-        }
-
-        let earlier = releases.filter { $0.version != (cur?.version ?? version) }
-        if !earlier.isEmpty {
-            out += row(c("2", "Earlier releases"))
-            for r in earlier {
-                out += bullet("94;1", "▪", "\(r.version) · \(r.date) · \(r.headline)", textCode: "37")
+            let earlier = releases.filter { $0.version != (cur?.version ?? version) }
+            if !earlier.isEmpty {
+                b.heading("Earlier releases", "2")
+                for r in earlier {
+                    b.bullet("▪", glyphCode: "94;1", "\(r.version) · \(r.date) · \(r.headline)")
+                }
             }
         }
-        out += c("2", "╰" + String(repeating: "─", count: W - 2) + "╯") + "\n"
-        return out
     }
 
     /// A stable `YYYY-MM-DD HH:MM` in the local zone (no Date.now — takes the instant explicitly).

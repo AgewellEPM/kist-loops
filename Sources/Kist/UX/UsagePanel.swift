@@ -136,48 +136,136 @@ struct UsagePanel {
         let week = combined.filter { $0.startedAt >= weekStart && $0.startedAt <= now }
         let sessionSummary = UsageCost.summarize(spans: session)
         let weekSummary = UsageCost.summarize(spans: week)
+        let mutating: Set<String> = ["write_file", "edit_file", "apply_patch", "notebook_edit",
+                                     "create_directory", "make_dir", "move_file"]
 
-        var lines: [String] = []
-        lines.append(c("1;37", "Usage", color))
-        lines.append("")
-        lines.append(c("1", "Session", color))
-        if session.isEmpty || sessionSummary.tokens == 0 {
-            lines.append("No token usage recorded in this session yet.")
-        } else {
-            let modelCalls = session.filter { $0.kind == .llmCall }.count
-            let toolCalls = session.filter { $0.kind == .toolCall }.count
-            let errors = session.filter { $0.status == .error }.count
-            lines.append("Total cost:        \(formatCost(sessionSummary))")
-            lines.append("Total duration:    \(formatDuration(session))")
-            lines.append("Total tokens:      \(formatTokens(sessionSummary.tokens))")
-            lines.append("Calls:             \(modelCalls) model, \(toolCalls) tool" + (errors > 0 ? ", \(errors) error" : ""))
-            lines.append("")
-            lines.append(c("1", "Usage by model", color))
-            lines.append(contentsOf: bucketLines(session, by: modelKey))
-            lines.append("")
-            lines.append(c("1", "Usage by role", color))
-            lines.append(contentsOf: bucketLines(session, by: roleKey))
+        return TerminalCard.build(title: "📊 Usage", color: color, width: 76) { b in
+            b.heading("Session", "96;1")
+            if session.isEmpty || sessionSummary.tokens == 0 {
+                b.row("No token usage recorded in this session yet.")
+            } else {
+                let llm = session.filter { $0.kind == .llmCall }
+                let tools = session.filter { $0.kind == .toolCall }
+                let errors = session.filter { $0.status == .error }.count
+                let inTok = llm.reduce(0) { $0 + $1.promptTokens }
+                let outTok = llm.reduce(0) { $0 + $1.completionTokens }
+                let apiSec = Int((llm.reduce(0.0) { $0 + $1.durationMs } / 1000).rounded())
+                let edits = tools.filter { mutating.contains($0.toolName ?? "") && $0.status == .ok }.count
+                b.kv("Cost", formatCost(sessionSummary))
+                b.kv("Duration", "\(formatDuration(session)) wall · \(formatSeconds(apiSec)) in model")
+                b.kv("Tokens", "\(formatTokens(sessionSummary.tokens)) · \(formatTokens(inTok)) in · \(formatTokens(outTok)) out")
+                b.kv("Calls", "\(llm.count) model · \(tools.count) tool" + (errors > 0 ? " · \(errors) error" : ""))
+                if edits > 0 { b.kv("Edits", "\(edits) file write/edit call(s)") }
+
+                b.blank(); b.heading("By model — who did the work")
+                let models = modelBuckets(llm)
+                if models.isEmpty { b.row(b.c("2", "(no model token spans)")) }
+                for m in models.prefix(8) {
+                    b.bullet("•", glyphCode: "92;1",
+                             "\(m.name) — \(formatTokens(m.input)) in · \(formatTokens(m.output)) out · \(costLabel(m.name, m.cost))")
+                }
+
+                let toolCounts = countBuckets(tools.compactMap { $0.toolName }.filter { !$0.hasPrefix("mcp__") })
+                if !toolCounts.isEmpty {
+                    b.blank(); b.heading("Where the work went — tools")
+                    let total = max(1, toolCounts.reduce(0) { $0 + $1.1 })
+                    for (name, n) in toolCounts.prefix(8) { b.kv("  " + name, "\(n) · \(share(n, of: total))") }
+                }
+
+                let subs = subagentBuckets(llm)
+                if !subs.isEmpty {
+                    b.blank(); b.heading("Subagents — delegated minds")
+                    let total = max(1, subs.reduce(0) { $0 + $1.1 })
+                    for (role, tok) in subs.prefix(6) { b.kv("  " + role, "\(formatTokens(tok)) · \(share(tok, of: total))") }
+                }
+
+                let mcp = countBuckets(tools.compactMap { $0.toolName }.filter { $0.hasPrefix("mcp__") }.map(mcpServer))
+                if !mcp.isEmpty {
+                    b.blank(); b.heading("MCP servers")
+                    for (server, n) in mcp.prefix(6) { b.kv("  " + server, "\(n) call(s)") }
+                }
+            }
+
+            b.blank(); b.heading("This week (local kist usage)", "94;1")
+            if week.isEmpty || weekSummary.tokens == 0 {
+                b.row(b.c("2", "No local traced token usage this week."))
+            } else {
+                let weekTokens = max(weekSummary.tokens, sessionSummary.tokens)
+                b.row(b.c("2", "session ") + bar(value: sessionSummary.tokens, total: weekTokens) + " " + share(sessionSummary.tokens, of: weekTokens))
+                b.row(b.c("2", "week    ") + bar(value: weekSummary.tokens, total: weekTokens) + " " + formatTokens(weekSummary.tokens))
+                b.kv("  week cost", formatCost(weekSummary))
+                // Per-provider week split — how hard each subscription / key was leaned on.
+                for m in modelBuckets(week.filter { $0.kind == .llmCall }, byVendor: true).prefix(6) {
+                    b.kv("  " + m.name, "\(formatTokens(m.input + m.output)) · \(costLabel(m.name, m.cost))")
+                }
+            }
+
+            b.blank(); b.heading("Subscription providers", "93;1")
+            b.bullet("▪", glyphCode: "93;1",
+                     "claude-cli / codex-cli are keyless subscription providers — the tokens above are what KIST drove through them (cost shown at list rates, not your plan).",
+                     textCode: "2")
+            b.bullet("▪", glyphCode: "93;1",
+                     "Global weekly plan % (across Claude Code / Codex, all apps) is owned by those CLIs — not yet aggregated here.",
+                     textCode: "2")
+
+            if !session.isEmpty, sessionSummary.tokens > 0 {
+                b.blank(); b.heading("What's driving it", "95;1")
+                for insight in contributionLines(session: session, week: week).prefix(5) {
+                    b.bullet("→", glyphCode: "96;1", insight)
+                }
+            }
+            if let ledgerWarning { b.blank(); b.row(b.c("33", ledgerWarning)) }
         }
+    }
 
-        lines.append("")
-        lines.append(c("1", "Local Week", color))
-        if week.isEmpty || weekSummary.tokens == 0 {
-            lines.append("No local traced token usage this week.")
-        } else {
-            let sessionTokens = sessionSummary.tokens
-            let weekTokens = max(weekSummary.tokens, sessionTokens)
-            lines.append("Current session:   \(bar(value: sessionTokens, total: weekTokens)) \(share(sessionTokens, of: weekTokens)) of local week")
-            lines.append("Local week trace:  \(bar(value: weekSummary.tokens, total: weekTokens)) \(formatTokens(weekSummary.tokens)) · \(formatCost(weekSummary))")
+    // MARK: - Rich breakdown helpers
+
+    struct ModelBucket { let name: String; let input: Int; let output: Int; let cost: UsageCostSummary }
+
+    private static func modelBuckets(_ llm: [AgentSpan], byVendor: Bool = false) -> [ModelBucket] {
+        let priced = llm.filter { $0.totalTokens > 0 }
+        let groups = Dictionary(grouping: priced, by: { byVendor ? ($0.vendor ?? "(unknown)") : modelKey($0) })
+        var out: [ModelBucket] = groups.map { name, spans in
+            ModelBucket(name: name,
+                        input: spans.reduce(0) { $0 + $1.promptTokens },
+                        output: spans.reduce(0) { $0 + $1.completionTokens },
+                        cost: UsageCost.summarize(spans: spans))
         }
-        lines.append("Account quota:     unavailable locally; provider plan limits are not exposed by Kist yet.")
-        if let ledgerWarning { lines.append(ledgerWarning) }
+        out.sort { ($0.input + $0.output) != ($1.input + $1.output) ? ($0.input + $0.output) > ($1.input + $1.output) : $0.name < $1.name }
+        return out
+    }
 
-        lines.append("")
-        lines.append(c("1", "What's Contributing", color))
-        lines.append(contentsOf: contributionLines(session: session, week: week))
-        lines.append("")
-        lines.append(c("2", "Commands: /logs for proof · /replay latest for run evidence · /clear to drop chat context", color))
-        return lines.joined(separator: "\n")
+    /// Delegated-role LLM spans (worker/coder/critic/researcher/council/fleet/reviewer/verifier), by tokens.
+    private static func subagentBuckets(_ llm: [AgentSpan]) -> [(String, Int)] {
+        let delegated = ["worker", "coder", "builder", "critic", "reviewer", "verifier",
+                         "researcher", "research", "council", "fleet", "analyst", "planner", "architect"]
+        let spans = llm.filter { span in
+            let r = (span.role ?? "").lowercased()
+            return delegated.contains { r.contains($0) }
+        }
+        return Dictionary(grouping: spans, by: roleKey)
+            .mapValues { $0.reduce(0) { $0 + $1.totalTokens } }
+            .filter { $0.value > 0 }
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map { ($0.key, $0.value) }
+    }
+
+    private static func countBuckets(_ names: [String]) -> [(String, Int)] {
+        Dictionary(grouping: names, by: { $0 }).mapValues { $0.count }
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map { ($0.key, $0.value) }
+    }
+
+    /// `mcp__<server>__<tool>` → `<server>`.
+    private static func mcpServer(_ tool: String) -> String {
+        let parts = String(tool.dropFirst("mcp__".count)).components(separatedBy: "__")
+        return parts.first ?? tool
+    }
+
+    private static func formatSeconds(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
     }
 
     private static func dedupe(_ spans: [AgentSpan]) -> [AgentSpan] {
@@ -188,27 +276,6 @@ struct UsagePanel {
             out.append(span)
         }
         return out
-    }
-
-    private static func bucketLines(_ spans: [AgentSpan], by key: (AgentSpan) -> String) -> [String] {
-        let llm = spans.filter { $0.kind == .llmCall && $0.totalTokens > 0 }
-        guard !llm.isEmpty else { return ["(no model token spans)"] }
-        let groups = Dictionary(grouping: llm, by: key)
-        var buckets: [(String, UsageCostSummary)] = []
-        for (name, spans) in groups {
-            let summary = UsageCost.summarize(spans: spans)
-            buckets.append((name, summary))
-        }
-        buckets.sort { lhs, rhs in
-            lhs.1.tokens > rhs.1.tokens || (lhs.1.tokens == rhs.1.tokens && lhs.0 < rhs.0)
-        }
-        var lines = buckets.prefix(8).map { name, summary in
-            "  \(name.padding(toLength: 30, withPad: " ", startingAt: 0)) \(formatTokens(summary.tokens)) · \(formatCost(summary))"
-        }
-        if buckets.count > 8 {
-            lines.append("  ... and \(buckets.count - 8) more")
-        }
-        return lines
     }
 
     private static func contributionLines(session: [AgentSpan], week: [AgentSpan]) -> [String] {
@@ -260,16 +327,22 @@ struct UsagePanel {
         return "(default)"
     }
 
-    private static func formatCost(_ summary: UsageCostSummary) -> String {
-        let dollars: String
-        if summary.knownUSD == 0 {
-            dollars = "unpriced"
-        } else if summary.knownUSD < 0.0001 {
-            dollars = "~<$0.0001"
-        } else {
-            dollars = String(format: "~$%.4f", summary.knownUSD)
+    /// Keyless subscription providers (Claude Max / ChatGPT plan) — no per-token charge, so their
+    /// cost reads "subscription", not "unpriced".
+    private static let subscriptionVendors = ["claude-cli", "codex-cli"]
+
+    private static func costLabel(_ name: String, _ cost: UsageCostSummary) -> String {
+        let lower = name.lowercased()
+        if cost.knownUSD == 0, subscriptionVendors.contains(where: { lower.hasPrefix($0) }) {
+            return "subscription"
         }
-        return summary.unknownTokens > 0 ? "\(dollars), \(formatTokens(summary.unknownTokens)) unpriced" : dollars
+        return formatCost(cost)
+    }
+
+    private static func formatCost(_ summary: UsageCostSummary) -> String {
+        if summary.knownUSD == 0 { return "unpriced" }
+        let dollars = summary.knownUSD < 0.0001 ? "~<$0.0001" : String(format: "~$%.4f", summary.knownUSD)
+        return summary.unknownTokens > 0 ? "\(dollars) + \(formatTokens(summary.unknownTokens)) unpriced" : dollars
     }
 
     private static func formatTokens(_ tokens: Int) -> String {

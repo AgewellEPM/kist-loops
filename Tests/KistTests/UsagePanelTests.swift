@@ -15,33 +15,64 @@ final class UsagePanelTests: XCTestCase {
 
         let out = UsagePanel.render(sessionSpans: spans, ledgerSpans: spans, now: now, color: false)
 
-        XCTAssertTrue(out.contains("Usage"))
+        XCTAssertTrue(out.contains("📊 Usage"))
         XCTAssertTrue(out.contains("Session"))
-        XCTAssertTrue(out.contains("Local Week"))
+        XCTAssertTrue(out.contains("This week"))
+        XCTAssertTrue(out.contains("By model"))
         XCTAssertTrue(out.contains("gemini:gemini-2.5-flash"))
         XCTAssertTrue(out.contains("mimo:mimo-v2.5-pro"))
-        XCTAssertTrue(out.contains("council_worker"))
-        XCTAssertTrue(out.contains("Account quota:"))
+        XCTAssertTrue(out.contains("council_worker"), "delegated role shown under Subagents")
+        XCTAssertTrue(out.contains("Subscription providers"))
         XCTAssertTrue(out.contains("delegated/council"))
+    }
+
+    func testClaudeAndCodexCliShownAsSubscription() {
+        let now = Date(timeIntervalSince1970: 1_782_700_000)
+        let spans = [
+            llm(id: "c1", now: now, role: "captain", vendor: "claude-cli", model: "claude-opus-4-8", input: 50_000, output: 3_000),
+            llm(id: "x1", now: now, role: "critic", vendor: "codex-cli", model: "gpt-5.6-sol", input: 20_000, output: 1_000),
+        ]
+        let out = UsagePanel.render(sessionSpans: spans, ledgerSpans: spans, now: now.addingTimeInterval(5), color: false)
+        XCTAssertTrue(out.contains("claude-cli:claude-opus-4-8"))
+        XCTAssertTrue(out.contains("codex-cli:gpt-5.6-sol"))
+        XCTAssertTrue(out.contains("subscription"), "keyless CLI providers read 'subscription', not a $ figure")
+        XCTAssertFalse(out.contains("unpriced, "), "no redundant 'unpriced, N unpriced' phrasing")
+    }
+
+    func testUsageCardRowsAreEqualCellWidth() {
+        let now = Date(timeIntervalSince1970: 1_782_700_000)
+        let spans = [
+            llm(id: "c1", now: now, role: "coder", vendor: "claude-cli", model: "claude-opus-4-8", input: 90_000, output: 6_000),
+            tool(id: "t1", now: now, name: "write_file"), tool(id: "t2", now: now, name: "mcp__perslis__vm_launch"),
+        ]
+        for color in [false, true] {
+            let out = UsagePanel.render(sessionSpans: spans, ledgerSpans: spans, now: now.addingTimeInterval(5), color: color)
+            let lines = out.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+            for line in lines where line.contains("│") || line.contains("╭") || line.contains("╰") {
+                XCTAssertEqual(TerminalCellText.width(line), 76,
+                               "usage card row not 76 cells (color=\(color)): \(TerminalCellText.stripANSI(line))")
+            }
+        }
     }
 
     func testUsagePanelHandlesEmptyTraceHonestly() {
         let out = UsagePanel.render(sessionSpans: [], ledgerSpans: [], color: false)
 
         XCTAssertTrue(out.contains("No token usage recorded"))
-        XCTAssertTrue(out.contains("Account quota:     unavailable locally"))
+        XCTAssertTrue(out.contains("Subscription providers"))
     }
 
-    func testUsagePanelShowsHiddenBucketCount() {
+    func testUsageByModelIsCappedToTopBuckets() {
         let now = Date(timeIntervalSince1970: 1_782_700_000)
         let spans = (0..<10).map { i in
             llm(id: "s\(i)", now: now.addingTimeInterval(TimeInterval(i)), role: "role\(i)",
-                vendor: "vendor\(i)", model: "model\(i)", input: 1000 + i, output: 10)
+                vendor: "vendor\(i)", model: "model\(i)", input: 1000 + i * 100, output: 10)
         }
 
         let out = UsagePanel.render(sessionSpans: spans, ledgerSpans: spans, now: now.addingTimeInterval(20), color: false)
 
-        XCTAssertTrue(out.contains("... and 2 more"))
+        XCTAssertTrue(out.contains("vendor9:model9"), "highest-token model shown")
+        XCTAssertFalse(out.contains("vendor0:model0"), "lowest models beyond top-8 are capped out")
     }
 
     func testUsageLedgerPersistsAndDeduplicatesSpans() throws {
