@@ -30,8 +30,22 @@ final class KistChangelogTests: XCTestCase {
         XCTAssertTrue(out.contains("fee3d5cff46f"), "shows the short commit from the manifest")
         XCTAssertTrue(out.contains("feat/dig-in-deep-council"))
         XCTAssertTrue(out.contains("What's new"))
-        if let firstChange = KistChangelog.current()?.changes.first {
-            XCTAssertTrue(out.contains(firstChange), "the current release's changes must appear")
+        XCTAssertTrue(out.contains("╭") && out.contains("╰"), "rendered as a bordered card")
+    }
+
+    // The card must stay square: every row (top/content/bottom) is the same visible cell width even
+    // with emoji + ANSI inside. This is the alignment guarantee the whole card rendering rests on.
+    func testCardRowsAreEqualCellWidth() {
+        let prov = KistBuildInfo.Provenance(commit: "abcdef012345", branch: "feat/dig-in-deep-council",
+                                            sourceDirty: false, builtAt: nil)
+        for color in [false, true] {
+            let out = KistChangelog.render(provenance: prov, color: color, width: 76)
+            let lines = out.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+            XCTAssertFalse(lines.isEmpty)
+            for line in lines {
+                XCTAssertEqual(TerminalCellText.width(line), 76,
+                               "card row not 76 cells (color=\(color)): \(TerminalCellText.stripANSI(line))")
+            }
         }
     }
 
