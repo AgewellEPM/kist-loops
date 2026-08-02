@@ -95,8 +95,10 @@ struct KistOptions {
     var tui = false                 // --tui: raw-mode persistent-input TUI (PROTOTYPE; off by default)
     var pinnedBar = true            // R2b: input bar glued to the bottom (scroll-region pinned). Default
                                     // ON for interactive TTYs; `--no-pinned-bar` reverts to the inline box.
-    var stickyTurns = false         // Keep the pinned box during turns via the serialized screen owner.
-                                    // Explicit opt-in only; normal kist retains suspend/resume fallback.
+    var stickyTurns = true          // Keep the pinned box during turns via the serialized screen owner.
+                                    // Default ON as of 2026-08-02 (Luke-approved; --sticky-bar-self-test
+                                    // PASS — box stays fixed, clean scroll-region teardown). `--no-sticky-turns`
+                                    // reverts to the suspend/resume fallback if a terminal misbehaves.
     var stickyBarSelfTest = false   // hidden/offline Terminal.app diagnostic; no provider/MCP/network startup
     var fetchAllowedHosts: [String] = []  // --fetch-host <host>: restrict fetch_url to exact/wildcard hosts
     var providerHealth = false     // --health: offline provider/model/router health report
