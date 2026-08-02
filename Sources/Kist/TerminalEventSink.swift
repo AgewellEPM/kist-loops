@@ -25,10 +25,12 @@ struct TerminalEventSink: RuntimeEventSink {
         // before `.completed` renders, so a streamedChars-based guard is always false by then and the whole
         // answer double-prints as the "done" tail. This flag survives that reset. (Bug fix 2026-07-29.)
         var textWasStreamed = false
-        // Prose markdown coloring needs to know whether the NEXT streamed chunk begins at a real line
-        // boundary — else a chunk that happens to start with "- " or "1. " mid-sentence gets falsely
-        // bulletized. True at turn start and after any chunk that ended in "\n".
-        var proseAtLineStart = true
+        // Prose markdown coloring buffers streamed text to a LINE boundary before rendering, so a marker
+        // pair (`**`, `` ` ``) is always evaluated over a whole line — never mispaired across a chunk
+        // split. `proseBuffer` holds the current unterminated line; `proseInFence` tracks a ``` code
+        // block so its contents are emitted RAW (never re-colored as prose).
+        var proseBuffer = ""
+        var proseInFence = false
         var promptTokens = 0
         var completionTokens = 0
         var usageEstimated = false
@@ -98,6 +100,39 @@ struct TerminalEventSink: RuntimeEventSink {
     }
     private func write(_ s: String) { FileHandle.standardOutput.write(Data(s.utf8)) }
 
+    /// Buffer streamed prose and emit only COMPLETE lines — so every markdown marker pair is evaluated
+    /// over a whole line and can't be mispaired across a chunk split (Codex catch). A line inside a
+    /// ``` fence is emitted RAW; the fence marker itself is dimmed.
+    private func emitProse(_ text: String) {
+        state.proseBuffer += text
+        while let nl = state.proseBuffer.firstIndex(of: "\n") {
+            let line = String(state.proseBuffer[..<nl])
+            state.proseBuffer.removeSubrange(state.proseBuffer.startIndex...nl)
+            write(renderStreamedLine(line) + "\n")
+        }
+    }
+
+    /// Emit any buffered partial line before non-prose output (a tool line, the done line) or at turn
+    /// end. The partial line is rendered too — `colorizePairs` leaves an unclosed marker literal, so a
+    /// half-typed `**bold` stays safe.
+    private func flushProse() {
+        guard !state.proseBuffer.isEmpty else { return }
+        let line = state.proseBuffer
+        state.proseBuffer = ""
+        write(renderStreamedLine(line))
+    }
+
+    /// Render one prose line, honoring the running fence state (which this call may toggle).
+    private func renderStreamedLine(_ line: String) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+            state.proseInFence.toggle()
+            return color ? c("2", line) : line          // dim the fence rule; never re-color its body
+        }
+        if state.proseInFence { return line }           // code content is emitted verbatim
+        return Self.renderProseLine(line, color: color)
+    }
+
     func emit(_ event: RuntimeEvent) {
         state.withLock { emitLocked(event) }
     }
@@ -106,6 +141,12 @@ struct TerminalEventSink: RuntimeEventSink {
         // R3: every event is progress — feed the stall alarm.
         state.lastProgressAt = Date()
         state.stallWarned = false
+        // Any output OTHER than more prose (a tool line, the done line, reasoning) must first flush the
+        // buffered partial prose line so ordering + coloring stay correct. `.usage` only ticks counters.
+        switch event {
+        case .tokenDelta, .usage: break
+        default: flushProse()
+        }
         // R3: watchdog lifecycle — terminal events and interactive prompts stop the clock (the
         // user is deciding; that's not the run stalling), everything else keeps it armed.
         switch event {
@@ -126,15 +167,14 @@ struct TerminalEventSink: RuntimeEventSink {
                 beginLiveStatus("working")
             case .idle, .completed, .failed, .cancelled:
                 finishLiveStatus()
+                state.proseInFence = false   // turn/interruption over (incl. ESC's .stateChanged(.cancelled))
             }
         case .tokenDelta(let t):
             proofStore?.record(.init(kind: .assistant, tool: nil, success: nil, text: t))   // proof keeps raw
             state.streamedChars += t.count
             state.textWasStreamed = true                                   // final answer shown inline ⇒ don't reprint on "done"
             finishLiveStatus(clearOnly: true)
-            let spaced = Self.spaceListItems(t)                             // list-spaced prose
-            write(Self.emphasizeProse(spaced, color: color, firstIsLineStart: state.proseAtLineStart))
-            state.proseAtLineStart = spaced.hasSuffix("\n")                 // next chunk's line-start state
+            emitProse(Self.spaceListItems(t))                              // buffer to line, then render
         case .usage(let promptTokens, let completionTokens, let estimated):
             state.promptTokens += max(0, promptTokens)
             state.completionTokens += max(0, completionTokens)
@@ -233,14 +273,14 @@ struct TerminalEventSink: RuntimeEventSink {
             let tail = (state.textWasStreamed || summary.isEmpty) ? "" : c("37", " · " + summary)
             print("\n" + c("32;1", "●") + c("32", " done") + tail)
             state.textWasStreamed = false                         // turn over — next turn starts un-streamed
-            state.proseAtLineStart = true                          // next turn's prose starts at a line boundary
+            state.proseInFence = false                             // turn over — reset fence tracking
         case .failed(let reason):
             finishLiveStatus()
             state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             proofStore?.record(.init(kind: .failed, tool: nil, success: false, text: reason))
             print("\n" + c("31;1", "●") + c("31", " failed") + c("37", " · " + ErrorHumanizer.humanize(reason)))
             state.textWasStreamed = false                         // turn over
-            state.proseAtLineStart = true
+            state.proseInFence = false
         case .contextCompacted(let omitted):
             finishLiveStatus(clearOnly: true)
             print(c("2", "⟢ compacted \(omitted) earlier step(s) into a summary — staying within context"))
@@ -249,7 +289,7 @@ struct TerminalEventSink: RuntimeEventSink {
             state.planStepCount = 0; state.currentWave = 0; state.liveDetail = nil
             print("\n" + c("33;1", "●") + c("33", " stopped"))
             state.textWasStreamed = false                         // turn over
-            state.proseAtLineStart = true
+            state.proseInFence = false
         case .planReady(let summary, let stepCount):
             // R0.1 (2026-07-28): this event was previously UNHANDLED (fell into `default: break`),
             // so the planning spinner's 1s timer kept overwriting the approval prompt's input line —
@@ -653,11 +693,29 @@ struct TerminalEventSink: RuntimeEventSink {
     /// Applied per streamed chunk, so it ONLY transforms patterns fully contained in this chunk —
     /// an emphasis marker split across two chunks is left literal (never emits an unbalanced escape,
     /// so it can't corrupt the stream). Bold is stripped of its `**` markers when colored.
-    static func emphasizeProse(_ text: String, color: Bool, firstIsLineStart: Bool = true) -> String {
+    /// Render a COMPLETE markdown block (fence-aware) — used by tests and any non-streaming caller.
+    /// The streaming path renders line-by-line via `renderProseLine` with its own fence state.
+    static func emphasizeProse(_ text: String, color: Bool) -> String {
         guard color, !text.isEmpty else { return text }
-        var out = colorizePairs(text, marker: "**", code: "97;1")   // bold → bright white
+        var inFence = false
+        let lines = text.components(separatedBy: "\n").map { line -> String in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { inFence.toggle(); return dimmed(line) }
+            return inFence ? line : renderProseLine(line, color: true)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func dimmed(_ s: String) -> String { "\u{001B}[2m" + s + "\u{001B}[0m" }
+
+    /// Light up markdown emphasis in ONE complete prose line: `**bold**` → bright (markers stripped),
+    /// `` `code` `` → cyan, and a `#`/bullet/number lead gets a colored glyph. Because the whole line
+    /// is present, marker pairs always resolve correctly. Balanced escapes only.
+    static func renderProseLine(_ line: String, color: Bool) -> String {
+        guard color, !line.isEmpty else { return line }
+        var out = colorizePairs(line, marker: "**", code: "97;1")   // bold → bright white
         out = colorizePairs(out, marker: "`", code: "96")           // inline code → cyan
-        out = colorizeLineLeads(out, firstIsLineStart: firstIsLineStart)  // #headers / -•* bullets / 1. lists
+        out = colorizeLead(out)                                     // #header / -•* bullet / 1. number
         return out
     }
 
@@ -694,36 +752,27 @@ struct TerminalEventSink: RuntimeEventSink {
     /// their `#` markers dropped; `- `/`* `/`+ `/`• ` bullets and `N.`/`N)` numbers get a colored
     /// glyph. Only fully-terminated lines (ending in "\n") are touched, so a partial trailing line in
     /// this chunk is left raw and re-processed when it completes in the next chunk.
-    private static func colorizeLineLeads(_ s: String, firstIsLineStart: Bool) -> String {
-        guard s.contains("\n") else { return s }
-        var lines = s.components(separatedBy: "\n")
-        let lastIndex = lines.count - 1                       // trailing partial (no newline) — leave raw
-        // Line 0 is only a genuine line start if the previous chunk ended at a boundary; otherwise it's
-        // a mid-sentence continuation and must not be treated as a bullet/header lead.
-        let start = firstIsLineStart ? 0 : 1
-        guard start < lastIndex else { return s }
-        for idx in start..<lastIndex {
-            let line = lines[idx]
-            let trimmed = line.drop { $0 == " " }
-            let indent = String(line.prefix(line.count - trimmed.count))
-            if trimmed.hasPrefix("#") {
-                let hashes = trimmed.prefix { $0 == "#" }
-                let title = trimmed.dropFirst(hashes.count).drop { $0 == " " }
-                guard !title.isEmpty else { continue }
-                lines[idx] = indent + "\u{001B}[95;1m▸ " + title + "\u{001B}[0m"   // header → magenta
-            } else if let f = trimmed.first, "-*+•".contains(f), trimmed.dropFirst().first == " " {
-                lines[idx] = indent + "\u{001B}[96;1m•\u{001B}[0m " + String(trimmed.dropFirst(2))  // bullet → cyan dot
-            } else {
-                let digits = trimmed.prefix { $0.isNumber }
-                if !digits.isEmpty, digits.count <= 3,
-                   let marker = trimmed.dropFirst(digits.count).first, marker == "." || marker == ")",
-                   trimmed.dropFirst(digits.count + 1).first == " " {
-                    let rest = String(trimmed.dropFirst(digits.count + 2))
-                    lines[idx] = indent + "\u{001B}[93;1m\(digits)\(marker)\u{001B}[0m " + rest  // number → yellow
-                }
-            }
+    /// Color the LEAD of one complete markdown line: `#`/`##`/`###` headers get a neon heading color
+    /// (markers dropped); `- `/`* `/`+ `/`• ` bullets and `N.`/`N)` numbers get a colored glyph.
+    private static func colorizeLead(_ line: String) -> String {
+        let trimmed = line.drop { $0 == " " }
+        let indent = String(line.prefix(line.count - trimmed.count))
+        if trimmed.hasPrefix("#") {
+            let hashes = trimmed.prefix { $0 == "#" }
+            let title = trimmed.dropFirst(hashes.count).drop { $0 == " " }
+            guard !title.isEmpty else { return line }
+            return indent + "\u{001B}[95;1m▸ " + title + "\u{001B}[0m"                    // header → magenta
         }
-        return lines.joined(separator: "\n")
+        if let f = trimmed.first, "-*+•".contains(f), trimmed.dropFirst().first == " " {
+            return indent + "\u{001B}[96;1m•\u{001B}[0m " + String(trimmed.dropFirst(2))  // bullet → cyan dot
+        }
+        let digits = trimmed.prefix { $0.isNumber }
+        if !digits.isEmpty, digits.count <= 3,
+           let marker = trimmed.dropFirst(digits.count).first, marker == "." || marker == ")",
+           trimmed.dropFirst(digits.count + 1).first == " " {
+            return indent + "\u{001B}[93;1m\(digits)\(marker)\u{001B}[0m " + String(trimmed.dropFirst(digits.count + 2))
+        }
+        return line
     }
 
     /// A markdown-ish list item: `- `, `* `, `+ `, `• `, or `1.` / `2)` numbered.
