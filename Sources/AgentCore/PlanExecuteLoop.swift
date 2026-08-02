@@ -185,6 +185,10 @@ public struct PlanExecuteLoop: Sendable {
         var replansUsed = 0
         var lastPlan: ExecutablePlan?
         var lastExecution: PlanExecution?
+        // Verification is turn-scoped, not plan-scoped. Failed plans and repaired attempts may have
+        // already changed the workspace; dropping them on replan would let the final plan launder those
+        // side effects. Each PlanExecutor trace is append-only and later plans append after it.
+        var verificationHistory: [ActionRecord] = []
 
         while true {
             // R1: ESC (via InterruptibleTurn's task cancellation) stops the plan loop at the next
@@ -277,6 +281,7 @@ public struct PlanExecuteLoop: Sendable {
                                               approveDangerous: approveDangerous,
                                               repairStep: stepRepairer).execute(plan)
                 lastExecution = exec
+                verificationHistory.append(contentsOf: Self.verifyTrajectory(plan: plan, exec: exec))
 
                 // R1: an ESC during execution must not fall into the replan/verify branches
                 // (which would print "re-planning" and spend more tokens on a run the user killed).
@@ -294,11 +299,13 @@ public struct PlanExecuteLoop: Sendable {
                     // build/test must have PASSED after the last edit — a deterministic, execution-
                     // grounded check (the same CompletionVerifier the great-loop gates on). The LLM
                     // critic below is advisory ON TOP, never the sole gate: an unverified code change
-                    // can no longer be laundered into "done" by a confident critic. Only enforced when
-                    // verifying AND shell is available (can't demand a build the run can't execute).
-                    if verifyGoal, context.shell.enabled {
-                        let traj = Self.verifyTrajectory(plan: plan, exec: exec)
-                        if case .needsVerification(let reason) = CompletionVerifier().check(trajectory: traj, canRunCommands: true) {
+                    // can no longer be laundered into "done" by a confident critic. The mutation promise
+                    // is enforced even without shell; source verification then fails honestly when shell
+                    // execution is unavailable instead of accepting absence of evidence.
+                    if verifyGoal {
+                        if case .needsVerification(let reason) = CompletionVerifier().check(
+                            trajectory: verificationHistory, canRunCommands: context.shell.enabled,
+                            expectedOutcome: .mutation, taskIntent: .build) {
                             guard replansUsed < maxReplans else {
                                 sink.emit(.failed("unverified: \(reason)"))
                                 return PlanOutcome(success: false, plan: plan, execution: exec,
@@ -420,13 +427,36 @@ public struct PlanExecuteLoop: Sendable {
     /// were review-caught false-negatives that over-blocked done runs.
     static func verifyTrajectory(plan: ExecutablePlan, exec: PlanExecution) -> [ActionRecord] {
         let stepById = Dictionary(plan.steps.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        return exec.stepResults.map { r in
+        // A phase is one concurrently-launched dependency wave (a retry receives a fresh later phase).
+        // A verifier in the same phase as a possible source mutation has no happens-before relation to
+        // that mutation, so it is deliberately downgraded. Legacy/manual StepResults have nil phases and
+        // retain their historical sequential-array semantics.
+        let mutatingPhases = Set(exec.attemptResults.compactMap { result -> Int? in
+            guard let phase = result.executionPhase,
+                  (result.effectObservation?.requiresBuildVerification ?? false) else { return nil }
+            return phase
+        })
+        return exec.attemptResults.map { r in
             let resolved: [String: Any] = stepById[r.stepId]
                 .map { ExecutablePlan.resolveArguments($0.argumentsJSON, outputs: exec.outputs) } ?? [:]
-            let fingerprint = r.tool == "run_command"
+            let fingerprint = r.argsFingerprint ?? (r.tool == "run_command"
                 ? Self.commandFingerprint(resolved)                       // full command, classifiable
-                : TrajectoryAnalyzer.fingerprint(resolved)
-            return ActionRecord(tool: r.tool, argsFingerprint: fingerprint, success: r.success)
+                : TrajectoryAnalyzer.fingerprint(resolved))
+            let observed = r.effectObservation
+                ?? ToolEffectCatalog.observe(tool: r.tool, arguments: resolved, outcomeMetadata: r.metadata)
+            let effect: ToolEffectObservation
+            if let phase = r.executionPhase, mutatingPhases.contains(phase),
+               observed.verification == .buildOrTest {
+                effect = ToolEffectObservation(mutation: observed.mutation,
+                                               verification: .nonVerifyingCommand,
+                                               progress: observed.progress,
+                                               mutationEvidence: observed.mutationEvidence)
+            } else {
+                effect = observed
+            }
+            return ActionRecord(tool: r.tool, argsFingerprint: fingerprint, success: r.success,
+                                failureDetail: r.success ? nil : r.error,
+                                effectObservation: effect)
         }
     }
 
@@ -434,13 +464,7 @@ public struct PlanExecuteLoop: Sendable {
     /// accepts (`command=<full>` or `executable=<e>&args=[...]&cwd=<c>`) so a real build/test verb is
     /// never clipped away before classification.
     static func commandFingerprint(_ args: [String: Any]) -> String {
-        if let cmd = (args["command"] as? String ?? args["cmd"] as? String) { return "command=\(cmd)" }
-        if let exe = args["executable"] as? String {
-            let argv = (args["args"] as? [Any])?.compactMap { $0 as? String } ?? []
-            let cwd = (args["cwd"] as? String).map { "&cwd=\($0)" } ?? ""
-            return "executable=\(exe)&args=\(argv)\(cwd)"
-        }
-        return TrajectoryAnalyzer.fingerprint(args)
+        ToolEffectCatalog.commandFingerprint(args)
     }
 
     /// Ask the model whether the goal is FULLY accomplished given what the steps produced. Verification

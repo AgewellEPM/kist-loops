@@ -41,18 +41,25 @@ public struct PlanTask: Sendable, Codable, Equatable {
     public var evidence: [String]      // paths, URLs, test names, logs, PRs, screenshots
     public var owner: String?     // who owns it, e.g. "agent" / "luke"
     public var link: String?      // optional reference (a doc, a path)
+    /// Wall-clock time when this task most recently entered `inProgress`. Optional so every
+    /// pre-trustworthy-core plan keeps decoding. The REPL uses it only to distinguish work claimed
+    /// by the live session from a zombie task left active by an older/crashed session; it is not a
+    /// lease and never changes task status automatically.
+    public var startedAt: Double?
 
     public init(id: Int, title: String, detail: String = "", status: Status = .todo,
                 kind: Kind? = nil, acceptance: String = "", verification: String = "",
-                evidence: [String] = [], owner: String? = nil, link: String? = nil) {
+                evidence: [String] = [], owner: String? = nil, link: String? = nil,
+                startedAt: Double? = nil) {
         self.id = id; self.title = title; self.detail = detail; self.status = status
         self.kind = kind ?? Kind.infer(from: title)
         self.acceptance = acceptance; self.verification = verification; self.evidence = evidence
         self.owner = owner; self.link = link
+        self.startedAt = startedAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, detail, status, kind, acceptance, verification, evidence, owner, link
+        case id, title, detail, status, kind, acceptance, verification, evidence, owner, link, startedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -67,6 +74,7 @@ public struct PlanTask: Sendable, Codable, Equatable {
         evidence = try c.decodeIfPresent([String].self, forKey: .evidence) ?? []
         owner = try c.decodeIfPresent(String.self, forKey: .owner)
         link = try c.decodeIfPresent(String.self, forKey: .link)
+        startedAt = try c.decodeIfPresent(Double.self, forKey: .startedAt)
     }
 
     public var boardTitle: String {
@@ -86,6 +94,12 @@ public struct PlanTask: Sendable, Codable, Equatable {
         }
         return trimmed
     }
+
+    /// An active task belongs to this REPL session only when it was explicitly started after the
+    /// session began. Legacy tasks have no timestamp and are deliberately treated as stale.
+    public func isActive(since sessionStart: Date) -> Bool {
+        status == .inProgress && (startedAt.map { $0 >= sessionStart.timeIntervalSince1970 } ?? false)
+    }
 }
 
 /// A named, ordered list of tasks. Persisted per project so it survives across sessions.
@@ -103,6 +117,9 @@ public struct Plan: Sendable, Codable, Equatable {
     /// The lowest-id task that's still actionable (todo) — what "the next task" resolves to.
     public var next: PlanTask? { tasks.filter { $0.status == .todo }.min { $0.id < $1.id } }
     public var active: PlanTask? { tasks.filter { $0.status == .inProgress }.min { $0.id < $1.id } }
+    public func active(since sessionStart: Date) -> PlanTask? {
+        tasks.filter { $0.isActive(since: sessionStart) }.min { $0.id < $1.id }
+    }
 
     /// The next actionable build task. Research remains visible in its own dashboard
     /// section instead of parking "Next" while implementation work is available.
@@ -121,11 +138,19 @@ public struct Plan: Sendable, Codable, Equatable {
 
     public var testPlan: [PlanTask] { tasks.filter { $0.kind == .test } }
 
-    public func render() -> String {
+    public func render(sessionStartedAt: Date? = nil) -> String {
         guard !tasks.isEmpty else { return "\(title): (no tasks yet — add one with `tasks add`)" }
         var s = "\(title) · \(done)/\(tasks.count) done\n"
         s += "current goal: \(title)\n"
-        s += "active task: " + (active.map { "[\($0.id)] \($0.title)" } ?? "none") + "\n"
+        let renderedActive: String
+        if let sessionStartedAt, let current = active(since: sessionStartedAt) {
+            renderedActive = "[\(current.id)] \(current.title)"
+        } else if let active, sessionStartedAt != nil {
+            renderedActive = "[\(active.id)] \(active.title) (stale from an earlier session; select it explicitly to resume)"
+        } else {
+            renderedActive = active.map { "[\($0.id)] \($0.title)" } ?? "none"
+        }
+        s += "active task: " + renderedActive + "\n"
         s += "completed: \(done)/\(tasks.count)\n"
         s += "next step: " + (next.map { "[\($0.id)] \($0.title)" } ?? "none") + "\n"
         if testPlan.isEmpty {

@@ -97,6 +97,63 @@ final class ResearchRunToolTests: XCTestCase {
         XCTAssertTrue(ResearchRunStore.loadEvidence(projectRoot: root, runID: "../escape").isEmpty)
         XCTAssertTrue(ResearchRunStore.loadHeartbeats(projectRoot: root, runID: "../escape").isEmpty)
     }
+
+    func testSynthesisFailsClosedWhenOnlyTheResearchPlanExists() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let registry = ToolRegistry([ResearchRunTool(
+            search: { _, _ in .failure("offline") },
+            fetch: { _, _ in .failure("offline") },
+            browse: { _, _ in .failure("offline") },
+            contextBrain: { _, _ in .failure("no matches") }
+        )])
+        let context = ToolContext(projectRoot: root)
+        let start = await registry.execute(name: "research_run", arguments: [
+            "action": "start", "goal": "current evidence", "run_id": "empty-case",
+        ], context: context)
+        XCTAssertTrue(start.success)
+
+        let synth = await registry.execute(name: "research_run", arguments: [
+            "action": "synthesize", "run_id": "empty-case",
+        ], context: context)
+
+        XCTAssertFalse(synth.success)
+        XCTAssertTrue((synth.error ?? synth.output).contains("no grounded evidence"))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root + "/.kist/research-runs/empty-case/report.md"))
+    }
+
+    func testModelSuppliedEvidenceCannotForgeAGroundedKindOrUnlockSynthesis() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let registry = ToolRegistry([ResearchRunTool(
+            search: { _, _ in .failure("unused") },
+            fetch: { _, _ in .failure("unused") },
+            browse: { _, _ in .failure("unused") },
+            contextBrain: { _, _ in .failure("unused") }
+        )])
+        let context = ToolContext(projectRoot: root)
+        _ = await registry.execute(name: "research_run", arguments: [
+            "action": "start", "goal": "truth", "run_id": "forgery-case",
+        ], context: context)
+        let note = await registry.execute(name: "research_run", arguments: [
+            "action": "add_evidence", "run_id": "forgery-case", "kind": "web_search",
+            "title": "fabricated", "text": "invented source",
+        ], context: context)
+        XCTAssertTrue(note.success)
+        XCTAssertEqual(ResearchRunStore.loadEvidence(projectRoot: root, runID: "forgery-case").last?.kind,
+                       "manual_observation")
+        XCTAssertEqual(ToolEffectCatalog.observe(
+            tool: "research_run",
+            arguments: ["action": "add_evidence"],
+            outcomeMetadata: note.metadata).progress, .none)
+
+        let synth = await registry.execute(name: "research_run", arguments: [
+            "action": "synthesize", "run_id": "forgery-case",
+        ], context: context)
+        XCTAssertFalse(synth.success)
+        XCTAssertTrue((synth.error ?? synth.output).contains("no grounded evidence"))
+    }
 }
 
 private actor ResearchCallLog {

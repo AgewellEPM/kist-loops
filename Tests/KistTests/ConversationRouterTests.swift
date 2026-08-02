@@ -7,6 +7,15 @@ import AgentCore
 /// build-shaped requests reach the model. The LLM classify() itself is live-verify, not unit-tested.
 final class ConversationRouterTests: XCTestCase {
 
+    func testExecutionRoutesCannotReinterpretCanonicalIntent() {
+        XCTAssertTrue(ConversationRouter.compatible(.research, with: .research))
+        XCTAssertTrue(ConversationRouter.compatible(.planExecute, with: .build))
+        XCTAssertTrue(ConversationRouter.compatible(.fleet(agents: 3), with: .build))
+        XCTAssertFalse(ConversationRouter.compatible(.research, with: .build))
+        XCTAssertFalse(ConversationRouter.compatible(.fleet(agents: 3), with: .review))
+        XCTAssertFalse(ConversationRouter.mayEscalate(.chat))
+    }
+
     func testObviousChatIsRecognized() {
         // Short, questions, and explainer openers → never escalate (handled inline as chat).
         XCTAssertTrue(ConversationRouter.isObviouslyChat("what is a closure?"))

@@ -50,6 +50,14 @@ public struct RunCommandTool: AgentTool {
         let cwd = try context.resolvedPath((arguments["cwd"] as? String) ?? ".", mustExist: true)
         let timeout = min(max(optionalInt("timeout", from: arguments) ?? 120, 1), 600)
 
+        // One invocation has one execution shape. Accepting both and silently preferring
+        // `executable` made audit/proof consumers vulnerable to classifying the unused shell text.
+        let requestedExecutable = (arguments["executable"] as? String)?.isEmpty == false
+        let requestedCommand = (arguments["command"] as? String)?.isEmpty == false
+        if requestedExecutable && requestedCommand {
+            return .failure("provide exactly one command form: executable+args OR command, not both")
+        }
+
         // Resolve execution mode + the (executableURL, argv) to spawn.
         let launchPath: String
         let launchArgs: [String]

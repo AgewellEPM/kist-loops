@@ -13,16 +13,16 @@ struct KistREPL {
     let loop: HeadlessAgentLoop
     let commands: KistCommands
     /// Escalate to a SUPERVISED FLEET from inside the conversation (nil when unavailable, e.g. resume).
-    var fleet: ((_ goal: String, _ agents: Int, _ roles: RoleBindings) async -> Void)? = nil
+    var fleet: ((_ goal: String, _ agents: Int, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Escalate to PLAN→EXECUTE (a typed DAG built by the team) from inside the conversation.
-    var planExecute: ((_ goal: String, _ roles: RoleBindings) async -> Void)? = nil
+    var planExecute: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Run an AI council (researcher -> architect -> coder -> critic -> UX -> memory -> final board).
-    var council: ((_ goal: String, _ roles: RoleBindings, _ execute: Bool) async -> Void)? = nil
+    var council: ((_ goal: String, _ roles: RoleBindings, _ execute: Bool) async -> HeavyRouteResult)? = nil
     /// "Dig in deep" / "consult the minds": ask EVERY reachable model the same question in parallel and
     /// synthesize agree/disagree — the multi-model second opinion, instead of one model answering alone.
-    var digDeep: ((_ goal: String, _ roles: RoleBindings) async -> Void)? = nil
+    var digDeep: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Run an evidence-first research pass, feed the dossier to council, and seed the shared board.
-    var research: ((_ goal: String, _ roles: RoleBindings) async -> Void)? = nil
+    var research: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Forge a specialist from a plain-English role description (AgentForge), bounded by the loop's tool
     /// ceiling, validated, and saved to the registry. nil = forging unavailable in this mode.
     var forge: ((_ description: String, _ roles: RoleBindings) async -> Void)? = nil
@@ -97,7 +97,8 @@ struct KistREPL {
     /// Deterministically save the current conversation transcript inside the project root.
     var saveTranscript: ((_ transcript: [ChatMessage], _ path: String) throws -> String)? = nil
     /// Compile messy user text into a clear, self-contained task brief before handing it to the loop.
-    var briefCompiler: ((_ input: String, _ roles: RoleBindings, _ mode: PromptCompiler.Mode, _ transcript: [ChatMessage]) -> String)? = nil
+    var briefCompiler: ((_ input: String, _ roles: RoleBindings, _ mode: PromptCompiler.Mode,
+                        _ transcript: [ChatMessage], _ intent: TaskBrief.Intent) -> String)? = nil
     /// Human-visible specialist adoption for the next turn ("acting as: security-auditor").
     var personaDisplay: ((_ input: String) -> String?)? = nil
     /// Lines typed into an approval prompt that were not approval answers, queued for the next REPL turn.
@@ -153,6 +154,7 @@ struct KistREPL {
         var extendedThinking = loop.isExtendedThinking   // --think default; /think toggles it on the held loop
         var showReasoning = loop.isExtendedThinking      // launched with --think ⇒ show reasoning (stays consistent across /model rebuilds)
         var usageSnapshot: [AgentSpan] = []
+        var submittedTurnSpans: [AgentSpan] = []
         // The model the conversation is currently talking to. In auto mode it changes per turn as the
         // heuristic routes; pinning with /model fixes it. Drives the loop rebuild + the routed banner.
         var activeBinding = roleSelection.fallback
@@ -174,6 +176,29 @@ struct KistREPL {
         var clipboardVisionApprovedForSession = autoApproveClipboardVision
         var currentPersona = "captain"   // personality layer; professional default, /persona to switch
         var copilot = CopilotConfig()    // /copilot: auto second-AI review of the diff after a coding turn
+        // The shared recorder is phase-local so substitution/review logic can make decisions about the
+        // current attempt. Preserve drained phases separately so final review, verification, learning, and
+        // replay still see the complete submitted-turn evidence in execution order.
+        var archivedTurnEvidence: [ActionRecord] = []
+        var repairPhaseFailed = false
+        func resetTurnEvidence() {
+            archivedTurnEvidence.removeAll(keepingCapacity: true)
+            submittedTurnSpans.removeAll(keepingCapacity: true)
+            repairPhaseFailed = false
+            recorder?.reset()
+        }
+        func archiveCurrentEvidencePhase() {
+            archivedTurnEvidence.append(contentsOf: recorder?.snapshot() ?? [])
+            recorder?.reset()
+        }
+        func turnEvidenceSnapshot() -> [ActionRecord] {
+            archivedTurnEvidence + (recorder?.snapshot() ?? [])
+        }
+        func reviewBaselineIfArmed(intent: TaskBrief.Intent? = nil) -> String? {
+            let automaticBuild = intent?.expectsMutation == true && copilot.automaticBuildReview
+            guard copilot.enabled || copilot.autoSecondOpinion || automaticBuild else { return nil }
+            return Self.workingTreeDiff(projectRoot: projectRoot)
+        }
         // Show the "this terminal can't render inline images" hint at most once per session, so a
         // user on Terminal.app (no inline-image protocol) isn't left thinking the drop silently broke.
         var noInlinePreviewHintShown = false
@@ -221,7 +246,9 @@ struct KistREPL {
         // calls are forbidden: a stale guards-off loop could otherwise run a /command or task turn after
         // the user left bypass (Codex CRITICAL). Source-pinned: the only `.turn(transcript:` is here.
         func runTurnInterruptible(loop l: HeadlessAgentLoop, userInput: String,
-                                  attachments: [MediaAttachment] = []) async -> HeadlessAgentLoop.Outcome {
+                                  attachments: [MediaAttachment] = [],
+                                  rawRequest: String? = nil,
+                                  resolvedIntent: TaskBrief.Intent? = nil) async -> HeadlessAgentLoop.Outcome {
             let preTurnTranscript = transcript
             let tBox = MutableBox(transcript)
             lastTurnInterrupted = false   // fresh turn; post-turn guards read it, next turn resets it
@@ -241,7 +268,10 @@ struct KistREPL {
                 }
             }) {
                 var t = tBox.value
-                let outcome = await l.turn(transcript: &t, userInput: userInput, attachments: attachments)
+                let outcome = await l.turn(transcript: &t, userInput: userInput,
+                                           attachments: attachments,
+                                           rawRequest: rawRequest,
+                                           resolvedIntent: resolvedIntent)
                 tBox.value = t
                 return outcome
             }
@@ -331,16 +361,19 @@ struct KistREPL {
                 noInlinePreviewHintShown = true
                 print("\u{001B}[37m↳ \(TerminalMediaRenderer.status()) (the model still receives the media)\u{001B}[0m")
             }
-            // A dropped-media turn is "look at THIS and answer" — NOT an agentic build. Do NOT run it
-            // through the heavy agent brief (which bleeds prior-task context and pushes tool use). Send a
-            // focused instruction that the media is ALREADY attached, so the model describes it directly
-            // instead of hunting for a file via view_image/read_file (which it then hallucinates a path for).
+            // Keep ordinary "describe this" media turns light, but preserve an explicit build contract when
+            // the user's prompt says to fix/implement/change what the screenshot shows. The semantic intent
+            // is resolved from the same raw prompt passed into AgentCore; attachment presence must not erase it.
             let text = prompt.isEmpty ? "Describe what's in the attached media and note anything important." : prompt
-            let compiled = """
-            \(text)
-
-            The media is ATTACHED directly to this message — look at it and answer from what you actually see/hear. It is ALREADY provided to you; do NOT call view_image, read_file, run_command, or any tool to find, open, load, or fetch it, and do NOT ask for a file path. Answer directly and finish.
-            """
+            let mediaMode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+            let mediaIntent = PromptCompiler.inferIntent(text, mode: mediaMode)
+            proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
+                                     text: "intent=\(mediaIntent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: mediaIntent, mode: mediaMode).rawValue) execution=inline-media"))
+            let mediaInstruction = mediaIntent.expectsMutation
+                ? "The media is ATTACHED directly to this message. Inspect it as evidence, then carry out the requested workspace change with the available tools and verify it. Do not call view_image/read_file merely to locate the attachment and do not ask for its path—it is already here."
+                : "The media is ATTACHED directly to this message — look at it and answer from what you actually see/hear. It is ALREADY provided to you; do NOT call view_image, read_file, run_command, or any tool to find, open, load, or fetch it, and do NOT ask for a file path. Answer directly and finish."
+            let compiled = text + "\n\n" + mediaInstruction
+            let reviewBaseline = reviewBaselineIfArmed(intent: mediaIntent)
             let mustUseGemini = atts.contains { $0.kind != .image || $0.fileURI != nil }
             // Vision capability is a property of the model the loop is ACTUALLY running (activeBinding),
             // NOT the default — after an auto-route switch these differ, and keying off the default could
@@ -348,34 +381,44 @@ struct KistREPL {
             let activeIsBorrow = activeBinding.providerId == visionProviderId
             let activeHandles = activeIsBorrow || (!mustUseGemini && (providerSupportsVision?(activeBinding) ?? false))
             let oc: HeadlessAgentLoop.Outcome
+            var turnAuthor = activeBinding
             if activeHandles {
-                oc = await runTurnInterruptible(loop: loop, userInput: compiled, attachments: atts)
+                oc = await runTurnInterruptible(loop: loop, userInput: compiled, attachments: atts,
+                                                rawRequest: text, resolvedIntent: mediaIntent)
             } else if let vid = visionProviderId, let loopFactory {
                 print("\u{001B}[37m↳ \(activeBinding.providerId) can't see this media — routing this turn to \(vid), back to \(activeBinding.providerId) after\u{001B}[0m")
-                let visionLoop = perm.arm(loopFactory(ProviderBinding(providerId: vid), roleSelection.bindings, perm.mode.isPlan, showReasoning, extendedThinking))
-                oc = await runTurnInterruptible(loop: visionLoop, userInput: compiled, attachments: atts)
+                turnAuthor = ProviderBinding(providerId: vid)
+                let visionLoop = perm.arm(loopFactory(turnAuthor, roleSelection.bindings, perm.mode.isPlan, showReasoning, extendedThinking))
+                oc = await runTurnInterruptible(loop: visionLoop, userInput: compiled, attachments: atts,
+                                                rawRequest: text, resolvedIntent: mediaIntent)
             } else {
                 print("\u{001B}[31m↳ no vision-capable provider configured (add a Gemini key) — sending text only\u{001B}[0m")
-                oc = await runTurnInterruptible(loop: loop, userInput: compiled)
+                oc = await runTurnInterruptible(loop: loop, userInput: compiled,
+                                                rawRequest: text, resolvedIntent: mediaIntent)
             }
             rememberHumanTurn(user: text, assistantSummary: oc.summary)
-            selfMonitor(goal: text, success: oc.success)
+            await runCopilotReview(task: text, answer: oc.summary, allowAdvisory: true,
+                                   authoredBy: turnAuthor, baselineDiff: reviewBaseline,
+                                   turnIntent: mediaIntent, turnSucceeded: oc.success)
+            // Monitoring must consume the complete submitted turn, including any reviewer-driven repair.
+            // A failed repair cannot inherit the primary attempt's success in learning/telemetry.
+            let completedTurn = recordVerificationAndFinal(outcome: oc, intent: mediaIntent)
+            selfMonitor(goal: text, intent: mediaIntent, success: completedTurn)
             await printTurnUsage()
+            recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
         }
 
         // SELF-MONITOR: analyze the just-finished turn's trajectory for reliability issues (runaway
         // loop / failure spike / read-only spin) and learn an obstacle from anything unhealthy or
         // failed. Surfaced dimly; recorded as advisory memory for future briefs.
-        func selfMonitor(goal: String, success: Bool) {
+        func selfMonitor(goal: String, intent: TaskBrief.Intent, success: Bool) {
             // R1: an ESC'd turn is a user decision, not a reliability signal — recording it as a
             // failure/obstacle would teach kist that interrupted goals fail. (Read-only: the flag
             // is reset at the START of the next turn so the other post-turn guards can read it too.)
             if lastTurnInterrupted { return }
             var issueLabels: [String] = []
-            if let recorder {
-                let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
-                let intent = PromptCompiler.compile(goal, mode: mode).intent
-                let report = TrajectoryAnalyzer.analyze(recorder.snapshot(),
+            if recorder != nil {
+                let report = TrajectoryAnalyzer.analyze(turnEvidenceSnapshot(),
                                                         taskIntent: intent)
                 issueLabels = report.issues.map { $0.kind.rawValue }
                 if !report.healthy {
@@ -394,15 +437,124 @@ struct KistREPL {
             }
         }
 
-        // /copilot: after a turn that MUTATED files, have the assigned co-reviewer model critique the actual
-        // working-tree diff. Advisory only — it prints findings and never edits/reverts. Skips silently when
-        // copilot is off, the turn changed nothing, no completion seam is wired, or the diff is empty.
+        /// Run one of the existing long-running REPL routes and close this submitted turn from the
+        /// runner's actual result. The route remains responsible for doing the work; this boundary only
+        /// prevents a successful-looking synthetic "handed off" record after a failure or ESC.
+        @discardableResult
+        func runHeavyRoute(goal: String,
+                           intent: TaskBrief.Intent,
+                           mode: PromptCompiler.Mode,
+                           execution: String,
+                           startProof: Bool,
+                           operation: () async -> HeavyRouteResult) async -> HeavyRouteResult {
+            if startProof { proofStore?.startTurn(goal: goal) }
+            proofStore?.record(HeavyRouteProof.routeEntry(intent: intent, mode: mode,
+                                                          execution: execution))
+
+            let result = await operation()
+            for entry in HeavyRouteProof.completionEntries(result: result, intent: intent,
+                                                            mode: mode, execution: execution) {
+                proofStore?.record(entry)
+            }
+            return result
+        }
+
+        func unavailableHeavyRoute(_ execution: String) -> HeavyRouteResult {
+            HeavyRouteResult(exitCode: 2, interruption: nil,
+                             review: .notApplicable("\(execution) was unavailable in this REPL"),
+                             verification: .unavailable("\(execution) never started"))
+        }
+
+        /// Close the durable proof stream with one execution-grounded verification assessment and one
+        /// canonical final result. Model review is recorded separately and never upgrades this verdict.
+        @discardableResult
+        func recordVerificationAndFinal(outcome: HeadlessAgentLoop.Outcome,
+                                        intent: TaskBrief.Intent) -> Bool {
+            let trajectory = turnEvidenceSnapshot()
+            let expected = PromptCompiler.expectedOutcome(
+                intent: intent,
+                mode: perm.mode.isPlan ? .plan : .inline)
+            var deterministicVerification: Bool?
+            let fulfilledMutationContract = trajectory.contains {
+                $0.success && ($0.observedEffects.confirmsMutation
+                    || (intent == .fleet && $0.observedEffects.progress == .delegation))
+            }
+            let fulfilledEvidenceContract = trajectory.contains {
+                $0.success && [.research, .evidence].contains($0.observedEffects.progress)
+            }
+            let fulfilledExternalAction = trajectory.contains {
+                $0.success && $0.observedEffects.progress == .externalState
+            }
+            if expected == .mutation, !fulfilledMutationContract {
+                deterministicVerification = false
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: false,
+                                         text: "failed — this turn promised a mutation but recorded no successful mutation or fleet delegation"))
+            } else if expected == .evidence, !fulfilledEvidenceContract {
+                deterministicVerification = false
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: false,
+                                         text: "failed — this turn promised research evidence but no successful evidence-gathering action was recorded"))
+            } else if expected == .externalAction, !fulfilledExternalAction {
+                deterministicVerification = false
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: false,
+                                         text: "failed — this turn promised an external action but no successful state-changing action was recorded"))
+            } else if let lastSource = trajectory.lastIndex(where: {
+                $0.observedEffects.requiresBuildVerification
+            }) {
+                let mutation = trajectory[lastSource]
+                let verified = mutation.success && trajectory.dropFirst(lastSource + 1).contains {
+                    $0.success && $0.observedEffects.verification == .buildOrTest
+                }
+                deterministicVerification = verified
+                let text: String
+                if !mutation.success {
+                    text = "unverified — the final source mutation failed"
+                } else if verified {
+                    text = "passed — an executed build/test succeeded after the final source mutation"
+                } else {
+                    text = "unverified — no executed build/test succeeded after the final source mutation"
+                }
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: verified, text: text))
+            } else if expected == .mutation {
+                deterministicVerification = true
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: true,
+                                         text: "passed — successful non-source mutation or fleet delegation recorded; no source build was required"))
+            } else if expected == .evidence {
+                deterministicVerification = true
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: true,
+                                         text: "passed — successful grounded evidence gathering was recorded"))
+            } else if expected == .externalAction {
+                deterministicVerification = true
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: true,
+                                         text: "passed — a successful external state-changing action was recorded"))
+            } else {
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: nil,
+                                         text: "not required — this turn recorded no source mutation"))
+            }
+            let finalSuccess = outcome.success && !repairPhaseFailed
+                && !lastTurnInterrupted && deterministicVerification != false
+            let repairSuffix = repairPhaseFailed ? " repair=failed-or-interrupted" : ""
+            proofStore?.record(.init(kind: .turnFinalized, tool: nil, success: finalSuccess,
+                                     text: "intent=\(intent.rawValue) expected=\(expected.rawValue) result=\(finalSuccess ? "completed" : "failed")\(repairSuffix) checkpoint=\(outcome.checkpointId)"))
+            return finalSuccess
+        }
+
+        // /copilot: after a turn that MUTATED files, have the assigned co-reviewer critique the actual,
+        // turn-scoped working-tree change. Review is advisory evidence; when repair authority is armed,
+        // findings return to the original author for a bounded repair. Build/tests remain verification.
         // Pick the reviewer: a model DIFFERENT from the one that just answered — never self-review (that's
         // the "just repeat yourself" anti-pattern Luke called out). Team mode's explicit `co` wins if it's
         // distinct; otherwise auto-pick a configured provider ≠ the answering one, cheap/reliable first.
         // nil ⇒ no distinct reviewer available (skip the review rather than let a model grade its own work).
         func autoReviewer(answeredBy: ProviderBinding) -> ProviderBinding? {
-            if let co = copilot.co, co.providerId != answeredBy.providerId { return co }
+            if let co = copilot.co, Copilot.isDistinctReviewer(co, from: answeredBy) { return co }
             let configured = Set(providerAliases.values)
             let prefer = ["claude-cli", "gemini", "deepseek", "mimo", "codex-cli", "moonshot", "zhipu", "grok"]
             if let pid = prefer.first(where: { $0 != answeredBy.providerId && configured.contains($0) }) {
@@ -425,16 +577,42 @@ struct KistREPL {
             return parts.joined(separator: "\n\n")
         }
 
-        // One review pass. Reviews the working-tree DIFF for a coding turn, else the substantive ANSWER
-        // text. Reviewer is a DIFFERENT model than the one that answered (autoReviewer). Returns the review
-        // text (nil = nothing worth reviewing / no distinct reviewer / no response).
-        func runOneReview(task: String, answer: String = "", reviewer: ProviderBinding? = nil) async -> String? {
-            guard let modelComplete else { return nil }
+        // One advisory review pass. Reviews the working-tree DIFF for a coding turn, else the substantive
+        // ANSWER text. The result distinguishes "not applicable" from a missing reviewer response so a
+        // silent/failed model can never be counted as a clean vote.
+        func runOneReview(task: String, answer: String = "", reviewer: ProviderBinding? = nil,
+                          answeredBy: ProviderBinding? = nil,
+                          baselineDiff: String? = nil) async -> Copilot.ReviewAttempt {
+            guard let modelComplete else { return .incomplete("review completion is unavailable in this mode") }
+            let author = answeredBy ?? activeBinding
             // `reviewer` lets ULTRA mode rotate the second opinion through a roster of minds; nil ⇒ the
             // default top-ranked distinct reviewer.
-            guard let co = reviewer ?? autoReviewer(answeredBy: activeBinding) else { return nil }
-            let isCoding = Copilot.shouldReview(trajectory: recorder?.snapshot() ?? [])
-            let diff = isCoding ? Self.workingTreeDiff(projectRoot: projectRoot) : ""
+            guard let co = reviewer ?? autoReviewer(answeredBy: author) else {
+                return .incomplete("no distinct reviewer is configured")
+            }
+            let isCoding = Copilot.shouldReview(trajectory: turnEvidenceSnapshot())
+            let diff: String
+            if isCoding {
+                guard let baselineDiff else {
+                    return .incomplete("turn-scoped review baseline is unavailable")
+                }
+                diff = Copilot.turnScopedReviewSubject(before: baselineDiff,
+                                                       after: Self.workingTreeDiff(projectRoot: projectRoot))
+                guard !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    // Never silently substitute a prose-summary review for an artifact review. Git cannot
+                    // expose non-repository, ignored, binary, or already-committed changes; that is an
+                    // incomplete review subject, not evidence that the change was clean.
+                    return .incomplete("a mutation was recorded, but no turn-scoped textual git diff is available")
+                }
+                guard !diff.contains("Binary files "),
+                      !diff.contains("[review input incomplete:"),
+                      !diff.contains("[new file truncated at"),
+                      !diff.contains("[turn delta truncated]") else {
+                    return .incomplete("the turn's textual review subject was unavailable or truncated")
+                }
+            } else {
+                diff = ""
+            }
             // Ground the reviewer in the SAME context the primary turn had — its self-identity brief plus
             // durable project memory. Without this the second model is context-blind about the domain (it
             // has never heard of "Kist") and answers "I can't verify these claims" instead of reviewing.
@@ -447,7 +625,7 @@ struct KistREPL {
                 system = Copilot.answerReviewSystemPrompt
                 userPrompt = Copilot.answerReviewPrompt(task: task, answer: answer, projectContext: grounding)
             } else {
-                return nil   // read-only/failed coding turn or chit-chat answer — nothing to second-opinion
+                return .notApplicable("no reviewable diff or substantive answer")
             }
             print("\u{001B}[35m⎇ second opinion · \(TeamLanguage.displayName(co.providerId)) reviewing…\u{001B}[0m")
             let review = await InterruptibleTurn.run(onInterrupt: { reason in
@@ -460,17 +638,15 @@ struct KistREPL {
                 await modelComplete(co.providerId, co.model, system, userPrompt)
             }
             guard let review, !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                print("\u{001B}[37m⎇ second opinion · \(TeamLanguage.displayName(co.providerId)) had no response\u{001B}[0m")
-                return nil
+                return .incomplete("\(TeamLanguage.displayName(co.providerId)) returned no response")
             }
-            print("\u{001B}[35m⎇ review (\(TeamLanguage.displayName(co.providerId))):\u{001B}[0m\n\(review)")
-            return review
+            print("\u{001B}[35m⎇ review (\(TeamLanguage.displayName(co.providerId))):\u{001B}[0m\n\(Copilot.safeReviewDisplay(review))")
+            return .completed(review)
         }
 
-        // ULTRA MODE (Luke 2026-08-01): the consensus of minds. The captain orders every reachable model by
-        // capability (Claude → Codex → DeepSeek → …); each mind REVIEWS the current work and, if it's not
-        // clean, GOES IN AND FIXES it, handing the improved work to the next mind — until a mind signs off
-        // clean (flawless) or the roster is exhausted. `/mode ultra` turns it on; `/mode normal` off.
+        // ULTRA MODE: every reachable model independently reviews the current work. Review is advisory;
+        // findings are handed back to the ORIGINAL author for a bounded repair, and executed build/tests
+        // remain the separate verification authority.
         func ultraRoster(excluding answered: ProviderBinding) -> [ProviderBinding] {
             let configured = Set(providerAliases.values)
             // Capability order — Claude leads, Codex second, then the rest (matches the operator's mental model).
@@ -482,92 +658,290 @@ struct KistREPL {
             return out
         }
 
-        func runUltraReview(task: String, answer: String) async {
-            guard let loopFactory else { return }
-            let roster = ultraRoster(excluding: activeBinding)
-            guard !roster.isEmpty else { print("\u{001B}[37m⎇ ultra · no other minds configured — add models with /model\u{001B}[0m"); return }
-            let maxPasses = 2   // bound so a stubborn nitpick can't loop forever; FLAWLESS = a full pass all-clean
+        func runUltraReview(task: String, answer: String, author: ProviderBinding,
+                            turnIntent: TaskBrief.Intent,
+                            baselineDiff: String?) async {
+            let roster = ultraRoster(excluding: author)
+            guard !roster.isEmpty else {
+                let text = "incomplete — no distinct reviewers configured"
+                print("\u{001B}[37m⎇ ultra · no other minds configured — add models with /model\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false, text: text))
+                return
+            }
+            let maxRepairs = min(3, max(0, copilot.maxFixRounds))
             print("\u{001B}[35m⎇ ultra · consensus of minds: \(roster.map { TeamLanguage.displayName($0.providerId) }.joined(separator: " → "))\u{001B}[0m")
-            print("\u{001B}[2m  up to \(maxPasses) passes · FLAWLESS = every mind signs off in one full pass\u{001B}[0m")
+            print("\u{001B}[2m  advisory review · up to \(maxRepairs) author repair rounds\u{001B}[0m")
             var current = answer
-            for pass in 1...maxPasses {
-                guard !lastTurnInterrupted else { return }
-                var allClean = true   // did EVERY mind sign off this pass (no fix needed)?
-                for mind in roster {
-                    guard !lastTurnInterrupted else { return }
-                    guard let review = await runOneReview(task: task, answer: current, reviewer: mind) else { continue }
-                    if Copilot.reviewIsClean(review) {
-                        print("\u{001B}[32m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) signs off ✓ (pass \(pass))\u{001B}[0m")
-                        continue
-                    }
-                    // Not clean → this mind goes in and fixes it; the improved work is what the rest review.
-                    allClean = false
-                    print("\u{001B}[35m⎇ ultra · \(TeamLanguage.displayName(mind.providerId)) going in to fix its findings (pass \(pass))…\u{001B}[0m")
-                    armTurnLoop()
-                    let fixLoop = perm.arm(loopFactory(mind, roleSelection.bindings, perm.mode.isPlan,
-                                                       showReasoning, extendedThinking))
-                    recorder?.reset()
-                    let oc = await runTurnInterruptible(loop: fixLoop, userInput: Copilot.fixPrompt(task: task, review: review))
-                    await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-                    current = oc.summary
-                }
-                if allClean {
-                    print("\u{001B}[1;32m⎇ ultra · FLAWLESS — all \(roster.count) minds signed off (pass \(pass))\u{001B}[0m")
+            var repairs = 0
+            while true {
+                guard !lastTurnInterrupted else {
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "incomplete — review interrupted"))
                     return
                 }
+                let pass = repairs + 1
+                var cleanCount = 0
+                var findings: [Copilot.RepairFinding] = []
+                var missing: [String] = []
+                var notApplicableReason: String?
+                for mind in roster {
+                    guard !lastTurnInterrupted else {
+                        proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                                 text: "incomplete — review interrupted"))
+                        return
+                    }
+                    let name = TeamLanguage.displayName(mind.providerId)
+                    switch await runOneReview(task: task, answer: current, reviewer: mind, answeredBy: author,
+                                              baselineDiff: baselineDiff) {
+                    case .notApplicable(let reason):
+                        notApplicableReason = reason
+                    case .incomplete(let reason):
+                        missing.append("\(name): \(reason)")
+                    case .completed(let review):
+                        switch Copilot.classifyReviewResponse(review) {
+                        case .clean:
+                            cleanCount += 1
+                            print("\u{001B}[32m⎇ ultra · review · \(name) reported no blocking issues (pass \(pass))\u{001B}[0m")
+                        case .findings(let structured):
+                            findings.append(contentsOf: structured)
+                        case .incomplete:
+                            missing.append("\(name): malformed or non-contract response")
+                        }
+                    }
+                }
+
+                if let reason = notApplicableReason {
+                    print("\u{001B}[37m⎇ ultra · review not run — \(reason)\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: nil,
+                                             text: "not applicable — \(reason)"))
+                    return
+                }
+                if findings.isEmpty {
+                    if missing.isEmpty && cleanCount == roster.count {
+                        print("\u{001B}[1;32m⎇ ultra · review consensus: \(cleanCount)/\(roster.count) reported no blocking issues (pass \(pass))\u{001B}[0m")
+                        proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: true,
+                                                 text: "\(cleanCount)/\(roster.count) reviewers reported no blocking issues"))
+                    } else {
+                        print("\u{001B}[33m⎇ ultra · review incomplete: \(cleanCount)/\(roster.count) clean responses; missing \(missing.count)\u{001B}[0m")
+                        for item in missing { print("\u{001B}[2m  · \(item)\u{001B}[0m") }
+                        proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                                 text: "incomplete — \(missing.count) reviewer response(s) missing"))
+                    }
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    return
+                }
+
+                if !missing.isEmpty {
+                    print("\u{001B}[33m⎇ ultra · review incomplete: \(missing.count) reviewer(s) returned no usable response; repairing known findings only\u{001B}[0m")
+                }
+                guard copilot.autoFix else {
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ ultra · review findings reported; automatic repair is off\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "blocking findings reported; automatic repair off"))
+                    return
+                }
+                guard repairs < maxRepairs else {
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ ultra · review findings remain after \(maxRepairs) author repair rounds\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "blocking findings remain after \(maxRepairs) author repair rounds"))
+                    return
+                }
+                guard let loopFactory else {
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ ultra · review findings reported; author repair is unavailable in this mode\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "blocking findings reported; author repair unavailable"))
+                    return
+                }
+
+                repairs += 1
+                print("\u{001B}[35m⎇ ultra · review complete → original author \(TeamLanguage.displayName(author.providerId)) repairing aggregated findings (round \(repairs)/\(maxRepairs))…\u{001B}[0m")
+                armTurnLoop()
+                let fixLoop = perm.arm(loopFactory(author, roleSelection.bindings, perm.mode.isPlan,
+                                                    showReasoning, extendedThinking))
+                archiveCurrentEvidencePhase()
+                let oc = await runTurnInterruptible(loop: fixLoop,
+                                                    userInput: Copilot.repairPrompt(task: task, findings: findings),
+                                                    rawRequest: task, resolvedIntent: turnIntent)
+                await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
+                if lastTurnInterrupted {
+                    repairPhaseFailed = true
+                    return
+                }
+                guard oc.success else {
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ ultra · repair incomplete — original author turn failed\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "repair incomplete — original author turn failed"))
+                    return
+                }
+                current = oc.summary
             }
-            print("\u{001B}[33m⎇ ultra · reached the \(maxPasses)-pass limit — not every mind is satisfied yet; best effort committed\u{001B}[0m")
         }
 
         // R4: the coder↔reviewer partnership. The co-reviewer critiques the diff; if it flags blocking
         // issues AND auto-fix is armed (team mode), the LEAD runs a bounded fix turn to address them,
         // then the reviewer re-checks — a real team accomplishing the goal, not an advisory print.
-        func runCopilotReview(task: String, answer: String = "", allowAdvisory: Bool = false) async {
+        func runCopilotReview(task: String, answer: String = "", allowAdvisory: Bool = false,
+                              authoredBy: ProviderBinding? = nil,
+                              baselineDiff: String? = nil,
+                              turnIntent: TaskBrief.Intent,
+                              turnSucceeded: Bool) async {
             // R2a (review catch): after an interject the user's typed instruction must run NEXT —
             // not after a copilot model call they didn't ask for.
+            if lastTurnInterrupted {
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: nil,
+                                         text: "not run — turn interrupted"))
+            }
             guard !lastTurnInterrupted else { return }
-            // Run the review when team mode is on (enabled) OR the default-on advisory second opinion applies
-            // to this DIRECT turn (allowAdvisory). Team mode adds the fix loop below; advisory just prints.
+            // Run the review when team mode is on (enabled) OR an explicitly enabled advisory second opinion
+            // applies to this DIRECT turn. Ordinary Q&A leaves autoSecondOpinion off by default.
             let advisory = allowAdvisory && copilot.autoSecondOpinion
-            guard copilot.enabled || advisory else { return }
-            // ULTRA MODE: hand off to the consensus-of-minds chain (every mind reviews→fixes in turn) instead
-            // of the single second opinion.
-            if copilot.ultra { await runUltraReview(task: task, answer: answer); return }
-            guard var review = await runOneReview(task: task, answer: answer) else { return }
+            let automaticBuild = turnSucceeded && turnIntent.expectsMutation
+                && copilot.automaticBuildReview
+                && Copilot.shouldReview(trajectory: turnEvidenceSnapshot())
+            guard copilot.enabled || advisory || automaticBuild else {
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: nil,
+                                         text: "not requested"))
+                return
+            }
+            let author = authoredBy ?? copilot.lead ?? activeBinding
+            if copilot.ultra {
+                await runUltraReview(task: task, answer: answer, author: author,
+                                     turnIntent: turnIntent, baselineDiff: baselineDiff)
+                return
+            }
 
-            // AUTO-FIX BY DEFAULT (Luke 2026-08-01): the reviewer must JUMP IN THE DRIVER'S SEAT and fix
-            // what it finds — not critique and stop. Any non-clean review with a lead loop now closes the
-            // loop and fixes it (team mode `/copilot on` is just the explicit form). `/copilot off` disables
-            // it. Bounded by maxFixRounds so a stubborn critique can't loop forever.
-            //
-            // WHO fixes (Luke 2026-08-01): the REVIEWER goes in LAST and fixes it — the capable model that
-            // FOUND the problem (Claude, via autoReviewer), NOT the primary model that already produced the
-            // bad work and would just botch it again. Order is: primary works → reviewer critiques →
-            // reviewer goes in and fixes. Fall back to the team lead / session model only if there's no
-            // distinct reviewer.
-            guard let loopFactory, !Copilot.reviewIsClean(review) else { return }
+            var currentAnswer = answer
+            let firstAttempt = await runOneReview(task: task, answer: currentAnswer, answeredBy: author,
+                                                  baselineDiff: baselineDiff)
+            var reviewResponse: Copilot.ReviewResponse
+            switch firstAttempt {
+            case .notApplicable(let reason):
+                print("\u{001B}[37m⎇ review not run — \(reason)\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: nil,
+                                         text: "not applicable — \(reason)"))
+                return
+            case .incomplete(let reason):
+                print("\u{001B}[33m⎇ review incomplete — \(reason)\u{001B}[0m")
+                print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                         text: "incomplete — \(reason)"))
+                return
+            case .completed(let response):
+                reviewResponse = Copilot.classifyReviewResponse(response)
+            }
+            if case .clean = reviewResponse {
+                print("\u{001B}[32m⎇ review · no blocking issues reported\u{001B}[0m")
+                print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: true,
+                                         text: "reviewer reported no blocking issues"))
+                return
+            }
+            guard case .findings = reviewResponse else {
+                print("\u{001B}[33m⎇ review incomplete — reviewer returned malformed or non-contract output; automatic repair withheld\u{001B}[0m")
+                print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                         text: "incomplete — malformed reviewer response; automatic repair withheld"))
+                return
+            }
+
+            // `autoFix` is the authority: a review may print findings without silently creating another
+            // mutating model turn. When armed, the ORIGINAL author—not the reviewer—owns every repair.
+            guard copilot.autoFix else {
+                repairPhaseFailed = true
+                print("\u{001B}[33m⎇ review · findings reported; automatic repair is off\u{001B}[0m")
+                print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                         text: "blocking findings reported; automatic repair off"))
+                return
+            }
+            guard let loopFactory else {
+                repairPhaseFailed = true
+                print("\u{001B}[33m⎇ review · findings reported; author repair is unavailable in this mode\u{001B}[0m")
+                print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                         text: "blocking findings reported; author repair unavailable"))
+                return
+            }
+            let repairLimit = min(3, max(1, copilot.maxFixRounds))
             var round = 0
-            while round < max(1, copilot.maxFixRounds), !Copilot.reviewIsClean(review) {
+            while round < repairLimit {
+                guard case .findings(let findings) = reviewResponse else { break }
                 round += 1
-                let fixer = autoReviewer(answeredBy: activeBinding) ?? copilot.lead ?? roleSelection.fallback
-                print("\u{001B}[35m⎇ review done → \(TeamLanguage.displayName(fixer.providerId)) going in to fix the findings (round \(round))…\u{001B}[0m")
+                let fixer = author
+                print("\u{001B}[35m⎇ review complete → original author \(TeamLanguage.displayName(fixer.providerId)) repairing findings (round \(round)/\(repairLimit))…\u{001B}[0m")
                 armTurnLoop()
                 let fixLoop = perm.arm(loopFactory(fixer, roleSelection.bindings, perm.mode.isPlan,
                                                    showReasoning, extendedThinking))
-                // Fresh trajectory for the fix turn so the re-review's shouldReview reflects ONLY what
-                // the fix changed — a no-op fix (coder pushed back) then converges instead of
-                // re-reviewing the unchanged diff on the stale coding-turn records (review catch).
-                recorder?.reset()
-                let oc = await runTurnInterruptible(loop: fixLoop, userInput: Copilot.fixPrompt(task: task, review: review))
+                // Start a fresh phase for the repair while archiving the original evidence. Review and
+                // final verification consume the combined ledger; phase-local routing still sees only
+                // the repair attempt currently executing.
+                archiveCurrentEvidencePhase()
+                let oc = await runTurnInterruptible(loop: fixLoop,
+                                                    userInput: Copilot.repairPrompt(task: task, findings: findings),
+                                                    rawRequest: task, resolvedIntent: turnIntent)
                 await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-                if lastTurnInterrupted { return }     // user stepped in — stop the team loop
+                if lastTurnInterrupted {
+                    repairPhaseFailed = true
+                    return
+                }     // user stepped in — stop the team loop
+                guard oc.success else {
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ team · repair incomplete — original author turn failed\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "repair incomplete — original author turn failed"))
+                    return
+                }
+                currentAnswer = oc.summary
                 // Re-review the fix so the loop converges (or exhausts its bounded rounds).
-                guard let next = await runOneReview(task: task) else { return }
-                review = next
+                switch await runOneReview(task: task, answer: currentAnswer, answeredBy: author,
+                                          baselineDiff: baselineDiff) {
+                case .completed(let next):
+                    reviewResponse = Copilot.classifyReviewResponse(next)
+                    if case .incomplete = reviewResponse {
+                        repairPhaseFailed = true
+                        print("\u{001B}[33m⎇ team · review incomplete after repair — malformed or non-contract output; further automatic repair withheld\u{001B}[0m")
+                        print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                        proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                                 text: "incomplete after repair — malformed reviewer response"))
+                        return
+                    }
+                case .notApplicable(let reason):
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ team · review incomplete after repair — \(reason)\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "incomplete after repair — \(reason)"))
+                    return
+                case .incomplete(let reason):
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ team · review incomplete after repair — \(reason)\u{001B}[0m")
+                    print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "incomplete after repair — \(reason)"))
+                    return
+                }
             }
-            if Copilot.reviewIsClean(review) {
-                print("\u{001B}[32m⎇ team · review clean — findings resolved\u{001B}[0m")
+            if case .clean = reviewResponse {
+                print("\u{001B}[32m⎇ team · review · no blocking issues reported after \(round) repair round(s)\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: true,
+                                         text: "no blocking issues reported after \(round) author repair round(s)"))
+            } else {
+                repairPhaseFailed = true
+                print("\u{001B}[33m⎇ team · review findings remain after \(repairLimit) repair rounds\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                         text: "blocking findings remain after \(repairLimit) author repair rounds"))
             }
+            print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
         }
 
         // R4: arm a natural-language TEAM ("gemini be the eyes for deepseek", "deepseek codes and mimo
@@ -621,6 +995,7 @@ struct KistREPL {
             let before = Set(usageSnapshot.map(\.id))
             let delta = spans.filter { !before.contains($0.id) }
             usageSnapshot = spans
+            submittedTurnSpans.append(contentsOf: delta)
             if !UsageLedger.append(projectRoot: projectRoot, spans: delta) {
                 print("\u{001B}[37musage ledger warning · could not persist local usage accounting\u{001B}[0m")
             }
@@ -714,7 +1089,7 @@ struct KistREPL {
             let failure = CaptainFailureAnalysis(projectRoot: projectRoot)
                 .analyze(goal: goal,
                          summary: summary,
-                         trajectory: recorder?.snapshot() ?? [],
+                         trajectory: turnEvidenceSnapshot(),
                          proofEntries: proofStore?.lastEntries() ?? [])
             let persisted = failure.writeSucceeded
                 ? failure.path
@@ -728,7 +1103,7 @@ struct KistREPL {
             let objective = Self.supervisorRepairObjective(for: failure.capsule)
             let report = Self.handleSelfHealCommand("self-heal run \(objective)",
                                                     projectRoot: projectRoot,
-                                                    trajectory: recorder?.snapshot() ?? [])
+                                                    trajectory: turnEvidenceSnapshot())
             let mission = report.writeSucceeded ? report.path : "write failed: \(report.writeError ?? "unknown error")"
             print("\u{001B}[33mCaptain supervisor opened repair mission\u{001B}[0m · \(mission) · seeded \(report.seededTasks) task(s)")
             await dispatchSelfHealAgents(report: report, objective: objective, automatic: true)
@@ -736,7 +1111,7 @@ struct KistREPL {
         }
 
         func printTurnSummary(outcomeSummary: String? = nil, success: Bool = true) async {
-            let trajectory = recorder?.snapshot() ?? []
+            let trajectory = turnEvidenceSnapshot()
             // `outcomeSummary` is the MODEL'S prose — it was ALREADY shown live (streamed token-by-token
             // during the turn), so we deliberately do NOT reprint it here (that caused "every answer twice").
             // It is not thrown away: it drives the grounding check that sets the dashboard confidence.
@@ -744,17 +1119,8 @@ struct KistREPL {
             // The deterministic four-part recap (happened / changed / failed / next) — the at-a-glance
             // operating summary, shown ABOVE the panel (Active Minds · Tasks · Next). Full detail: /summary.
             let spans = await consumeTurnUsageDelta()
-            if let outcomeSummary, !outcomeSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let plan = PlanStore(projectRoot: projectRoot).load()
-                let insights = DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
-                                                               trajectory: trajectory)
-                let currentObjective = humanTranscript.reversed().first { $0.role == .user }?.content
-                _ = OrganizationalLearningStore(projectRoot: projectRoot)
-                    .recordTurn(plan: plan, spans: spans, trajectory: trajectory,
-                                outcomeSummary: outcomeSummary, success: success,
-                                insights: insights, objective: currentObjective)
-            }
-            print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans, trajectory: trajectory))
+            print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans,
+                                           trajectory: trajectory, sessionStartedAt: sessionStart))
             // R2a (review catch): an ESC'd turn is not a failure — auto-opening a repair mission
             // (self-heal dispatch, token spend) before the user's queued instruction is the exact
             // opposite of "your turn".
@@ -765,7 +1131,8 @@ struct KistREPL {
                                           automaticRepair: true)
             }
             let dashboard = Self.buildDashboard(roles: roleSelection, projectRoot: projectRoot,
-                                                trajectory: trajectory, grounded: grounded)
+                                                trajectory: trajectory, grounded: grounded,
+                                                sessionStartedAt: sessionStart)
             // Only remember the report for `/confidence` on a SUCCESSFUL turn: a provider failure after
             // one clean tool call computes a misleading ~95% that must not be inherited by the next
             // `/confidence` (Codex catch). A failed turn keeps the last successful turn's report.
@@ -775,6 +1142,23 @@ struct KistREPL {
             print(compact ? dashboard.renderCompact(color: panelColor) : dashboard.render(color: panelColor))
             let hint = "proof: /logs · cost: /usage · board: /tasks · /summary for detail"
             print(panelColor ? "\u{001B}[2m\(hint)\u{001B}[0m" : hint)
+        }
+
+        /// Persist exactly one learning capsule for the submitted turn, after review/repair and the final
+        /// deterministic contract have settled. Interim phase summaries remain display-only so a primary
+        /// success cannot survive as a false pass when its automatic repair later fails.
+        func recordSubmittedTurnLearning(outcomeSummary: String, success: Bool) {
+            let clean = outcomeSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty, !lastTurnInterrupted else { return }
+            let trajectory = turnEvidenceSnapshot()
+            let plan = PlanStore(projectRoot: projectRoot).load()
+            let insights = DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
+                                                           trajectory: trajectory)
+            let currentObjective = humanTranscript.reversed().first { $0.role == .user }?.content
+            _ = OrganizationalLearningStore(projectRoot: projectRoot)
+                .recordTurn(plan: plan, spans: submittedTurnSpans, trajectory: trajectory,
+                            outcomeSummary: clean, success: success,
+                            insights: insights, objective: currentObjective)
         }
 
         func runSelfHealCommand(_ rawArgs: String) async {
@@ -920,7 +1304,10 @@ struct KistREPL {
 
             if let research {
                 print("\u{001B}[33mlegal research handoff\u{001B}[0m · evidence-first /research")
-                await research(report.researchGoal, roleSelection.bindings)
+                await runHeavyRoute(goal: report.researchGoal, intent: .research, mode: .inline,
+                                    execution: "research", startProof: true) {
+                    await research(report.researchGoal, roleSelection.bindings)
+                }
             } else if runSpecialist != nil {
                 print("\u{001B}[33mlegal research handoff\u{001B}[0m · specialist fallback")
                 await dispatchLegalResearchAgents(report: report)
@@ -951,11 +1338,12 @@ struct KistREPL {
             let cost = traceRecorder == nil ? "—" : compactCost(UsageCost.summarize(spans: await traceRecorder!.all()))
             let store = PlanStore(projectRoot: projectRoot)
             let persisted = store.load()
+            let currentActive = persisted.active(since: sessionStart)
             // Show doing:/next: for work THIS session is on — but never greet a cold start with a stale
             // prior-session task (see PlanStatusVisibility). The board is always on /tasks.
             let showPlan = PlanStatusVisibility.shouldShow(planModifiedAt: store.modifiedAt(),
                                                            sessionStart: sessionStart,
-                                                           hasActiveTask: persisted.active != nil)
+                                                           hasActiveTask: currentActive != nil)
             let plan = showPlan ? persisted : Plan()
             let modeLabel: String
             switch perm.mode {
@@ -967,8 +1355,9 @@ struct KistREPL {
             return StatusLine(modelLabel: modelLabel,
                               mode: modeLabel,
                               cost: cost,
-                              activeTask: plan.active.map { "[\($0.id)] \($0.title)" },
-                              nextStep: (plan.active ?? plan.nextActionable ?? plan.next).map { "[\($0.id)] \($0.title)" }).render()
+                              activeTask: (showPlan ? currentActive : nil).map { "[\($0.id)] \($0.title)" },
+                              nextStep: (showPlan ? (currentActive ?? plan.nextActionable ?? plan.next) : nil)
+                                .map { "[\($0.id)] \($0.title)" }).render()
         }
 
         func completionCandidates() -> [String] {
@@ -1110,7 +1499,7 @@ struct KistREPL {
                         ("\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
                 }
             }
-            recorder?.reset()                 // fresh trajectory per turn for self-monitoring
+            resetTurnEvidence()               // fresh complete evidence ledger per submitted turn
 
             // Slash commands: built-ins, /commands, then any custom .kist/commands/<name>.md.
             // Only a command-shaped leading "/" counts — a dragged-in path falls through
@@ -1220,7 +1609,8 @@ struct KistREPL {
                 case "summary", "status":
                     let spans = await traceRecorder?.all() ?? []
                     let trajectory = recorder?.snapshot() ?? []
-                    print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans, trajectory: trajectory))
+                    print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans,
+                                                   trajectory: trajectory, sessionStartedAt: sessionStart))
                     continue
                 case "confidence", "why":
                     // Explain the exact report the panel showed for the last completed turn. Do not
@@ -1416,7 +1806,8 @@ struct KistREPL {
                 case "tasks", "task", "plan-tasks", "todo", "goals", "goal":
                     // The native runbook: the shared task list at <project>/.kist/plan.json. Both you and
                     // the agent (via the `tasks` tool) read/update it. `/tasks` shows it; subcommands edit.
-                    print(Self.handleTasks(args, projectRoot: projectRoot))
+                    print(Self.handleTasks(args, projectRoot: projectRoot,
+                                           sessionStartedAt: sessionStart))
                     continue
                 case "cortex", "memory", "remember":
                     // The Cortex: what kist knows about YOU (preferences/projects/journal, all .md you can see).
@@ -1460,16 +1851,28 @@ struct KistREPL {
                     }
                     continue
                 case "action":
-                    guard !args.isEmpty else { print(Self.handleTasks("", projectRoot: projectRoot)); continue }
-                    print(Self.handleTasks("add ACTION: \(args)", projectRoot: projectRoot))
+                    guard !args.isEmpty else {
+                        print(Self.handleTasks("", projectRoot: projectRoot,
+                                               sessionStartedAt: sessionStart)); continue
+                    }
+                    print(Self.handleTasks("add ACTION: \(args)", projectRoot: projectRoot,
+                                           sessionStartedAt: sessionStart))
                     continue
                 case "test":
-                    guard !args.isEmpty else { print(Self.handleTasks("", projectRoot: projectRoot)); continue }
-                    print(Self.handleTasks("add TEST: \(args)", projectRoot: projectRoot))
+                    guard !args.isEmpty else {
+                        print(Self.handleTasks("", projectRoot: projectRoot,
+                                               sessionStartedAt: sessionStart)); continue
+                    }
+                    print(Self.handleTasks("add TEST: \(args)", projectRoot: projectRoot,
+                                           sessionStartedAt: sessionStart))
                     continue
                 case "review":
-                    guard !args.isEmpty else { print(Self.handleTasks("", projectRoot: projectRoot)); continue }
-                    print(Self.handleTasks("add REVIEW: \(args)", projectRoot: projectRoot))
+                    guard !args.isEmpty else {
+                        print(Self.handleTasks("", projectRoot: projectRoot,
+                                               sessionStartedAt: sessionStart)); continue
+                    }
+                    print(Self.handleTasks("add REVIEW: \(args)", projectRoot: projectRoot,
+                                           sessionStartedAt: sessionStart))
                     continue
                 case "paste", "v":
                     // Pull media off the clipboard (screenshot/copy, or copied media/PDF file) and ask about it.
@@ -1540,7 +1943,8 @@ struct KistREPL {
                     continue
                 case "copilot", "co-pilot", "cp":
                     // Auto second-AI review after every coding turn. `/copilot on|off`, `/copilot lead
-                    // <model>` (who codes), `/copilot co <model>` (who reviews). Advisory only.
+                    // <model>` (who codes), `/copilot co <model>` (who reviews). `/copilot on` explicitly
+                    // enables bounded original-author repair; `/copilot off` revokes all automatic review.
                     switch Copilot.parseCommand(args) {
                     case .status:
                         print(copilot.statusLine(render: { Self.render($0) }))
@@ -1549,12 +1953,16 @@ struct KistREPL {
                         }
                     case .on:
                         copilot.enabled = true
-                        copilot.autoSecondOpinion = true   // /copilot on restores the second opinion if it was silenced
-                        print("\u{001B}[35m⎇ copilot ON\u{001B}[0m — the co-reviewer critiques the diff after each coding turn. " + copilot.statusLine(render: { Self.render($0) }))
+                        copilot.automaticBuildReview = true
+                        copilot.autoSecondOpinion = true
+                        copilot.autoFix = true
+                        print("\u{001B}[35m⎇ copilot ON\u{001B}[0m — review→repair enabled (original author, max 3); build/tests remain verification. " + copilot.statusLine(render: { Self.render($0) }))
                     case .off:
                         copilot.enabled = false
-                        copilot.autoFix = false   // also disarm the team review→fix loop (never resurrect it via /copilot on)
-                        copilot.autoSecondOpinion = false   // fully silence — also turns off the default-on advisory second opinion
+                        copilot.automaticBuildReview = false
+                        copilot.autoFix = false
+                        copilot.autoSecondOpinion = false
+                        copilot.ultra = false
                         print("copilot off — no automatic review, second opinion, or fix.")
                     case .setLead(let spec):
                         guard let b = Self.resolveModelSpec(spec, currentProvider: roleSelection.fallback.providerId,
@@ -1590,17 +1998,27 @@ struct KistREPL {
                     for (i, step) in steps.enumerated() {
                         print("\u{001B}[36m⛓ step \(i + 1)/\(steps.count): \(step)\u{001B}[0m")
                         proofStore?.startTurn(goal: step)
-                        recorder?.reset()
+                        resetTurnEvidence()
                         armTurnLoop()
-                        let compiled = briefCompiler?(step, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? step
+                        let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+                        let intent = PromptCompiler.inferIntent(step, mode: mode)
+                        proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
+                                                 text: "intent=\(intent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: intent, mode: mode).rawValue) execution=chain-inline"))
+                        let compiled = briefCompiler?(step, roleSelection.bindings, mode,
+                                                      humanTranscript, intent) ?? step
                         let enriched = attachCaptainContext(to: compiled, objective: step)
-                        let oc = await runTurnInterruptible(loop: loop, userInput: enriched)
+                        let reviewBaseline = reviewBaselineIfArmed(intent: intent)
+                        let oc = await runTurnInterruptible(loop: loop, userInput: enriched,
+                                                            rawRequest: step, resolvedIntent: intent)
                         rememberHumanTurn(user: step, assistantSummary: oc.summary)
-                        selfMonitor(goal: step, success: oc.success)
                         await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-                        await runCopilotReview(task: step)
+                        await runCopilotReview(task: step, baselineDiff: reviewBaseline,
+                                               turnIntent: intent, turnSucceeded: oc.success)
+                        let completedTurn = recordVerificationAndFinal(outcome: oc, intent: intent)
+                        selfMonitor(goal: step, intent: intent, success: completedTurn)
                         await printTurnUsage()
-                        if !oc.success {
+                        recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+                        if !completedTurn {
                             print("\u{001B}[31m⛓ step \(i + 1) did not succeed — stopping the chain. Remaining: \(steps.count - i - 1)\u{001B}[0m")
                             break
                         }
@@ -1910,7 +2328,10 @@ struct KistREPL {
                         print("usage: /fleet [--agents N|--agents=N] <goal>")
                         continue
                     }
-                    await fleet(invocation.goal, invocation.agents, roleSelection.bindings)
+                    await runHeavyRoute(goal: invocation.goal, intent: .fleet, mode: .fleet,
+                                        execution: "fleet(\(invocation.agents))", startProof: true) {
+                        await fleet(invocation.goal, invocation.agents, roleSelection.bindings)
+                    }
                     continue
                 case "bughunt", "monkey", "monkeybash", "hunt", "breakit":
                     // Real-life bug hunt / monkey-bash (Luke 2026-08-01): spin up a FLEET of isolated
@@ -1922,12 +2343,19 @@ struct KistREPL {
                         continue
                     }
                     print("\u{001B}[35m🐛 bug hunt · \(inv.agents) isolated hunters running + hammering: \(inv.goal)\u{001B}[0m")
-                    await fleet(Self.bugHuntBrief(inv.goal), inv.agents, roleSelection.bindings)
+                    let bugGoal = Self.bugHuntBrief(inv.goal)
+                    await runHeavyRoute(goal: bugGoal, intent: .fleet, mode: .fleet,
+                                        execution: "bughunt-fleet(\(inv.agents))", startProof: true) {
+                        await fleet(bugGoal, inv.agents, roleSelection.bindings)
+                    }
                     continue
                 case "plan-execute", "pe", "dag":
                     guard let planExecute else { print("\u{001B}[31m/plan-execute isn't available here\u{001B}[0m"); continue }
                     guard !args.isEmpty else { print("usage: /plan-execute <goal>"); continue }
-                    await planExecute(args, roleSelection.bindings)
+                    await runHeavyRoute(goal: args, intent: .build, mode: .planExecute,
+                                        execution: "plan-execute", startProof: true) {
+                        await planExecute(args, roleSelection.bindings)
+                    }
                     continue
                 case "council", "consult":
                     guard let council else { print("\u{001B}[31m/council isn't available here\u{001B}[0m"); continue }
@@ -1935,30 +2363,43 @@ struct KistREPL {
                         print("usage: /council [--execute|--build] <research/task>")
                         continue
                     }
-                    await council(invocation.goal, roleSelection.bindings, invocation.execute)
+                    let councilIntent: TaskBrief.Intent = invocation.execute ? .build : .plan
+                    let councilMode: PromptCompiler.Mode = invocation.execute ? .planExecute : .inline
+                    await runHeavyRoute(goal: invocation.goal, intent: councilIntent, mode: councilMode,
+                                        execution: invocation.execute ? "council-execute" : "council",
+                                        startProof: true) {
+                        await council(invocation.goal, roleSelection.bindings, invocation.execute)
+                    }
                     continue
                 case "dig", "digdeep", "minds", "mind":
                     guard let digDeep else { print("\u{001B}[31m/dig isn't available here\u{001B}[0m"); continue }
                     guard !args.isEmpty else { print("usage: /dig <question> — ask every reachable model in parallel and synthesize"); continue }
-                    await digDeep(args, roleSelection.bindings)
+                    await runHeavyRoute(goal: args, intent: .review, mode: .inline,
+                                        execution: "dig-in-deep", startProof: true) {
+                        await digDeep(args, roleSelection.bindings)
+                    }
                     continue
                 case "ultra", "consensus", "flawless":
-                    // The review "slider" (/mode is taken by persona): /ultra → consensus of minds (every
-                    // reachable model reviews→fixes in turn until flawless); /ultra off → single second opinion.
+                    // Explicit consensus mode: heterogeneous reviewers report findings; the original author
+                    // gets at most three repair rounds. Review consensus never substitutes for build/tests.
                     let level = args.trimmingCharacters(in: .whitespaces).lowercased()
                     switch level {
                     case "", "on", "ultra", "max", "consensus":
-                        copilot.ultra = true; copilot.autoSecondOpinion = true
+                        copilot.ultra = true
+                        copilot.enabled = true
+                        copilot.autoSecondOpinion = true
+                        copilot.autoFix = true
                         let roster = ultraRoster(excluding: activeBinding).map { TeamLanguage.displayName($0.providerId) }
-                        print("\u{001B}[35m⎇ ULTRA on — consensus of minds after each turn (review→fix until flawless)\u{001B}[0m")
+                        print("\u{001B}[35m⎇ ULTRA on — advisory consensus; original author repairs findings (max 3)\u{001B}[0m")
+                        print("\u{001B}[2m  \(Copilot.verificationBoundary)\u{001B}[0m")
                         print("\u{001B}[2m  order: \(roster.isEmpty ? "(no other minds configured — add with /model)" : roster.joined(separator: " → "))\u{001B}[0m")
                     case "off", "normal", "single", "review":
                         copilot.ultra = false
-                        print("\u{001B}[35m⎇ ULTRA off — single second opinion (review→fix)\u{001B}[0m")
+                        print("\u{001B}[35m⎇ ULTRA off — single-review mode\u{001B}[0m")
                     case "status", "?":
-                        print("ultra: \(copilot.ultra ? "ON (consensus of minds)" : "off (single second opinion)") · /ultra | /ultra off")
+                        print("ultra: \(copilot.ultra ? "ON (advisory consensus + author repair)" : "off (single review)") · /ultra | /ultra off")
                     default:
-                        print("usage: /ultra | /ultra off   (ultra = every reachable mind reviews→fixes until flawless)")
+                        print("usage: /ultra | /ultra off   (review consensus; original author repairs, max 3)")
                     }
                     continue
                 case "research", "deepdive", "sweep", "deep":
@@ -1976,21 +2417,34 @@ struct KistREPL {
                         continue
                     }
                     print("\u{001B}[2m↳ evidence dossier → role-bound council → durable task board\u{001B}[0m")
-                    await research(researchGoal, roleSelection.bindings)
+                    await runHeavyRoute(goal: researchGoal, intent: .research, mode: .inline,
+                                        execution: "research", startProof: true) {
+                        await research(researchGoal, roleSelection.bindings)
+                    }
                     continue
                 default:
                     if let expanded = commands.expand(name, args: args) {
                         proofStore?.startTurn(goal: expanded)
                         if let display = personaDisplay?(expanded) { print(Self.stdoutColorEnabled(projectRoot: projectRoot) ? "\u{001B}[95;1m🎭 \(display)\u{001B}[0m" : "↳ \(display)") }
                         armTurnLoop()   // arm the permission tier — never run a turn on a stale loop
-                        let compiled = briefCompiler?(expanded, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? expanded
+                        let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+                        let intent = PromptCompiler.inferIntent(expanded, mode: mode)
+                        proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
+                                                 text: "intent=\(intent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: intent, mode: mode).rawValue) execution=command-inline"))
+                        let compiled = briefCompiler?(expanded, roleSelection.bindings, mode,
+                                                      humanTranscript, intent) ?? expanded
                         let enriched = attachCaptainContext(to: compiled, objective: expanded)
-                        let oc = await runTurnInterruptible(loop: loop, userInput: enriched)
+                        let reviewBaseline = reviewBaselineIfArmed(intent: intent)
+                        let oc = await runTurnInterruptible(loop: loop, userInput: enriched,
+                                                            rawRequest: expanded, resolvedIntent: intent)
                         rememberHumanTurn(user: expanded, assistantSummary: oc.summary)
-                        selfMonitor(goal: expanded, success: oc.success)
                         await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-                        await runCopilotReview(task: expanded)
+                        await runCopilotReview(task: expanded, baselineDiff: reviewBaseline,
+                                               turnIntent: intent, turnSucceeded: oc.success)
+                        let completedTurn = recordVerificationAndFinal(outcome: oc, intent: intent)
+                        selfMonitor(goal: expanded, intent: intent, success: completedTurn)
                         await printTurnUsage()
+                        recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
                     } else {
                         print("\u{001B}[31munknown command /\(name)\u{001B}[0m — try /help or /commands")
                     }
@@ -1998,31 +2452,45 @@ struct KistREPL {
                 }
             }
 
-            if let task = Self.taskSelectedByUser(input, projectRoot: projectRoot) {
+            if let task = Self.taskSelectedByUser(input, projectRoot: projectRoot,
+                                                  sessionStartedAt: sessionStart) {
                 let taskPrompt = Self.executionBrief(for: task, userInput: input)
                 _ = PlanStore(projectRoot: projectRoot).update(id: task.id, status: .inProgress)
                 if let planExecute {
                     print("\u{001B}[37m↳ running task [\(task.id)] through plan→execute · \(roleSelection.summary)\u{001B}[0m")
-                    await planExecute(taskPrompt, roleSelection.bindings)
+                    await runHeavyRoute(goal: taskPrompt, intent: .build, mode: .planExecute,
+                                        execution: "task-plan-execute", startProof: true) {
+                        await planExecute(taskPrompt, roleSelection.bindings)
+                    }
                 } else {
                     proofStore?.startTurn(goal: taskPrompt)
                     armTurnLoop()   // arm the permission tier — never run a turn on a stale loop
-                    let compiled = briefCompiler?(taskPrompt, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? taskPrompt
+                    let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+                    let intent = PromptCompiler.inferIntent(taskPrompt, mode: mode)
+                    proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
+                                             text: "intent=\(intent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: intent, mode: mode).rawValue) execution=task-inline"))
+                    let compiled = briefCompiler?(taskPrompt, roleSelection.bindings, mode,
+                                                  humanTranscript, intent) ?? taskPrompt
                     let enriched = attachCaptainContext(to: compiled, objective: taskPrompt)
-                    let oc = await runTurnInterruptible(loop: loop, userInput: enriched)
+                    let reviewBaseline = reviewBaselineIfArmed(intent: intent)
+                    let oc = await runTurnInterruptible(loop: loop, userInput: enriched,
+                                                        rawRequest: taskPrompt, resolvedIntent: intent)
                     rememberHumanTurn(user: taskPrompt, assistantSummary: oc.summary)
-                    selfMonitor(goal: taskPrompt, success: oc.success)
                     await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-                    await runCopilotReview(task: taskPrompt)
+                    await runCopilotReview(task: taskPrompt, baselineDiff: reviewBaseline,
+                                           turnIntent: intent, turnSucceeded: oc.success)
+                    let completedTurn = recordVerificationAndFinal(outcome: oc, intent: intent)
+                    selfMonitor(goal: taskPrompt, intent: intent, success: completedTurn)
                     await printTurnUsage()
+                    recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
                     // LOOP FIX: a RESEARCH item is a single-shot digest-and-decide unit (see ManageTasksTool),
                     // yet a plain research answer never calls `tasks done`, so `plan.active` re-served the same
                     // research task on every 'next'/'continue' forever. When a research-kind driving task's turn
                     // succeeds and was not interrupted, auto-close it (+advance) so it can never be re-selected.
-                    if task.kind == .research, oc.success, !lastTurnInterrupted, !perm.mode.isPlan {
+                    if task.kind == .research, completedTurn, !perm.mode.isPlan {
                         let store = PlanStore(projectRoot: projectRoot)
                         _ = store.update(id: task.id, appendEvidence: ["auto-closed after research turn: " + oc.summary.prefix(160)])
-                        _ = store.completeAndAdvance(id: task.id)
+                        _ = store.completeAndAdvance(id: task.id, sessionStartedAt: sessionStart)
                     }
                 }
                 continue
@@ -2080,12 +2548,17 @@ struct KistREPL {
                 // A team was named AND a task given → run it as a team (plan→execute) so the roles are
                 // actually USED — a normal turn would only use the default model. Model-only → normal turn.
                 if case .setRoles = intent.action, let planExecute {
-                    let routedTask = Self.expandBoardReference(intent.residualTask, projectRoot: projectRoot)
+                    let routedTask = Self.expandBoardReference(intent.residualTask, projectRoot: projectRoot,
+                                                               sessionStartedAt: sessionStart)
                     print("\u{001B}[37m↳ running as your team (plan→execute) · \(roleSelection.summary)\u{001B}[0m")
-                    await planExecute(routedTask, roleSelection.bindings)
+                    await runHeavyRoute(goal: routedTask, intent: .build, mode: .planExecute,
+                                        execution: "team-plan-execute", startProof: true) {
+                        await planExecute(routedTask, roleSelection.bindings)
+                    }
                     continue
                 }
-                messageBody = Self.expandBoardReference(intent.residualTask, projectRoot: projectRoot)
+                messageBody = Self.expandBoardReference(intent.residualTask, projectRoot: projectRoot,
+                                                        sessionStartedAt: sessionStart)
             }
 
             if let request = Self.selfCodebaseAuditRequest(messageBody, currentProjectRoot: projectRoot) {
@@ -2156,6 +2629,10 @@ struct KistREPL {
                 messageText = team.goal
                 if messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }  // pure setup
             }
+            // Resolve semantics once from the raw, current request. Routing, prompt compilation, the
+            // headless progress governor, monitoring, and replay all consume this same value.
+            let turnMode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+            let turnIntent = PromptCompiler.inferIntent(messageText, mode: turnMode)
 
             // AUTO-ROUTE (Increment B): for a plain message, the router may PROPOSE an escalation to a
             // fleet / plan-DAG / research pass / council. It never spends big silently — we confirm first; a no falls through to a
@@ -2167,7 +2644,10 @@ struct KistREPL {
             // one model answering (and re-answering) alone. Fires only on the narrow phrase set, so a normal
             // message is never hijacked; runs before the router so it isn't shadowed by a research proposal.
             if let digDeep, !lineFromQueue, AICouncil.looksLikeDigDeep(messageText) {
-                await digDeep(messageText, roleSelection.bindings)
+                await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
+                                    execution: "dig-in-deep", startProof: false) {
+                    await digDeep(messageText, roleSelection.bindings)
+                }
                 continue
             }
             let routingWasInterrupted = MutableBox(false)
@@ -2181,7 +2661,7 @@ struct KistREPL {
                           + (reason == .cancel ? "⎋⎋ routing cancelled" : "⎋ routing interrupted — your turn")
                           + "\u{001B}[0m")
                 }) {
-                    await router.propose(messageText)
+                    await router.propose(messageText, resolvedIntent: turnIntent)
                 }
             }
             if routingWasInterrupted.value { continue }
@@ -2193,10 +2673,30 @@ struct KistREPL {
                 }
                 if ans == "y" || ans == "yes" {
                     switch proposal.route {
-                    case .fleet(let agents): if let fleet { await fleet(messageText, agents, roleSelection.bindings) }
-                    case .planExecute: if let planExecute { await planExecute(messageText, roleSelection.bindings) }
-                    case .council: if let council { await council(messageText, roleSelection.bindings, false) }
-                    case .research: if let research { await research(messageText, roleSelection.bindings) }
+                    case .fleet(let agents):
+                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
+                                            execution: "fleet(\(agents))", startProof: false) {
+                            guard let fleet else { return unavailableHeavyRoute("fleet") }
+                            return await fleet(messageText, agents, roleSelection.bindings)
+                        }
+                    case .planExecute:
+                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
+                                            execution: "plan-execute", startProof: false) {
+                            guard let planExecute else { return unavailableHeavyRoute("plan-execute") }
+                            return await planExecute(messageText, roleSelection.bindings)
+                        }
+                    case .council:
+                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
+                                            execution: "council", startProof: false) {
+                            guard let council else { return unavailableHeavyRoute("council") }
+                            return await council(messageText, roleSelection.bindings, false)
+                        }
+                    case .research:
+                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
+                                            execution: "research", startProof: false) {
+                            guard let research else { return unavailableHeavyRoute("research") }
+                            return await research(messageText, roleSelection.bindings)
+                        }
                     }
                     continue
                 }
@@ -2221,7 +2721,10 @@ struct KistREPL {
             }
 
             armTurnLoop()   // apply the permission tier (plan/approvals); confirm bypass if just armed
-            let compiled = briefCompiler?(messageText, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? messageText
+            proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
+                                     text: "intent=\(turnIntent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: turnIntent, mode: turnMode).rawValue) execution=inline model=\(Self.render(activeBinding))"))
+            let compiled = briefCompiler?(messageText, roleSelection.bindings, turnMode,
+                                          humanTranscript, turnIntent) ?? messageText
             if let display = personaDisplay?(messageText) { print(Self.stdoutColorEnabled(projectRoot: projectRoot) ? "\u{001B}[95;1m🎭 \(display)\u{001B}[0m" : "↳ \(display)") }
             var enriched = attachCaptainContext(to: compiled, objective: messageText)
             // AUTO-EXPLORE: a lookup/find/self question ("find what we did for tinkyspeak", "how does your
@@ -2232,7 +2735,26 @@ struct KistREPL {
                 let search = EstateSearch()
                 let mt = messageText
                 print("\u{001B}[35m🔎 searching our files for context…\u{001B}[0m")
-                if let grounding = await Task.detached(priority: .userInitiated, operation: { search.groundingBlock(for: mt) }).value {
+                let searchTask = Task.detached(priority: .userInitiated) {
+                    search.groundingBlock(for: mt)
+                }
+                let searchInterrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                let grounding = await InterruptibleTurn.run(onInterrupt: { reason in
+                    searchInterrupted.value = reason
+                    if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                    else { TurnInputQueue.shared.commitPending() }
+                    print("\n\u{001B}[33m"
+                          + (reason == .cancel ? "⎋⎋ file search cancelled" : "⎋ file search interrupted — your turn")
+                          + "\u{001B}[0m")
+                }) {
+                    await withTaskCancellationHandler(operation: {
+                        await searchTask.value
+                    }, onCancel: {
+                        searchTask.cancel()
+                    })
+                }
+                if searchInterrupted.value != nil { continue }
+                if let grounding {
                     let n = max(0, grounding.components(separatedBy: "\n### ").count - 1)
                     print("\u{001B}[35m🔎 grounded in \(n) file(s) from our estate\u{001B}[0m")
                     enriched = grounding + "\n\n" + enriched
@@ -2241,7 +2763,10 @@ struct KistREPL {
                 }
             }
             let transcriptBeforeModelAttempt = transcript
-            var oc = await runTurnInterruptible(loop: loop, userInput: enriched)
+            let reviewBaseline = reviewBaselineIfArmed(intent: turnIntent)
+            var turnAuthor = activeBinding
+            var oc = await runTurnInterruptible(loop: loop, userInput: enriched,
+                                                rawRequest: messageText, resolvedIntent: turnIntent)
             if let loopFactory,
                !lastTurnInterrupted,   // R2a: never re-run a turn the USER stopped (their queued instruction runs next)
                let substitution = Self.modelSubstitutionDecision(success: oc.success,
@@ -2253,20 +2778,26 @@ struct KistREPL {
                                                                  providerModels: providerModels) {
                 print("\u{001B}[33m↳ model substitution\u{001B}[0m · \(Self.render(substitution.current)) benched for \(substitution.reason); trying \(Self.render(substitution.replacement)) for this turn")
                 transcript = transcriptBeforeModelAttempt
-                recorder?.reset()
+                archiveCurrentEvidencePhase()
                 let replacementLoop = perm.arm(loopFactory(substitution.replacement,
                                                            roleSelection.bindings,
                                                            perm.mode.isPlan,
                                                            showReasoning,
                                                            extendedThinking))
-                oc = await runTurnInterruptible(loop: replacementLoop, userInput: enriched)
+                turnAuthor = substitution.replacement
+                oc = await runTurnInterruptible(loop: replacementLoop, userInput: enriched,
+                                                rawRequest: messageText, resolvedIntent: turnIntent)
             }
             rememberHumanTurn(user: messageText, assistantSummary: oc.summary)
-            selfMonitor(goal: messageText, success: oc.success)
             await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
-            // Default-on second opinion: a DIFFERENT model reviews this direct turn's work (diff or answer).
-            await runCopilotReview(task: messageText, answer: oc.summary, allowAdvisory: true)
+            // Opt-in second opinion: ordinary Q&A returns one canonical answer unless the user armed review.
+            await runCopilotReview(task: messageText, answer: oc.summary, allowAdvisory: true,
+                                   authoredBy: turnAuthor, baselineDiff: reviewBaseline,
+                                   turnIntent: turnIntent, turnSucceeded: oc.success)
+            let completedTurn = recordVerificationAndFinal(outcome: oc, intent: turnIntent)
+            selfMonitor(goal: messageText, intent: turnIntent, success: completedTurn)
             await printTurnUsage()
+            recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
         }
     }
 
@@ -2450,10 +2981,12 @@ struct KistREPL {
     /// The uncommitted working-tree diff vs HEAD (staged + unstaged) PLUS untracked NEW files. `git diff
     /// HEAD` omits untracked files entirely, so a turn that CREATES a file (very common — "write a new
     /// module") would otherwise produce an empty diff and the `/copilot` co-reviewer would review nothing.
-    /// Untracked files are appended as synthetic `new file` blocks, bounded so a huge new asset can't blow
-    /// context. Empty string when git is absent, not a repo, or nothing changed.
+    /// Untracked files are appended as synthetic `new file` blocks. Every path receives its own bounded
+    /// representation: a large pre-existing untracked file must never consume a global budget and make a
+    /// later file invisible to the pre/post turn delta. Capture failures are explicit incomplete markers,
+    /// never an empty string that a caller could mistake for a clean tree.
     static func workingTreeDiff(projectRoot: String) -> String {
-        func git(_ args: [String]) -> String? {
+        func git(_ args: [String], maxBytes: Int = 1_000_000) -> (text: String, truncated: Bool, digest: String)? {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             p.arguments = ["git", "-C", projectRoot] + args
@@ -2461,24 +2994,127 @@ struct KistREPL {
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
             do { try p.run() } catch { return nil }
-            // Read BEFORE waitUntilExit so a large diff can't deadlock on a full pipe buffer.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            // Drain incrementally before waiting so a large diff cannot deadlock or be materialized in
+            // memory. Hash discarded bytes as well: if a same-sized change occurs beyond the captured
+            // prefix, the turn delta still changes to an explicit incomplete-review marker.
+            var captured = Data()
+            var totalBytes = 0
+            var digest: UInt64 = 14_695_981_039_346_656_037
+            while true {
+                let chunk = pipe.fileHandleForReading.readData(ofLength: 64 * 1_024)
+                if chunk.isEmpty { break }
+                totalBytes += chunk.count
+                for byte in chunk {
+                    digest ^= UInt64(byte)
+                    digest &*= 1_099_511_628_211
+                }
+                let remaining = max(0, maxBytes - captured.count)
+                if remaining > 0 { captured.append(contentsOf: chunk.prefix(remaining)) }
+            }
             p.waitUntilExit()
-            guard p.terminationStatus == 0 else { return nil }
-            return String(decoding: data, as: UTF8.self)
+            guard p.terminationStatus == 0,
+                  let text = String(data: captured, encoding: .utf8) else { return nil }
+            return (text, totalBytes > maxBytes, String(digest, radix: 16))
         }
-        var out = git(["diff", "HEAD"]) ?? ""
-        let untracked = (git(["ls-files", "--others", "--exclude-standard"]) ?? "")
-            .split(separator: "\n").map(String.init)
-        var budget = 20_000   // total chars of untracked content to append (reviewPrompt re-clips to 12k)
-        for rel in untracked where budget > 0 && !rel.isEmpty {
-            let full = (projectRoot as NSString).appendingPathComponent(rel)
-            // Skip binaries / unreadable files (non-UTF8 decode fails) — nothing textual to review.
-            guard let content = try? String(contentsOfFile: full, encoding: .utf8) else { continue }
-            out += Self.syntheticNewFileDiff(path: rel, content: content, maxChars: budget)
-            budget -= min(content.count, budget)
+        let tracked = git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"])
+        var out = tracked?.text
+            ?? "[review input incomplete: tracked git diff capture failed]\n"
+        if let tracked, tracked.truncated {
+            out += "\n[review input incomplete: tracked diff exceeded 1000000 bytes; digest=\(tracked.digest)]\n"
+        }
+        // NUL delimiters preserve literal newlines and other unusual bytes in repository paths. The path
+        // is subsequently opened through ConfinedRoot, not as an absolute filesystem string.
+        let untrackedCapture = git(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        if untrackedCapture == nil {
+            out += "\n[review input incomplete: untracked git path capture failed]\n"
+        }
+        if let untrackedCapture, untrackedCapture.truncated {
+            out += "\n[review input incomplete: untracked path list exceeded 1000000 bytes; digest=\(untrackedCapture.digest)]\n"
+        }
+        let untracked = untrackedCapture?.truncated == false
+            ? (untrackedCapture?.text ?? "").split(separator: "\0").map(String.init)
+            : []
+        let maxUntrackedFiles = 256
+        guard untracked.count <= maxUntrackedFiles else {
+            let digest = untrackedCapture?.digest ?? "unavailable"
+            out += "\n[review input incomplete: untracked file count \(untracked.count) exceeded \(maxUntrackedFiles); digest=\(digest)]\n"
+            return out
+        }
+        let confined: ConfinedRoot
+        do {
+            confined = try ConfinedRoot(root: projectRoot)
+        } catch {
+            out += "\n[review input incomplete: project root could not be opened safely]\n"
+            return out
+        }
+        let perFileBudget = 20_000
+        let maxAggregateBytes = 1_500_000
+        var aggregateBytes = out.utf8.count
+        for rel in untracked where !rel.isEmpty {
+            // Read only enough bytes to represent this file's review budget. Loading an entire huge
+            // untracked artifact here used to make an otherwise small build turn hang or exhaust memory.
+            // The confined prefix read uses O_NOFOLLOW for every component, so an untracked symlink can
+            // never make automatic review ingest bytes from outside the repository. Four bytes per Unicode
+            // scalar covers the maximum UTF-8 width; one extra scalar proves worst-case truncation.
+            guard let content = Self.boundedUTF8FileContents(
+                confinedRoot: confined, path: rel, maxBytes: (perFileBudget + 1) * 4
+            ) else {
+                // Preserve the existence of an unreviewable artifact in the turn delta. Silently
+                // dropping it would let a reviewer report clean despite never seeing the file.
+                let block = "\ndiff --git a/\(rel) b/\(rel)\n[review input incomplete: symlink, binary, or unreadable file omitted]\n"
+                guard aggregateBytes + block.utf8.count <= maxAggregateBytes else {
+                    out += "\n[review input incomplete: aggregate repository review capture exceeded \(maxAggregateBytes) bytes]\n"
+                    break
+                }
+                out += block
+                aggregateBytes += block.utf8.count
+                continue
+            }
+            let block = Self.syntheticNewFileDiff(path: rel, content: content, maxChars: perFileBudget)
+            guard aggregateBytes + block.utf8.count <= maxAggregateBytes else {
+                out += "\n[review input incomplete: aggregate repository review capture exceeded \(maxAggregateBytes) bytes]\n"
+                break
+            }
+            out += block
+            aggregateBytes += block.utf8.count
         }
         return out
+    }
+
+    /// Read a bounded UTF-8 prefix without ever materializing the whole file. Invalid/binary prefixes are
+    /// not reviewable text. A byte cap can bisect one UTF-8 scalar, so retry after dropping at most three
+    /// trailing bytes before rejecting the file.
+    static func boundedUTF8FileContents(path: String, maxBytes: Int) -> String? {
+        guard maxBytes > 0,
+              let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
+        defer { try? handle.close() }
+        let payload: Data?
+        do { payload = try handle.read(upToCount: maxBytes) }
+        catch { return nil }
+        guard var data = payload else { return nil }
+        if data.contains(0) { return nil }
+        for _ in 0..<4 {
+            if let text = String(data: data, encoding: .utf8) { return text }
+            guard !data.isEmpty else { break }
+            data.removeLast()
+        }
+        return nil
+    }
+
+    /// Symlink-safe variant used for repository review capture. Every component is opened relative to
+    /// the trusted root descriptor with O_NOFOLLOW, and only a bounded prefix enters model context.
+    static func boundedUTF8FileContents(confinedRoot: ConfinedRoot, path: String,
+                                        maxBytes: Int) -> String? {
+        guard maxBytes > 0,
+              let prefix = try? confinedRoot.readDataPrefix(path, maxBytes: maxBytes) else { return nil }
+        var data = prefix.data
+        if data.contains(0) { return nil }
+        for _ in 0..<4 {
+            if let text = String(data: data, encoding: .utf8) { return text }
+            guard !data.isEmpty else { break }
+            data.removeLast()
+        }
+        return nil
     }
 
     /// Format an untracked file as a synthetic unified-diff `new file` block so the co-reviewer reads a
@@ -2533,7 +3169,8 @@ struct KistREPL {
     /// Build the glanceable turn dashboard from live session state: the active model/team, the board, a
     /// derived confidence, and what's next. Pure over its inputs → the REPL just feeds it.
     static func buildDashboard(roles: RoleSelection, projectRoot: String,
-                               trajectory: [ActionRecord], grounded: Bool) -> StatusDashboard {
+                               trajectory: [ActionRecord], grounded: Bool,
+                               sessionStartedAt: Date? = nil) -> StatusDashboard {
         // Active Minds — the Captain is the orchestration process; models are workers it can assign.
         let fb = roles.fallback
         var minds: [StatusDashboard.Mind] = [
@@ -2582,10 +3219,12 @@ struct KistREPL {
         // "Next" must not FREEZE on a stale board task when the user just asked a QUESTION that never
         // touched the board (Luke's "I asked something and Next never changed" bug — a task stuck
         // inProgress made plan.active return it forever). Only surface a specific board Next when THIS
-        // turn actually worked the board (a file mutation or the `tasks` tool); otherwise "Continue".
-        let workedBoard = trajectory.contains { ($0.success && Copilot.mutatingTools.contains($0.tool)) || $0.tool == "tasks" }
+        // turn actually worked the board (a file mutation or state-changing `tasks` action); otherwise
+        // "Continue". Listing/validating tasks is inspection, not board movement.
+        let workedBoard = turnWorkedBoard(trajectory)
+        let currentActive = sessionStartedAt.map { plan.active(since: $0) } ?? plan.active
         let next = workedBoard
-            ? (plan.active?.boardTitle ?? plan.nextActionable?.boardTitle ?? plan.next?.boardTitle ?? "Continue")
+            ? (currentActive?.boardTitle ?? plan.nextActionable?.boardTitle ?? plan.next?.boardTitle ?? "Continue")
             : "Continue"
         return StatusDashboard(minds: minds,
                                tasks: Array(tasks),

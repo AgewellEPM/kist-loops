@@ -72,6 +72,14 @@ public struct ToolRegistry: Sendable {
 
     public var names: [String] { tools.keys.sorted() }
 
+    /// Build-relevant effects for one invocation, classified from the complete arguments at the same
+    /// registry seam every loop executes through. The result is recorded with the trajectory so later
+    /// consumers do not guess independently from a truncated fingerprint.
+    public func effectObservation(name: String, arguments: [String: Any],
+                                  result: ToolResult? = nil) -> ToolEffectObservation {
+        ToolEffectCatalog.observe(tool: name, arguments: arguments, outcomeMetadata: result?.metadata)
+    }
+
     /// Neutral tool definitions for NATIVE tool-calling (providers translate to their schema).
     public func toolSpecs() -> [ToolSpec] {
         all().sorted { $0.name < $1.name }

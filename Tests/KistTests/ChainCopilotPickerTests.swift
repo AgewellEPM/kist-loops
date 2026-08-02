@@ -55,7 +55,8 @@ final class ChainCopilotPickerTests: XCTestCase {
 
     func testCopilotReviewsOnlyAfterSuccessfulMutation() {
         let mutated = [ActionRecord(tool: "read_file", argsFingerprint: "a", success: true),
-                       ActionRecord(tool: "write_file", argsFingerprint: "b", success: true)]
+                       ActionRecord(tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: true,
+                                    effectObservation: ToolEffectObservation(mutation: .source))]
         XCTAssertTrue(Copilot.shouldReview(trajectory: mutated))
 
         let readOnly = [ActionRecord(tool: "read_file", argsFingerprint: "a", success: true),
@@ -78,16 +79,18 @@ final class ChainCopilotPickerTests: XCTestCase {
 
     func testCopilotStatusLineReflectsState() {
         var cfg = CopilotConfig()
-        // Default: team mode off, but the advisory second opinion is ON (that's the default-on feature).
-        XCTAssertTrue(cfg.statusLine(render: { $0.providerId }).contains("second opinion"))
-        // Fully silenced only when the second opinion is also off.
-        cfg.autoSecondOpinion = false
-        XCTAssertTrue(cfg.statusLine(render: { $0.providerId }).contains("off"))
-        // Team mode → the review→fix loop.
+        XCTAssertTrue(cfg.statusLine(render: { $0.providerId }).contains("build review→repair"))
+        cfg.autoSecondOpinion = true
+        XCTAssertTrue(cfg.statusLine(render: { $0.providerId }).contains("advisory review"))
+        // Team mode is still advisory until autoFix is explicitly armed.
+        cfg.autoFix = false
         cfg.enabled = true
         cfg.co = ProviderBinding(providerId: "gemini")
+        XCTAssertTrue(cfg.statusLine(render: { $0.providerId }).contains("advisory review"))
+        cfg.autoFix = true
         let line = cfg.statusLine(render: { $0.providerId })
         XCTAssertTrue(line.contains("team"))
+        XCTAssertTrue(line.contains("review→repair"))
         XCTAssertTrue(line.contains("gemini"))
         XCTAssertTrue(line.contains("session model"))   // lead unset ⇒ session model
     }
@@ -171,5 +174,16 @@ final class ChainCopilotPickerTests: XCTestCase {
         let diff = KistREPL.syntheticNewFileDiff(path: "big.txt", content: huge, maxChars: 100)
         XCTAssertTrue(diff.contains("[new file truncated at 100 chars]"))
         XCTAssertLessThan(diff.count, 400, "clipped, not the whole 5k file")
+    }
+
+    func testReviewFileReaderNeverLoadsPastItsByteBudget() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kist-review-bounded-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try String(repeating: "x", count: 1_000_000).write(to: file, atomically: true, encoding: .utf8)
+
+        let content = KistREPL.boundedUTF8FileContents(path: file.path, maxBytes: 257)
+        XCTAssertEqual(content?.utf8.count, 257,
+                       "review input must read a bounded prefix instead of materializing a huge file")
     }
 }

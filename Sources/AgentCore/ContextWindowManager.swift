@@ -80,15 +80,30 @@ public struct ContextWindowManager: Sendable {
         return prefix + [countedNotice] + suffix
     }
 
-    private func totalCost(_ messages: [ChatMessage]) -> Int {
+    /// Shared approximate wire-size model used by both the legacy trimming API and the unified
+    /// conversation preparer. Keeping this in one place prevents the compaction trigger and the
+    /// final outbound bound from disagreeing about whether a transcript fits.
+    func totalCost(_ messages: [ChatMessage]) -> Int {
         messages.reduce(0) { $0 + cost($1) }
     }
 
-    private func cost(_ message: ChatMessage) -> Int {
+    func cost(_ message: ChatMessage) -> Int {
         var n = message.content.count
         n += message.toolCalls?.reduce(0) { $0 + $1.name.count + $1.argumentsJSON.count + $1.id.count } ?? 0
         n += message.toolCallId?.count ?? 0
-        if message.imageData != nil { n += 2_000 }
+        // `allAttachments` folds the legacy single-image field into the modern attachment list and
+        // de-duplicates it when both representations carry the same bytes. Count the real inline
+        // payload rather than the old flat 2k estimate: otherwise one large legacy image could pass the
+        // advertised hard bound while producing a much larger base64 provider request.
+        for attachment in message.allAttachments {
+            // Inline media becomes base64 on the wire (~4/3 expansion). Provider file references are
+            // cheap but not free; count their URI and MIME metadata instead of treating them as zero.
+            if attachment.inlineByteCount > 0 {
+                n += (attachment.inlineByteCount * 4 / 3) + attachment.mimeType.count + 64
+            } else {
+                n += (attachment.fileURI?.count ?? 0) + attachment.mimeType.count + 64
+            }
+        }
         return n + 32
     }
 

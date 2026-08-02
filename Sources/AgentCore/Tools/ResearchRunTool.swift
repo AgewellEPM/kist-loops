@@ -12,7 +12,7 @@ public struct ResearchRunTool: AgentTool {
     synthesize a dossier, then feed that dossier into council/plan-execute.
     """
     public let parameters = [
-        ToolParameter(name: "action", type: "string", description: "start | status | heartbeat | search | fetch | browse | visual | context | add_evidence | synthesize", required: true),
+        ToolParameter(name: "action", type: "string", description: "start | status | heartbeat | search | fetch | browse | visual | context | estate | add_evidence | synthesize", required: true),
         ToolParameter(name: "goal", type: "string", description: "Research goal for action=start, or fallback goal when creating a run.", required: false),
         ToolParameter(name: "run_id", type: "string", description: "Research run id. Omit for action=start.", required: false),
         ToolParameter(name: "query", type: "string", description: "Search or context query.", required: false),
@@ -28,13 +28,13 @@ public struct ResearchRunTool: AgentTool {
     ]
 
     public var supportedActions: [String] {
-        ["start", "status", "heartbeat", "search", "fetch", "browse", "visual", "context", "add_evidence", "synthesize"]
+        ["start", "status", "heartbeat", "search", "fetch", "browse", "visual", "context", "estate", "add_evidence", "synthesize"]
     }
     public var unsupportedActions: [String] {
         ["crawl_unbounded", "bypass_allowlist", "claim_without_evidence", "write_code"]
     }
     public var capabilityNote: String? {
-        "Research is resumable by run_id. Gather evidence first, then call synthesize and hand the dossier to council/plan-execute."
+        "Research is resumable by run_id. Only successful built-in gatherers count as grounded evidence; add_evidence records an unverified note. Gather first, then synthesize and hand the dossier to council/plan-execute."
     }
     public var usageExamples: [String] {
         [
@@ -155,16 +155,37 @@ public struct ResearchRunTool: AgentTool {
             if let limit = arguments["limit"] { args["limit"] = limit }
             return try await gather(kind: "context_brain", title: title, runner: contextBrain,
                                     runnerArgs: args, arguments: arguments, context: context)
+        case "estate":
+            let query = try requireString("query", from: arguments)
+            guard let grounding = EstateSearch(maxFiles: 16, maxTotalChars: 16_000)
+                .groundingBlock(for: query) else {
+                return .failure("estate search found no grounded file evidence")
+            }
+            let count = max(0, grounding.components(separatedBy: "\n### ").count - 1)
+            let store = try openStore(arguments, context: context)
+            let ev = try store.appendEvidence(kind: "estate_search",
+                                              title: "Estate search (\(count) files)",
+                                              text: grounding,
+                                              metadata: ["query": query, "files": String(count),
+                                                         "collector": "EstateSearch"])
+            try store.heartbeat(status: "gathering", message: "added \(ev.id): estate search")
+            return ToolResult(success: true, output: "Recorded \(ev.id) · estate_search\n\n" + grounding,
+                              metadata: ["run_id": store.currentManifest().runID,
+                                         "evidence_id": ev.id, "files": String(count),
+                                         "collector": "EstateSearch"])
         case "add_evidence":
             let store = try openStore(arguments, context: context)
-            let kind = (arguments["kind"] as? String) ?? "note"
-            let title = (arguments["title"] as? String) ?? kind
+            let claimedKind = (arguments["kind"] as? String) ?? "note"
+            let kind = "manual_observation"
+            let title = (arguments["title"] as? String) ?? claimedKind
             let text = try requireString("text", from: arguments)
             let ev = try store.appendEvidence(kind: kind, title: title, text: text,
                                               url: arguments["url"] as? String,
-                                              path: arguments["path"] as? String)
+                                              path: arguments["path"] as? String,
+                                              metadata: ["claimed_kind": claimedKind,
+                                                         "collector": "model_supplied"])
             try store.heartbeat(status: "gathering", message: "added \(ev.id): \(title)")
-            return ToolResult(success: true, output: "Recorded \(ev.id) · \(kind): \(title)",
+            return ToolResult(success: true, output: "Recorded \(ev.id) · \(kind): \(title) (unverified note)",
                               metadata: ["run_id": store.currentManifest().runID, "evidence_id": ev.id])
         case "synthesize":
             let store = try openStore(arguments, context: context)
@@ -227,7 +248,7 @@ public struct ResearchRunTool: AgentTool {
         2. Use research_run(action="fetch", run_id="\(runID)", url="...") for primary sources.
         3. Use research_run(action="browse", run_id="\(runID)", url="...") when JavaScript or screenshots matter.
         4. Use research_run(action="context", run_id="\(runID)", query="...") for repo/RAG evidence.
-        5. Use visual_verify separately for screenshot comparison, then record its report with add_evidence.
+        5. Use research_run(action="visual", run_id="\(runID)", goal="...", candidate="...") for grounded visual evidence.
         6. Use research_run(action="synthesize", run_id="\(runID)") before council or plan-execute.
         """
     }

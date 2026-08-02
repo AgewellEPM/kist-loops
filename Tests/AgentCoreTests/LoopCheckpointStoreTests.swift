@@ -20,7 +20,19 @@ final class LoopCheckpointStoreTests: XCTestCase {
     }
 
     func testSaveLoadRoundTrip() throws {
-        let cp = make(.running)
+        var cp = make(.running)
+        cp.rawRequest = "fix the parser"
+        cp.intent = .build
+        cp.expectedOutcome = .mutation
+        cp.pendingAction = PendingAction(
+            tool: "write_file", argsSummary: "path=Sources/Pending.swift", iteration: 2,
+            predictedEffects: ToolEffectObservation(mutation: .source, mutationEvidence: .mayMutate))
+        cp.trajectory = [
+            ActionRecord(tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .source)),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=swift test", success: true,
+                         effectObservation: ToolEffectObservation(verification: .buildOrTest)),
+        ]
         try store.save(cp)
         let back = try store.load(id: cp.id)
         XCTAssertEqual(back.id, cp.id)
@@ -28,6 +40,34 @@ final class LoopCheckpointStoreTests: XCTestCase {
         XCTAssertEqual(back.providerId, "openai")
         XCTAssertEqual(back.iteration, 1)
         XCTAssertEqual(back.messages.count, 1)
+        XCTAssertEqual(back.rawRequest, "fix the parser")
+        XCTAssertEqual(back.intent, .build)
+        XCTAssertEqual(back.expectedOutcome, .mutation)
+        XCTAssertEqual(back.trajectory, cp.trajectory)
+        XCTAssertEqual(back.pendingAction?.predictedEffects,
+                       cp.pendingAction?.predictedEffects)
+    }
+
+    func testLegacyCheckpointWithoutTurnContractStillDecodes() throws {
+        let encoded = try JSONEncoder().encode(make(.running))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "rawRequest")
+        object.removeValue(forKey: "intent")
+        object.removeValue(forKey: "expectedOutcome")
+        object.removeValue(forKey: "trajectory")
+        if var pending = object["pendingAction"] as? [String: Any] {
+            pending.removeValue(forKey: "predictedEffects")
+            object["pendingAction"] = pending
+        }
+
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(LoopCheckpoint.self, from: legacy)
+
+        XCTAssertNil(decoded.rawRequest)
+        XCTAssertNil(decoded.intent)
+        XCTAssertNil(decoded.expectedOutcome)
+        XCTAssertNil(decoded.trajectory)
+        XCTAssertNil(decoded.pendingAction?.predictedEffects)
     }
 
     func testResumableExcludesCompleted() throws {

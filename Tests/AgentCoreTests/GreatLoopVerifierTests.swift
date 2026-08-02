@@ -41,10 +41,11 @@ final class GreatLoopVerifierTests: XCTestCase {
         guard case .gamed = v else { return XCTFail("a `|| true` runner bypass must be blocked: \(v)") }
     }
 
-    func testShellOffCannotBlockOnVerification() {
-        // No shell ⇒ can't require a build; a clean diff is verified (matches CompletionVerifier policy).
+    func testShellOffReportsCodeChangeAsUnverified() {
+        // No shell means there is no execution evidence. Preserve the change, but never label it verified.
         let v = GreatLoopVerifier.verify(trajectory: [edit()], canRunCommands: false,
                                          changedFiles: ["Sources/Foo.swift"], diff: "+ok")
-        XCTAssertEqual(v, .verified)
+        guard case .unverified(let why) = v else { return XCTFail("shell-off source change must be unverified") }
+        XCTAssertTrue(why.contains("shell/build execution is unavailable"), why)
     }
 }

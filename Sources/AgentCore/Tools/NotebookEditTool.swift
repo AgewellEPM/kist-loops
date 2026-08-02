@@ -54,9 +54,15 @@ public struct NotebookEditTool: AgentTool {
 
         nb["cells"] = cells
         let out = try JSONSerialization.data(withJSONObject: nb, options: [.prettyPrinted, .sortedKeys])
-        try confined.writeString(path, String(decoding: out, as: UTF8.self), createParents: false)
-        return ToolResult(success: true, output: "\(mode) cell \(index) in \(path) (\(cells.count) cells)",
-                          metadata: ["path": path, "cells": String(cells.count)])
+        let serialized = String(decoding: out, as: UTF8.self)
+        let changed = serialized != raw
+        if changed { try confined.writeString(path, serialized, createParents: false) }
+        let output = changed
+            ? "\(mode) cell \(index) in \(path) (\(cells.count) cells)"
+            : "unchanged cell \(index) in \(path)"
+        return ToolResult(success: true, output: output,
+                          metadata: ["path": path, "cells": String(cells.count),
+                                     "changed": String(changed)])
     }
 
     /// Jupyter stores source as an array of lines each ending in \n (except the last). Match that.

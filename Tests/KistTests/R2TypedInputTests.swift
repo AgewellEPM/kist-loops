@@ -191,14 +191,16 @@ final class R2TypedInputTests: XCTestCase {
             try String(contentsOf: repo.appendingPathComponent(rel), encoding: .utf8)
         }
 
-        // Runner: drain chain + sink typed-input provider + all three escalation begin() sites.
+        // Runner: drain chain + sink typed-input provider + every heavy escalation begin() site.
         let runner = try src("Sources/Kist/KistRunner.swift")
         XCTAssertTrue(runner.contains("TurnInputQueue.shared.popQueued"),
                       "the deferredInput chain no longer drains typed messages")
         XCTAssertTrue(runner.contains("typedInput: { TurnInputQueue.shared.preview() }"),
                       "the REPL sink lost its typed-input renderer — typing mid-turn is invisible again")
-        XCTAssertGreaterThanOrEqual(runner.components(separatedBy: "TurnInputQueue.shared.begin()").count - 1, 3,
-                                    "an escalation surface (plan-execute/council/research) stopped collecting typed input")
+        XCTAssertGreaterThanOrEqual(runner.components(separatedBy: "TurnInputQueue.shared.begin()").count - 1, 4,
+                                    "an escalation surface (fleet/plan-execute/council/research) stopped collecting typed input")
+        XCTAssertTrue(runner.contains("— fleet run stopped"),
+                      "fleet lost the shared ESC/type-ahead wrapper")
         // BOTH REPL sink construction sites use the shared constructor (review catch: the initial
         // loop's sink missed the provider → invisible capture on fresh/pinned sessions).
         XCTAssertGreaterThanOrEqual(runner.components(separatedBy: "sinkOverride: makeReplSink(").count - 1, 2,

@@ -75,6 +75,64 @@ final class TranscriptRepairTests: XCTestCase {
         XCTAssertTrue(repaired[2].content.contains("A"))
     }
 
+    func testDuplicateAdjacentResultIsRejectedButCompleteExchangeSurvives() {
+        let msgs = [
+            ChatMessage(role: .assistant, content: "", toolCalls: [
+                ToolCallRef(id: "c1", name: "read_file", argumentsJSON: "{}")]),
+            ChatMessage.toolResult(callId: "c1", content: "first result"),
+            ChatMessage.toolResult(callId: "c1", content: "duplicate result"),
+        ]
+
+        XCTAssertTrue(TranscriptRepair.hasOrphanToolResults(msgs))
+        let repaired = TranscriptRepair.repairForNativeTools(msgs)
+
+        XCTAssertFalse(TranscriptRepair.hasOrphanToolResults(repaired))
+        XCTAssertEqual(repaired.filter { $0.role == .tool }.count, 1,
+                       "one call id may have exactly one native result")
+        XCTAssertEqual(repaired[1].toolCallId, "c1")
+        XCTAssertEqual(repaired[2].role, .user)
+        XCTAssertTrue(repaired[2].content.contains("duplicate result"),
+                      "rejected duplicate content remains visible as plain data")
+    }
+
+    func testLateResultIsRejectedEvenWhenCallIdAppearedEarlier() {
+        let msgs = [
+            ChatMessage(role: .assistant, content: "", toolCalls: [
+                ToolCallRef(id: "c1", name: "read_file", argumentsJSON: "{}")]),
+            ChatMessage.toolResult(callId: "c1", content: "immediate result"),
+            ChatMessage(role: .user, content: "later turn"),
+            ChatMessage.toolResult(callId: "c1", content: "late duplicate"),
+        ]
+
+        XCTAssertTrue(TranscriptRepair.hasOrphanToolResults(msgs))
+        let repaired = TranscriptRepair.repairForNativeTools(msgs)
+
+        XCTAssertFalse(TranscriptRepair.hasOrphanToolResults(repaired))
+        XCTAssertEqual(repaired.filter { $0.role == .tool }.count, 1)
+        XCTAssertEqual(repaired.last?.role, .user)
+        XCTAssertTrue(repaired.last?.content.contains("late duplicate") ?? false)
+    }
+
+    func testReusedCallIdInLaterExchangeIsRejectedExactOnce() {
+        let call = ChatMessage(role: .assistant, content: "", toolCalls: [
+            ToolCallRef(id: "same", name: "read_file", argumentsJSON: "{}")])
+        let msgs = [
+            call,
+            ChatMessage.toolResult(callId: "same", content: "first"),
+            ChatMessage(role: .user, content: "again"),
+            call,
+            ChatMessage.toolResult(callId: "same", content: "second"),
+        ]
+
+        XCTAssertTrue(TranscriptRepair.hasOrphanToolResults(msgs))
+        let repaired = TranscriptRepair.repairForNativeTools(msgs)
+
+        XCTAssertFalse(TranscriptRepair.hasOrphanToolResults(repaired))
+        XCTAssertEqual(repaired.filter { $0.role == .tool }.count, 1)
+        XCTAssertEqual(repaired.filter { !($0.toolCalls?.isEmpty ?? true) }.count, 1)
+        XCTAssertTrue(repaired.contains { $0.role == .user && $0.content.contains("second") })
+    }
+
     func testRepairIsIdempotent() {
         let msgs = [ChatMessage.toolResult(callId: "ghost", content: "x")]
         let once = TranscriptRepair.repairForNativeTools(msgs)

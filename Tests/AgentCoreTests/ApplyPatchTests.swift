@@ -120,6 +120,29 @@ final class ApplyPatchTests: XCTestCase {
         XCTAssertEqual(try String(contentsOfFile: root + "/a.txt", encoding: .utf8), "original\n")
     }
 
+    func testDeleteFileCannotClaimChangeWhenTargetIsDirectory() async throws {
+        let raw = NSTemporaryDirectory() + "patch-delete-dir-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: raw, withIntermediateDirectories: true)
+        let root = ToolContext.canonicalize(raw)!
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try FileManager.default.createDirectory(atPath: root + "/Victim.swift",
+                                                withIntermediateDirectories: false)
+        let ctx = ToolContext(projectRoot: root)
+        let patch = """
+        *** Begin Patch
+        *** Delete File: Victim.swift
+        *** End Patch
+        """
+
+        do {
+            let result = try await ApplyPatchTool().execute(arguments: ["patch": patch], context: ctx)
+            XCTFail("failed directory removal must not return success/changed: \(result)")
+        } catch {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/Victim.swift"),
+                          "the failed delete must leave the target present")
+        }
+    }
+
     func testApplyPatchClassifiedDangerousOnEscape() {
         let safe = "*** Begin Patch\n*** Update File: a.swift\n@@\n-x\n+y\n*** End Patch"
         let evil = "*** Begin Patch\n*** Add File: /etc/evil\n+x\n*** End Patch"

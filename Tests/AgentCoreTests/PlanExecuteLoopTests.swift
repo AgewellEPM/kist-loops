@@ -159,6 +159,32 @@ final class PlanExecuteLoopTests: XCTestCase {
         XCTAssertEqual(try? String(contentsOfFile: root + "/ok.txt", encoding: .utf8), "recovered")
     }
 
+    func testFailedPlanSideEffectsRemainInVerificationHistoryAcrossReplan() async {
+        // Plan 1 leaves a source file behind and fails. Its repaired retry also fails. Plan 2 only
+        // writes a README. Verifying plan 2 in isolation would accept and launder the source side effect;
+        // the turn-scoped attempt history must keep it incomplete.
+        let plan1 = #"{"steps":[{"id":"E1","intent":"partial source write","tool":"run_command","arguments":{"command":"printf broken > Sources/ReplanLeak.swift"}}]}"#
+        let plan2 = writePlan(id: "E1", path: "README.md", content: "done")
+        let done = #"{"done":true,"reason":"looks complete"}"#
+        let provider = PlanScriptedProvider([plan1, "{}", plan2, done])
+        let registry = ProviderRegistry(providers: [provider], keyStore: PXLNullKeys())
+        let loop = PlanExecuteLoop(
+            providers: registry, providerId: "planscript", model: nil,
+            tools: ToolRegistry([ReplanPartialFailureRunCommandTool(), WriteFileTool()]),
+            context: ToolContext(projectRoot: root), requireApproval: false,
+            maxReplans: 1, verifyGoal: true
+        )
+
+        let out = await loop.run(goal: "make the requested source change")
+
+        XCTAssertFalse(out.success, "the clean-looking final plan must not erase prior-plan side effects")
+        XCTAssertTrue(out.message.contains("source mutation failed"), out.message)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/Sources/ReplanLeak.swift"),
+                      "the failed prior plan really changed the workspace")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/README.md"),
+                      "the final successful non-source plan did run")
+    }
+
     func testVerifyNotDoneTriggersReplan() async {
         // Plan 1 succeeds, but the verify gate says NOT done → replan → Plan 2 adds the missing file.
         let plan1 = writePlan(id: "E1", path: "one.txt", content: "1")
@@ -427,6 +453,23 @@ private actor PXLResponses {
     private let responses: [String]; private var idx = 0
     init(_ responses: [String]) { self.responses = responses }
     func next() -> String { defer { idx += 1 }; return idx < responses.count ? responses[idx] : "still not a plan" }
+}
+
+private struct ReplanPartialFailureRunCommandTool: AgentTool {
+    let name = "run_command"
+    let description = "writes source before failing, for replan evidence tests"
+    let parameters: [ToolParameter] = []
+
+    func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        if arguments["command"] as? String != nil {
+            try FileManager.default.createDirectory(atPath: context.projectRoot + "/Sources",
+                                                    withIntermediateDirectories: true)
+            try "broken".write(toFile: context.projectRoot + "/Sources/ReplanLeak.swift",
+                               atomically: true, encoding: .utf8)
+            return .failure("failed after partial source write")
+        }
+        return .failure("repair did not reconcile partial write")
+    }
 }
 
 /// Scripted provider that records how many times it was streamed — lets a test PROVE which vendor

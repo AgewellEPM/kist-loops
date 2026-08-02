@@ -66,8 +66,8 @@ phases into separately tested modules without changing behavior before adding mo
   `TerminalEventSink` (calm renderer, live status line, stall alarm), `TUI/`.
 - `Sources/Kist/UX/` — REPL UX units: `InterruptibleTurn` (ESC semantics), `TurnInputQueue`
   (type-while-working), `EnhancedPromptReader`, `StdinArbiter`, `TurnProofStore`.
-- UX roadmap: `docs/CAPTAIN_UX_OVERHAUL_PLAN_2026_07_28.md` (R0-R2a+R3 shipped; R2b bottom bar,
-  R4 tag-team, R5 watchdog, R6 wheels remain). Trust its recon notes over intuition.
+- Historical UX roadmap: `docs/CAPTAIN_UX_OVERHAUL_PLAN_2026_07_28.md`. It is a dated planning
+  snapshot, not current status. Trust executable tests and `docs/FEATURE_STATUS_MATRIX.md` instead.
 
 ## Rules of the road (inherits ~/.claude/CLAUDE.md)
 - New RuntimeEvent cases: audit EVERY sink/switch (TerminalEventSink previously dropped

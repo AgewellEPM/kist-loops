@@ -384,6 +384,16 @@ final class ToolsTests: XCTestCase {
         XCTAssertTrue((r.error ?? "").contains("not found"))
     }
 
+    func testRunCommandRejectsConflictingExecutionForms() async {
+        let r = await ToolRegistry.headless().execute(
+            name: "run_command",
+            arguments: ["executable": "/usr/bin/true", "args": [String](), "command": "swift test"],
+            context: ctx(shell: enabledShell())
+        )
+        XCTAssertFalse(r.success)
+        XCTAssertTrue((r.error ?? "").contains("exactly one command form"))
+    }
+
     func testStructuredExec_envScrubbedNoSecretInChildEnv() async {
         setenv("FAKE_API_KEY", "sk-should-not-leak", 1)
         defer { unsetenv("FAKE_API_KEY") }

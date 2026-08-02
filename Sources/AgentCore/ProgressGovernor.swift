@@ -38,7 +38,8 @@ public struct ProgressGovernor: Sendable {
     /// governor judges ONLY actions taken SINCE. Without this, the stale stuck-pattern that triggered the
     /// recovery is still in the window and would immediately re-stop the run before the new approach gets a
     /// chance. (Codex review: "stuck-recovery stops on stale trajectory".)
-    public func decide(iteration: Int, trajectory: [ActionRecord], analyzeFrom: Int = 0) -> Decision {
+    public func decide(iteration: Int, trajectory: [ActionRecord], analyzeFrom: Int = 0,
+                       taskIntent: TaskBrief.Intent? = nil) -> Decision {
         if iteration >= hardCeiling { return .stopCeiling }
         // Consider only post-recovery actions when a reset cursor is set.
         let considered = analyzeFrom > 0 ? Array(trajectory.dropFirst(min(analyzeFrom, trajectory.count))) : trajectory
@@ -48,13 +49,18 @@ public struct ProgressGovernor: Sendable {
         // Judge the RECENT window only, at the STUCK bar (higher than the in-loop nudge threshold), so we
         // only stop once the loop's own recovery has clearly failed.
         let recent = Array(considered.suffix(recentWindow))
-        let report = TrajectoryAnalyzer.analyze(recent, runawayThreshold: stuckRepeat, failureRateThreshold: failureBar)
+        let report = TrajectoryAnalyzer.analyze(recent, runawayThreshold: stuckRepeat,
+                                                failureRateThreshold: failureBar,
+                                                taskIntent: taskIntent)
 
         if let loop = report.issues.first(where: { $0.kind == .runawayLoop }) {
             return .stopStuck(reason: "stuck in a loop the re-plan couldn't break — \(loop.detail)")
         }
         if let spike = report.issues.first(where: { $0.kind == .failureSpike }) {
             return .stopStuck(reason: "sustained failure spike — \(spike.detail)")
+        }
+        if let noProgress = report.issues.first(where: { $0.kind == .noToolProgress }) {
+            return .stopStuck(reason: "build made no deliverable progress — \(noProgress.detail)")
         }
         return .cont
     }

@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -80,6 +81,35 @@ public final class ConfinedRoot: Sendable {
 
     public func readData(_ path: String) throws -> Data { try readData(path, maxBytes: nil) }
 
+    /// Read at most `maxBytes` from a confined regular file without following symlinks. Unlike
+    /// `readData(_:maxBytes:)`, this is a deliberate prefix capture: oversized files are returned
+    /// with `truncated == true` instead of being rejected. The extra byte is read from the same
+    /// `O_NOFOLLOW` descriptor, so callers can distinguish an exact-size file from a truncated one
+    /// without a metadata/read race.
+    public func readDataPrefix(_ path: String, maxBytes: Int) throws -> (data: Data, truncated: Bool) {
+        guard maxBytes >= 0, maxBytes < Int.max else {
+            throw ToolError.execution("invalid byte limit for \(path)")
+        }
+        let comps = try relativeComponents(path)
+        let (parent, leaf) = try openParentDir(comps, createIntermediates: false)
+        defer { close(parent) }
+        guard let leaf else { throw ToolError.notFound(path) }
+        let fd = openat(parent, leaf, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw Self.openError(path: path, root: rootPath) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else {
+            close(fd)
+            throw ToolError.execution("cannot stat \(path): \(Self.strerr())")
+        }
+        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            close(fd)
+            throw ToolError.execution("not a regular file: \(path)")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        let captured = handle.readData(ofLength: maxBytes + 1)
+        return (Data(captured.prefix(maxBytes)), captured.count > maxBytes)
+    }
+
     /// Read a confined regular file, optionally BOUNDED to `maxBytes`. The size check and the read happen
     /// on the SAME O_NOFOLLOW file descriptor (fstat then a length-capped read) — no check-then-read
     /// TOCTOU. A file that is small at a prior metadata stat but grows/replaced before the read cannot
@@ -119,6 +149,36 @@ public final class ConfinedRoot: Sendable {
             throw ToolError.execution("file is not valid UTF-8: \(path)")
         }
         return s
+    }
+
+    /// Streaming SHA-256 of a confined regular file. This keeps generated images/audio/video out of
+    /// memory while still letting callers prove that an overwrite changed the artifact. The file is
+    /// opened relative to the trusted root descriptor with `O_NOFOLLOW`, exactly like `readData`.
+    public func fileSHA256(_ path: String, chunkSize: Int = 1_048_576) throws -> Data {
+        let comps = try relativeComponents(path)
+        let (parent, leaf) = try openParentDir(comps, createIntermediates: false)
+        defer { close(parent) }
+        guard let leaf else { throw ToolError.notFound(path) }
+        let fd = openat(parent, leaf, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw Self.openError(path: path, root: rootPath) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else {
+            close(fd)
+            throw ToolError.execution("cannot stat \(path): \(Self.strerr())")
+        }
+        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            close(fd)
+            throw ToolError.execution("not a regular file: \(path)")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var hasher = SHA256()
+        while autoreleasepool(invoking: {
+            let data = handle.readData(ofLength: max(1, chunkSize))
+            guard !data.isEmpty else { return false }
+            hasher.update(data: data)
+            return true
+        }) {}
+        return Data(hasher.finalize())
     }
 
     /// Symlink-safe metadata lookup used by scanners to reject oversized files before

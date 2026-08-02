@@ -67,6 +67,52 @@ final class TasksCommandTests: XCTestCase {
         XCTAssertEqual(PlanStore(projectRoot: dir).load().tasks.first?.status, .inProgress)
     }
 
+    func testImplicitNextIgnoresStaleInProgressTaskFromPriorSession() {
+        let dir = NSTemporaryDirectory() + "replplan_\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = PlanStore(projectRoot: dir)
+        store.replace(title: "Plan", tasks: [
+            PlanTask(id: 1, title: "ACTION: abandoned old topic", status: .inProgress,
+                     startedAt: Date().addingTimeInterval(-3600).timeIntervalSince1970),
+            PlanTask(id: 2, title: "ACTION: current queue"),
+        ])
+
+        let sessionStart = Date()
+        let picked = KistREPL.taskSelectedByUser("next", projectRoot: dir,
+                                                 sessionStartedAt: sessionStart)
+
+        XCTAssertEqual(picked?.id, 2)
+        XCTAssertTrue(store.load().render(sessionStartedAt: Date()).contains("stale from an earlier session"))
+
+        _ = KistREPL.expandBoardReference("next", projectRoot: dir,
+                                          sessionStartedAt: sessionStart)
+        XCTAssertEqual(store.load().active(since: sessionStart)?.id, 2,
+                       "the explicitly resumed/current task must win even while a stale active row remains")
+    }
+
+    func testDashboardNextIgnoresStaleActiveEvenAfterMutatingTurn() {
+        let dir = NSTemporaryDirectory() + "replplan_\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let sessionStart = Date(timeIntervalSince1970: 10_000)
+        PlanStore(projectRoot: dir).replace(title: "Plan", tasks: [
+            PlanTask(id: 1, title: "ACTION: zombie topic", status: .inProgress, startedAt: 1),
+            PlanTask(id: 2, title: "ACTION: current queue"),
+        ])
+        let mutation = ActionRecord(
+            tool: "edit_file", argsFingerprint: "path=Sources/App.swift", success: true,
+            effectObservation: ToolEffectObservation(mutation: .source)
+        )
+
+        let dashboard = KistREPL.buildDashboard(
+            roles: KistREPL.RoleSelection(default: ProviderBinding(providerId: "test")),
+            projectRoot: dir, trajectory: [mutation], grounded: true,
+            sessionStartedAt: sessionStart)
+
+        XCTAssertEqual(dashboard.next, "current queue")
+    }
+
     func testTasksBlockAndClear() {
         let dir = NSTemporaryDirectory() + "replplan_\(UUID().uuidString)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)

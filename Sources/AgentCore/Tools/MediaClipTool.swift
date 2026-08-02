@@ -18,7 +18,25 @@ public struct MediaClipTool: AgentTool {
         ToolParameter(name: "out", type: "string", description: "Optional output path (project-relative).", required: false),
     ]
 
-    public init() {}
+    private let resolveFFmpeg: @Sendable () -> String?
+    private let runFFmpeg: @Sendable (_ launchPath: String, _ args: [String], _ cwd: String) async -> ToolResult
+
+    public init() {
+        self.resolveFFmpeg = {
+            RunCommandTool.resolveExecutable("ffmpeg", env: ProcessInfo.processInfo.environment)
+        }
+        self.runFFmpeg = { launchPath, args, cwd in
+            await RunCommandTool.spawnAndCollect(launchPath: launchPath, launchArgs: args,
+                                                 cwd: cwd, timeout: 120)
+        }
+    }
+
+    /// Deterministic process seam for tests; production always uses the public initializer above.
+    init(resolveFFmpeg: @escaping @Sendable () -> String?,
+         runFFmpeg: @escaping @Sendable (_ launchPath: String, _ args: [String], _ cwd: String) async -> ToolResult) {
+        self.resolveFFmpeg = resolveFFmpeg
+        self.runFFmpeg = runFFmpeg
+    }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let path = try requireString("path", from: arguments)
@@ -35,9 +53,11 @@ public struct MediaClipTool: AgentTool {
         let safeAt = at.replacingOccurrences(of: ":", with: "-")
         let defaultName = kind == "clip" ? "\(stem)_\(safeAt).mp4" : "\(stem)_\(safeAt).jpg"
         let outArg = (arguments["out"] as? String) ?? defaultName
-        let outPath = try context.resolvedPath(outArg, mustExist: false)
+        let artifact = try ArtifactOutputEvidence.prepare(path: outArg, kind: .file, context: context)
+        try artifact.ensureParentDirectory(context: context)
+        let outPath = artifact.absolutePath
 
-        guard let ffmpeg = RunCommandTool.resolveExecutable("ffmpeg", env: ProcessInfo.processInfo.environment) else {
+        guard let ffmpeg = resolveFFmpeg() else {
             return .failure("ffmpeg not found on PATH — install it (brew install ffmpeg) to extract frames/clips")
         }
         // -ss before -i = fast seek; -y overwrite. Frame: one image. Clip: stream-copy a window.
@@ -50,11 +70,18 @@ public struct MediaClipTool: AgentTool {
         if let reason = await context.shell.binaryRefusalReason(resolvedPath: ffmpeg, args: args) {
             return .failure("ffmpeg blocked by shell policy: \(reason) (try --allow-shell)")
         }
-        let run = await RunCommandTool.spawnAndCollect(launchPath: ffmpeg, launchArgs: args, cwd: context.projectRoot, timeout: 120)
+        let run = await runFFmpeg(ffmpeg, args, context.projectRoot)
+        guard run.success else {
+            return .failure("ffmpeg failed: \(run.error ?? run.output)")
+        }
         guard FileManager.default.fileExists(atPath: outPath) else {
             return .failure("ffmpeg ran but produced no output: \(run.error ?? run.output)")
         }
-        return ToolResult(success: true, output: "wrote \(kind) at \(at) → \(outArg)", metadata: ["path": outPath])
+        var metadata = ["path": artifact.relativePath]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
+        return ToolResult(success: true,
+                          output: "wrote \(kind) at \(at) → \(artifact.relativePath)",
+                          metadata: metadata)
     }
 
     /// Accept MM:SS, HH:MM:SS, or a plain seconds value (int or decimal).

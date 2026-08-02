@@ -16,10 +16,14 @@ public struct TaskBrief: Sendable, Equatable {
         case review
         case desktop
 
-        /// Only build turns promise a state change. Chat, research, review, and plan turns can
+        /// Build and fleet turns promise a state change. Chat, research, review, and plan turns can
         /// legitimately finish after read-only evidence gathering, so their trajectories must not
         /// be diagnosed as "no progress" merely because they did not edit the workspace.
-        public var expectsMutation: Bool { self == .build }
+        public var expectsMutation: Bool { self == .build || self == .fleet }
+    }
+
+    public enum ExpectedOutcome: String, Sendable, Equatable, Codable {
+        case answer, evidence, plan, mutation, externalAction
     }
 
     public enum Risk: String, Sendable, Equatable, Codable {
@@ -41,6 +45,12 @@ public struct TaskBrief: Sendable, Equatable {
     public let reviewGuidance: [String]
     public let conversationContext: String?
     public let projectContext: String?
+
+    /// The single outcome contract consumed by progress, verification, review, and summaries. It is
+    /// derived from the already-resolved intent instead of letting each subsystem reinterpret text.
+    public var expectedOutcome: ExpectedOutcome {
+        PromptCompiler.expectedOutcome(intent: intent, mode: mode)
+    }
 
     public init(originalRequest: String,
                 intent: Intent,
@@ -139,10 +149,11 @@ public enum PromptCompiler {
                                role explicitRole: AgentRole? = nil,
                                mode: Mode = .inline,
                                conversationContext: String? = nil,
-                               projectContext: String? = nil) -> TaskBrief {
+                               projectContext: String? = nil,
+                               resolvedIntent: TaskBrief.Intent? = nil) -> TaskBrief {
         let original = normalized(request)
         let lower = original.lowercased()
-        let intent = inferIntent(lower: lower, mode: mode)
+        let intent = resolvedIntent ?? inferIntent(original, mode: mode)
         let role = explicitRole ?? inferredRole(for: intent, mode: mode)
         let risk = inferRisk(lower: lower, intent: intent, mode: mode)
         let scopeDecision = AuthorizationScopeEngine.evaluate(original)
@@ -180,10 +191,12 @@ public enum PromptCompiler {
                                       role: AgentRole? = nil,
                                       mode: Mode = .inline,
                                       conversationContext: String? = nil,
-                                      projectContext: String? = nil) -> String {
+                                      projectContext: String? = nil,
+                                      resolvedIntent: TaskBrief.Intent? = nil) -> String {
         compile(request, role: role, mode: mode,
                 conversationContext: conversationContext,
-                projectContext: projectContext).prompt
+                projectContext: projectContext,
+                resolvedIntent: resolvedIntent).prompt
     }
 
     public static func conversationContext(from transcript: [ChatMessage],
@@ -202,20 +215,34 @@ public enum PromptCompiler {
         return joined.count <= maxCharacters ? joined : String(joined.suffix(maxCharacters))
     }
 
-    private static func inferIntent(lower: String, mode: Mode) -> TaskBrief.Intent {
+    /// Resolve semantic intent exactly once from the raw current request. Callers that subsequently
+    /// compile or route the same turn pass this value back through `resolvedIntent`.
+    public static func inferIntent(_ request: String, mode: Mode = .inline) -> TaskBrief.Intent {
+        let lower = normalized(request).lowercased()
         switch mode {
         case .plan: return .plan
         case .planExecute: return .build
         case .fleet: return .fleet
         case .inline, .delegated: break
         }
-        if containsAny(lower, ["open safari", "open chrome", "open firefox", "open browser", "youtube",
-                               "play me", "clean desktop", "clean my desktop", "desktop", "computer"]) {
+        let explicitlyReadOnly = containsAny(lower, [
+            "do not edit any files", "don't edit any files", "do not change any files",
+            "don't change any files", "do not change anything", "don't change anything",
+            "no file changes", "without editing files", "without changing files", "read-only",
+        ])
+        // A defect noun does not turn an explicit repair command into a read-only review. This check must
+        // precede both desktop nouns and the broad "bug"/"regression" review cues so requests such as
+        // "fix the desktop app crash" remain build work instead of becoming an answer-only desktop turn.
+        if !explicitlyReadOnly, isBuildDirective(lower) { return .build }
+        let asksForExplanation = [
+            "explain ", "describe ", "tell me ", "what ", "why ", "how ", "where ", "when ",
+            "which ", "who ", "how would ", "what would ", "should i ", "should we ",
+        ].contains { lower.hasPrefix($0) }
+        if !explicitlyReadOnly, !asksForExplanation,
+           containsAny(lower, ["open safari", "open chrome", "open firefox", "open browser", "youtube",
+                               "play me", "clean desktop", "clean my desktop"]) {
             return .desktop
         }
-        // A defect noun does not turn an explicit repair command into a read-only review. This check must
-        // precede the broad "bug"/"regression" review cues so "fix this regression" remains a build.
-        if isBuildDirective(lower) { return .build }
         if containsAny(lower, ["review", "audit", "assess", "failure point", "risk", "bug", "regression"]) {
             return .review
         }
@@ -226,11 +253,22 @@ public enum PromptCompiler {
         if containsAny(lower, ["fleet", "swarm", "parallel agents", "multi-agent"]) {
             return .fleet
         }
-        if containsAny(lower, ["build", "fix", "implement", "wire", "add ", "create", "make ", "change",
-                               "refactor", "test it", "commit"]) {
-            return .build
-        }
+        // Build words inside a question are not authorization to mutate. Imperatives are handled by
+        // `isBuildDirective` above; ambiguous prose falls back to chat instead of being steered into an
+        // unsolicited edit by the mutation completion contract.
         return .chat
+    }
+
+    /// Resolve the expected result from the canonical intent and execution mode. This small value is
+    /// persisted with checkpoints so resume, progress, verification, and replay do not reinterpret the
+    /// user's wording independently.
+    public static func expectedOutcome(intent: TaskBrief.Intent,
+                                       mode: Mode = .inline) -> TaskBrief.ExpectedOutcome {
+        if mode == .plan || intent == .plan { return .plan }
+        if intent == .research { return .evidence }
+        if intent == .desktop { return .externalAction }
+        if intent.expectsMutation || mode == .planExecute || mode == .fleet { return .mutation }
+        return .answer
     }
 
     private static func inferredRole(for intent: TaskBrief.Intent, mode: Mode) -> AgentRole? {
@@ -426,12 +464,16 @@ public enum PromptCompiler {
 
     private static func isBuildDirective(_ text: String) -> Bool {
         var directive = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        for politePrefix in ["please ", "can you ", "could you ", "would you "] where directive.hasPrefix(politePrefix) {
-            directive.removeFirst(politePrefix.count)
-            break
+        let leadIns = [
+            "please ", "can you ", "could you ", "would you ", "i need you to ", "i want you to ",
+            "go ahead and ", "let's ", "lets ",
+        ]
+        while let prefix = leadIns.first(where: { directive.hasPrefix($0) }) {
+            directive.removeFirst(prefix.count)
         }
-        return ["build", "fix", "implement", "wire", "add", "create", "make", "change",
-                "refactor", "patch", "update", "commit"].contains {
+        return ["build", "fix", "implement", "wire", "add", "create", "make", "change", "write", "rename",
+                "remove", "delete", "revert", "install", "uninstall", "move", "replace", "migrate",
+                "upgrade", "downgrade", "configure", "refactor", "patch", "update", "commit"].contains {
             directive == $0 || directive.hasPrefix($0 + " ")
         }
     }

@@ -183,17 +183,19 @@ public struct WriteFileTool: AgentTool {
         // A whole-file write is legitimately any size, so only the always-valid marker
         // check applies (non-localized). `old` = current bytes if the file exists, "" for
         // a create — either way a newly-introduced marker is refused.
-        let existing = (try? confined.readString(path)) ?? ""
-        if let block = EditGuards.validate(old: existing, new: content, path: path, localized: false) {
+        let existing = try? confined.readString(path)
+        if let block = EditGuards.validate(old: existing ?? "", new: content, path: path, localized: false) {
             return block
         }
+        let changed = existing != content
         // ConfinedRoot.writeString creates parents inside the confined root and writes
         // atomically (temp + renameat); a symlinked leaf is replaced, never written through.
-        try confined.writeString(path, content, createParents: true)
+        if changed { try confined.writeString(path, content, createParents: true) }
 
         let lineCount = content.components(separatedBy: "\n").count
-        return ToolResult(success: true, output: "Wrote \(path) (\(lineCount) lines)", metadata: [
-            "path": path, "lines": String(lineCount),
+        let output = changed ? "Wrote \(path) (\(lineCount) lines)" : "Unchanged \(path) (content identical)"
+        return ToolResult(success: true, output: output, metadata: [
+            "path": path, "lines": String(lineCount), "changed": String(changed),
         ])
     }
 }
@@ -233,14 +235,17 @@ public struct EditFileTool: AgentTool {
         if let block = EditGuards.validate(old: content, new: updated, path: path, localized: true) {
             return block
         }
-        try confined.writeString(path, updated, createParents: false)
+        let changed = updated != content
+        if changed { try confined.writeString(path, updated, createParents: false) }
 
         let perDiff = newText.components(separatedBy: "\n").count - oldText.components(separatedBy: "\n").count
         let lineDiff = perDiff * occurrences
         let count = replaceAll ? "\(occurrences)× " : ""
         let suffix = lineDiff == 0 ? "" : (lineDiff > 0 ? " (+\(lineDiff) lines)" : " (\(lineDiff) lines)")
-        return ToolResult(success: true, output: "Edited \(count)\(path)\(suffix)", metadata: [
+        let output = changed ? "Edited \(count)\(path)\(suffix)" : "Unchanged \(path) (replacement identical)"
+        return ToolResult(success: true, output: output, metadata: [
             "path": path, "line_diff": String(lineDiff), "occurrences": String(occurrences),
+            "changed": String(changed),
         ])
     }
 }
@@ -262,8 +267,24 @@ public struct MoveFileTool: AgentTool {
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let from = try requireString("from", from: arguments)
         let to = try requireString("to", from: arguments)
-        try context.confinedRoot().move(from, to, createParents: true)
-        return ToolResult(success: true, output: "Moved \(from) → \(to)", metadata: ["from": from, "to": to])
+        let confined = try context.confinedRoot()
+        // Compare the same confined representation the move primitive uses. String-only path
+        // standardization misses aliases such as an absolute in-root source and its relative form,
+        // causing renameat(source, source) to be reported as a mutation even though no tree byte moved.
+        let fromComponents = try confined.relativeComponents(from)
+        let toComponents = try confined.relativeComponents(to)
+        guard !fromComponents.isEmpty else { throw ToolError.execution("cannot move the root directory") }
+        guard !toComponents.isEmpty else { throw ToolError.execution("invalid move destination: \(to)") }
+        let changed = fromComponents != toComponents
+        if changed {
+            try confined.move(from, to, createParents: true)
+        } else if try !confined.fileType(from).exists {
+            // Preserve rename semantics: a no-op spelling does not turn a missing source into success.
+            throw ToolError.notFound(from)
+        }
+        let output = changed ? "Moved \(from) → \(to)" : "Unchanged \(from) (source and destination match)"
+        return ToolResult(success: true, output: output,
+                          metadata: ["from": from, "to": to, "changed": String(changed)])
     }
 }
 
@@ -278,7 +299,12 @@ public struct MakeDirTool: AgentTool {
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let path = try requireString("path", from: arguments)
-        try context.confinedRoot().makeDirectory(path)
-        return ToolResult(success: true, output: "Created folder \(path)", metadata: ["path": path])
+        let confined = try context.confinedRoot()
+        let existed = (try? confined.fileType(path).exists) ?? false
+        try confined.makeDirectory(path)
+        let changed = !existed
+        let output = changed ? "Created folder \(path)" : "Unchanged folder \(path) (already exists)"
+        return ToolResult(success: true, output: output,
+                          metadata: ["path": path, "changed": String(changed)])
     }
 }

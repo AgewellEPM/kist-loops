@@ -44,6 +44,24 @@ final class PlanStoreTests: XCTestCase {
         XCTAssertFalse(r2.didAdvance)
     }
 
+    func testStaleActiveDoesNotBlockSessionAwareAdvance() {
+        let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
+        let sessionStart = Date(timeIntervalSince1970: 10_000)
+        store.save(Plan(tasks: [
+            PlanTask(id: 1, title: "zombie", status: .inProgress, startedAt: 1),
+            PlanTask(id: 2, title: "current", status: .inProgress, startedAt: 10_001),
+            PlanTask(id: 3, title: "next", status: .todo),
+        ]))
+
+        let result = store.completeAndAdvance(id: 2, sessionStartedAt: sessionStart)
+
+        XCTAssertTrue(result.didAdvance)
+        XCTAssertEqual(result.nowActive?.id, 3)
+        XCTAssertEqual(store.load().tasks.first { $0.id == 1 }?.status, .inProgress,
+                       "stale work stays recoverable but does not own live routing")
+        XCTAssertEqual(store.load().tasks.first { $0.id == 3 }?.status, .inProgress)
+    }
+
     func testCompleteAndAdvanceRetryDoesNotSkipAhead() {
         let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
         store.add(title: "A")
@@ -211,6 +229,19 @@ final class PlanStoreTests: XCTestCase {
         XCTAssertEqual(task.acceptance, "")
         XCTAssertEqual(task.verification, "")
         XCTAssertEqual(task.evidence, [])
+        XCTAssertNil(task.startedAt)
+    }
+
+    func testStartingTaskRecordsSessionOwnershipTimestamp() {
+        let (store, path) = tempStore(); defer { try? FileManager.default.removeItem(atPath: path) }
+        store.add(title: "ACTION: owned work")
+
+        let before = Date().timeIntervalSince1970
+        _ = store.startNext()
+        let task = store.load().tasks[0]
+
+        XCTAssertEqual(task.status, .inProgress)
+        XCTAssertGreaterThanOrEqual(task.startedAt ?? 0, before)
     }
 
     func testReplaceRebasesNextId() {
@@ -265,6 +296,26 @@ final class PlanStoreTests: XCTestCase {
         _ = try await tool.execute(arguments: ["action": "block", "id": 2], context: ctx)
         let retry = try await tool.execute(arguments: ["action": "done", "id": 1], context: ctx)
         XCTAssertTrue(retry.output.contains("⚠ no actionable task — blocked work remains"))
+    }
+
+    func testToolDoneIgnoresOlderZombieAndAdvancesLiveBoard() async throws {
+        let dir = NSTemporaryDirectory() + "plantool_\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = PlanStore(projectRoot: dir)
+        store.save(Plan(tasks: [
+            PlanTask(id: 1, title: "zombie", status: .inProgress, startedAt: 1),
+            PlanTask(id: 2, title: "current", status: .inProgress, startedAt: 10_001),
+            PlanTask(id: 3, title: "next", status: .todo),
+        ]))
+
+        let result = try await ManageTasksTool().execute(
+            arguments: ["action": "done", "id": 2],
+            context: ToolContext(projectRoot: dir))
+
+        XCTAssertTrue(result.output.contains("▶ advanced to [3] next"), result.output)
+        XCTAssertEqual(store.load().tasks.first { $0.id == 1 }?.status, .inProgress)
+        XCTAssertEqual(store.load().tasks.first { $0.id == 3 }?.status, .inProgress)
     }
 
     func testToolValidateReportsContractIssues() async throws {

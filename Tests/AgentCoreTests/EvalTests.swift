@@ -58,20 +58,47 @@ final class EvalTests: XCTestCase {
     }
 
     func testAllBuildMutationPathsPreventNoProgressWarning() {
-        let expectedProgressTools = [
-            "write_file", "edit_file", "apply_patch", "notebook_edit",
-            "move_file", "make_dir", "create_directory", "ast_grep_apply", "run_command",
+        let confirmedMutationTools: [(String, [String: Any])] = [
+            ("write_file", ["path": "Sources/App.swift"]),
+            ("edit_file", ["path": "Sources/App.swift"]),
+            ("apply_patch", ["patch": "*** Begin Patch\n*** Update File: Sources/App.swift\n*** End Patch"]),
+            ("notebook_edit", ["path": "Notebook.ipynb"]),
+            ("move_file", ["from": "Sources/A.swift", "to": "Sources/B.swift"]),
+            ("make_dir", ["path": "Generated"]),
+            ("create_directory", ["path": "Generated"]),
         ]
-        for tool in expectedProgressTools {
-            let steps = (0..<6).map { step("read_file", "\($0)") } + [step(tool, "target")]
+        for (tool, arguments) in confirmedMutationTools {
+            let mutation = ActionRecord(
+                tool: tool, argsFingerprint: "target", success: true,
+                effectObservation: ToolEffectCatalog.observe(
+                    tool: tool, arguments: arguments, outcomeMetadata: ["changed": "true"])
+            )
+            let steps = (0..<6).map { step("read_file", "\($0)") } + [mutation]
             let report = TrajectoryAnalyzer.analyze(steps, taskIntent: .build)
             XCTAssertFalse(report.issues.contains { $0.kind == .noToolProgress }, tool)
         }
+
+        let possibleAstRewrite = (0..<6).map { step("read_file", "\($0)") }
+            + [step("ast_grep_apply", "path=.")]
+        XCTAssertTrue(TrajectoryAnalyzer.analyze(possibleAstRewrite, taskIntent: .build).issues
+            .contains { $0.kind == .noToolProgress }, "possible mutation is not observed progress")
 
         let failedPatch = (0..<6).map { step("read_file", "\($0)") }
             + [step("apply_patch", "target", success: false)]
         XCTAssertTrue(TrajectoryAnalyzer.analyze(failedPatch, taskIntent: .build).issues
             .contains { $0.kind == .noToolProgress })
+    }
+
+    func testSuccessfulInspectionCommandIsNotBuildProgress() {
+        let steps = (0..<6).map { step("read_file", "\($0)") } + [step("run_command", "command=ls -la")]
+        let report = TrajectoryAnalyzer.analyze(steps, taskIntent: .build)
+        XCTAssertTrue(report.issues.contains { $0.kind == .noToolProgress })
+    }
+
+    func testSuccessfulBuildOrTestCommandIsBuildProgress() {
+        let steps = (0..<6).map { step("read_file", "\($0)") } + [step("run_command", "command=swift test")]
+        let report = TrajectoryAnalyzer.analyze(steps, taskIntent: .build)
+        XCTAssertFalse(report.issues.contains { $0.kind == .noToolProgress })
     }
 
     func testHealthyTrajectoryHasNoIssues() {

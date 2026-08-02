@@ -11,8 +11,13 @@ public struct PendingAction: Codable, Sendable {
     public let tool: String
     public let argsSummary: String
     public let iteration: Int
-    public init(tool: String, argsSummary: String, iteration: Int) {
+    /// Pre-execution effect classification. Optional so checkpoints written before this field existed
+    /// still decode; reconciliation falls back to the conservative legacy classifier when it is absent.
+    public let predictedEffects: ToolEffectObservation?
+    public init(tool: String, argsSummary: String, iteration: Int,
+                predictedEffects: ToolEffectObservation? = nil) {
         self.tool = tool; self.argsSummary = argsSummary; self.iteration = iteration
+        self.predictedEffects = predictedEffects
     }
 }
 
@@ -24,6 +29,13 @@ public struct LoopCheckpoint: Codable, Sendable {
 
     public let id: String
     public var goal: String
+    /// The raw operator request, separate from any compiled Captain prompt in `goal`.
+    /// Optional for backward compatibility with checkpoints written before the turn contract existed.
+    public var rawRequest: String?
+    /// One semantic decision for the whole turn. Downstream systems consume this value rather than
+    /// independently guessing whether the turn is chat, research, planning, or a state-changing build.
+    public var intent: TaskBrief.Intent?
+    public var expectedOutcome: TaskBrief.ExpectedOutcome?
     public var providerId: String
     public var model: String?
     public var projectRoot: String
@@ -32,16 +44,29 @@ public struct LoopCheckpoint: Codable, Sendable {
     public var status: Status
     public var summary: String?
     public var pendingAction: PendingAction?   // set before a tool runs; nil once it completed
+    /// The complete, ordered tool-evidence ledger for this run. Optional only for checkpoints written
+    /// before trajectory persistence shipped; new checkpoints always initialize it to an empty ledger.
+    /// Completion verification reconstructs its recorder from this field on resume, so a pause cannot
+    /// erase an unverified mutation; execution proof is then deliberately invalidated at the unbound
+    /// workspace resume boundary until a fresh build/test succeeds.
+    public var trajectory: [ActionRecord]?
     public let createdAt: Date
     public var updatedAt: Date
 
-    public init(id: String = UUID().uuidString, goal: String, providerId: String, model: String?,
+    public init(id: String = UUID().uuidString, goal: String, rawRequest: String? = nil,
+                intent: TaskBrief.Intent? = nil,
+                expectedOutcome: TaskBrief.ExpectedOutcome? = nil,
+                providerId: String, model: String?,
                 projectRoot: String, messages: [ChatMessage], iteration: Int = 0,
                 status: Status = .running, summary: String? = nil, pendingAction: PendingAction? = nil,
+                trajectory: [ActionRecord]? = [],
                 createdAt: Date = Date(), updatedAt: Date = Date()) {
-        self.id = id; self.goal = goal; self.providerId = providerId; self.model = model
+        self.id = id; self.goal = goal; self.rawRequest = rawRequest
+        self.intent = intent; self.expectedOutcome = expectedOutcome
+        self.providerId = providerId; self.model = model
         self.projectRoot = projectRoot; self.messages = messages; self.iteration = iteration
         self.status = status; self.summary = summary; self.pendingAction = pendingAction
+        self.trajectory = trajectory
         self.createdAt = createdAt; self.updatedAt = updatedAt
     }
 

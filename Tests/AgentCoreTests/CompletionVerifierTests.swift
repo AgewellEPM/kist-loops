@@ -15,6 +15,97 @@ final class CompletionVerifierTests: XCTestCase {
         XCTAssertTrue(v.check(trajectory: [rec("read_file"), rec("search_code")], canRunCommands: true).isAccept)
     }
 
+    func testPromisedMutationRejectsZeroToolAndReadOnlyNoOps() {
+        for trajectory in [[], [rec("read_file"), rec("search_code")]] {
+            guard case .needsVerification(let reason) = v.check(
+                trajectory: trajectory, canRunCommands: true, expectedOutcome: .mutation
+            ) else { return XCTFail("a build/fleet contract cannot complete without a mutation") }
+            XCTAssertTrue(reason.contains("no successful mutation"), reason)
+            XCTAssertTrue(CompletionVerifier.steering(reason: reason).contains("Perform the requested workspace change"),
+                          "a no-op must be steered to do the promised work, not merely run tests")
+        }
+    }
+
+    func testPromisedResearchRequiresObservedEvidence() {
+        guard case .needsVerification(let reason) = v.check(
+            trajectory: [], canRunCommands: true, expectedOutcome: .evidence, taskIntent: .research
+        ) else { return XCTFail("research cannot finish without gathering evidence") }
+        XCTAssertTrue(reason.contains("evidence"), reason)
+        let steering = CompletionVerifier.steering(reason: reason)
+        XCTAssertTrue(steering.contains("Gather concrete evidence"), steering)
+        XCTAssertFalse(steering.contains("Run the project's REAL build"), steering)
+
+        let fetched = ActionRecord(
+            tool: "fetch_url", argsFingerprint: "url=https://example.com", success: true,
+            effectObservation: ToolEffectObservation(progress: .evidence))
+        XCTAssertTrue(v.check(trajectory: [fetched], canRunCommands: true,
+                              expectedOutcome: .evidence, taskIntent: .research).isAccept)
+        let searched = ActionRecord(
+            tool: "jeeves_research", argsFingerprint: "query=facts", success: true,
+            effectObservation: ToolEffectObservation(progress: .research))
+        XCTAssertTrue(v.check(trajectory: [searched], canRunCommands: true,
+                              expectedOutcome: .evidence, taskIntent: .research).isAccept)
+        let symbolic = ActionRecord(
+            tool: "jeeves-floor__symbolic_query", argsFingerprint: "query=facts", success: true,
+            effectObservation: ToolEffectCatalog.observe(
+                tool: "jeeves-floor__symbolic_query", arguments: ["query": "facts"]))
+        XCTAssertEqual(symbolic.observedEffects.progress, .evidence)
+        XCTAssertTrue(v.check(trajectory: [symbolic], canRunCommands: true,
+                              expectedOutcome: .evidence, taskIntent: .research).isAccept)
+        let failedFetch = ActionRecord(
+            tool: "fetch_url", argsFingerprint: "url=https://example.com", success: false,
+            effectObservation: ToolEffectObservation(progress: .evidence))
+        XCTAssertFalse(v.check(trajectory: [failedFetch], canRunCommands: true,
+                               expectedOutcome: .evidence, taskIntent: .research).isAccept)
+    }
+
+    func testPromisedDesktopActionRequiresSuccessfulExternalStateChange() {
+        XCTAssertFalse(v.check(trajectory: [], canRunCommands: true,
+                               expectedOutcome: .externalAction, taskIntent: .desktop).isAccept)
+        let inspection = ActionRecord(
+            tool: "desktop_control", argsFingerprint: "action=screenshot", success: true,
+            effectObservation: ToolEffectObservation.none)
+        guard case .needsVerification(let reason) = v.check(
+            trajectory: [inspection], canRunCommands: true,
+            expectedOutcome: .externalAction, taskIntent: .desktop
+        ) else { return XCTFail("inspection alone cannot fulfill an external action") }
+        let steering = CompletionVerifier.steering(reason: reason)
+        XCTAssertTrue(steering.contains("Perform the requested external action"), steering)
+        XCTAssertFalse(steering.contains("Run the project's REAL build"), steering)
+        let opened = ActionRecord(
+            tool: "computer_control", argsFingerprint: "action=open_app", success: true,
+            effectObservation: ToolEffectObservation(progress: .externalState))
+        XCTAssertTrue(v.check(trajectory: [opened], canRunCommands: true,
+                              expectedOutcome: .externalAction, taskIntent: .desktop).isAccept)
+        let failedOpen = ActionRecord(
+            tool: "computer_control", argsFingerprint: "action=open_app", success: false,
+            effectObservation: ToolEffectObservation(progress: .externalState))
+        XCTAssertFalse(v.check(trajectory: [failedOpen], canRunCommands: true,
+                               expectedOutcome: .externalAction, taskIntent: .desktop).isAccept)
+    }
+
+    func testDesktopToolEffectsOnlyCreditConfirmedActuation() {
+        XCTAssertEqual(ToolEffectCatalog.observe(
+            tool: "computer_control", arguments: ["action": "open_app"]
+        ).progress, .externalState)
+        XCTAssertEqual(ToolEffectCatalog.observe(
+            tool: "computer_control", arguments: ["action": "clean_desktop", "dry_run": true],
+            outcomeMetadata: ["count": "3", "dry_run": "true"]
+        ).progress, .none)
+        XCTAssertEqual(ToolEffectCatalog.observe(
+            tool: "desktop_control", arguments: ["action": "screenshot"]
+        ).progress, .none)
+        XCTAssertEqual(ToolEffectCatalog.observe(
+            tool: "desktop_control", arguments: ["action": "click"]
+        ).progress, .externalState)
+        XCTAssertEqual(ToolEffectCatalog.observe(
+            tool: "ax_press", arguments: [:], outcomeMetadata: ["pressed": "false"]
+        ).progress, .none)
+        XCTAssertEqual(ToolEffectCatalog.observe(
+            tool: "tap", arguments: [:], outcomeMetadata: ["found": "1"]
+        ).progress, .externalState)
+    }
+
     func testEditThenPassingBuildIsAccepted() {
         let t = [rec("read_file"), rec("edit_file"), cmd("swift build")]
         XCTAssertTrue(v.check(trajectory: t, canRunCommands: true).isAccept)
@@ -27,7 +118,27 @@ final class CompletionVerifierTests: XCTestCase {
 
     /// R7: a mutation whose PATH fingerprint carries a file extension.
     private func edit(_ path: String) -> ActionRecord {
-        ActionRecord(tool: "edit_file", argsFingerprint: "content=x&path=\(path)", success: true)
+        ActionRecord(
+            tool: "edit_file", argsFingerprint: "content=x&path=\(path)", success: true,
+            effectObservation: ToolEffectCatalog.observe(
+                tool: "edit_file", arguments: ["path": path], outcomeMetadata: ["changed": "true"])
+        )
+    }
+
+    func testPromisedMutationAcceptsSuccessfulNonSourceMutationWithoutBuild() {
+        XCTAssertTrue(v.check(trajectory: [edit("README.md")], canRunCommands: true,
+                              expectedOutcome: .mutation).isAccept)
+    }
+
+    func testFleetDelegationFulfillsFleetProgressWithoutBecomingMutationVerification() {
+        let delegated = ActionRecord(
+            tool: "spawn_agent", argsFingerprint: "task=worker", success: true,
+            effectObservation: ToolEffectObservation(progress: .delegation)
+        )
+        XCTAssertTrue(v.check(trajectory: [delegated], canRunCommands: true,
+                              expectedOutcome: .mutation, taskIntent: .fleet).isAccept)
+        XCTAssertFalse(v.check(trajectory: [delegated], canRunCommands: true,
+                               expectedOutcome: .mutation, taskIntent: .build).isAccept)
     }
 
     // R7 over-block fix: editing a DOC/CONFIG file needs no build/test — demanding one was the review-
@@ -75,13 +186,68 @@ final class CompletionVerifierTests: XCTestCase {
         if case .needsVerification = v.check(trajectory: t, canRunCommands: true) {} else { XCTFail("must re-verify after the new edit") }
     }
 
-    func testShellOffCannotBeBlocked() {
-        XCTAssertTrue(v.check(trajectory: [rec("edit_file")], canRunCommands: false).isAccept)
+    func testShellUnavailableIsDisclosedAsUnverified() {
+        guard case .needsVerification(let why) = v.check(
+            trajectory: [rec("edit_file")], canRunCommands: false
+        ) else { return XCTFail("absence of a shell is not verification") }
+        XCTAssertTrue(why.contains("shell/build execution is unavailable"), why)
+        XCTAssertTrue(why.contains("unverified"), why)
     }
 
     func testWriteAndPatchAlsoCountAsMutations() {
         XCTAssertFalse(v.check(trajectory: [rec("write_file")], canRunCommands: true).isAccept)
         XCTAssertFalse(v.check(trajectory: [rec("apply_patch")], canRunCommands: true).isAccept)
+    }
+
+    func testFailedMutationCannotBeLaunderedByPassingBuild() {
+        let trajectory = [rec("edit_file", false), cmd("swift test")]
+        guard case .needsVerification(let why) = v.check(trajectory: trajectory, canRunCommands: true) else {
+            return XCTFail("a failed mutation is incomplete even if a later test passes")
+        }
+        XCTAssertTrue(why.contains("mutation failed"), why)
+    }
+
+    func testLaterSuccessfulMutationAndTestRecoverFromEarlierFailure() {
+        let trajectory = [rec("edit_file", false), rec("edit_file"), cmd("swift test")]
+        XCTAssertTrue(v.check(trajectory: trajectory, canRunCommands: true).isAccept)
+    }
+
+    func testFailedNonSourceMutationIsStillIncomplete() {
+        let failedReadme = ActionRecord(
+            tool: "edit_file", argsFingerprint: "path=README.md", success: false
+        )
+        XCTAssertFalse(v.check(trajectory: [failedReadme], canRunCommands: true).isAccept)
+    }
+
+    func testExplicitEffectObservationSupportsFutureToolsWithoutVerifierNameChanges() {
+        let mutation = ActionRecord(
+            tool: "future_refactor_tool", argsFingerprint: "opaque", success: true,
+            effectObservation: ToolEffectObservation(mutation: .source)
+        )
+        let verification = ActionRecord(
+            tool: "future_ci_tool", argsFingerprint: "opaque", success: true,
+            effectObservation: ToolEffectObservation(verification: .buildOrTest)
+        )
+        XCTAssertTrue(v.check(trajectory: [mutation, verification], canRunCommands: true).isAccept)
+    }
+
+    func testPathNamedVerifierCannotProveAConfirmedSourceMutation() {
+        let spoofedCommand = "/repo/swift test"
+        let spoofedEffect = ToolEffectCatalog.observe(
+            tool: "run_command", arguments: ["command": spoofedCommand]
+        )
+        XCTAssertEqual(spoofedEffect.verification, .nonVerifyingCommand)
+
+        let spoofedSuccess = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=\(spoofedCommand)", success: true,
+            effectObservation: spoofedEffect
+        )
+        guard case .needsVerification(let reason) = v.check(
+            trajectory: [edit("Sources/App.swift"), spoofedSuccess], canRunCommands: true
+        ) else {
+            return XCTFail("an arbitrary path named `swift` cannot verify a confirmed source mutation")
+        }
+        XCTAssertTrue(reason.contains("build/test"), reason)
     }
 
     // MARK: CommandClassifier — what actually counts as a build/test/lint

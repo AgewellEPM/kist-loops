@@ -13,7 +13,7 @@ $ kist                       # interactive REPL
 $ kist --resume <id>         # pick a run back up where it stopped
 ```
 
-> **Status: PILOT.** The engine is built, tested (130+ tests), and security-reviewed. It runs real
+> **Status: PILOT.** The engine is built, covered by thousands of automated checks, and security-reviewed. It runs real
 > agentic loops against real providers today. It is not yet 1.0 — see [Status](#status).
 
 ## Why
@@ -86,11 +86,18 @@ Two pieces, one Foundation-only Swift package (`AgentCore`) + a CLI (`Kist`):
   sandboxed `ToolRegistry`, an MCP client, and `HeadlessAgentLoop` (the agent loop). No UI deps.
 - **`Kist`** — the terminal shell wired on top.
 
-The loop is a **provider-agnostic text protocol** (ReAct): the model emits a small JSON action
-object, Mythos parses and dispatches it, feeds the result back, and repeats. Because it relies on
-structured *text* rather than a provider's native tool-calling format, the *same* loop works across
-every provider — including local models with no function-calling. (Native tool-calling as a
-reliability boost on capable providers is on the roadmap.)
+The loop supports both **native provider tool calls** and a provider-agnostic structured-text
+protocol. Capable providers use their native tool format; local or compatibility models use the
+same JSON-action loop through the text path. Both paths share tools, approvals, checkpointing,
+progress monitoring, verification, and resume reconciliation.
+
+The reliability rules live inside those existing paths; this work did not add another REPL or
+control plane. Plan execution retains every invocation attempt, including failures later replaced by
+a repair, and carries deterministic verification evidence across replans. Concurrent dependency-wave
+steps do not establish a false mutation-before-verification order. A resumed mutation turn cannot
+reuse stale pre-resume build/test proof to authorize completion: it needs fresh verification against
+the current workspace state. Recognized build, dependency, test, and CI manifests, configuration
+files, and lockfiles are treated as verification-requiring inputs when changed.
 
 A macOS SwiftUI app shares the same `AgentCore` engine.
 
@@ -98,10 +105,12 @@ A macOS SwiftUI app shares the same `AgentCore` engine.
 
 PILOT-quality and honestly labeled — built and reviewed, not yet 1.0. Known gaps:
 
-- Interrupted-action reconciliation on resume (a tool can re-run if a crash lands between its side
-  effect and the checkpoint write).
 - Linux builds (Foundation-only) but is CI-verified only on macOS so far.
-- No native tool-calling path yet (text protocol only); no per-domain network allowlist.
+- macOS has the production OS sandbox; Linux sandbox parity and per-domain network allowlists remain.
+- The native-scrollback REPL's response-bar behavior is unchanged: pinned while idle, with
+  during-turn sticky capture remaining explicit opt-in (`--sticky-turns`) while terminal/resize
+  coverage continues to mature.
+- Model review is advisory evidence; only executed deterministic checks establish verification.
 
 ## License
 

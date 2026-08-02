@@ -20,6 +20,25 @@ final class MoveFileToolTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/Images/photo.png"))   // parent created
     }
 
+    func testNormalizedSamePathIsANoOpWithChangedFalse() async throws {
+        try "same".write(toFile: root + "/same.txt", atomically: true, encoding: .utf8)
+        let r = try await MoveFileTool().execute(
+            arguments: ["from": root + "/same.txt", "to": "./same.txt"], context: ctx)
+        XCTAssertTrue(r.success, r.output)
+        XCTAssertEqual(r.metadata["changed"], "false")
+        XCTAssertEqual(try String(contentsOfFile: root + "/same.txt", encoding: .utf8), "same")
+    }
+
+    func testNormalizedSameMissingPathDoesNotClaimSuccess() async {
+        do {
+            _ = try await MoveFileTool().execute(
+                arguments: ["from": root + "/missing.txt", "to": "./missing.txt"], context: ctx)
+            XCTFail("a same-path spelling must not make a missing source successful")
+        } catch {
+            XCTAssertEqual(error as? ToolError, .notFound("\(root!)/missing.txt"))
+        }
+    }
+
     func testMakeDir() async throws {
         let r = try await MakeDirTool().execute(arguments: ["path": "a/b/c"], context: ctx)
         XCTAssertTrue(r.success)

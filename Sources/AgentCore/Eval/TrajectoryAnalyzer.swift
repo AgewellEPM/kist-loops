@@ -10,9 +10,19 @@ public struct ActionRecord: Sendable, Equatable, Codable {
     /// carry the concrete error forward to the next cycle instead of the model rediscovering it. nil on
     /// success or when no detail was captured.
     public let failureDetail: String?
-    public init(tool: String, argsFingerprint: String, success: Bool, failureDetail: String? = nil) {
+    /// Argument-aware effect captured before fingerprints truncate values. Optional so checkpoints written
+    /// by older binaries continue to decode; consumers fall back to the central legacy classifier.
+    public let effectObservation: ToolEffectObservation?
+
+    public init(tool: String, argsFingerprint: String, success: Bool, failureDetail: String? = nil,
+                effectObservation: ToolEffectObservation? = nil) {
         self.tool = tool; self.argsFingerprint = argsFingerprint; self.success = success
         self.failureDetail = failureDetail
+        self.effectObservation = effectObservation
+    }
+
+    public var observedEffects: ToolEffectObservation {
+        effectObservation ?? ToolEffectCatalog.inferLegacy(tool: tool, argsFingerprint: argsFingerprint)
     }
 }
 
@@ -46,15 +56,11 @@ public struct TrajectoryReport: Sendable, Equatable, Codable {
 }
 
 public enum TrajectoryAnalyzer {
-    /// Successful actions that are concrete progress for a build turn. Keep the native file mutators
-    /// together here so newer paths such as apply_patch/AST rewrites are not mistaken for read-only spin.
-    /// `run_command` also counts: it may perform the requested change itself and is the execution seam for
-    /// builds/tests. This is intentionally broader than CompletionVerifier's source-edit-only set.
-    public static let buildProgressTools: Set<String> = [
-        "write_file", "edit_file", "apply_patch", "notebook_edit",
-        "move_file", "make_dir", "create_directory", "ast_grep_apply",
-        "run_command",
-    ]
+    /// Compatibility projection for callers that displayed the old catalog. Progress decisions must use
+    /// the per-invocation observation: membership alone cannot distinguish `swift test` from `ls`.
+    @available(*, deprecated, message: "Use ActionRecord.observedEffects.advancesBuild")
+    public static let buildProgressTools: Set<String> =
+        ToolEffectCatalog.knownMutationTools.union(ToolEffectCatalog.knownCommandTools)
 
     /// Analyze a sequence of actions. `maxIterations` lets us flag a run that's about to exhaust its
     /// budget. `taskIntent` is opt-in because read-only chat/research/review work is real work; only
@@ -122,9 +128,10 @@ public enum TrajectoryAnalyzer {
 
         // 4) No mutating progress applies ONLY to a build. Research, chat, review, and plan turns can
         // correctly use many read/search calls and then answer. Require a successful progress action:
-        // a failed edit attempt did not actually move the build forward.
+        // a failed edit attempt did not actually move the build forward, and a successful `ls` is still
+        // only inspection. Effects come from the shared catalog/recorded observation, not a local name set.
         if taskIntent?.expectsMutation == true, toolCalls >= 6,
-           !steps.contains(where: { $0.success && buildProgressTools.contains($0.tool) }) {
+           !steps.contains(where: { $0.success && $0.observedEffects.advances(intent: taskIntent) }) {
             issues.append(.init(kind: .noToolProgress,
                                 detail: "\(toolCalls) tool calls for a build, none made mutating/execution progress — possible read-only spin",
                                 stepIndices: []))

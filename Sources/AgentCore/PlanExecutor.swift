@@ -7,18 +7,44 @@ public struct StepResult: Sendable, Equatable {
     public let success: Bool
     public let output: String        // success output, or the error text (bounded)
     public let error: String?
+    /// Post-call evidence (for example `changed=true`) needed to distinguish attempted from actual work.
+    public var metadata: [String: String] = [:]
+    /// Effect of the arguments that ACTUALLY produced this final result. A repaired retry can run
+    /// different arguments from the frozen plan, so verification must not reclassify the original step.
+    public var effectObservation: ToolEffectObservation? = nil
     /// The user said no at the approval gate — a structured flag, not an error-string sniff.
     /// Declined steps are never self-repaired (the decline was a decision, not a malfunction).
     public var declinedAtGate: Bool = false
+    /// Executor phase in which this invocation ran. All initial calls in one dependency wave share a
+    /// phase because they overlap; every repaired retry gets a later phase. nil preserves the legacy
+    /// meaning for manually-constructed StepResults: declaration order is sequential evidence.
+    public var executionPhase: Int? = nil
+    /// Fingerprint of the arguments THIS invocation actually ran. Repairs can change arguments, so the
+    /// frozen plan template is only a compatibility fallback for old/manual results.
+    public var argsFingerprint: String? = nil
 }
 
 /// Result of running a whole plan: per-step results, the captured outputs (id → text) usable for
 /// `${id}` references, and the first failing step id (nil on full success).
 public struct PlanExecution: Sendable, Equatable {
     public let success: Bool
-    public let stepResults: [StepResult]      // in execution order
+    public let stepResults: [StepResult]      // final state per step, in stable plan order
+    /// Append-only invocation ledger. Unlike `stepResults`, this retains a failed initial attempt when a
+    /// repaired retry replaces that step's final state. Plan verification consumes this ledger.
+    public let attemptResults: [StepResult]
     public let outputs: [String: String]      // id → output text
     public let failedStepId: String?
+
+    /// `attemptResults` defaults to the legacy final rows so existing/manual PlanExecution values retain
+    /// their old sequential verification behavior. The executor always supplies its richer ledger.
+    public init(success: Bool, stepResults: [StepResult], attemptResults: [StepResult]? = nil,
+                outputs: [String: String], failedStepId: String?) {
+        self.success = success
+        self.stepResults = stepResults
+        self.attemptResults = attemptResults ?? stepResults
+        self.outputs = outputs
+        self.failedStepId = failedStepId
+    }
 
     /// A compact transcript of what ran — fed to the replan/verify nodes (next increment).
     public var summary: String {
@@ -67,6 +93,7 @@ public struct PlanExecutor: Sendable {
 
         var outputs: [String: String] = [:]
         var results: [StepResult] = []
+        var attempts: [StepResult] = []
         var completed = Set<String>()
         var remaining = Dictionary(uniqueKeysWithValues: ordered.map { ($0.id, $0) })
         let orderIndex = Dictionary(uniqueKeysWithValues: ordered.enumerated().map { ($0.element.id, $0.offset) })
@@ -82,17 +109,23 @@ public struct PlanExecutor: Sendable {
             // launches. Completed step results are preserved.
             if Task.isCancelled {
                 sink.emit(.cancelled)
-                return PlanExecution(success: false, stepResults: results, outputs: outputs, failedStepId: nil)
+                return PlanExecution(success: false, stepResults: results, attemptResults: attempts,
+                                     outputs: outputs, failedStepId: nil)
             }
             let ready = ordered.filter { step in
                 remaining[step.id] != nil && plan.effectiveDependencies(of: step).isSubset(of: completed)
             }
             guard !ready.isEmpty else {
                 sink.emit(.failed("plan invalid: no executable DAG frontier"))
-                return PlanExecution(success: false, stepResults: results, outputs: outputs, failedStepId: nil)
+                return PlanExecution(success: false, stepResults: results, attemptResults: attempts,
+                                     outputs: outputs, failedStepId: nil)
             }
             wave += 1
             sink.emit(.stepWave(wave: wave, stepIds: ready.map(\.id)))   // R3: mission-slice marker
+            // Phase is causal, not cosmetic: every call in this wave overlaps and therefore none of its
+            // verifiers can prove a sibling mutation. Repairs below advance it before they execute.
+            var executionPhase = attempts.compactMap(\.executionPhase).max().map { $0 + 1 } ?? 1
+            let wavePhase = executionPhase
 
             let outputSnapshot = outputs
             let waveResults = await withTaskGroup(of: (Int, String, String, StepResult).self) { group in
@@ -108,7 +141,9 @@ public struct PlanExecutor: Sendable {
                        await approve(step.tool, args) == false {
                         let sr = StepResult(stepId: step.id, tool: step.tool, success: false,
                                             output: "", error: "declined at approval gate (dangerous step)",
-                                            declinedAtGate: true)
+                                            effectObservation: .none, declinedAtGate: true,
+                                            executionPhase: wavePhase,
+                                            argsFingerprint: Self.fingerprint(tool: step.tool, arguments: args))
                         // Emitted INLINE (immediate feedback at the prompt); the merge loop skips
                         // declined entries so one decline never prints two ✗ lines.
                         sink.emit(.actionStarted(index: idx, tool: step.tool, description: step.intent))
@@ -120,8 +155,15 @@ public struct PlanExecutor: Sendable {
                     group.addTask {
                         let result = await tools.execute(name: step.tool, arguments: args, context: context)
                         let body = String((result.success ? result.output : (result.error ?? result.output)).prefix(maxOutputBytes))
+                        let effect = ToolEffectCatalog.observe(tool: step.tool, arguments: args,
+                                                               outcomeMetadata: result.metadata)
                         return (idx, step.id, body, StepResult(stepId: step.id, tool: step.tool,
-                                                              success: result.success, output: body, error: result.error))
+                                                              success: result.success, output: body, error: result.error,
+                                                              metadata: result.metadata,
+                                                              effectObservation: effect,
+                                                              executionPhase: wavePhase,
+                                                              argsFingerprint: Self.fingerprint(tool: step.tool,
+                                                                                               arguments: args)))
                     }
                 }
 
@@ -137,6 +179,7 @@ public struct PlanExecutor: Sendable {
                 }
                 outputs[stepId] = body
                 results.append(stepResult)
+                attempts.append(stepResult)
                 completed.insert(stepId)
                 remaining.removeValue(forKey: stepId)
             }
@@ -168,24 +211,43 @@ public struct PlanExecutor: Sendable {
                 }
                 let retry = await tools.execute(name: step.tool, arguments: fixedArgs, context: context)
                 let body = String((retry.success ? retry.output : (retry.error ?? retry.output)).prefix(maxOutputBytes))
+                let retryEffect = ToolEffectCatalog.observe(tool: step.tool, arguments: fixedArgs,
+                                                            outcomeMetadata: retry.metadata)
+                executionPhase += 1
+                let retryResult = retry.success
+                    ? StepResult(stepId: stepId, tool: step.tool, success: true, output: body, error: nil,
+                                 metadata: retry.metadata, effectObservation: retryEffect,
+                                 executionPhase: executionPhase,
+                                 argsFingerprint: Self.fingerprint(tool: step.tool, arguments: fixedArgs))
+                    : StepResult(stepId: stepId, tool: step.tool, success: false, output: body,
+                                 error: "repaired-args retry also failed: \(retry.error ?? body)",
+                                 metadata: retry.metadata, effectObservation: retryEffect,
+                                 executionPhase: executionPhase,
+                                 argsFingerprint: Self.fingerprint(tool: step.tool, arguments: fixedArgs))
                 sink.emit(.actionFinished(index: idx, success: retry.success,
                                           output: retry.success ? body : "", error: retry.error))
+                attempts.append(retryResult)
                 if let i = results.lastIndex(where: { $0.stepId == stepId }) {
                     // Record the retry's FINAL state either way — a stale original error would
                     // misdirect the replan prompt and hide that a repair was attempted.
                     outputs[stepId] = body
-                    results[i] = retry.success
-                        ? StepResult(stepId: stepId, tool: step.tool, success: true, output: body, error: nil)
-                        : StepResult(stepId: stepId, tool: step.tool, success: false, output: body,
-                                     error: "repaired-args retry also failed: \(retry.error ?? body)")
+                    results[i] = retryResult
                 }
             }
 
             if let failed = results.first(where: { !$0.success })?.stepId {
                 // Same-wave siblings may already have completed; no downstream work runs.
-                return PlanExecution(success: false, stepResults: results, outputs: outputs, failedStepId: failed)
+                return PlanExecution(success: false, stepResults: results, attemptResults: attempts,
+                                     outputs: outputs, failedStepId: failed)
             }
         }
-        return PlanExecution(success: true, stepResults: results, outputs: outputs, failedStepId: nil)
+        return PlanExecution(success: true, stepResults: results, attemptResults: attempts,
+                             outputs: outputs, failedStepId: nil)
+    }
+
+    private static func fingerprint(tool: String, arguments: [String: Any]) -> String {
+        tool == "run_command"
+            ? ToolEffectCatalog.commandFingerprint(arguments)
+            : TrajectoryAnalyzer.fingerprint(arguments)
     }
 }

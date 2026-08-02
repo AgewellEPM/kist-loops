@@ -71,7 +71,12 @@ public struct PlanStore: Sendable {
         withLock {
             var plan = load()
             guard let idx = plan.tasks.firstIndex(where: { $0.id == id }) else { return nil }
-            if let status { plan.tasks[idx].status = status }
+            if let status {
+                plan.tasks[idx].status = status
+                // Passing `.inProgress` is an explicit start/resume action, including resuming a task
+                // that a prior session left in that state. Refresh ownership every time.
+                if status == .inProgress { plan.tasks[idx].startedAt = Date().timeIntervalSince1970 }
+            }
             if let detail { plan.tasks[idx].detail = detail }
             if let kind { plan.tasks[idx].kind = kind }
             if let acceptance { plan.tasks[idx].acceptance = acceptance }
@@ -101,6 +106,7 @@ public struct PlanStore: Sendable {
                 return nil
             }
             plan.tasks[index].status = .inProgress
+            plan.tasks[index].startedAt = Date().timeIntervalSince1970
             save(plan)
             return plan.tasks[index]
         }
@@ -112,23 +118,35 @@ public struct PlanStore: Sendable {
     /// re-select. A retry of an already-completed task is idempotent and never advances again.
     /// Returns what was completed, what's now active, and whether this call performed the promotion.
     @discardableResult
-    public func completeAndAdvance(id: Int)
+    public func completeAndAdvance(id: Int, sessionStartedAt: Date? = nil)
         -> (completed: PlanTask?, nowActive: PlanTask?, didAdvance: Bool) {
         withLock {
             var plan = load()
-            guard let idx = plan.tasks.firstIndex(where: { $0.id == id }) else {
-                return (nil, plan.active, false)
+            func liveActive(in plan: Plan, since ownershipStart: Date?) -> PlanTask? {
+                ownershipStart.map { plan.active(since: $0) } ?? plan.active
             }
+            guard let idx = plan.tasks.firstIndex(where: { $0.id == id }) else {
+                return (nil, liveActive(in: plan, since: sessionStartedAt), false)
+            }
+            // The REPL supplies its exact session boundary. Tool callers do not have that boundary, but a
+            // task explicitly started/resumed for this run carries a fresh `startedAt`; use that as the
+            // ownership floor so an older zombie cannot block `tasks done` from advancing the live board.
+            let ownershipStart = sessionStartedAt
+                ?? plan.tasks[idx].startedAt.map { Date(timeIntervalSince1970: $0) }
             if plan.tasks[idx].status == .done {
-                return (plan.tasks[idx], plan.active, false)
+                return (plan.tasks[idx], liveActive(in: plan, since: ownershipStart), false)
             }
             plan.tasks[idx].status = .done
             let completed = plan.tasks[idx]
-            var nowActive = plan.active                       // keep an already-running task if there is one
+            // A zombie `inProgress` task from an earlier session must not block advancement forever.
+            // Keep only a task explicitly claimed by this live session; stale status remains visible and
+            // recoverable on disk, but it has no routing ownership until the user explicitly resumes it.
+            var nowActive = liveActive(in: plan, since: ownershipStart)
             var didAdvance = false
             if nowActive == nil, let next = plan.nextActionable,
                let ni = plan.tasks.firstIndex(where: { $0.id == next.id }) {
                 plan.tasks[ni].status = .inProgress
+                plan.tasks[ni].startedAt = Date().timeIntervalSince1970
                 nowActive = plan.tasks[ni]
                 didAdvance = true
             }

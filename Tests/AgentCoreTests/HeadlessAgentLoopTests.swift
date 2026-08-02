@@ -61,6 +61,48 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(occurrences, 2, "both done sites must handle .failUnverified — a missed sibling laundered success")
     }
 
+    func testVerifyBeforeDoneCannotBeDisabledByOmittingHostRecorder() async {
+        // Delegated/headless callers intentionally omit the observation recorder. Reliability policy
+        // must still see the source mutation and refuse a model's repeated unverified "done" claim.
+        let sink = RecordingEventSink()
+        let out = await loop([
+            #"{"tool":"write_file","parameters":{"path":"Sources/New.swift","content":"struct New {}"}}"#,
+            #"{"done":true,"summary":"done without testing"}"#,
+            #"{"done":true,"summary":"still done"}"#,
+            #"{"done":true,"summary":"done again"}"#,
+            #"{"done":true,"summary":"final done claim"}"#,
+        ], sink: sink, maxIterations: 8).run(goal: "add a Swift source file")
+
+        XCTAssertFalse(out.success, out.summary)
+        XCTAssertTrue(out.summary.lowercased().contains("unverified"), out.summary)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/Sources/New.swift"))
+    }
+
+    func testShellOffMissingEvidenceAndExternalActionRemainNudgeable() {
+        let l = loop([], sink: NullEventSink())
+
+        guard case .nudge(let researchReason) = l.verifyBeforeDone(
+            canRunCommands: false, expectedOutcome: .evidence, taskIntent: .research, nudges: 0
+        ) else {
+            return XCTFail("research tools can still gather evidence when the shell is disabled")
+        }
+        XCTAssertTrue(researchReason.contains("research evidence"), researchReason)
+
+        guard case .nudge(let actionReason) = l.verifyBeforeDone(
+            canRunCommands: false, expectedOutcome: .externalAction, taskIntent: .desktop, nudges: 0
+        ) else {
+            return XCTFail("desktop tools can still perform an external action when the shell is disabled")
+        }
+        XCTAssertTrue(actionReason.contains("external action"), actionReason)
+
+        guard case .failUnverified = l.verifyBeforeDone(
+            canRunCommands: false, expectedOutcome: .evidence, taskIntent: .research,
+            nudges: 3
+        ) else {
+            return XCTFail("a reachable missing outcome must still fail honestly after its nudge budget")
+        }
+    }
+
     private actor RecordingInteractor: RuntimeInteractor {
         private(set) var asked = false
         private(set) var lastDangerous = false
@@ -203,7 +245,10 @@ final class HeadlessAgentLoopTests: XCTestCase {
                 triggerCharacters: 2_000, keepFirst: 2, keepRecent: 8, minMiddle: 6)
         )
 
-        let out = await subject.turn(transcript: &transcript, userInput: wrapped)
+        // This fixture exercises compaction only. Pin chat intent so the stricter build contract does
+        // not correctly demand a mutation from the deliberately read-only scripted responses.
+        let out = await subject.turn(transcript: &transcript, userInput: wrapped,
+                                     rawRequest: current, resolvedIntent: .chat)
         let mainPrompts = await provider.mainPrompts()
 
         XCTAssertTrue(out.success, out.summary)
@@ -368,6 +413,209 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertEqual(try store.load(id: a.checkpointId).status, .completed)   // same checkpoint id, now done
     }
 
+    func testResumeRetainsUnverifiedPrePauseMutationAndCannotFalseSucceed() async throws {
+        let ckptDir = NSTemporaryDirectory() + "resume-proof-negative-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: ckptDir) }
+        let store = LoopCheckpointStore(directory: ckptDir)
+        var cp = LoopCheckpoint(
+            goal: "change Sources/App.swift", rawRequest: "change Sources/App.swift",
+            intent: .build, expectedOutcome: .mutation,
+            providerId: "scripted", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "change Sources/App.swift")],
+            iteration: 1, status: .paused)
+        cp.trajectory = [
+            ActionRecord(tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .source)),
+        ]
+        try store.save(cp)
+        let loaded = try store.load(id: cp.id)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                "off protocol one", "off protocol two", "off protocol three",
+                #"{"done":true,"summary":"final synthesis tries to claim done"}"#,
+            ])],
+                keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 4
+        ).resume(from: loaded)
+
+        XCTAssertFalse(out.success, "pause/resume must not erase the unverified source mutation")
+        XCTAssertTrue(out.summary.lowercased().contains("unverified"), out.summary)
+        XCTAssertEqual(try store.load(id: cp.id).trajectory, cp.trajectory,
+                       "final synthesis must not erase durable pre-pause evidence")
+    }
+
+    func testResumeInvalidatesPrePauseBuildProofWhenShellIsNowDisabled() async throws {
+        let ckptDir = NSTemporaryDirectory() + "resume-proof-positive-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: ckptDir) }
+        let store = LoopCheckpointStore(directory: ckptDir)
+        let proof = [
+            ActionRecord(tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .source)),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=swift test", success: true,
+                         effectObservation: ToolEffectObservation(verification: .buildOrTest)),
+        ]
+        let cp = LoopCheckpoint(
+            goal: "change Sources/App.swift", rawRequest: "change Sources/App.swift",
+            intent: .build, expectedOutcome: .mutation,
+            providerId: "scripted", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "change Sources/App.swift")],
+            iteration: 2, status: .paused, trajectory: proof)
+        try store.save(cp)
+        let loaded = try store.load(id: cp.id)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"done":true,"summary":"tries to reuse stale build proof"}"#])],
+                keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 2
+        ).resume(from: loaded)
+
+        XCTAssertFalse(out.success, "pre-pause execution proof is not bound to the resumed workspace")
+        XCTAssertTrue(out.summary.contains("shell/build execution is unavailable"), out.summary)
+        let saved = try store.load(id: cp.id)
+        XCTAssertEqual(Array(saved.trajectory?.prefix(proof.count) ?? []), proof)
+        XCTAssertEqual(saved.trajectory?.last?.tool, "resume_boundary")
+        XCTAssertEqual(saved.trajectory?.last?.observedEffects.mutationEvidence, .mayMutate)
+    }
+
+    func testResumeAcceptsFreshSuccessfulVerifierAfterWorkspaceBoundary() async throws {
+        let ckptDir = NSTemporaryDirectory() + "resume-proof-fresh-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: ckptDir) }
+        let store = LoopCheckpointStore(directory: ckptDir)
+        let proof = [
+            ActionRecord(tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .source)),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=swift test", success: true,
+                         effectObservation: ToolEffectObservation(verification: .buildOrTest)),
+        ]
+        let cp = LoopCheckpoint(
+            goal: "change Sources/App.swift", rawRequest: "change Sources/App.swift",
+            intent: .build, expectedOutcome: .mutation,
+            providerId: "scripted", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "change Sources/App.swift")],
+            iteration: 2, status: .paused, trajectory: proof)
+        try store.save(cp)
+        try "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n"
+            .write(toFile: root + "/test_ok.py", atomically: true, encoding: .utf8)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"tool":"run_command","parameters":{"command":"python3 -m unittest discover -s . -p test_ok.py"}}"#,
+                #"{"done":true,"summary":"fresh verifier passed"}"#,
+            ])], keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root,
+                                 shell: ShellPolicy(enabled: true, autoApprove: true)),
+            checkpoints: store, maxIterations: 3
+        ).resume(from: try store.load(id: cp.id))
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(out.summary, "fresh verifier passed")
+        let saved = try store.load(id: cp.id)
+        let boundary = try XCTUnwrap(saved.trajectory?.firstIndex { $0.tool == "resume_boundary" })
+        XCTAssertTrue(saved.trajectory![(boundary + 1)...].contains {
+            $0.success && $0.observedEffects.verification == .buildOrTest
+        })
+    }
+
+    func testResumeMutationTurnWithOnlyNonSourceWorkRequiresFreshWorkspaceProof() async throws {
+        let ckptDir = NSTemporaryDirectory() + "resume-doc-only-boundary-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: ckptDir) }
+        let store = LoopCheckpointStore(directory: ckptDir)
+        let nonSourceWork = [
+            ActionRecord(tool: "write_file", argsFingerprint: "path=README.md", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .nonSource)),
+        ]
+        let cp = LoopCheckpoint(
+            goal: "update README.md", rawRequest: "update README.md",
+            intent: .build, expectedOutcome: .mutation,
+            providerId: "scripted", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "update README.md")],
+            iteration: 1, status: .paused, trajectory: nonSourceWork)
+        try store.save(cp)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"done":true,"summary":"tries to trust a docs-only pre-resume ledger"}"#])],
+                keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 2
+        ).resume(from: cp)
+
+        XCTAssertFalse(out.success, "offline source drift must not hide behind prior non-source work")
+        XCTAssertTrue(out.summary.contains("shell/build execution is unavailable"), out.summary)
+        let saved = try store.load(id: cp.id)
+        XCTAssertEqual(Array(saved.trajectory?.prefix(nonSourceWork.count) ?? []), nonSourceWork)
+        XCTAssertEqual(saved.trajectory?.last?.tool, "resume_boundary")
+    }
+
+    func testResumeMutationTurnWithOnlyNonSourceWorkAcceptsFreshVerifier() async throws {
+        let ckptDir = NSTemporaryDirectory() + "resume-doc-only-fresh-proof-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: ckptDir) }
+        let store = LoopCheckpointStore(directory: ckptDir)
+        let cp = LoopCheckpoint(
+            goal: "update README.md", rawRequest: "update README.md",
+            intent: .build, expectedOutcome: .mutation,
+            providerId: "scripted", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "update README.md")],
+            iteration: 1, status: .paused,
+            trajectory: [ActionRecord(
+                tool: "write_file", argsFingerprint: "path=README.md", success: true,
+                effectObservation: ToolEffectObservation(mutation: .nonSource))])
+        try store.save(cp)
+        try "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n"
+            .write(toFile: root + "/test_ok.py", atomically: true, encoding: .utf8)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"tool":"run_command","parameters":{"command":"python3 -m unittest discover -s . -p test_ok.py"}}"#,
+                #"{"done":true,"summary":"fresh verifier covered the resumed workspace"}"#,
+            ])], keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root,
+                                 shell: ShellPolicy(enabled: true, autoApprove: true)),
+            checkpoints: store, maxIterations: 3
+        ).resume(from: cp)
+
+        XCTAssertTrue(out.success, out.summary)
+        let saved = try store.load(id: cp.id)
+        let boundary = try XCTUnwrap(saved.trajectory?.firstIndex { $0.tool == "resume_boundary" })
+        XCTAssertTrue(saved.trajectory![(boundary + 1)...].contains {
+            $0.success && $0.observedEffects.verification == .buildOrTest
+        })
+    }
+
+    func testResumeMutationTurnWithNoPriorMutationBindsWorkspaceBeforeLaterDocEdit() async throws {
+        let ckptDir = NSTemporaryDirectory() + "resume-empty-mutation-boundary-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: ckptDir) }
+        let store = LoopCheckpointStore(directory: ckptDir)
+        let cp = LoopCheckpoint(
+            goal: "update README.md", rawRequest: "update README.md",
+            intent: .build, expectedOutcome: .mutation,
+            providerId: "scripted", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "update README.md")],
+            status: .paused, trajectory: [])
+        try store.save(cp)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"tool":"write_file","parameters":{"path":"README.md","content":"updated"}}"#,
+                #"{"done":true,"summary":"doc edit done without checking resumed workspace"}"#,
+            ])], keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 3
+        ).resume(from: cp)
+
+        XCTAssertFalse(out.success, "a later doc edit must not erase the unbound resume workspace")
+        XCTAssertTrue(out.summary.contains("shell/build execution is unavailable"), out.summary)
+        let saved = try store.load(id: cp.id)
+        XCTAssertEqual(saved.trajectory?.first?.tool, "resume_boundary")
+        XCTAssertEqual(saved.trajectory?.last?.observedEffects.mutation, .nonSource)
+    }
+
     func testResumeGetsFreshIterationBudgetEvenWhenCursorExceedsDefaultMax() async throws {
         var cp = LoopCheckpoint(goal: "g", providerId: "scripted", model: nil, projectRoot: root,
                                 messages: [ChatMessage(role: .user, content: "g")], iteration: 10,
@@ -431,8 +679,8 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
     func testSpawnAgentRoutesSubtaskByRoleBinding() async throws {
         let parent = NamedScriptedProvider(id: "parent", responses: [
-            #"{"tool":"spawn_agent","parameters":{"role":"researcher","task":"research and write worker.txt"}}"#,
-            #"{"done":true,"summary":"research delegated"}"#,
+            #"{"tool":"spawn_agent","parameters":{"role":"researcher","task":"write worker.txt containing researched by mimo"}}"#,
+            #"{"done":true,"summary":"file creation delegated"}"#,
         ])
         let worker = NamedScriptedProvider(id: "mimo", responses: [
             #"{"tool":"write_file","parameters":{"path":"worker.txt","content":"researched by mimo"}}"#,
@@ -448,7 +696,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
         let out = await HeadlessAgentLoop(providers: registry, providerId: "parent", model: nil,
                                           tools: ToolRegistry(base.all() + [spawn]),
                                           context: ToolContext(projectRoot: root),
-                                          maxIterations: 5).run(goal: "delegate research")
+                                          maxIterations: 5).run(goal: "delegate a file creation")
 
         XCTAssertTrue(out.success, out.summary)
         XCTAssertEqual(try? String(contentsOfFile: root + "/worker.txt", encoding: .utf8), "researched by mimo")
@@ -459,7 +707,10 @@ final class HeadlessAgentLoopTests: XCTestCase {
     func testSpawnAgentProviderAndModelOverrideRoleBinding() async throws {
         let parent = NamedScriptedProvider(id: "parent", responses: [])
         let worker = NamedScriptedProvider(id: "mimo", responses: [#"{"done":true,"summary":"wrong provider"}"#])
-        let builder = NamedScriptedProvider(id: "gemini", responses: [#"{"done":true,"summary":"built by gemini"}"#])
+        let builder = NamedScriptedProvider(id: "gemini", responses: [
+            #"{"tool":"write_file","parameters":{"path":"build-note.txt","content":"built"}}"#,
+            #"{"done":true,"summary":"built by gemini"}"#,
+        ])
         let registry = ProviderRegistry(providers: [parent, worker, builder], keyStore: NullKeyStore())
         let roles = RoleBindings(default: ProviderBinding(providerId: "parent"))
             .binding(.worker, to: ProviderBinding(providerId: "mimo", model: "mimo-research"))
@@ -478,6 +729,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertEqual(result.metadata["sub_agent_role"], "worker")
         XCTAssertEqual(result.metadata["sub_agent_provider"], "gemini")
         XCTAssertEqual(result.metadata["sub_agent_model"], "gemini-build")
+        XCTAssertEqual(try? String(contentsOfFile: root + "/build-note.txt", encoding: .utf8), "built")
         let builderModels = await builder.seenModels()
         let workerModels = await worker.seenModels()
         XCTAssertEqual(builderModels.first, "gemini-build")
@@ -681,7 +933,8 @@ final class HeadlessAgentLoopTests: XCTestCase {
                                           approvalTools: ["write_file"]).run(goal: "write files")
         let replans = sink.events.filter { if case .replanStarted = $0 { return true } else { return false } }
         XCTAssertEqual(replans.count, 0, "native: user declines must NOT trigger the failure re-plan")
-        XCTAssertTrue(out.success, out.summary)
+        XCTAssertFalse(out.success, "a declined mutation must not be reported as completed")
+        XCTAssertTrue(out.summary.contains("no successful mutation"), out.summary)
     }
 
     func testTextLoopDoesNotReplanWhenUserDeclines() async {
@@ -698,7 +951,8 @@ final class HeadlessAgentLoopTests: XCTestCase {
                                           approvalTools: ["write_file"]).run(goal: "write files")
         let replans = sink.events.filter { if case .replanStarted = $0 { return true } else { return false } }
         XCTAssertEqual(replans.count, 0, "text: user declines must NOT trigger the failure re-plan")
-        XCTAssertTrue(out.success, out.summary)
+        XCTAssertFalse(out.success, "a declined mutation must not be reported as completed")
+        XCTAssertTrue(out.summary.contains("no successful mutation"), out.summary)
     }
 
     // Codex Q3/Q4: plan mode is a user CHOICE (read-only) — repeated plan-mode blocks of write tools
@@ -829,7 +1083,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
     // MARK: - Interrupted-action reconciliation
 
-    func testResumeReconcilesInterruptedAction() async throws {
+    func testResumeReconcilesInterruptedMutationAsDurableUncertainty() async throws {
         let dir = NSTemporaryDirectory() + "rec-\(UUID().uuidString)"
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = LoopCheckpointStore(directory: dir)
@@ -837,7 +1091,9 @@ final class HeadlessAgentLoopTests: XCTestCase {
         // A checkpoint as if the process died mid-write: pendingAction set, never cleared.
         var cp = LoopCheckpoint(goal: "g", providerId: "scripted", model: nil, projectRoot: root,
                                 messages: [ChatMessage(role: .user, content: "g")], iteration: 1, status: .running)
-        cp.pendingAction = PendingAction(tool: "write_file", argsSummary: "path: x.txt", iteration: 2)
+        cp.pendingAction = PendingAction(
+            tool: "write_file", argsSummary: "path: x.txt", iteration: 2,
+            predictedEffects: ToolEffectObservation(mutation: .source, mutationEvidence: .mayMutate))
         try store.save(cp)
 
         // On resume, after the reconcile note, the model finishes.
@@ -847,10 +1103,114 @@ final class HeadlessAgentLoopTests: XCTestCase {
             context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 5)
         let out = await l.resume(from: cp)
 
-        XCTAssertTrue(out.success)
+        XCTAssertFalse(out.success, "an interrupted mutator cannot be laundered into success")
         let saved = try store.load(id: cp.id)
         XCTAssertTrue(saved.messages.contains { $0.content.contains("was INTERRUPTED") }, "reconcile note must be injected")
         XCTAssertNil(saved.pendingAction)   // cleared after reconciling
+        XCTAssertTrue(saved.trajectory?.contains {
+            !$0.success && $0.tool == "write_file"
+                && $0.observedEffects.mutationEvidence == .mayMutate
+        } == true, "the uncertain mutation must replace the pending bracket durably")
+    }
+
+    func testResumeReadOnlyPendingActionDoesNotPoisonCompletion() async throws {
+        let dir = NSTemporaryDirectory() + "rec-readonly-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = LoopCheckpointStore(directory: dir)
+        var cp = LoopCheckpoint(goal: "answer a question", rawRequest: "answer a question",
+                                intent: .chat, expectedOutcome: .answer,
+                                providerId: "scripted", model: nil, projectRoot: root,
+                                messages: [ChatMessage(role: .user, content: "answer a question")],
+                                iteration: 1, status: .running)
+        cp.pendingAction = PendingAction(
+            tool: "read_file", argsSummary: "path: note.txt", iteration: 2,
+            predictedEffects: ToolEffectObservation.none)
+        try store.save(cp)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"done":true,"summary":"answered after read reconciliation"}"#])],
+                keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 2
+        ).resume(from: cp)
+
+        XCTAssertTrue(out.success, out.summary)
+        let saved = try store.load(id: cp.id)
+        XCTAssertNil(saved.pendingAction)
+        XCTAssertTrue(saved.trajectory?.isEmpty == true,
+                      "an interrupted read must not invent mutation evidence")
+    }
+
+    func testResumeLegacyReadOnlyCommandPendingActionDoesNotPoisonCompletion() async throws {
+        let dir = NSTemporaryDirectory() + "rec-legacy-command-readonly-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = LoopCheckpointStore(directory: dir)
+        var cp = LoopCheckpoint(goal: "answer a question", rawRequest: "answer a question",
+                                intent: .chat, expectedOutcome: .answer,
+                                providerId: "scripted", model: nil, projectRoot: root,
+                                messages: [ChatMessage(role: .user, content: "answer a question")],
+                                iteration: 1, status: .running)
+        // Pre-predictedEffects checkpoints persisted the display-oriented `compactArgs` form.
+        cp.pendingAction = PendingAction(tool: "run_command", argsSummary: "command: ls",
+                                         iteration: 2)
+        try store.save(cp)
+
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"done":true,"summary":"answered after legacy command reconciliation"}"#])],
+                keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 2
+        ).resume(from: cp)
+
+        XCTAssertTrue(out.success, out.summary)
+        let saved = try store.load(id: cp.id)
+        XCTAssertNil(saved.pendingAction)
+        XCTAssertTrue(saved.trajectory?.isEmpty == true,
+                      "a legacy interrupted read-only command must not invent mutation evidence")
+    }
+
+    func testResumeBoundaryNeverSupersedesLaterFailedMutation() async throws {
+        let dir = NSTemporaryDirectory() + "resume-boundary-failed-mutation-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = LoopCheckpointStore(directory: dir)
+        let trajectory = [
+            ActionRecord(tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .source)),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=swift test", success: true,
+                         effectObservation: ToolEffectObservation(verification: .buildOrTest)),
+            ActionRecord(tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: false,
+                         effectObservation: ToolEffectObservation(mutation: .source,
+                                                                  mutationEvidence: .mayMutate)),
+        ]
+        let cp = LoopCheckpoint(
+            goal: "change Sources/App.swift", rawRequest: "change Sources/App.swift",
+            intent: .build, expectedOutcome: .mutation,
+            providerId: "scripted", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "change Sources/App.swift")],
+            iteration: 3, status: .paused, trajectory: trajectory)
+        try store.save(cp)
+        try "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n"
+            .write(toFile: root + "/test_ok.py", atomically: true, encoding: .utf8)
+
+        let done = #"{"done":true,"summary":"tries to launder the failed mutation"}"#
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [ScriptedProvider([
+                #"{"tool":"run_command","parameters":{"command":"python3 -m unittest discover -s . -p test_ok.py"}}"#,
+                done, done, done, done,
+            ])], keyStore: NullKeyStore()),
+            providerId: "scripted", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root,
+                                 shell: ShellPolicy(enabled: true, autoApprove: true)),
+            checkpoints: store, maxIterations: 5
+        ).resume(from: cp)
+
+        XCTAssertFalse(out.success, "a fresh verifier cannot repair a later failed mutation")
+        XCTAssertTrue(out.summary.contains("last mutation failed"), out.summary)
+        let saved = try store.load(id: cp.id)
+        XCTAssertFalse(saved.trajectory?.contains { $0.tool == "resume_boundary" } == true,
+                       "a successful resume boundary must not be appended after a real failed mutation")
     }
 
     func testBracketClearsPendingActionAfterSuccess() async throws {
@@ -1075,7 +1435,8 @@ final class HeadlessAgentLoopTests: XCTestCase {
         let out = await HeadlessAgentLoop(providers: registry, providerId: "scripted", model: nil,
                                           tools: .headless(), context: ToolContext(projectRoot: root),
                                           hooks: hooks).run(goal: "write a file")
-        XCTAssertTrue(out.success)
+        XCTAssertFalse(out.success, "a policy-blocked mutation must not be reported as completed")
+        XCTAssertTrue(out.summary.contains("no successful mutation"), out.summary)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/blocked.txt"))
         XCTAssertEqual(runner.calls.count, 1)   // the pre-hook ran exactly once
     }
@@ -1113,8 +1474,9 @@ final class HeadlessAgentLoopTests: XCTestCase {
         ])], keyStore: NullKeyStore())
         let out = await HeadlessAgentLoop(providers: registry, providerId: "native", model: nil,
                                           tools: .headless(), context: ToolContext(projectRoot: root),
-                                          hooks: hooks).run(goal: "native write")
-        XCTAssertTrue(out.success)
+                                          hooks: hooks).run(goal: "write a file")
+        XCTAssertFalse(out.success, "a policy-blocked mutation must not be reported as completed")
+        XCTAssertTrue(out.summary.contains("no successful mutation"), out.summary)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/native-blocked.txt"))
     }
 
@@ -1131,7 +1493,8 @@ final class HeadlessAgentLoopTests: XCTestCase {
                                   tools: .headless(), context: ToolContext(projectRoot: root),
                                   interactor: DecliningInteractor(), approvalTools: ["write_file"])
         let out = await l.run(goal: "write a file")
-        XCTAssertTrue(out.success)
+        XCTAssertFalse(out.success, "a declined mutation must not be reported as completed")
+        XCTAssertTrue(out.summary.contains("no successful mutation"), out.summary)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/blocked.txt"))
     }
 

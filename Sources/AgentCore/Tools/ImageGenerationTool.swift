@@ -113,14 +113,18 @@ public struct GenerateImageTool: AgentTool {
         guard (out as NSString).pathExtension.lowercased() == "png" else {
             return .failure("out must end in .png")
         }
+        let artifact = try ArtifactOutputEvidence.prepare(path: out, kind: .file, context: context)
         let bytes = try await generate(prompt, model, size)
         guard !bytes.isEmpty else { return .failure("image generation returned no data") }
         // Symlink-safe atomic write inside the project root (was a raw FileManager write — the same
         // symlink-escape class Codex caught in translate_document; edit/audio/video were fixed, this wasn't).
-        try context.confinedRoot().writeData(out, bytes, createParents: true)
+        try context.confinedRoot().writeData(artifact.relativePath, bytes, createParents: true)
+        var metadata = ["path": artifact.relativePath, "bytes": String(bytes.count),
+                        "model": model, "size": size]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
         return ToolResult(success: true,
-                          output: "generated image → \(out) (\(bytes.count) bytes)",
-                          metadata: ["path": out, "bytes": String(bytes.count), "model": model, "size": size])
+                          output: "generated image → \(artifact.relativePath) (\(bytes.count) bytes)",
+                          metadata: metadata)
     }
 
     static let allowedSizes: Set<String> = ["1024x1024", "1024x1536", "1536x1024", "auto"]

@@ -125,12 +125,26 @@ public final class ResearchRunStore: @unchecked Sendable {
     @discardableResult
     public func synthesize(maxEvidenceChars: Int = 24_000) throws -> String {
         let evidence = Self.loadEvidence(projectRoot: manifest.projectRoot, runID: manifest.runID)
+        // A plan/heartbeat is bookkeeping, not research. Refuse to manufacture a polished dossier when
+        // every real gatherer failed: downstream council text must never turn "zero sources" into success.
+        let groundedKinds: Set<String> = [
+            "web_search", "fetch_url", "browse", "visual_verify", "context_brain", "estate_search",
+        ]
+        let grounded = evidence.filter {
+            groundedKinds.contains($0.kind)
+                && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !grounded.isEmpty else {
+            throw ToolError.execution(
+                "research has no grounded evidence; a search/fetch/browse/context/visual/estate gatherer must succeed before synthesis")
+        }
         var lines: [String] = [
             "# Research Dossier",
             "",
             "- Run: \(manifest.runID)",
             "- Goal: \(manifest.goal)",
             "- Evidence items: \(evidence.count)",
+            "- Grounded evidence items: \(grounded.count)",
             "",
             "## Evidence Index",
         ]
@@ -152,10 +166,6 @@ public final class ResearchRunStore: @unchecked Sendable {
                 "",
                 excerpt.isEmpty ? "(empty evidence)" : excerpt,
             ]
-        }
-        if evidence.isEmpty {
-            lines.append("")
-            lines.append("No evidence gathered yet. Use research_run search/fetch/browse/context/add_evidence first.")
         }
         let report = lines.joined(separator: "\n") + "\n"
         let reportPath = runDirectory + "/report.md"

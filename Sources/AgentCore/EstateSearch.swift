@@ -70,10 +70,11 @@ public struct EstateSearch: Sendable {
     /// The formatted grounding block for a lookup question, or nil when nothing relevant is found (caller
     /// then falls through to a normal answer). This is what gets injected ahead of the model's turn.
     public func groundingBlock(for query: String) -> String? {
+        guard !Task.isCancelled else { return nil }
         let terms = EstateLookupIntent.searchTerms(query)
         guard !terms.isEmpty else { return nil }
         let hits = search(terms: terms)
-        guard !hits.isEmpty else { return nil }
+        guard !Task.isCancelled, !hits.isEmpty else { return nil }
 
         var out = """
         AUTO-RETRIEVED FROM OUR OWN FILE ESTATE — real files found by searching \(rootsLabel) for \
@@ -92,10 +93,14 @@ public struct EstateSearch: Sendable {
 
     /// The ranked file hits for the given terms. Public for tests / callers that want the paths directly.
     public func search(terms: [String]) -> [Hit] {
+        guard !Task.isCancelled else { return [] }
         let lowered = terms.map { $0.lowercased() }
         guard !lowered.isEmpty else { return [] }
         let files = rankedFiles(terms: lowered)
-        return files.prefix(maxFiles).map { Hit(path: $0, snippet: snippet(for: $0, terms: lowered)) }
+        return files.prefix(maxFiles).compactMap {
+            guard !Task.isCancelled else { return nil }
+            return Hit(path: $0, snippet: snippet(for: $0, terms: lowered))
+        }
     }
 
     // MARK: - internals
@@ -119,10 +124,10 @@ public struct EstateSearch: Sendable {
             .map { ($0, $0.count) }
 
         outer: while let (dir, rootLen) = stack.popLast() {
-            if Date() >= deadline || scanned >= scanBudget { break }
+            if Task.isCancelled || Date() >= deadline || scanned >= scanBudget { break }
             guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { continue }
             for name in entries {
-                if Date() >= deadline || scanned >= scanBudget { break outer }
+                if Task.isCancelled || Date() >= deadline || scanned >= scanBudget { break outer }
                 if name.hasPrefix(".") { continue }                        // skip hidden entries
                 let full = dir + "/" + name
                 // lstat (attributesOfItem does NOT follow the final symlink). SKIP symlinks entirely so

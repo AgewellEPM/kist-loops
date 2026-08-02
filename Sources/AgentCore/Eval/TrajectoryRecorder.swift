@@ -9,16 +9,25 @@ public final class TrajectoryRecorder: @unchecked Sendable {
 
     public init() {}
 
-    public func record(tool: String, argsFingerprint: String, success: Bool, failureDetail: String? = nil) {
+    public func record(tool: String, argsFingerprint: String, success: Bool, failureDetail: String? = nil,
+                       effectObservation: ToolEffectObservation? = nil) {
         lock.lock(); defer { lock.unlock() }
         steps.append(ActionRecord(tool: tool, argsFingerprint: argsFingerprint, success: success,
-                                  failureDetail: failureDetail))
+                                  failureDetail: failureDetail, effectObservation: effectObservation))
     }
 
     /// Current steps (a copy).
     public func snapshot() -> [ActionRecord] {
         lock.lock(); defer { lock.unlock() }
         return steps
+    }
+
+    /// Replace the in-memory ledger with the exact durable checkpoint ledger. Resume must restore,
+    /// not append: appending to a host recorder that already observed the pre-pause actions would
+    /// duplicate evidence, while starting empty would let pause/resume bypass completion verification.
+    public func restore(_ records: [ActionRecord]) {
+        lock.lock(); defer { lock.unlock() }
+        steps = records
     }
 
     /// Clear between turns so each run is analyzed on its own.

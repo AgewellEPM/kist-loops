@@ -2,6 +2,19 @@ import XCTest
 @testable import AgentCore
 
 final class PromptCompilerTests: XCTestCase {
+    func testResolvedIntentIsReusedAndDefinesOneExpectedOutcome() {
+        let brief = PromptCompiler.compile("compare the implementations",
+                                           mode: .inline,
+                                           resolvedIntent: .build)
+
+        XCTAssertEqual(brief.intent, .build)
+        XCTAssertEqual(brief.expectedOutcome, .mutation)
+        XCTAssertEqual(PromptCompiler.compile("research the API").expectedOutcome, .evidence)
+        XCTAssertEqual(PromptCompiler.compile("make a plan", mode: .plan).expectedOutcome, .plan)
+        XCTAssertEqual(PromptCompiler.compile("what happened?").expectedOutcome, .answer)
+        XCTAssertEqual(PromptCompiler.compile("open Safari").expectedOutcome, .externalAction)
+    }
+
     func testResearchBriefIsHonestAboutWebSearchLimits() {
         let brief = PromptCompiler.compile("deep dive the latest fleet-agent research and cite sources")
 
@@ -118,5 +131,41 @@ final class PromptCompilerTests: XCTestCase {
 
         XCTAssertEqual(brief.intent, .build)
         XCTAssertTrue(brief.intent.expectsMutation)
+    }
+
+    func testDesktopNounCannotOverrideAnExplicitBuildDirective() {
+        let brief = PromptCompiler.compile("fix the desktop app crash")
+
+        XCTAssertEqual(brief.intent, .build)
+        XCTAssertEqual(brief.expectedOutcome, .mutation)
+    }
+
+    func testReadOnlyQuestionsContainingBuildWordsDoNotAuthorizeMutation() {
+        for request in [
+            "Explain how to fix this; do not edit any files",
+            "How would you implement a parser?",
+            "Tell me what changing this config would do",
+            "Explain how opening Safari works",
+        ] {
+            let brief = PromptCompiler.compile(request)
+            XCTAssertFalse(brief.intent.expectsMutation, request)
+            XCTAssertNotEqual(brief.expectedOutcome, .mutation, request)
+        }
+    }
+
+    func testImperativeMutationVerbsResolveToBuild() {
+        for request in [
+            "rename Foo.swift to Bar.swift",
+            "remove the obsolete function",
+            "delete old.swift",
+            "revert the regression",
+            "install the dependency",
+            "write the release notes",
+            "could you please migrate the config",
+        ] {
+            let brief = PromptCompiler.compile(request)
+            XCTAssertEqual(brief.intent, .build, request)
+            XCTAssertEqual(brief.expectedOutcome, .mutation, request)
+        }
     }
 }

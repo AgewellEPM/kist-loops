@@ -99,26 +99,37 @@ public struct TranslateDocumentTool: AgentTool {
         let ext = (resolved as NSString).pathExtension.lowercased()
         let format = (arguments["format"] as? String ?? "markdown").lowercased()
         let asHTML = format == "html" || format == "htm"
+        let base = (resolved as NSString).lastPathComponent
 
         // fidelity=file → Cloud Translation v3: a re-rendered file with the ORIGINAL layout preserved
         // (PDF→PDF, DOCX→DOCX, …). Same extension out. Needs a GCP token (translateFile closure).
         if (arguments["fidelity"] as? String)?.lowercased() == "file" {
-            let base = (resolved as NSString).lastPathComponent
             guard let docMime = CloudTranslationClient.mimeType(forExtension: ext) else {
                 return .failure("fidelity=file supports pdf/docx/pptx/xlsx; '\(path)' is not one of those")
             }
             guard let translateFile else { return .failure("fidelity=file (Cloud Translation v3) is not available here") }
-            guard let data = try? context.readDataForReading(path) else { return .failure("couldn't read \(path)") }
-            let translated = try await translateFile(data, docMime, Self.langCode(to))
-            guard !translated.bytes.isEmpty else { return .failure("translation returned no file for \(path)") }
             let stem = (base as NSString).deletingPathExtension
             let outArg = (arguments["output"] as? String)?.trimmingCharacters(in: .whitespaces)
             let outRel = (outArg?.isEmpty == false) ? outArg! : "\(stem).\(Self.langSlug(to)).\(ext)"
-            try context.confinedRoot().writeData(outRel, translated.bytes, createParents: true)
+            let artifact = try ArtifactOutputEvidence.prepare(path: outRel, kind: .file, context: context)
+            guard let data = try? context.readDataForReading(path) else { return .failure("couldn't read \(path)") }
+            let translated = try await translateFile(data, docMime, Self.langCode(to))
+            guard !translated.bytes.isEmpty else { return .failure("translation returned no file for \(path)") }
+            try context.confinedRoot().writeData(artifact.relativePath, translated.bytes, createParents: true)
+            var metadata = ["source_path": path, "path": artifact.relativePath,
+                            "output": artifact.relativePath, "language": to, "fidelity": "file"]
+            try metadata.mergeArtifactMetadata(artifact, context: context)
             return ToolResult(success: true,
-                              output: "Translated \(base) → \(outRel) (\(to), original \(ext.uppercased()) layout preserved, \(translated.bytes.count) bytes).",
-                              metadata: ["path": path, "output": outRel, "language": to, "fidelity": "file"])
+                              output: "Translated \(base) → \(artifact.relativePath) (\(to), original \(ext.uppercased()) layout preserved, \(translated.bytes.count) bytes).",
+                              metadata: metadata)
         }
+
+        let outExt = asHTML ? "html" : "md"
+        let stem = (base as NSString).deletingPathExtension
+        let defaultOut = "\(stem).\(Self.langSlug(to)).\(outExt)"
+        let requestedOut = (arguments["output"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outRel = (requestedOut?.isEmpty == false) ? requestedOut! : defaultOut
+        let artifact = try ArtifactOutputEvidence.prepare(path: outRel, kind: .file, context: context)
 
         // Decide the source carrier: media part (pdf/image) vs inline text (text files). All reads go
         // through the CONFINED root (symlink-safe), never a raw resolvedPath open (TOCTOU).
@@ -161,7 +172,6 @@ public struct TranslateDocumentTool: AgentTool {
         }
         if let uploadedURI, let filesClient { try? await filesClient.delete(uri: uploadedURI) }
         let body = translated.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = (resolved as NSString).lastPathComponent
         guard !body.isEmpty else { return .failure("translation came back empty for \(path)") }
         // Do NOT silently ship a cut-off translation. If the model hit its output cap, refuse to write
         // a partial file and tell the user to split the document.
@@ -171,17 +181,15 @@ public struct TranslateDocumentTool: AgentTool {
 
         // Save next to a default name unless an output path was given. Write through the CONFINED root
         // (symlink-safe atomic temp+rename inside the project), never a raw path that could follow a link.
-        let outExt = asHTML ? "html" : "md"
-        let stem = (base as NSString).deletingPathExtension
-        let defaultOut = "\(stem).\(Self.langSlug(to)).\(outExt)"
-        let outArg = (arguments["output"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let outRel = (outArg?.isEmpty == false) ? outArg! : defaultOut
-        try context.confinedRoot().writeData(outRel, Data(body.utf8), createParents: true)
+        try context.confinedRoot().writeData(artifact.relativePath, Data(body.utf8), createParents: true)
 
         let lineCount = body.split(separator: "\n", omittingEmptySubsequences: false).count
+        var metadata = ["source_path": path, "path": artifact.relativePath,
+                        "output": artifact.relativePath, "language": to, "format": outExt]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
         return ToolResult(success: true,
-                          output: "Translated \(base) → \(outRel) (\(to), \(asHTML ? "HTML" : "Markdown"), \(lineCount) lines, structure preserved).",
-                          metadata: ["path": path, "output": outRel, "language": to, "format": outExt])
+                          output: "Translated \(base) → \(artifact.relativePath) (\(to), \(asHTML ? "HTML" : "Markdown"), \(lineCount) lines, structure preserved).",
+                          metadata: metadata)
     }
 
     static func prompt(to: String, asHTML: Bool, inlineText: String, hasAttachment: Bool) -> String {

@@ -33,16 +33,19 @@ public struct GenerateAudioTool: AgentTool {
         let voice = (arguments["voice"] as? String)?.trimmingCharacters(in: .whitespaces).nonEmpty ?? GeminiTTSClient.defaultVoice
         let out = (arguments["out"] as? String) ?? "audio/\(Self.slug(text)).wav"
         guard (out as NSString).pathExtension.lowercased() == "wav" else { return .failure("out must end in .wav") }
+        let artifact = try ArtifactOutputEvidence.prepare(path: out, kind: .file, context: context)
 
         let pcm = try await synth(text, voice)
         guard !pcm.data.isEmpty else { return .failure("TTS returned no audio") }
         let wav = GeminiTTSClient.wav(pcm: pcm.data, sampleRate: pcm.sampleRate)
         // Symlink-safe atomic write inside the project root.
-        try context.confinedRoot().writeData(out, wav, createParents: true)
+        try context.confinedRoot().writeData(artifact.relativePath, wav, createParents: true)
         let seconds = Double(pcm.data.count) / Double(pcm.sampleRate * 2)   // 16-bit mono
+        var metadata = ["path": artifact.relativePath, "voice": voice, "bytes": String(wav.count)]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
         return ToolResult(success: true,
-                          output: "spoke \(text.count) chars → \(out) (voice \(voice), ~\(String(format: "%.1f", seconds))s, \(wav.count) bytes)",
-                          metadata: ["path": out, "voice": voice, "bytes": String(wav.count)])
+                          output: "spoke \(text.count) chars → \(artifact.relativePath) (voice \(voice), ~\(String(format: "%.1f", seconds))s, \(wav.count) bytes)",
+                          metadata: metadata)
     }
 
     static func slug(_ text: String) -> String {

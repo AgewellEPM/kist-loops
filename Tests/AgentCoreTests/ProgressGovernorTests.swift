@@ -94,4 +94,31 @@ final class ProgressGovernorTests: XCTestCase {
         XCTAssertTrue(s.contains("different"))       // the whole point: abandon, don't tweak
         XCTAssertTrue(s.contains("goal"))            // re-anchor on the goal
     }
+
+    func testBuildReadOnlySpinTriggersRecoveryButResearchDoesNot() {
+        let reads = (0..<6).map { rec("read_file", "file\($0)") }
+
+        if case .stopStuck(let reason) = gov.decide(iteration: 6, trajectory: reads,
+                                                    taskIntent: .build) {
+            XCTAssertTrue(reason.contains("no deliverable progress"))
+        } else {
+            XCTFail("a six-call build read-only spin must trigger the existing one-recovery path")
+        }
+        XCTAssertEqual(gov.decide(iteration: 6, trajectory: reads, taskIntent: .research), .cont)
+    }
+
+    func testSuccessfulDelegationIsFleetProgressButNotMutationOrVerification() {
+        let reads = (0..<6).map { rec("read_file", "file\($0)") }
+        let delegation = ActionRecord(
+            tool: "spawn_agent", argsFingerprint: "task=implement", success: true,
+            effectObservation: ToolEffectCatalog.observe(tool: "spawn_agent", arguments: ["task": "implement"])
+        )
+        XCTAssertEqual(gov.decide(iteration: 7, trajectory: reads + [delegation], taskIntent: .fleet), .cont)
+
+        if case .stopStuck = gov.decide(iteration: 7, trajectory: reads + [delegation], taskIntent: .build) {
+            // Delegating is coordination, not proof that a direct build produced a deliverable.
+        } else {
+            XCTFail("delegation must not masquerade as source mutation or verification for a build turn")
+        }
+    }
 }

@@ -611,7 +611,7 @@ enum KistRunner {
                 try? cortex?.seedIfNeeded()
                 repl.cortex = cortex
                 let projectName = (root as NSString).lastPathComponent
-                repl.briefCompiler = { input, roles, mode, transcript in
+                repl.briefCompiler = { input, roles, mode, transcript, intent in
                     let personaContext = TaskPersonaMatcher.promptContext(
                         matches: personaMatcher.matches(for: input, limit: 3))
                     let reviewContext = ReviewContext.renderIfNeeded(request: input, projectRoot: root)
@@ -624,7 +624,8 @@ enum KistRunner {
                                                                                       roles: roles,
                                                                                       lessons: lessonStore?.primer(forGoal: input),
                                                                                       specialists: personaContext,
-                                                                                      reviewTargets: reviewContext))
+                                                                                      reviewTargets: reviewContext),
+                                                         resolvedIntent: intent)
                 }
                 // Rebuilt on /model (new default provider+model) and /roles (new team). The default
                 // binding drives the conversational turn AND the spawn-tool default; roles drive the team.
@@ -715,8 +716,35 @@ enum KistRunner {
                 repl.roleProfiles = RoleProfileStore()
                 repl.fleet = { g, n, roles in
                     var o = opts; o.goal = g; o.agents = n; o.fleet = true
-                    _ = await runFleet(o, registry: registry, root: root, tools: tools,
+                    // Fleet is a long-running sibling of plan/council/research and must share their
+                    // exact ESC + type-ahead contract. It was the last heavy route that bypassed the
+                    // watcher, leaving the terminal apparently unresponsive during a fleet run.
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
+                    let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                    let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
+                        interrupted.value = reason
+                        if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                        else { TurnInputQueue.shared.commitPending() }
+                        print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
+                              + " — fleet run stopped\u{001B}[0m")
+                    }) {
+                        await runFleet(o, registry: registry, root: root, tools: tools,
                                        providerId: providerId, model: model, rolesOverride: roles)
+                    }
+                    let verification: HeavyRouteResult.Verification
+                    if interrupted.value != nil {
+                        verification = .unavailable("fleet verification did not finish after interruption")
+                    } else if exitCode == 0 {
+                        verification = .passed("Foreman signoff completed and signed branches joined the isolated integration branch")
+                    } else if exitCode == 1 {
+                        verification = .failed("the fleet did not reach its required signoff and integration gate")
+                    } else {
+                        verification = .unavailable("the fleet was rejected before its verification stage ran")
+                    }
+                    return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
+                                            review: .handledInternally("FleetSupervisor and Foreman own review/signoff"),
+                                            verification: verification)
                 }
                 repl.planExecute = { g, roles in
                     var o = opts; o.goal = g; o.planExecute = true
@@ -727,7 +755,9 @@ enum KistRunner {
                     // the chat turn's watcher (single-watcher invariant preserved).
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
-                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                    let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                    let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
+                        interrupted.value = reason
                         if reason == .cancel { TurnInputQueue.shared.clearAll() }
                         else { TurnInputQueue.shared.commitPending() }
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
@@ -737,6 +767,19 @@ enum KistRunner {
                                              context: context, providerId: providerId, model: model,
                                              rolesOverride: roles)
                     }
+                    let verification: HeavyRouteResult.Verification
+                    if interrupted.value != nil {
+                        verification = .unavailable("plan verification did not finish after interruption")
+                    } else if exitCode == 0 {
+                        verification = .passed("the plan executor's deterministic mutation gate and critic verification completed")
+                    } else if exitCode == 1 {
+                        verification = .failed("the plan executor did not pass its required critic verification")
+                    } else {
+                        verification = .unavailable("plan execution was rejected before its verifier ran")
+                    }
+                    return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
+                                            review: .handledInternally("plan→execute owns its planner/coder/critic loop"),
+                                            verification: verification)
                 }
                 repl.council = { g, roles, execute in
                     // R1 sibling: council (and its execute=true hand-off into runPlanExecute) gets
@@ -745,7 +788,9 @@ enum KistRunner {
                     // honest partial beats a dead zone.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
-                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                    let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                    let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
+                        interrupted.value = reason
                         if reason == .cancel { TurnInputQueue.shared.clearAll() }
                         else { TurnInputQueue.shared.commitPending() }
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
@@ -755,26 +800,51 @@ enum KistRunner {
                                          root: root, tools: tools, context: context,
                                          providerId: providerId, model: model, rolesOverride: roles)
                     }
+                    let verification: HeavyRouteResult.Verification
+                    if interrupted.value != nil {
+                        verification = .unavailable("council execution stopped before verification")
+                    } else if execute, exitCode == 0 {
+                        verification = .passed("the council's builder handoff completed plan→execute verification")
+                    } else if execute, exitCode == 1 {
+                        verification = .failed("the council's builder handoff did not pass plan→execute verification")
+                    } else {
+                        verification = .unavailable(execute
+                            ? "the council was rejected before builder verification ran"
+                            : "an advisory council has no deterministic execution oracle")
+                    }
+                    return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
+                                            review: .handledInternally("the role-bound council synthesizes its own critique"),
+                                            verification: verification)
                 }
                 repl.digDeep = { g, roles in
                     // "Dig in deep" / "consult the minds": same ESC watcher as council — top-level, sequential.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
-                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                    let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                    let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
+                        interrupted.value = reason
                         if reason == .cancel { TurnInputQueue.shared.clearAll() }
                         else { TurnInputQueue.shared.commitPending() }
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
                               + " — dig-in-deep stopped\u{001B}[0m")
                     }) {
-                        _ = await runWideCouncil(opts, goal: g, registry: registry, root: root,
-                                                 providerId: providerId, model: model, rolesOverride: roles)
+                        await runWideCouncil(opts, goal: g, registry: registry, root: root,
+                                             providerId: providerId, model: model, rolesOverride: roles)
                     }
+                    return HeavyRouteResult(
+                        exitCode: exitCode, interruption: interrupted.value,
+                        review: .handledInternally("the heterogeneous wide council synthesizes its panel"),
+                        verification: .unavailable(interrupted.value == nil
+                            ? "advisory consensus has no deterministic execution oracle"
+                            : "the wide council was interrupted before completion"))
                 }
                 repl.research = { g, roles in
                     // R1 sibling: same watcher for the research pipeline.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
-                    _ = await InterruptibleTurn.run(onInterrupt: { reason in
+                    let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                    let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
+                        interrupted.value = reason
                         if reason == .cancel { TurnInputQueue.shared.clearAll() }
                         else { TurnInputQueue.shared.commitPending() }
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
@@ -785,6 +855,21 @@ enum KistRunner {
                                           providerId: providerId, model: model,
                                           rolesOverride: roles)
                     }
+                    let verification: HeavyRouteResult.Verification
+                    if interrupted.value != nil {
+                        verification = .unavailable("research stopped before any execution verification completed")
+                    } else if opts.councilExecute, exitCode == 0 {
+                        verification = .passed("research handed off through council to verified plan execution")
+                    } else if opts.councilExecute, exitCode == 1 {
+                        verification = .failed("research's plan-execute handoff did not pass verification")
+                    } else {
+                        verification = .unavailable(opts.councilExecute
+                            ? "research was rejected before builder verification ran"
+                            : "evidence synthesis and board seeding have no deterministic execution oracle")
+                    }
+                    return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
+                                            review: .handledInternally("research feeds its evidence dossier through the role-bound council"),
+                                            verification: verification)
                 }
                 repl.forge = { description, roles in
                     // AgentForge: generate a specialist bounded by the loop's tool ceiling, validate, save.
@@ -1468,26 +1553,30 @@ enum KistRunner {
                                        context: context)
         if !repo.success { note("research · repo context blocked · \(repo.error ?? repo.output)") }
 
+        // DEEP ESTATE SWEEP (Luke 2026-07-31): on TOP of the web + current-repo evidence, sweep our OWN
+        // system files across ~ and /Volumes IN-PROCESS (bypasses the tool sandbox → reaches our real source
+        // at /Volumes/PRO-G40/kist-loops and the rest of the estate). Record the sweep in the SAME durable
+        // evidence ledger before synthesis; otherwise a zero-source dossier could be laundered into a
+        // successful council artifact, and estate provenance would exist only in transient prompt text.
+        let estate = await tools.execute(name: "research_run",
+                                         arguments: ["action": "estate", "run_id": runID,
+                                                     "query": goal],
+                                         context: context)
+        if estate.success {
+            note("research · recorded \(estate.metadata["files"] ?? "0") system file(s) from our estate")
+        } else {
+            note("research · estate search unavailable · \(estate.error ?? estate.output)")
+        }
+
         let synth = await tools.execute(name: "research_run",
                                         arguments: ["action": "synthesize", "run_id": runID],
                                         context: context)
         guard synth.success else {
-            err("research · failed to synthesize: \(synth.error ?? synth.output)")
+            err("research · incomplete: \(synth.error ?? synth.output)")
             return 1
         }
         if let report = synth.metadata["report"] { note("research · dossier saved · \(report)") }
-
-        // DEEP ESTATE SWEEP (Luke 2026-07-31): on TOP of the web + current-repo evidence, sweep our OWN
-        // system files across ~ and /Volumes IN-PROCESS (bypasses the tool sandbox → reaches our real source
-        // at /Volumes/PRO-G40/kist-loops and the rest of the estate) and fold that real-file grounding into
-        // the dossier the council scores. So /research is grounded in our actual system — evidence pipeline
-        // AND captain score AND a real deep-dive of our files — instead of answering from memory.
-        var dossier = synth.output
-        if let estateGrounding = EstateSearch(maxFiles: 16, maxTotalChars: 16_000).groundingBlock(for: goal) {
-            let swept = max(0, estateGrounding.components(separatedBy: "\n### ").count - 1)
-            note("research · swept \(swept) system file(s) from our estate into the dossier")
-            dossier += "\n\n" + estateGrounding
-        }
+        let dossier = synth.output
 
         return await runCouncil(opts, goal: goal, execute: opts.councilExecute,
                                 registry: registry, root: root, tools: tools, context: context,

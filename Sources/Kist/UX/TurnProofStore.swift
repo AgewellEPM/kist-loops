@@ -11,6 +11,9 @@ final class TurnProofStore: @unchecked Sendable {
             // prompt ever runs) — recording it as "waiting for approval" put a phantom approval
             // wait into /logs and the durable replay ledger (R0 review catch 2026-07-28).
             case planReady
+            // Turn-level facts emitted after semantic intent is resolved. These stay separate from
+            // token/tool events so replay can distinguish supporting work from the one canonical result.
+            case routeSelected, reviewAssessment, verificationAssessment, turnFinalized
         }
         let kind: Kind
         let tool: String?
@@ -87,6 +90,14 @@ final class TurnProofStore: @unchecked Sendable {
                 lines.append("completed: \(Self.oneLine(entry.text, max: 500))")
             case .failed:
                 lines.append("failed: \(Self.oneLine(entry.text, max: 500))")
+            case .routeSelected:
+                lines.append("route: \(Self.oneLine(entry.text, max: 300))")
+            case .reviewAssessment:
+                lines.append("review: \(Self.oneLine(entry.text, max: 500))")
+            case .verificationAssessment:
+                lines.append("verification: \(Self.oneLine(entry.text, max: 500))")
+            case .turnFinalized:
+                lines.append("final: \(Self.oneLine(entry.text, max: 700))")
             }
         }
         if entries.count > limit { lines.append("... \(entries.count - limit) more event(s)") }

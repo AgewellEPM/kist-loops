@@ -55,14 +55,30 @@ public struct ApplyPatchTool: AgentTool {
                 return block
             }
         }
-        // Commit: every hunk matched and every guard passed, so writes here are the only failure surface.
+        // A syntactically valid patch can still be a byte-for-byte no-op (for example replacing text with
+        // itself, or deleting an already-absent path). Record the observed tree delta, not just intent.
+        var changed = false
         for (path, content) in result.files {
-            if let content { try confined.writeString(path, content, createParents: true) }
-            else { try? confined.removeFile(path) }
+            if let content {
+                if (try? confined.readString(path)) != content { changed = true; break }
+            } else if (try? confined.fileType(path).exists) == true {
+                changed = true; break
+            }
+        }
+        // Commit: every hunk matched and every guard passed, so writes here are the only failure surface.
+        if changed {
+            for (path, content) in result.files {
+                if let content { try confined.writeString(path, content, createParents: true) }
+                // A failed delete is not proof of a change. In particular, unlinking a directory
+                // through a `*** Delete File:` operation fails with EISDIR; swallowing that error
+                // previously returned success + changed=true while the target remained on disk.
+                else { try confined.removeFile(path) }
+            }
         }
         return ToolResult(success: true,
-                          output: "applied patch:\n" + result.summary.joined(separator: "\n"),
-                          metadata: ["files": String(result.files.count)])
+                          output: (changed ? "applied patch:\n" : "patch made no changes:\n")
+                            + result.summary.joined(separator: "\n"),
+                          metadata: ["files": String(result.files.count), "changed": String(changed)])
     }
 
     private func message(for e: ApplyPatch.PatchError) -> String {

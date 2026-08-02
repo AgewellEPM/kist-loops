@@ -6,9 +6,11 @@ final class TrajectoryRecorderTests: XCTestCase {
     func testRecordSnapshotReset() {
         let r = TrajectoryRecorder()
         r.record(tool: "read_file", argsFingerprint: "a", success: true)
-        r.record(tool: "edit_file", argsFingerprint: "b", success: false)
+        r.record(tool: "edit_file", argsFingerprint: "b", success: false,
+                 effectObservation: ToolEffectObservation(mutation: .source))
         XCTAssertEqual(r.snapshot().count, 2)
         XCTAssertEqual(r.snapshot()[1].success, false)
+        XCTAssertEqual(r.snapshot()[1].effectObservation?.mutation, .source)
         r.reset()
         XCTAssertTrue(r.snapshot().isEmpty)
     }

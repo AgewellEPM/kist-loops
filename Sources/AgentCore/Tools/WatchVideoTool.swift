@@ -53,25 +53,29 @@ public struct WatchVideoTool: AgentTool {
         let every = min(max(optionalInt("every_seconds", from: arguments) ?? 5, 1), 60)
         let maxFrames = min(max(optionalInt("max_frames", from: arguments) ?? 12, 1), 40)
         let outDirArg = (arguments["out_dir"] as? String) ?? ".mythos/video-frames/\(Self.slug((input as NSString).lastPathComponent))-\(Int(Date().timeIntervalSince1970))"
-        let outDir = try context.resolvedPath(outDirArg, mustExist: false)
-        try FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+        let artifact = try ArtifactOutputEvidence.prepare(path: outDirArg, kind: .directory, context: context)
+        try context.confinedRoot().makeDirectory(artifact.relativePath)
 
-        let sampled = try await capture(input, outDir, every, maxFrames, context)
+        let sampled = try await capture(input, artifact.absolutePath, every, maxFrames, context)
         guard !sampled.isEmpty else { return .failure("ffmpeg produced no sampled frames") }
 
-        let attachments = try sampled.map { frame -> MediaAttachment in
-            let data = try Data(contentsOf: URL(fileURLWithPath: frame))
-            return MediaAttachment(kind: .image, mimeType: "image/jpeg", payload: .inline(data), sourcePath: frame)
+        let confinedFrames = try sampled.map { try artifact.confinedDescendant($0, context: context) }
+        let root = try context.confinedRoot()
+        let attachments = try confinedFrames.map { frame -> MediaAttachment in
+            let data = try root.readData(frame)
+            return MediaAttachment(kind: .image, mimeType: "image/jpeg", payload: .inline(data),
+                                   sourcePath: root.rootPath + "/" + frame)
         }
         let question = (arguments["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let prompt = Self.prompt(everySeconds: every, frameCount: attachments.count, question: question)
         let report = try await analyze(attachments, prompt)
-        let relFrames = sampled.map { Self.relativePath($0, root: context.projectRoot) }
+        var metadata = ["frames": String(attachments.count), "out_dir": artifact.relativePath]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
         return ToolResult(success: true,
                           output: "Video watch · sampled \(attachments.count) frame(s) every \(every)s\nFrames:\n" +
-                                  relFrames.map { "  \($0)" }.joined(separator: "\n") +
+                                  confinedFrames.map { "  \($0)" }.joined(separator: "\n") +
                                   "\n\n" + report.trimmingCharacters(in: .whitespacesAndNewlines),
-                          metadata: ["frames": String(attachments.count), "out_dir": outDirArg])
+                          metadata: metadata)
     }
 
     static func sampleFrames(input: String, outDir: String, everySeconds: Int, maxFrames: Int,

@@ -26,6 +26,8 @@ final class EstateAutoExploreWiringTests: XCTestCase {
         let s = repl()
         XCTAssertTrue(s.contains("Task.detached"),
                       "the blocking file walk must run off the cooperative pool")
+        XCTAssertTrue(s.contains("searchTask.cancel()") && s.contains("file search interrupted"),
+                      "the session ESC contract must cancel auto-explore instead of ignoring the user")
         XCTAssertTrue(s.contains("🔎"),
                       "the search must be visible to the user (a 🔎 status line)")
     }

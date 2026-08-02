@@ -31,13 +31,16 @@ public struct GenerateVideoTool: AgentTool {
         let aspect = (arguments["aspect"] as? String).flatMap { ["16:9", "9:16"].contains($0) ? $0 : nil } ?? "16:9"
         let out = (arguments["out"] as? String) ?? "generated-videos/\(Self.slug(prompt)).mp4"
         guard (out as NSString).pathExtension.lowercased() == "mp4" else { return .failure("out must end in .mp4") }
+        let artifact = try ArtifactOutputEvidence.prepare(path: out, kind: .file, context: context)
 
         let bytes = try await generate(prompt, aspect)
         guard !bytes.isEmpty else { return .failure("video generation returned no data") }
-        try context.confinedRoot().writeData(out, bytes, createParents: true)
+        try context.confinedRoot().writeData(artifact.relativePath, bytes, createParents: true)
+        var metadata = ["path": artifact.relativePath, "bytes": String(bytes.count), "aspect": aspect]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
         return ToolResult(success: true,
-                          output: "generated video → \(out) (\(bytes.count) bytes, \(aspect))",
-                          metadata: ["path": out, "bytes": String(bytes.count), "aspect": aspect])
+                          output: "generated video → \(artifact.relativePath) (\(bytes.count) bytes, \(aspect))",
+                          metadata: metadata)
     }
 
     static func slug(_ prompt: String) -> String {

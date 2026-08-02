@@ -23,10 +23,15 @@ struct ConversationRouter {
     struct Proposal { let route: Route; let prompt: String }
 
     /// Propose an escalation, or nil to just handle the message inline (chat/build).
-    func propose(_ input: String) async -> Proposal? {
+    func propose(_ input: String, resolvedIntent: TaskBrief.Intent? = nil) async -> Proposal? {
+        let intent = resolvedIntent ?? PromptCompiler.inferIntent(input)
+        // Semantic intent belongs to PromptCompiler. This router chooses only a compatible execution
+        // escalation; it may not reinterpret an answer/review request as a build or research run.
+        guard Self.mayEscalate(intent) else { return nil }
         // Cheap pre-filter: obviously-chat → never escalate, and don't pay for a classifier call.
         if Self.isObviouslyChat(input) { return nil }
         guard let route = await classify(input) else { return nil }
+        guard Self.compatible(route, with: intent) else { return nil }
         switch route {
         case .fleet:
             return Proposal(route: .fleet(agents: defaultFleetAgents),
@@ -41,6 +46,25 @@ struct ConversationRouter {
         case .research:
             return Proposal(route: .research,
                             prompt: "⇪ This looks like source-backed research. Run the evidence-first research pipeline before council synthesis? [y/N]")
+        }
+    }
+
+    static func mayEscalate(_ intent: TaskBrief.Intent) -> Bool {
+        switch intent {
+        case .build, .research, .review, .plan, .fleet: return true
+        case .chat, .desktop: return false
+        }
+    }
+
+    static func compatible(_ route: Route, with intent: TaskBrief.Intent) -> Bool {
+        switch (intent, route) {
+        case (.build, .planExecute), (.build, .fleet),
+             (.fleet, .fleet), (.fleet, .planExecute),
+             (.research, .research),
+             (.review, .council), (.plan, .council):
+            return true
+        default:
+            return false
         }
     }
 

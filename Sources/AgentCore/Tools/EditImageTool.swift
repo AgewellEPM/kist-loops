@@ -47,13 +47,16 @@ public struct EditImageTool: AgentTool {
 
         let out = (arguments["out"] as? String) ?? "edited-images/\(Self.slug(prompt)).png"
         guard (out as NSString).pathExtension.lowercased() == "png" else { return .failure("out must end in .png") }
+        let artifact = try ArtifactOutputEvidence.prepare(path: out, kind: .file, context: context)
 
         let edited = try await edit(prompt, data, mime)
         guard !edited.isEmpty else { return .failure("edit returned no image") }
-        try context.confinedRoot().writeData(out, edited, createParents: true)
+        try context.confinedRoot().writeData(artifact.relativePath, edited, createParents: true)
+        var metadata = ["path": artifact.relativePath, "bytes": String(edited.count)]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
         return ToolResult(success: true,
-                          output: "edited \((resolved as NSString).lastPathComponent) → \(out) (\(edited.count) bytes)",
-                          metadata: ["path": out, "bytes": String(edited.count)])
+                          output: "edited \((resolved as NSString).lastPathComponent) → \(artifact.relativePath) (\(edited.count) bytes)",
+                          metadata: metadata)
     }
 
     static func slug(_ prompt: String) -> String {

@@ -91,6 +91,134 @@ final class PlanExecutorTests: XCTestCase {
         XCTAssertEqual(exec.stepResults.last?.stepId, "D")
     }
 
+    func testRepairedPlanStepCarriesTheArgumentsThatActuallyRanIntoVerification() async throws {
+        let plan = ExecutablePlan(goal: "edit then verify", steps: [
+            PlanStep(id: "E1", intent: "edit source", tool: "write_file",
+                     argumentsJSON: #"{"path":"Sources/App.swift","content":"let value = 1\n"}"#),
+            PlanStep(id: "E2", intent: "verify", tool: "run_command",
+                     argumentsJSON: #"{"command":"swift test"}"#, dependsOn: ["E1"]),
+        ])
+        let exec = await PlanExecutor(
+            tools: ToolRegistry([WriteFileTool(), RepairableRunCommandTool()]),
+            context: ToolContext(projectRoot: root),
+            repairStep: { step, _, _ in
+                step.id == "E2" ? ["executable": "true", "args": [String]()] : nil
+            }
+        ).execute(plan)
+
+        XCTAssertTrue(exec.success)
+        let trajectory = PlanExecuteLoop.verifyTrajectory(plan: plan, exec: exec)
+        XCTAssertEqual(trajectory.last?.observedEffects.verification, .nonVerifyingCommand,
+                       "a successful repaired `true` retry must not inherit the failed original `swift test`")
+        guard case .needsVerification = CompletionVerifier().check(
+            trajectory: trajectory, canRunCommands: true,
+            expectedOutcome: .mutation, taskIntent: .build
+        ) else {
+            return XCTFail("a repaired non-verifier must not satisfy verify-after-edit")
+        }
+    }
+
+    func testFailedPartialMutationSurvivesHarmlessRepairInAttemptLedger() async throws {
+        let plan = ExecutablePlan(goal: "recover without hiding a partial write", steps: [
+            PlanStep(id: "E1", intent: "write source then fail", tool: "run_command",
+                     argumentsJSON: #"{"command":"printf broken > Sources/Partial.swift"}"#),
+            PlanStep(id: "E2", intent: "write release note", tool: "write_file",
+                     argumentsJSON: #"{"path":"README.md","content":"done"}"#, dependsOn: ["E1"]),
+        ])
+        let exec = await PlanExecutor(
+            tools: ToolRegistry([PartialFailureRunCommandTool(), WriteFileTool()]),
+            context: ToolContext(projectRoot: root),
+            repairStep: { step, _, _ in
+                step.id == "E1" ? ["executable": "true", "args": [String]()] : nil
+            }
+        ).execute(plan)
+
+        XCTAssertTrue(exec.success, exec.summary)
+        XCTAssertEqual(exec.stepResults.count, 2, "final per-step compatibility view stays collapsed")
+        XCTAssertEqual(exec.attemptResults.map(\.success), [false, true, true],
+                       "initial failure, repaired retry, and dependent write must all remain in order")
+        XCTAssertEqual(exec.attemptResults.map(\.executionPhase), [1, 2, 3])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/Sources/Partial.swift"),
+                      "the failing attempt really left a partial source side effect")
+
+        let trajectory = PlanExecuteLoop.verifyTrajectory(plan: plan, exec: exec)
+        guard case .needsVerification(let reason) = CompletionVerifier().check(
+            trajectory: trajectory, canRunCommands: true,
+            expectedOutcome: .mutation, taskIntent: .build
+        ) else { return XCTFail("a harmless repaired retry must not erase its failed source side effect") }
+        XCTAssertTrue(reason.contains("source mutation failed"), reason)
+    }
+
+    func testSameWaveVerifierCannotProveConcurrentSourceMutation() async {
+        let plan = ExecutablePlan(goal: "edit and verify", steps: [
+            PlanStep(id: "E1", intent: "edit source", tool: "write_file",
+                     argumentsJSON: #"{"path":"Sources/App.swift","content":"let x = 1"}"#),
+            PlanStep(id: "E2", intent: "verify", tool: "run_command",
+                     argumentsJSON: #"{"command":"swift test"}"#),
+        ])
+        let exec = await PlanExecutor(
+            tools: ToolRegistry([WriteFileTool(), PassingRunCommandTool()]),
+            context: ToolContext(projectRoot: root)
+        ).execute(plan)
+
+        XCTAssertTrue(exec.success, exec.summary)
+        XCTAssertEqual(exec.attemptResults.map(\.executionPhase), [1, 1],
+                       "independent ready steps must be represented as one overlapping phase")
+        let trajectory = PlanExecuteLoop.verifyTrajectory(plan: plan, exec: exec)
+        XCTAssertEqual(trajectory.last?.observedEffects.verification, .nonVerifyingCommand,
+                       "same-phase test has no happens-before edge to the source edit")
+        XCTAssertFalse(CompletionVerifier().check(
+            trajectory: trajectory, canRunCommands: true,
+            expectedOutcome: .mutation, taskIntent: .build
+        ).isAccept)
+    }
+
+    func testSameWaveVerifierCannotPrecedeARepairedMutationThenMoveAfterItBySorting() async {
+        // Both initial attempts are phase 1. The verifier finishes before repair is even attempted;
+        // replacing E1 in stable plan order must not manufacture [repaired edit, old passing test].
+        let plan = ExecutablePlan(goal: "repair edit and verify", steps: [
+            PlanStep(id: "E1", intent: "edit source", tool: "write_file",
+                     argumentsJSON: #"{"path":"Sources/App.swift","content":"broken"}"#),
+            PlanStep(id: "E2", intent: "verify", tool: "run_command",
+                     argumentsJSON: #"{"command":"swift test"}"#),
+        ])
+        let exec = await PlanExecutor(
+            tools: ToolRegistry([RepairingWriteFileTool(), PassingRunCommandTool()]),
+            context: ToolContext(projectRoot: root),
+            repairStep: { step, _, _ in
+                step.id == "E1" ? ["path": "Sources/App.swift", "content": "repaired"] : nil
+            }
+        ).execute(plan)
+
+        XCTAssertTrue(exec.success, exec.summary)
+        XCTAssertEqual(exec.attemptResults.map(\.executionPhase), [1, 1, 2])
+        XCTAssertEqual(exec.attemptResults.map(\.stepId), ["E1", "E2", "E1"])
+        let trajectory = PlanExecuteLoop.verifyTrajectory(plan: plan, exec: exec)
+        XCTAssertFalse(CompletionVerifier().check(
+            trajectory: trajectory, canRunCommands: true,
+            expectedOutcome: .mutation, taskIntent: .build
+        ).isAccept, "phase-1 test cannot verify the repaired phase-2 edit")
+    }
+
+    func testDependentVerifierInLaterWaveStillProvesMutation() async {
+        let plan = ExecutablePlan(goal: "edit then verify", steps: [
+            PlanStep(id: "E1", intent: "edit source", tool: "write_file",
+                     argumentsJSON: #"{"path":"Sources/App.swift","content":"let x = 1"}"#),
+            PlanStep(id: "E2", intent: "verify", tool: "run_command",
+                     argumentsJSON: #"{"command":"swift test"}"#, dependsOn: ["E1"]),
+        ])
+        let exec = await PlanExecutor(
+            tools: ToolRegistry([WriteFileTool(), PassingRunCommandTool()]),
+            context: ToolContext(projectRoot: root)
+        ).execute(plan)
+
+        XCTAssertEqual(exec.attemptResults.map(\.executionPhase), [1, 2])
+        XCTAssertTrue(CompletionVerifier().check(
+            trajectory: PlanExecuteLoop.verifyTrajectory(plan: plan, exec: exec), canRunCommands: true,
+            expectedOutcome: .mutation, taskIntent: .build
+        ).isAccept, "an explicit dependency establishes verifier-after-mutation")
+    }
+
     func testIndependentReadyStepsRunInParallelButReportDeterministically() async {
         let sleeper = SleepTool(delayMilliseconds: 500)
         let exec = PlanExecutor(tools: ToolRegistry([sleeper]), context: ToolContext(projectRoot: root))
@@ -181,5 +309,69 @@ private final class SleepTool: AgentTool, @unchecked Sendable {
         queue.sync { _starts[id] = Date() }
         try await Task.sleep(nanoseconds: delayNanoseconds)
         return ToolResult(success: true, output: "slept \(id)")
+    }
+}
+
+private struct RepairableRunCommandTool: AgentTool {
+    let name = "run_command"
+    let description = "test double"
+    let parameters: [ToolParameter] = []
+
+    func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        if arguments["command"] as? String == "swift test" {
+            return .failure("simulated failing tests")
+        }
+        if arguments["executable"] as? String == "true" {
+            return ToolResult(success: true, output: "(no output)")
+        }
+        return .failure("unexpected arguments")
+    }
+}
+
+private struct PassingRunCommandTool: AgentTool {
+    let name = "run_command"
+    let description = "always-passing verifier test double"
+    let parameters: [ToolParameter] = []
+
+    func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        ToolResult(success: true, output: "tests passed")
+    }
+}
+
+private struct PartialFailureRunCommandTool: AgentTool {
+    let name = "run_command"
+    let description = "leaves a source write before its first failure"
+    let parameters: [ToolParameter] = []
+
+    func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        if arguments["command"] as? String != nil {
+            try FileManager.default.createDirectory(atPath: context.projectRoot + "/Sources",
+                                                    withIntermediateDirectories: true)
+            try "broken".write(toFile: context.projectRoot + "/Sources/Partial.swift",
+                               atomically: true, encoding: .utf8)
+            return .failure("failed after partial source write")
+        }
+        if arguments["executable"] as? String == "true" {
+            return ToolResult(success: true, output: "(no output)")
+        }
+        return .failure("unexpected arguments")
+    }
+}
+
+private struct RepairingWriteFileTool: AgentTool {
+    let name = "write_file"
+    let description = "fails after first source write, succeeds on repaired content"
+    let parameters: [ToolParameter] = []
+
+    func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        try FileManager.default.createDirectory(atPath: context.projectRoot + "/Sources",
+                                                withIntermediateDirectories: true)
+        let content = (arguments["content"] as? String) ?? ""
+        try content.write(toFile: context.projectRoot + "/Sources/App.swift",
+                          atomically: true, encoding: .utf8)
+        return content == "repaired"
+            ? ToolResult(success: true, output: "wrote", metadata: ["changed": "true"])
+            : ToolResult(success: false, output: "", error: "failed after write",
+                         metadata: ["changed": "true"])
     }
 }

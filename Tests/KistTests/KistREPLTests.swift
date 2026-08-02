@@ -98,7 +98,7 @@ final class KistREPLTests: XCTestCase {
             .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
         XCTAssertTrue(repl.contains("let next = workedBoard"),
                       "the dashboard Next must be gated on workedBoard so it can't freeze on a stale task")
-        XCTAssertTrue(repl.contains("? (plan.active?.boardTitle") && repl.contains(": \"Continue\""),
+        XCTAssertTrue(repl.contains("? (currentActive?.boardTitle") && repl.contains(": \"Continue\""),
                       "a non-board turn shows 'Continue', not a frozen inProgress task")
     }
 
@@ -108,7 +108,8 @@ final class KistREPLTests: XCTestCase {
             .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
         XCTAssertTrue(repl.contains("case \"bughunt\", \"monkey\", \"monkeybash\", \"hunt\", \"breakit\":"),
                       "/bughunt (and aliases) must be a command")
-        XCTAssertTrue(repl.contains("await fleet(Self.bugHuntBrief(inv.goal), inv.agents, roleSelection.bindings)"),
+        XCTAssertTrue(repl.contains("let bugGoal = Self.bugHuntBrief(inv.goal)")
+                      && repl.contains("await fleet(bugGoal, inv.agents, roleSelection.bindings)"),
                       "bug hunt must dispatch a FLEET of isolated hunters with the adversarial brief")
     }
 
@@ -373,7 +374,10 @@ final class KistREPLTests: XCTestCase {
                                promptTokens: 100, completionTokens: 20, startedAt: now, endedAt: now)]
         // A board-WORKING turn (a real file mutation) — only then does the summary nudge the next board
         // task (the 2026-07-29 loop-restart fix gates the nudge to turns that actually touched the board).
-        let trajectory = [ActionRecord(tool: "write_file", argsFingerprint: "a", success: true)]
+        let trajectory = [ActionRecord(
+            tool: "write_file", argsFingerprint: "path=Sources/App.swift", success: true,
+            effectObservation: ToolEffectObservation(mutation: .source)
+        )]
 
         let summary = KistREPL.renderSimpleSummary(projectRoot: dir, spans: spans, trajectory: trajectory)
 
@@ -409,5 +413,24 @@ final class KistREPLTests: XCTestCase {
             ActionRecord(tool: "edit_file", argsFingerprint: "z", success: false),
         ]
         XCTAssertTrue(KistREPL.toolErrorSummary(multi).hasPrefix("run_command ×2, edit_file ×1"))
+    }
+
+    func testDurableTurnLearningRunsOnceAfterReviewAndFinalVerdict() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let summaryStart = try XCTUnwrap(source.range(of: "func printTurnSummary("))
+        let learningStart = try XCTUnwrap(source.range(of: "func recordSubmittedTurnLearning("))
+        let summaryBody = String(source[summaryStart.lowerBound..<learningStart.lowerBound])
+
+        XCTAssertFalse(summaryBody.contains(".recordTurn("),
+                       "interim primary/repair summaries must never persist phase-local pass capsules")
+        XCTAssertEqual(source.components(separatedBy: "recordSubmittedTurnLearning(").count - 1, 6,
+                       "one helper definition plus five submitted-turn finalization paths are expected")
+        XCTAssertTrue(source.contains("let completedTurn = recordVerificationAndFinal(outcome:"),
+                      "learning success must come from the combined deterministic final verdict")
+        XCTAssertTrue(source.contains("recordTurn(plan: plan, spans: submittedTurnSpans"),
+                      "the one durable capsule must include usage from every author/review/repair phase")
     }
 }

@@ -6,24 +6,29 @@ import AgentCore
 // Extracted verbatim from KistREPL.swift (Pass-1 modularization; no behavior change).
 extension KistREPL {
 
-    /// Tools whose SUCCESSFUL use means the turn actually CHANGED state — a broader set than the copilot
-    /// review trigger (which is only file-diff mutations). Restored across the origin/main merge: the
-    /// turn-summary dashboard uses this to decide compact-vs-full, so a `run_command`/`apply_patch` turn
-    /// (real work, no file-write) still renders the full dashboard. Do NOT narrow to Copilot.mutatingTools.
-    static let summaryMutatingTools: Set<String> = [
-        "edit_file", "write_file", "apply_patch", "notebook_edit",
-        "run_command", "move_file", "create_directory", "make_dir",
-    ]
-
-    /// True when a turn did real mutating work (any `summaryMutatingTools` call that succeeded).
+    /// True when a turn made deliverable build progress. This consumes the same argument-aware effect
+    /// observation as the progress governor and completion verifier, so `swift test` counts while `ls`
+    /// does not, and newer mutators do not require another local tool-name list.
     static func turnHasMutatingWork(_ trajectory: [ActionRecord]) -> Bool {
-        trajectory.contains { summaryMutatingTools.contains($0.tool) && $0.success }
+        trajectory.contains { $0.success && $0.observedEffects.advancesBuild }
     }
 
-    static func handleTasks(_ args: String, projectRoot: String) -> String {
+    /// Whether this turn genuinely advanced the visible board. Task inspection is deliberately excluded;
+    /// only a confirmed deliverable mutation or a successful state-changing task action moves "Next".
+    static func turnWorkedBoard(_ trajectory: [ActionRecord]) -> Bool {
+        trajectory.contains {
+            $0.success && ($0.observedEffects.confirmsMutation
+                || $0.observedEffects.progress == .taskBoard)
+        }
+    }
+
+    static func handleTasks(_ args: String, projectRoot: String,
+                            sessionStartedAt: Date? = nil) -> String {
         let store = PlanStore(projectRoot: projectRoot)
         let parts = args.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
-        guard let sub = parts.first?.lowercased() else { return store.load().render() }
+        guard let sub = parts.first?.lowercased() else {
+            return store.load().render(sessionStartedAt: sessionStartedAt)
+        }
         let rest = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
         switch sub {
         case "add":
@@ -40,7 +45,8 @@ extension KistREPL {
             return task.map { "started [\($0.id)] \($0.title)\n" } ?? "no task to start\n" + store.load().render()
         case "done", "complete":
             guard let id = Int(rest) else { return "usage: /tasks done <id>" }
-            let (completed, nowActive, didAdvance) = store.completeAndAdvance(id: id)
+            let (completed, nowActive, didAdvance) = store.completeAndAdvance(
+                id: id, sessionStartedAt: sessionStartedAt)
             guard let t = completed else { return "usage: /tasks done <id>" }
             let plan = store.load()
             let advance: String
@@ -55,7 +61,8 @@ extension KistREPL {
             } else {
                 advance = "✓ build queue clear\n"
             }
-            return "done [\(t.id)] \(t.title)\n" + advance + plan.render()
+            return "done [\(t.id)] \(t.title)\n" + advance
+                + plan.render(sessionStartedAt: sessionStartedAt)
         case "block":
             let bits = rest.split(separator: " ", maxSplits: 1).map(String.init)
             guard let id = bits.first.flatMap(Int.init),
@@ -80,7 +87,8 @@ extension KistREPL {
     }
 
 
-    static func taskSelectedByUser(_ input: String, projectRoot: String) -> PlanTask? {
+    static func taskSelectedByUser(_ input: String, projectRoot: String,
+                                   sessionStartedAt: Date? = nil) -> PlanTask? {
         let plan = PlanStore(projectRoot: projectRoot).load()
         guard !plan.tasks.isEmpty else { return nil }
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -98,15 +106,22 @@ extension KistREPL {
         // Prefer a genuinely-active task, then the next ACTIONABLE (non-research) todo, and only then a
         // bare research todo — so a stuck .inProgress research task cannot hijack 'next' while build work
         // remains, and `active` still wins for real in-flight multi-turn work.
-        if nextPhrases.contains(lower) { return plan.active ?? plan.nextActionable ?? plan.next }
+        if nextPhrases.contains(lower) {
+            let active = sessionStartedAt.flatMap { started in
+                plan.active(since: started)
+            } ?? (sessionStartedAt == nil ? plan.active : nil)
+            return active ?? plan.nextActionable ?? plan.next
+        }
         return nil
     }
 
 
-    static func expandBoardReference(_ input: String, projectRoot: String) -> String {
+    static func expandBoardReference(_ input: String, projectRoot: String,
+                                     sessionStartedAt: Date? = nil) -> String {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return trimmed }
-        if let task = taskSelectedByUser(trimmed, projectRoot: projectRoot) {
+        if let task = taskSelectedByUser(trimmed, projectRoot: projectRoot,
+                                         sessionStartedAt: sessionStartedAt) {
             _ = PlanStore(projectRoot: projectRoot).update(id: task.id, status: .inProgress)
             return executionBrief(for: task, userInput: trimmed)
         }
@@ -122,7 +137,10 @@ extension KistREPL {
             .filter { !boardReferenceGlue.contains($0) }
         guard meaningful.isEmpty else { return trimmed }
         let plan = PlanStore(projectRoot: projectRoot).load()
-        guard let task = plan.active ?? plan.nextActionable ?? plan.next else { return trimmed }
+        let liveActive = sessionStartedAt.flatMap { started in
+            plan.active(since: started)
+        } ?? (sessionStartedAt == nil ? plan.active : nil)
+        guard let task = liveActive ?? plan.nextActionable ?? plan.next else { return trimmed }
         _ = PlanStore(projectRoot: projectRoot).update(id: task.id, status: .inProgress)
         return executionBrief(for: task, userInput: trimmed)
     }
@@ -245,7 +263,8 @@ extension KistREPL {
     }
 
     static func renderSimpleSummary(projectRoot: String, spans: [AgentSpan], trajectory: [ActionRecord],
-                                    color: Bool? = nil) -> String {
+                                    color: Bool? = nil,
+                                    sessionStartedAt: Date? = nil) -> String {
         let useColor = color ?? stdoutColorEnabled(projectRoot: projectRoot)
         func c(_ code: String, _ s: String) -> String { useColor ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
         let plan = PlanStore(projectRoot: projectRoot).load()
@@ -254,13 +273,15 @@ extension KistREPL {
         let usage = UsageCost.summarize(spans: spans).render(label: "usage")
         // Mirror the selectors: prefer a real active task, then the next ACTIONABLE todo, so a stuck
         // research task doesn't dominate the "next" nudge while build work remains.
-        let next = plan.active ?? plan.nextActionable ?? plan.next
+        let currentActive = sessionStartedAt.map { plan.active(since: $0) } ?? plan.active
+        let next = currentActive ?? plan.nextActionable ?? plan.next
         // Only NUDGE toward the board when THIS turn actually worked it — a successful file mutation
-        // (a build) or a `tasks` tool call. A pure chat / research / Q&A turn must NOT push the board's
+        // (a build) or a successful state-changing `tasks` action. Read-only `tasks(list|validate)` calls
+        // and pure chat / research / Q&A turns must NOT push the board's
         // next item: otherwise a stale objective hijacks every unrelated turn and the user feels the
         // Captain "re-ran the original loop and lost my thread" (2026-07-29 loop-restart bug). The board
         // is still visible via /goals and the status panel — this only stops the actionable "type N" push.
-        let workedBoard = trajectory.contains { ($0.success && Copilot.mutatingTools.contains($0.tool)) || $0.tool == "tasks" }
+        let workedBoard = turnWorkedBoard(trajectory)
         let nextLine: String
         if let next, workedBoard {
             nextLine = "[\(next.id)] \(next.title) — type \(next.id) to run it"

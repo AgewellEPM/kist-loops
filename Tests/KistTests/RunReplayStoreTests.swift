@@ -61,4 +61,44 @@ final class RunReplayStoreTests: XCTestCase {
         XCTAssertTrue(rendered.contains("Invalid replay id"))
         XCTAssertTrue(RunReplayStore.loadEvents(projectRoot: root, runID: "../outside").isEmpty)
     }
+
+    func testReplayDistinguishesTurnDecisionsAndOneCanonicalFinal() {
+        let root = NSTemporaryDirectory() + "kist-replay-typed-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let store = RunReplayStore(projectRoot: root, provider: "openai", model: "gpt",
+                                   runID: "typed-turn")
+        let proof = TurnProofStore(replayStore: store)
+        proof.startTurn(goal: "fix the parser")
+        proof.record(.init(kind: .routeSelected, tool: nil, success: nil,
+                           text: "intent=build execution=inline model=openai:gpt"))
+        proof.record(.init(kind: .reviewAssessment, tool: nil, success: nil,
+                           text: "not requested"))
+        proof.record(.init(kind: .verificationAssessment, tool: nil, success: true,
+                           text: "passed: swift test"))
+        proof.record(.init(kind: .turnFinalized, tool: nil, success: true,
+                           text: "parser fixed"))
+
+        let events = RunReplayStore.loadEvents(projectRoot: root, runID: "typed-turn")
+
+        XCTAssertEqual(events.filter { $0.kind == "turnFinalized" }.count, 1)
+        XCTAssertTrue(events.contains { $0.kind == "routeSelected" })
+        XCTAssertTrue(events.contains { $0.kind == "verificationAssessment" })
+    }
+
+    func testREPLActuallyEmitsTypedTurnDecisions() throws {
+        let repl = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+
+        XCTAssertTrue(repl.contains("kind: .routeSelected"))
+        XCTAssertTrue(repl.contains("kind: .reviewAssessment"))
+        XCTAssertTrue(repl.contains("kind: .verificationAssessment"))
+        XCTAssertTrue(repl.contains("kind: .turnFinalized"))
+        XCTAssertTrue(repl.contains("router.propose(messageText, resolvedIntent: turnIntent)"),
+                      "routing must consume the same intent persisted by the turn")
+        XCTAssertTrue(repl.contains("rawRequest: messageText, resolvedIntent: turnIntent"),
+                      "the existing REPL must pass its canonical contract into AgentCore")
+        XCTAssertTrue(repl.contains("expected == .mutation, !fulfilledMutationContract"),
+                      "a promised build/fleet result must not finalize successfully as a no-op")
+    }
 }

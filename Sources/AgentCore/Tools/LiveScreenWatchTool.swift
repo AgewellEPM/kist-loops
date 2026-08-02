@@ -44,24 +44,28 @@ public struct LiveScreenWatchTool: AgentTool {
         let interval = min(max(optionalInt("interval", from: arguments) ?? 2, 1), 10)
         let count = min(max(Int(ceil(Double(total) / Double(interval))) + 1, 1), 30)
         let outDirArg = (arguments["out_dir"] as? String) ?? ".mythos/screen-watch/\(Int(Date().timeIntervalSince1970))"
-        let outDir = try context.resolvedPath(outDirArg, mustExist: false)
-        try FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+        let artifact = try ArtifactOutputEvidence.prepare(path: outDirArg, kind: .directory, context: context)
+        try context.confinedRoot().makeDirectory(artifact.relativePath)
 
-        let shots = try await capture(outDir, count, interval, context)
+        let shots = try await capture(artifact.absolutePath, count, interval, context)
         guard !shots.isEmpty else { return .failure("no screenshots captured") }
-        let attachments = try shots.map { path -> MediaAttachment in
-            let data = try Data(contentsOf: URL(fileURLWithPath: path))
-            return MediaAttachment(kind: .image, mimeType: "image/png", payload: .inline(data), sourcePath: path)
+        let confinedShots = try shots.map { try artifact.confinedDescendant($0, context: context) }
+        let root = try context.confinedRoot()
+        let attachments = try confinedShots.map { path -> MediaAttachment in
+            let data = try root.readData(path)
+            return MediaAttachment(kind: .image, mimeType: "image/png", payload: .inline(data),
+                                   sourcePath: root.rootPath + "/" + path)
         }
         let question = (arguments["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let prompt = Self.prompt(interval: interval, count: attachments.count, question: question)
         let report = try await analyze(attachments, prompt)
-        let rel = shots.map { WatchVideoTool.relativePath($0, root: context.projectRoot) }
+        var metadata = ["screenshots": String(attachments.count), "out_dir": artifact.relativePath]
+        try metadata.mergeArtifactMetadata(artifact, context: context)
         return ToolResult(success: true,
                           output: "Live screen watch · \(attachments.count) screenshot(s), interval \(interval)s\nScreenshots:\n" +
-                                  rel.map { "  \($0)" }.joined(separator: "\n") +
+                                  confinedShots.map { "  \($0)" }.joined(separator: "\n") +
                                   "\n\n" + report.trimmingCharacters(in: .whitespacesAndNewlines),
-                          metadata: ["screenshots": String(attachments.count), "out_dir": outDirArg])
+                          metadata: metadata)
     }
 
     static func captureScreens(outDir: String, count: Int, interval: Int, context: ToolContext) async throws -> [String] {

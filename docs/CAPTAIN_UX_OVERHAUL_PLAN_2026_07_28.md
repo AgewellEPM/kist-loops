@@ -1,5 +1,10 @@
 # Captain UX Overhaul Plan — 2026-07-28
 
+> **Historical planning snapshot.** This file describes the system as it existed when the roadmap
+> was written and is not a current feature-status source. Several increments were later implemented
+> in different shapes. Use `README.md`, `docs/FEATURE_STATUS_MATRIX.md`, and executable acceptance
+> tests for current truth.
+
 **Status: PLAN (approved scope from Luke, 2026-07-28). Each R-increment ships separately, tested, own branch.**
 
 Luke's asks, verbatim intent:

@@ -3,6 +3,13 @@ import XCTest
 
 final class SpawnAgentPromptBriefTests: XCTestCase {
     func testSpawnAgentSendsCompiledSelfContainedBriefToSubAgent() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spawn-brief-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "local routing evidence".write(to: root.appendingPathComponent("evidence.txt"),
+                                            atomically: true, encoding: .utf8)
+
         let provider = BriefCaptureProvider()
         let registry = ProviderRegistry(providers: [provider], keyStore: BriefNullKeyStore())
         let spawn = SpawnAgentTool(
@@ -16,10 +23,10 @@ final class SpawnAgentPromptBriefTests: XCTestCase {
         let result = try await spawn.execute(arguments: [
             "role": "researcher",
             "task": "deep dive the latest model-role routing design and report source limits",
-        ], context: ToolContext(projectRoot: NSTemporaryDirectory()))
+        ], context: ToolContext(projectRoot: root.path))
 
         XCTAssertTrue(result.success, result.error ?? "")
-        let userPrompt = await provider.lastUserPrompt()
+        let userPrompt = await provider.initialUserPrompt()
         XCTAssertTrue(userPrompt.contains("TASK BRIEF"))
         XCTAssertTrue(userPrompt.contains("Original user request:"))
         XCTAssertTrue(userPrompt.contains("deep dive the latest model-role routing design"))
@@ -47,26 +54,31 @@ private final class BriefCaptureProvider: ChatProvider {
     private let store = BriefMessageStore()
 
     func stream(messages: [ChatMessage], model: String, settings: ModelSettings, apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        await store.record(messages)
+        let call = await store.record(messages)
         return AsyncThrowingStream { continuation in
-            continuation.yield(.delta(#"{"done":true,"summary":"captured"}"#))
+            if call == 1 {
+                continuation.yield(.delta(#"{"tool":"read_file","parameters":{"path":"evidence.txt"}}"#))
+            } else {
+                continuation.yield(.delta(#"{"done":true,"summary":"captured"}"#))
+            }
             continuation.finish()
         }
     }
 
-    func lastUserPrompt() async -> String {
-        await store.lastUserPrompt()
+    func initialUserPrompt() async -> String {
+        await store.initialUserPrompt()
     }
 }
 
 private actor BriefMessageStore {
     private var batches: [[ChatMessage]] = []
 
-    func record(_ messages: [ChatMessage]) {
+    func record(_ messages: [ChatMessage]) -> Int {
         batches.append(messages)
+        return batches.count
     }
 
-    func lastUserPrompt() -> String {
-        batches.last?.last(where: { $0.role == .user })?.content ?? ""
+    func initialUserPrompt() -> String {
+        batches.first?.last(where: { $0.role == .user })?.content ?? ""
     }
 }
