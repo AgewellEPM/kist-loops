@@ -172,6 +172,99 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertEqual(out.iterations, 3)
     }
 
+    // Regression (2026-08-01 live run 1785638394-f58017fa): fixed-head compaction kept the previous
+    // turn's "next natural progression" request verbatim, compacted the current whitespace-fix brief,
+    // then MiMo snapped back to the old topic. Exercise TWO ConversationCompactor passes and inspect the
+    // actual next provider prompt: the current raw request must be the one final controlling message.
+    func testRepeatedConversationCompactionReassertsCurrentTurnObjective() async {
+        let provider = CompactionPromptCaptureProvider(responses: [
+            "summary of the first compacted middle",
+            #"{"tool":"list_files","parameters":{"path":"."}}"#,
+            #"{"tool":"glob_files","parameters":{"path":".","pattern":"*.swift"}}"#,
+            "summary of the second compacted middle",
+            #"{"done":true,"summary":"fixed the current whitespace issue"}"#,
+        ])
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let current = "fix the leading whitespace in the message renderer"
+        let wrapped = """
+        TASK BRIEF
+        \(PromptCompiler.scopeSourceStart)
+        \(current)
+        \(PromptCompiler.scopeSourceEnd)
+        Old roadmap context is advisory only.
+        """
+        var transcript = staleTopicTranscript(count: 16)
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: provider.id, model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            sink: NullEventSink(), maxIterations: 6,
+            contextWindow: ContextWindowManager(maxCharacters: 1_000_000),
+            compactor: ConversationCompactor(
+                triggerCharacters: 2_000, keepFirst: 2, keepRecent: 8, minMiddle: 6)
+        )
+
+        let out = await subject.turn(transcript: &transcript, userInput: wrapped)
+        let mainPrompts = await provider.mainPrompts()
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(mainPrompts.count, 3, "two action calls plus the final done call")
+        guard let prompt = mainPrompts.last else { return XCTFail("missing post-compaction provider prompt") }
+        let anchors = prompt.filter { $0.content.hasPrefix(HeadlessAgentLoop.currentTurnObjectiveMarker) }
+        XCTAssertEqual(anchors.count, 1, "repeated compaction must replace, not accumulate, the objective anchor")
+        XCTAssertEqual(prompt.last?.role, .user)
+        XCTAssertEqual(prompt.last?.content,
+                       HeadlessAgentLoop.currentTurnObjectiveMarker + "\n" + current)
+        XCTAssertFalse(prompt.last?.content.contains("next natural progression") ?? true,
+                       "the stale first-turn objective must not remain controlling")
+    }
+
+    // The start-of-turn ContextWindowManager has a separate compaction implementation from the
+    // per-iteration ConversationCompactor. Prove that path applies the same current-objective invariant.
+    func testContextWindowCompactionReassertsCurrentTurnObjective() async {
+        let provider = CompactionPromptCaptureProvider(responses: [
+            "summary of older conversation",
+            #"{"done":true,"summary":"answered the current turn"}"#,
+        ])
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let current = "answer only the current resize question"
+        let wrapped = """
+        \(PromptCompiler.scopeSourceStart)
+        \(current)
+        \(PromptCompiler.scopeSourceEnd)
+        """
+        var transcript = staleTopicTranscript(count: 12)
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: provider.id, model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            sink: NullEventSink(), maxIterations: 3,
+            contextWindow: ContextWindowManager(maxCharacters: 2_000, keepFirst: 1, keepLast: 2),
+            compactor: ConversationCompactor(triggerCharacters: 1_000_000)
+        )
+
+        let out = await subject.turn(transcript: &transcript, userInput: wrapped)
+        let mainPrompts = await provider.mainPrompts()
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(mainPrompts.count, 1)
+        guard let prompt = mainPrompts.first else { return XCTFail("missing provider prompt") }
+        XCTAssertEqual(prompt.last?.role, .user)
+        XCTAssertEqual(prompt.last?.content,
+                       HeadlessAgentLoop.currentTurnObjectiveMarker + "\n" + current)
+    }
+
+    private func staleTopicTranscript(count: Int) -> [ChatMessage] {
+        let filler = String(repeating: "x", count: 500)
+        return (0..<count).map { index in
+            let content: String
+            switch index {
+            case 0: content = "OLD OBJECTIVE: tell me the next natural progression for Kist " + filler
+            case 1: content = "I will research the old UX roadmap now " + filler
+            default: content = "old turn step \(index) " + filler
+            }
+            return ChatMessage(role: index.isMultiple(of: 2) ? .user : .assistant, content: content)
+        }
+    }
+
     func testProviderErrorBecomesFailedOutcome() async {
         let registry = ProviderRegistry(providers: [FailingProvider()], keyStore: NullKeyStore())
         let l = HeadlessAgentLoop(providers: registry, providerId: "failing", model: nil,
@@ -1212,6 +1305,56 @@ private actor ScriptedResponses {
     func next() -> String {
         defer { idx += 1 }
         return idx < responses.count ? responses[idx] : #"{"done":true,"summary":"(out of script)"}"#
+    }
+}
+
+/// Returns scripted text for both compaction helper calls and main agent calls, while retaining only
+/// the MAIN prompts. This lets the tests assert what the model actually sees after compaction.
+private final class CompactionPromptCaptureProvider: ChatProvider, @unchecked Sendable {
+    let id = "compaction-capture", name = "Compaction Capture", iconName = "cpu"
+    let requiresAPIKey = false, keyAccount = "compaction-capture", defaultModel = "capture-1"
+    let availableModels = [AIModel(id: "capture-1")]
+    private let state: CompactionPromptCaptureState
+
+    init(responses: [String]) {
+        state = CompactionPromptCaptureState(responses: responses)
+    }
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        let response = await state.next(messages: messages, settings: settings)
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta(response))
+            continuation.finish()
+        }
+    }
+
+    func mainPrompts() async -> [[ChatMessage]] {
+        await state.mainPrompts()
+    }
+}
+
+private actor CompactionPromptCaptureState {
+    private let responses: [String]
+    private var index = 0
+    private var capturedMainPrompts: [[ChatMessage]] = []
+
+    init(responses: [String]) {
+        self.responses = responses
+    }
+
+    func next(messages: [ChatMessage], settings: ModelSettings) -> String {
+        if settings.systemPrompt.contains("single JSON object") {
+            capturedMainPrompts.append(messages)
+        }
+        defer { index += 1 }
+        return index < responses.count
+            ? responses[index]
+            : #"{"done":true,"summary":"(out of capture script)"}"#
+    }
+
+    func mainPrompts() -> [[ChatMessage]] {
+        capturedMainPrompts
     }
 }
 

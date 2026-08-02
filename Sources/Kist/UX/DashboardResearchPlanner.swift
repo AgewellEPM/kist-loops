@@ -20,7 +20,12 @@ enum DashboardResearchPlanner {
         let context = contextText(plan: plan, projectRoot: projectRoot, trajectory: trajectory)
         let lower = context.lowercased()
         let projectName = URL(fileURLWithPath: projectRoot).lastPathComponent.lowercased()
-        let orchestrationContext = projectName.contains("kist")
+        // A user's HOME directory named `lukekist` is not the Kist source project. Substring matching
+        // classified every unrelated turn there as orchestration work and auto-created the same six
+        // Claude/Cursor/OpenHands debts after each answer. Match project-shaped names only.
+        let isKistProject = projectName == "kist" || projectName == "kist-loops"
+            || projectName.hasPrefix("kist-") || projectName == "mythos"
+        let orchestrationContext = isKistProject
             || containsAny(lower, ["captain", "orchestrat", "swarm", "fleet", "delegate",
                                    "worker", "agent", "handoff", "model routing", "background"])
         let learningContext = orchestrationContext

@@ -77,4 +77,16 @@ final class DashboardResearchPlannerTests: XCTestCase {
         XCTAssertEqual(bundle.research.first?.title, "Study Claude Code's fleet scheduling")
         XCTAssertFalse(bundle.research.prefix(3).contains { $0.title == "Research React clock app examples" })
     }
+
+    func testHomeDirectoryNameDoesNotFabricateKistOrchestrationDebt() {
+        let bundle = DashboardResearchPlanner.build(
+            for: Plan(),
+            projectRoot: "/Users/lukekist",
+            trajectory: [ActionRecord(tool: "read_file", argsFingerprint: "a", success: true)])
+
+        XCTAssertFalse(bundle.research.contains { $0.title == "Study Claude Code's fleet scheduling" })
+        XCTAssertFalse(bundle.research.contains { $0.title == "Analyze Cursor background agents" })
+        XCTAssertFalse(bundle.research.contains { $0.title == "Review OpenHands planning loop" })
+        XCTAssertFalse(bundle.knowledgeDebt.contains { $0.topic == "Apple Foundation Models" })
+    }
 }

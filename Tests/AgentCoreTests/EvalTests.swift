@@ -25,11 +25,53 @@ final class EvalTests: XCTestCase {
         XCTAssertEqual(report.failures, 3)
     }
 
-    func testFlagsNearIterationBudgetAndReadOnlySpin() {
+    func testFlagsNearIterationBudgetWithoutCallingReadOnlyWorkNoProgress() {
         let reads = (0..<10).map { step("read_file", "\($0)") }
         let report = TrajectoryAnalyzer.analyze(reads, maxIterations: 12)
         XCTAssertTrue(report.issues.contains { $0.kind == .nearIterationBudget })
-        XCTAssertTrue(report.issues.contains { $0.kind == .noToolProgress })
+        XCTAssertFalse(report.issues.contains { $0.kind == .noToolProgress })
+    }
+
+    func testOnlyBuildIntentFlagsReadOnlySpin() {
+        let reads = (0..<6).map { step("read_file", "\($0)") }
+        let requests = [
+            "Explain how this module works",
+            "Research current consensus techniques",
+            "Review this implementation for bugs",
+        ]
+        for request in requests {
+            let intent = PromptCompiler.compile(request).intent
+            XCTAssertFalse(intent.expectsMutation, request)
+            let report = TrajectoryAnalyzer.analyze(reads, taskIntent: intent)
+            XCTAssertFalse(report.issues.contains { $0.kind == .noToolProgress }, request)
+        }
+
+        let buildIntent = PromptCompiler.compile("Implement the requested feature").intent
+        XCTAssertTrue(buildIntent.expectsMutation)
+        let buildReport = TrajectoryAnalyzer.analyze(reads, taskIntent: buildIntent)
+        XCTAssertTrue(buildReport.issues.contains { $0.kind == .noToolProgress })
+
+        let repairIntent = PromptCompiler.compile("fix this regression").intent
+        XCTAssertEqual(repairIntent, .build)
+        XCTAssertTrue(TrajectoryAnalyzer.analyze(reads, taskIntent: repairIntent).issues
+            .contains { $0.kind == .noToolProgress })
+    }
+
+    func testAllBuildMutationPathsPreventNoProgressWarning() {
+        let expectedProgressTools = [
+            "write_file", "edit_file", "apply_patch", "notebook_edit",
+            "move_file", "make_dir", "create_directory", "ast_grep_apply", "run_command",
+        ]
+        for tool in expectedProgressTools {
+            let steps = (0..<6).map { step("read_file", "\($0)") } + [step(tool, "target")]
+            let report = TrajectoryAnalyzer.analyze(steps, taskIntent: .build)
+            XCTAssertFalse(report.issues.contains { $0.kind == .noToolProgress }, tool)
+        }
+
+        let failedPatch = (0..<6).map { step("read_file", "\($0)") }
+            + [step("apply_patch", "target", success: false)]
+        XCTAssertTrue(TrajectoryAnalyzer.analyze(failedPatch, taskIntent: .build).issues
+            .contains { $0.kind == .noToolProgress })
     }
 
     func testHealthyTrajectoryHasNoIssues() {

@@ -10,6 +10,8 @@ final class EstateLookupIntentTests: XCTestCase {
         XCTAssertTrue(EstateLookupIntent.matches("what's the state of the tinky dashboard"))
         XCTAssertTrue(EstateLookupIntent.matches("show me our windows port work"))
         XCTAssertTrue(EstateLookupIntent.matches("how does your router work?"))
+        XCTAssertTrue(EstateLookupIntent.matches("tellme whastteh next naturakl pgressson for ksit"),
+                      "typo-heavy Kist self questions must still ground in the estate")
     }
 
     func testBuildTasksDoNotMatch() {
@@ -47,5 +49,11 @@ final class EstateLookupIntentTests: XCTestCase {
     func testEmptyTermsWhenAllFiller() {
         XCTAssertTrue(EstateLookupIntent.searchTerms("what did we do").isEmpty,
                       "an all-filler question yields no terms → caller skips the search")
+    }
+
+    func testTypoedKistCanonicalizesSearchTerms() {
+        let terms = EstateLookupIntent.searchTerms("tellme whastteh next naturakl pgressson for ksit")
+        XCTAssertTrue(terms.contains("kist"))
+        XCTAssertFalse(terms.contains("ksit"))
     }
 }

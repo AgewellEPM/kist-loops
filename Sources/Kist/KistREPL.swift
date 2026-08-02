@@ -26,7 +26,7 @@ struct KistREPL {
     /// Forge a specialist from a plain-English role description (AgentForge), bounded by the loop's tool
     /// ceiling, validated, and saved to the registry. nil = forging unavailable in this mode.
     var forge: ((_ description: String, _ roles: RoleBindings) async -> Void)? = nil
-    /// The intent router (Increment B): classify a plain message as chat|build|plan|fleet and PROPOSE an
+    /// The intent router (Increment B): classify a plain message as chat|build|plan|research|council|fleet and PROPOSE an
     /// escalation (never silently spend). nil = auto-route off (explicit slash commands only).
     var router: ConversationRouter? = nil
     /// Rebuild the auto-router when the planner role changes inside the REPL.
@@ -369,7 +369,10 @@ struct KistREPL {
             if lastTurnInterrupted { return }
             var issueLabels: [String] = []
             if let recorder {
-                let report = TrajectoryAnalyzer.analyze(recorder.snapshot())
+                let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+                let intent = PromptCompiler.compile(goal, mode: mode).intent
+                let report = TrajectoryAnalyzer.analyze(recorder.snapshot(),
+                                                        taskIntent: intent)
                 issueLabels = report.issues.map { $0.kind.rawValue }
                 if !report.healthy {
                     print("\u{001B}[37m⚙ self-check · \(issueLabels.joined(separator: ", "))\u{001B}[0m")
@@ -741,10 +744,11 @@ struct KistREPL {
                 let plan = PlanStore(projectRoot: projectRoot).load()
                 let insights = DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
                                                                trajectory: trajectory)
+                let currentObjective = humanTranscript.reversed().first { $0.role == .user }?.content
                 _ = OrganizationalLearningStore(projectRoot: projectRoot)
                     .recordTurn(plan: plan, spans: spans, trajectory: trajectory,
                                 outcomeSummary: outcomeSummary, success: success,
-                                insights: insights)
+                                insights: insights, objective: currentObjective)
             }
             print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans, trajectory: trajectory))
             // R2a (review catch): an ESC'd turn is not a failure — auto-opening a repair mission
@@ -2147,7 +2151,7 @@ struct KistREPL {
             }
 
             // AUTO-ROUTE (Increment B): for a plain message, the router may PROPOSE an escalation to a
-            // fleet / plan-DAG. It never spends big silently — we confirm first; a no falls through to a
+            // fleet / plan-DAG / research pass / council. It never spends big silently — we confirm first; a no falls through to a
             // normal turn. Slash commands above are the explicit path; this is the "just talk" path.
             // A team goal runs as a team-armed turn so the coder↔reviewer review→fix loop actually
             // fires — an accepted fleet/plan escalation would `continue` past runCopilotReview and drop
@@ -2185,6 +2189,7 @@ struct KistREPL {
                     case .fleet(let agents): if let fleet { await fleet(messageText, agents, roleSelection.bindings) }
                     case .planExecute: if let planExecute { await planExecute(messageText, roleSelection.bindings) }
                     case .council: if let council { await council(messageText, roleSelection.bindings, false) }
+                    case .research: if let research { await research(messageText, roleSelection.bindings) }
                     }
                     continue
                 }

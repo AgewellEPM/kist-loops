@@ -501,14 +501,19 @@ public enum CaptainRetrievalRanker {
             let overlap = objectiveTokens.intersection(haystackTokens)
             let phraseBonus = phraseMatchBonus(objective: objective, candidate: candidate)
             let layerBonus = layerPriority(candidate.layerID)
-            let score = min(100, candidate.baseRelevance + layerBonus + phraseBonus + overlap.count * 12)
+            // A high base/layer priority is useful only AFTER relevance is established. Previously an
+            // organizational rule could clear the >=20 threshold with zero shared terms, so unrelated
+            // old roadmaps were injected into every new turn as "working memory". No lexical/phrase
+            // match means no retrieval; explicit /retrieve still reports an honest empty result.
+            let hasObjectiveMatch = !overlap.isEmpty || phraseBonus > 0
+            let score = hasObjectiveMatch
+                ? min(100, candidate.baseRelevance + layerBonus + phraseBonus + overlap.count * 12)
+                : 0
             let reason: String
             if !overlap.isEmpty {
                 reason = "matched objective terms: \(overlap.sorted().prefix(8).joined(separator: ", "))"
-            } else if candidate.baseRelevance > 0 {
-                reason = "high-priority \(candidate.layerID.title) record"
             } else {
-                reason = "low lexical match"
+                reason = "no objective-term match"
             }
             return CaptainRetrievedMemory(layerID: candidate.layerID,
                                           recordID: candidate.recordID,
@@ -553,10 +558,15 @@ public enum CaptainRetrievalRanker {
     }
 
     private static func tokens(_ text: String) -> [String] {
-        text.lowercased()
+        let stopwords: Set<String> = [
+            "the", "and", "for", "from", "with", "that", "this", "then", "into", "your", "our",
+            "you", "are", "was", "were", "has", "have", "had", "not", "but", "can", "will",
+            "current", "new", "old", "task", "work", "fix", "build", "make"
+        ]
+        return text.lowercased()
             .split { !$0.isLetter && !$0.isNumber }
             .map(String.init)
-            .filter { $0.count > 2 }
+            .filter { $0.count > 2 && !stopwords.contains($0) }
     }
 }
 

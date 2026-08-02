@@ -99,7 +99,7 @@ final class ConfidenceReportTests: XCTestCase {
 
     func testHealthRaiseHintsFollowAnalyzerOrderAndDeduplicate() {
         let trajectory = (0..<6).map { _ in rec("read_file", false) }
-        let report = TrajectoryAnalyzer.analyze(trajectory, maxIterations: 6)
+        let report = TrajectoryAnalyzer.analyze(trajectory, maxIterations: 6, taskIntent: .build)
         let confidence = ConfidenceReport.compute(report: report, grounded: true)!
         let health = confidence.factors.first { $0.label == "Health" }!
         XCTAssertEqual(

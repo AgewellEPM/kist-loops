@@ -33,12 +33,24 @@ public enum EstateLookupIntent {
 
     /// True when `message` is a lookup/find/self question worth auto-searching the estate for.
     public static func matches(_ message: String) -> Bool {
-        let t = message.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let t = normalizedForIntent(message)
         guard t.count >= 6 else { return false }                 // too short to be a real lookup
         if buildCues.contains(where: { t.hasPrefix($0) }) { return false }   // a build task, not a lookup
         let hasLookupCue = lookupCues.contains { t.contains($0) }
-        let hasSelfCue = selfCues.contains { t.contains($0) } && (t.contains("?") || isQuestionOpener(t))
+        // Luke often types quickly ("ksit", "tellme", missing '?'). A self-directed "what's next"
+        // question is still a lookup even with those harmless shapes; missing it sends the model to its
+        // own memory/web and recreates the exact hallucination mode this detector exists to prevent.
+        let hasSelfCue = selfCues.contains { t.contains($0) }
+            && (t.contains("?") || isQuestionOpener(t) || t.contains("what's next")
+                || t.contains("whats next") || t.contains("next natural") || t.hasPrefix("tell me "))
         return hasLookupCue || hasSelfCue
+    }
+
+    private static func normalizedForIntent(_ message: String) -> String {
+        var t = message.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        t = t.replacingOccurrences(of: "ksit", with: "kist")
+        if t.hasPrefix("tellme ") { t = "tell me " + t.dropFirst("tellme ".count) }
+        return t
     }
 
     /// Question-word openers so "how does the router work" counts even without a trailing "?".
@@ -60,7 +72,7 @@ public enum EstateLookupIntent {
     /// "tinkyspeak", "kist", "perslis" survive; filler and question words are dropped. Deduped, order-preserved,
     /// capped so a rambling question can't spawn a huge query. Empty ⇒ caller should skip the search.
     public static func searchTerms(_ message: String, limit: Int = 6) -> [String] {
-        let tokens = message.lowercased()
+        let tokens = normalizedForIntent(message)
             .replacingOccurrences(of: "'s", with: "")
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)

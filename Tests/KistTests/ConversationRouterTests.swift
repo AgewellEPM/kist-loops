@@ -1,4 +1,5 @@
 import XCTest
+import AgentCore
 @testable import Kist
 
 /// The router's deterministic pre-filter (isObviouslyChat) gates whether a classifier call even happens —
@@ -32,7 +33,7 @@ final class ConversationRouterTests: XCTestCase {
         XCTAssertEqual(ConversationRouter.parseRoute("fleet", defaultFleetAgents: 4), .fleet(agents: 4))
         XCTAssertEqual(ConversationRouter.parseRoute("```text\nplan\n```", defaultFleetAgents: 4), .planExecute)
         XCTAssertEqual(ConversationRouter.parseRoute("council", defaultFleetAgents: 4), .council)
-        XCTAssertEqual(ConversationRouter.parseRoute("research", defaultFleetAgents: 4), .council)
+        XCTAssertEqual(ConversationRouter.parseRoute("research", defaultFleetAgents: 4), .research)
         XCTAssertNil(ConversationRouter.parseRoute("not fleet", defaultFleetAgents: 4))
         XCTAssertNil(ConversationRouter.parseRoute("I would choose plan.", defaultFleetAgents: 4))
         XCTAssertNil(ConversationRouter.parseRoute("build", defaultFleetAgents: 4))
@@ -43,5 +44,45 @@ final class ConversationRouterTests: XCTestCase {
             "Research the future of agentic coding systems and make a product roadmap for our system"))
         XCTAssertFalse(ConversationRouter.isObviouslyChat(
             "Do a deep dive landscape analysis and cross compare the competitors"))
+    }
+
+    func testResearchClassifierReplyProposesEvidencePipeline() async throws {
+        let registry = ProviderRegistry(
+            providers: [RouterReplyProvider(reply: "research")],
+            keyStore: RouterNullKeys())
+        let router = ConversationRouter(
+            providers: registry,
+            binding: ProviderBinding(providerId: "router-test"))
+
+        let proposed = await router.propose(
+            "Research the current state of multi-agent consensus using source-backed evidence")
+        let proposal = try XCTUnwrap(proposed)
+
+        XCTAssertEqual(proposal.route, .research)
+        XCTAssertTrue(proposal.prompt.contains("evidence-first research pipeline"))
+        XCTAssertFalse(proposal.prompt.contains("produce a decision and task board"))
+    }
+}
+
+private struct RouterNullKeys: KeyStore {
+    func key(forAccount account: String) -> String? { nil }
+}
+
+private struct RouterReplyProvider: ChatProvider {
+    let reply: String
+    let id = "router-test"
+    let name = "Router Test"
+    let requiresAPIKey = false
+    let keyAccount = "router-test"
+    let defaultModel = "router-test"
+    let availableModels = [AIModel(id: "router-test")]
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.delta(reply))
+            continuation.yield(.finish(reason: "stop"))
+            continuation.finish()
+        }
     }
 }

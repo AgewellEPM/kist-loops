@@ -112,4 +112,11 @@ final class PromptCompilerTests: XCTestCase {
         XCTAssertTrue(brief.successCriteria.contains { $0.contains("Do not stop at directory listing") })
         XCTAssertTrue(brief.reviewGuidance.contains { $0.contains("mark the review incomplete") })
     }
+
+    func testExplicitFixOfARegressionIsABuildNotAReview() {
+        let brief = PromptCompiler.compile("fix this regression")
+
+        XCTAssertEqual(brief.intent, .build)
+        XCTAssertTrue(brief.intent.expectsMutation)
+    }
 }

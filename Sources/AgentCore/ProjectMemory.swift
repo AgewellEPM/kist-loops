@@ -23,6 +23,14 @@ public struct ProjectMemory: Sendable {
     public let root: String
     private let maxFactsBytes: Int
 
+    // Episodic memory is a hint, not a transcript archive. In particular, plan→execute wraps the
+    // current goal with the memory it just loaded. Persisting that wrapper verbatim recursively embeds
+    // every older episode in the next one (a live 15-line file grew to 14 MB / 6.9 MB for one record).
+    // Bound and unwrap at this storage choke point so no caller can recreate that feedback loop.
+    static let maxEpisodeGoalCharacters = 1_000
+    static let maxEpisodeSummaryCharacters = 2_000
+    static let maxPlanningContextCharacters = 16_000
+
     public init(root: String, maxFactsBytes: Int = 8_000) { self.root = root; self.maxFactsBytes = maxFactsBytes }
 
     private var memoryDir: String { root + "/.mythos/memory" }
@@ -57,7 +65,7 @@ public struct ProjectMemory: Sendable {
               let text = String(data: data, encoding: .utf8) else { return [] }
         let episodes = text.split(separator: "\n").compactMap { line -> Episode? in
             guard let d = line.data(using: .utf8) else { return nil }
-            return try? JSONDecoder().decode(Episode.self, from: d)
+            return (try? JSONDecoder().decode(Episode.self, from: d)).map(Self.sanitizedEpisode)
         }
         return Array(episodes.suffix(max(0, limit)))
     }
@@ -65,7 +73,8 @@ public struct ProjectMemory: Sendable {
     /// Append one episode to the run-log (creates the memory dir on first write). Fail-soft: a write
     /// error is swallowed — losing a memory entry must never break a run.
     public func recordEpisode(_ episode: Episode) {
-        guard let line = try? JSONEncoder().encode(episode),
+        let bounded = Self.sanitizedEpisode(episode)
+        guard let line = try? JSONEncoder().encode(bounded),
               let lineStr = String(data: line, encoding: .utf8) else { return }
         try? FileManager.default.createDirectory(atPath: memoryDir, withIntermediateDirectories: true)
         let entry = Data((lineStr + "\n").utf8)
@@ -76,6 +85,23 @@ public struct ProjectMemory: Sendable {
         } else {
             try? entry.write(to: URL(fileURLWithPath: episodesPath))
         }
+    }
+
+    /// Strip Kist's injected TASK BRIEF / MEMORY wrapper back to the operator's actual request, then
+    /// cap both fields. Applied on write AND read so an existing poisoned file becomes safe immediately;
+    /// a separate maintenance pass may compact its bytes on disk without being required for correctness.
+    static func sanitizedEpisode(_ episode: Episode) -> Episode {
+        let source = HeadlessAgentLoop.scopeRequestSource(for: episode.goal)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let goal = bounded(source.isEmpty ? episode.goal : source, max: maxEpisodeGoalCharacters)
+        let summary = bounded(episode.summary.trimmingCharacters(in: .whitespacesAndNewlines),
+                              max: maxEpisodeSummaryCharacters)
+        return Episode(goal: goal, success: episode.success, summary: summary, at: episode.at)
+    }
+
+    private static func bounded(_ text: String, max: Int) -> String {
+        guard text.count > max else { return text }
+        return String(text.prefix(max)) + "… [memory clipped]"
     }
 
     // MARK: - Injectable context
@@ -94,7 +120,7 @@ public struct ProjectMemory: Sendable {
             out += "\n\n## Recent runs\n"
             out += episodes.map { "- [\($0.success ? "ok" : "failed")] \($0.goal): \($0.summary)" }.joined(separator: "\n")
         }
-        return out
+        return String(out.prefix(Self.maxPlanningContextCharacters))
     }
 
     public var hasContent: Bool { !facts().isEmpty || !recentEpisodes(limit: 1).isEmpty }

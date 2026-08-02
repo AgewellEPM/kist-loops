@@ -76,4 +76,40 @@ final class ProjectMemoryTests: XCTestCase {
         try String(repeating: "x", count: 20_000).write(toFile: root + "/AGENTS.md", atomically: true, encoding: .utf8)
         XCTAssertEqual(ProjectMemory(root: root, maxFactsBytes: 5_000).facts().count, 5_000)
     }
+
+    func testEpisodeStorageStripsRecursiveMemoryWrapperAndBoundsFields() throws {
+        let actual = "fix the current whitespace regression"
+        let wrapped = "MEMORY — old context:\n" + String(repeating: "stale roadmap ", count: 2_000)
+            + "\n\n---\nGOAL:\n" + actual
+        let hugeSummary = String(repeating: "result ", count: 2_000)
+
+        let mem = ProjectMemory(root: root)
+        mem.recordEpisode(Episode(goal: wrapped, success: true, summary: hugeSummary,
+                                  at: Date(timeIntervalSince1970: 1)))
+
+        let stored = try XCTUnwrap(mem.recentEpisodes(limit: 1).first)
+        XCTAssertEqual(stored.goal, actual, "episodic memory must store the real request, never its injected memory wrapper")
+        XCTAssertLessThanOrEqual(stored.summary.count,
+                                 ProjectMemory.maxEpisodeSummaryCharacters + "… [memory clipped]".count)
+        let bytes = try Data(contentsOf: URL(fileURLWithPath: root + "/.mythos/memory/episodes.jsonl"))
+        XCTAssertLessThan(bytes.count, 4_000, "one episode must stay bounded instead of recursively growing")
+    }
+
+    func testExistingOversizedEpisodesAreSanitizedOnReadAndContextIsBounded() throws {
+        let dir = root + "/.mythos/memory"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let nested = "MEMORY — prior:\n" + String(repeating: "old topic ", count: 3_000)
+            + "\n\n---\nGOAL:\ncurrent exact task"
+        let raw = Episode(goal: nested, success: false, summary: String(repeating: "s", count: 20_000),
+                          at: Date(timeIntervalSince1970: 2))
+        let data = try JSONEncoder().encode(raw)
+        try (data + Data("\n".utf8)).write(to: URL(fileURLWithPath: dir + "/episodes.jsonl"))
+
+        let mem = ProjectMemory(root: root)
+        XCTAssertEqual(mem.recentEpisodes(limit: 1).first?.goal, "current exact task")
+        let context = try XCTUnwrap(mem.planningContext())
+        XCTAssertLessThanOrEqual(context.count, ProjectMemory.maxPlanningContextCharacters)
+        XCTAssertTrue(context.contains("current exact task"))
+        XCTAssertFalse(context.contains(String(repeating: "old topic ", count: 100)))
+    }
 }

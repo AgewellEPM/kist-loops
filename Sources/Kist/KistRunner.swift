@@ -358,7 +358,8 @@ enum KistRunner {
                 let mem = opts.noMemory ? "" : CortexMemory().context(projectName: (root as NSString).lastPathComponent)
                 let outcome = await loop.resume(from: Self.withMemoryRefresh(cp, memory: mem, enabled: !opts.noMemory))
                 recordRuntimeLessons(goal: cp.title, success: outcome.success, recorder: recorder,
-                                     lessonStore: lessonStore, maxIterations: opts.maxIterations)
+                                     lessonStore: lessonStore, maxIterations: opts.maxIterations,
+                                     mode: .inline)
                 Self.autoJournalRun(goal: cp.title, success: outcome.success, root: root, enabled: !opts.noMemory)
                 printUsageDelta(from: [], to: await traceRecorder.all(), label: "usage", projectRoot: root)
                 if !outcome.success { note("paused — resume with: kist --resume \(outcome.checkpointId)") }
@@ -891,7 +892,8 @@ enum KistRunner {
             if opts.ship { await runShipReview(goal: goal, registry: registry, roles: roles, root: root) }
             // Self-monitor: surface reliability issues and learn obstacles (advisory, retrieval-only).
             recordRuntimeLessons(goal: goal, success: outcome.success, recorder: recorder,
-                                 lessonStore: lessonStore, maxIterations: opts.maxIterations)
+                                 lessonStore: lessonStore, maxIterations: opts.maxIterations,
+                                 mode: opts.planMode ? .plan : .inline)
             Self.autoJournalRun(goal: goal, success: outcome.success, root: root, enabled: !opts.noMemory)
             print(KistREPL.renderSimpleSummary(projectRoot: root, spans: await traceRecorder.all(), trajectory: recorder.snapshot()))
             let grounding = GroundedReviewValidator.audit(outcome.summary, projectRoot: root)
@@ -1350,7 +1352,9 @@ enum KistRunner {
                 note("  ⚠ \(cycleProvider) \(why) — routing around it (cooldown)")
             }
             let trajectory = recorder.snapshot()
-            let report = TrajectoryAnalyzer.analyze(trajectory)
+            let intent = PromptCompiler.compile(baseGoal).intent
+            let report = TrajectoryAnalyzer.analyze(trajectory,
+                                                    taskIntent: intent)
             let failures = trajectory.filter { !$0.success }.count
             let failureRate = trajectory.isEmpty ? 0 : Double(failures) / Double(trajectory.count)
             let after = await traceRecorder.all()
@@ -1862,8 +1866,11 @@ enum KistRunner {
     }
 
     private static func recordRuntimeLessons(goal: String, success: Bool, recorder: TrajectoryRecorder,
-                                             lessonStore: LessonStore?, maxIterations: Int) {
-        let report = TrajectoryAnalyzer.analyze(recorder.snapshot(), maxIterations: maxIterations)
+                                             lessonStore: LessonStore?, maxIterations: Int,
+                                             mode: PromptCompiler.Mode) {
+        let intent = PromptCompiler.compile(goal, mode: mode).intent
+        let report = TrajectoryAnalyzer.analyze(recorder.snapshot(), maxIterations: maxIterations,
+                                                taskIntent: intent)
         if !report.healthy { note("⚙ self-check · " + report.issues.map { $0.kind.rawValue }.joined(separator: ", ")) }
         guard let lessonStore else { return }
         let at = Date().timeIntervalSince1970

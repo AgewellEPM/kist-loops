@@ -45,6 +45,26 @@ final class KistREPLTests: XCTestCase {
         XCTAssertFalse(command.contains("runTurnInterruptible"))
     }
 
+    func testAcceptedNaturalLanguageResearchRouteDispatchesResearchNotCouncil() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
+            encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: "switch proposal.route"))
+        let tail = source[start.lowerBound...]
+        let end = try XCTUnwrap(tail.range(of: "\n                    continue"))
+        let dispatch = String(tail[..<end.lowerBound])
+        let researchStart = try XCTUnwrap(dispatch.range(of: "case .research:"))
+        let researchDispatch = String(dispatch[researchStart.lowerBound...])
+
+        XCTAssertTrue(researchDispatch.contains("await research(messageText, roleSelection.bindings)"))
+        XCTAssertFalse(researchDispatch.contains("await council("),
+                       "natural-language research must not bypass evidence collection through council")
+    }
+
     func testFleetArgsUseDefaultAgents() {
         XCTAssertEqual(KistREPL.parseFleetArgs("build the modules", defaultAgents: 5),
                        KistREPL.FleetInvocation(goal: "build the modules", agents: 5))

@@ -36,6 +36,14 @@ public struct SearchCodeTool: AgentTool {
         let (confined, searchBase) = try context.confinedRootForReading(base)
         let baseComps = try confined.relativeComponents(searchBase)
         let relDir = baseComps.isEmpty ? "." : baseComps.joined(separator: "/")
+        // `.kist/runs` is Kist's own transcript/replay ledger, not project source. Searching a repo root
+        // used to return prior model answers from events.jsonl as if they were code evidence; a live turn
+        // then abandoned the current whitespace task and repeated an old UX roadmap verbatim. Exclude the
+        // ledger from broad searches, while preserving explicit `path=.kist/runs` diagnostics.
+        let runtimeTranscriptPrefix = Self.runtimeTranscriptPrefixRelativeToBase(baseComps)
+        // ripgrep's globs are relative to its cwd (the confined root), not to the search operand.
+        // Keep this separate from the walk-relative prefix used by the Foundation fallback.
+        let runtimeTranscriptGlobPrefix = runtimeTranscriptPrefix == nil ? nil : ".kist/runs"
         // External base → emit ABSOLUTE paths (searchDir) so follow-up read_file calls resolve to
         // the right root — a root-relative path would silently resolve against the PROJECT root
         // (wrong-file on a name collision). Project base keeps the historical relative contract.
@@ -56,7 +64,8 @@ public struct SearchCodeTool: AgentTool {
                                    context: optionalInt("context", from: arguments),
                                    caseInsensitive: optionalBool("case_insensitive", from: arguments),
                                    multiline: optionalBool("multiline", from: arguments),
-                                   type: arguments["type"] as? String, glob: arguments["glob"] as? String, limit: limit)
+                                   type: arguments["type"] as? String, glob: arguments["glob"] as? String,
+                                   runtimeTranscriptPrefix: runtimeTranscriptGlobPrefix, limit: limit)
         }
         // No ripgrep → pure-Foundation fallback (content mode only; modes degrade gracefully).
         return try swiftWalkSearch(pattern: pattern, base: searchBase, glob: arguments["glob"] as? String,
@@ -72,7 +81,7 @@ public struct SearchCodeTool: AgentTool {
 
     static func runRipgrep(rg: String, pattern: String, cwd: String, relDir: String, mode: Mode,
                            context: Int?, caseInsensitive: Bool?, multiline: Bool?, type: String?,
-                           glob: String?, limit: Int) -> ToolResult {
+                           glob: String?, runtimeTranscriptPrefix: String? = nil, limit: Int) -> ToolResult {
         var args = ["--color=never"]
         switch mode {
         case .files: args.append("--files-with-matches")
@@ -84,6 +93,9 @@ public struct SearchCodeTool: AgentTool {
         if let context, mode == .content { args += ["--context", String(min(max(context, 0), 10))] }
         if let type, !type.isEmpty { args += ["--type", type] }
         if let glob, !glob.isEmpty { args += ["--glob", glob] }
+        if let runtimeTranscriptPrefix {
+            args += ["--glob", "!\(runtimeTranscriptPrefix)/**"]
+        }
         args += ["--", pattern, relDir]   // `--` stops flag parsing; pattern/dir are argv, never shell-interpreted
 
         let (out, timedOut) = runProcess(rg, args, cwd: cwd, maxBytes: 200_000, timeout: 20)
@@ -184,6 +196,7 @@ public struct SearchCodeTool: AgentTool {
         catch { return .failure("invalid regex: \(error.localizedDescription)") }
         let nameFilter = try glob.map { try GlobFilesTool.globToRegex($0) }
         let baseComps = try confined.relativeComponents(base)
+        let runtimeTranscriptPrefix = Self.runtimeTranscriptPrefixRelativeToBase(baseComps)
         let relPrefix = baseComps.isEmpty ? "" : baseComps.joined(separator: "/") + "/"
         // External root → absolute output paths (see execute); readString accepts them under its root.
         let basePrefix = confined.readOnly ? confined.rootPath + "/" + relPrefix : relPrefix
@@ -191,7 +204,8 @@ public struct SearchCodeTool: AgentTool {
         var filesScanned = 0
         struct StopSearch: Error {}
         do {
-            try confined.walk(base, skipDirs: [".git", ".build", "node_modules"]) { rel, isDir in
+            try confined.walk(base, skipDirs: [".git", ".build", "node_modules"],
+                               skipRelativePrefixes: Set(runtimeTranscriptPrefix.map { [$0] } ?? [])) { rel, isDir in
                 if isDir { return }
                 if let nameFilter {
                     let leaf = (rel as NSString).lastPathComponent
@@ -212,5 +226,14 @@ public struct SearchCodeTool: AgentTool {
         return ToolResult(success: true, output: hits.isEmpty ? "(no matches)" : hits.joined(separator: "\n"),
                           metadata: ["engine": "foundation", "matches": String(hits.count),
                                      "files_scanned": String(filesScanned), "truncated": String(hits.count >= limit)])
+    }
+
+    /// Path of the generated replay ledger relative to `base`, or nil when the caller explicitly
+    /// targeted that ledger (explicit diagnostics must remain possible).
+    static func runtimeTranscriptPrefixRelativeToBase(_ baseComponents: [String]) -> String? {
+        let target = [".kist", "runs"]
+        guard baseComponents.count < target.count,
+              Array(target.prefix(baseComponents.count)) == baseComponents else { return nil }
+        return target.dropFirst(baseComponents.count).joined(separator: "/")
     }
 }

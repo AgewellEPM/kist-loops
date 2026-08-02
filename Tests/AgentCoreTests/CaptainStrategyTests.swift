@@ -182,6 +182,24 @@ final class CaptainStrategyTests: XCTestCase {
             .briefing.contains("DECISION CARDS"))
     }
 
+    func testRetrievalRejectsHighPriorityRecordsWithZeroObjectiveOverlap() {
+        let stale = CaptainMemoryCandidate(
+            layerID: .organizationalRules,
+            recordID: "OR-stale-ux-roadmap",
+            title: "Old UX overhaul roadmap",
+            excerpt: "Fix the spinner and persistent bar, then build a task board.",
+            sourcePath: ".kist/learning/organizational-rules.jsonl",
+            baseRelevance: 90)
+
+        let retrieved = CaptainRetrievalRanker.retrieve(
+            objective: "remove leading whitespace from the current response",
+            candidates: [stale],
+            limit: 4)
+
+        XCTAssertTrue(retrieved.isEmpty,
+                      "base priority alone must not inject an unrelated old topic into a new turn")
+    }
+
     func testStrategicIntelligenceAndTeachingInferSpecialists() {
         let plan = CaptainStrategist.plan(
             objective: "add Strategic Intelligence and Teach Captain permanent organizational rules")

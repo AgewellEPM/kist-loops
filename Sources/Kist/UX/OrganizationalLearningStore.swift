@@ -184,11 +184,13 @@ struct OrganizationalLearningStore: Sendable {
     @discardableResult
     func recordTurn(plan: Plan, spans: [AgentSpan], trajectory: [ActionRecord],
                     outcomeSummary: String, success: Bool,
-                    insights: DashboardInsightBundle? = nil) -> LearningCapsule {
+                    insights: DashboardInsightBundle? = nil,
+                    objective: String? = nil) -> LearningCapsule {
         let bundle = insights ?? DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
                                                                 trajectory: trajectory)
         let capsule = makeCapsule(plan: plan, spans: spans, trajectory: trajectory,
-                                  outcomeSummary: outcomeSummary, success: success)
+                                  outcomeSummary: outcomeSummary, success: success,
+                                  objective: objective)
         appendJSON(capsule, to: capsulesPath)
         for item in bundle.research {
             upsertKnowledgeDebt(from: item, sourceCapsuleID: capsule.id)
@@ -3897,8 +3899,9 @@ struct OrganizationalLearningStore: Sendable {
     }
 
     private func makeCapsule(plan: Plan, spans: [AgentSpan], trajectory: [ActionRecord],
-                             outcomeSummary: String, success: Bool) -> LearningCapsule {
-        let title = taskTitle(plan: plan, outcomeSummary: outcomeSummary)
+                             outcomeSummary: String, success: Bool,
+                             objective: String? = nil) -> LearningCapsule {
+        let title = taskTitle(plan: plan, outcomeSummary: outcomeSummary, objective: objective)
         let summary = Self.safe(outcomeSummary)
         let tools = Set(trajectory.map(\.tool))
         let mutating = trajectory.filter { ["edit_file", "write_file", "apply_patch", "run_command", "move_file"].contains($0.tool) }
@@ -3949,7 +3952,12 @@ struct OrganizationalLearningStore: Sendable {
         )
     }
 
-    private func taskTitle(plan: Plan, outcomeSummary: String) -> String {
+    private func taskTitle(plan: Plan, outcomeSummary: String, objective: String?) -> String {
+        if let objective {
+            let clean = HeadlessAgentLoop.scopeRequestSource(for: objective)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty { return String(clean.prefix(90)) }
+        }
         if let done = plan.tasks.filter({ $0.status == .done }).max(by: { $0.id < $1.id }) {
             return done.boardTitle
         }

@@ -15,6 +15,11 @@ public struct TaskBrief: Sendable, Equatable {
         case research
         case review
         case desktop
+
+        /// Only build turns promise a state change. Chat, research, review, and plan turns can
+        /// legitimately finish after read-only evidence gathering, so their trajectories must not
+        /// be diagnosed as "no progress" merely because they did not edit the workspace.
+        public var expectsMutation: Bool { self == .build }
     }
 
     public enum Risk: String, Sendable, Equatable, Codable {
@@ -208,6 +213,9 @@ public enum PromptCompiler {
                                "play me", "clean desktop", "clean my desktop", "desktop", "computer"]) {
             return .desktop
         }
+        // A defect noun does not turn an explicit repair command into a read-only review. This check must
+        // precede the broad "bug"/"regression" review cues so "fix this regression" remains a build.
+        if isBuildDirective(lower) { return .build }
         if containsAny(lower, ["review", "audit", "assess", "failure point", "risk", "bug", "regression"]) {
             return .review
         }
@@ -414,6 +422,18 @@ public enum PromptCompiler {
 
     private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
         needles.contains { text.contains($0) }
+    }
+
+    private static func isBuildDirective(_ text: String) -> Bool {
+        var directive = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for politePrefix in ["please ", "can you ", "could you ", "would you "] where directive.hasPrefix(politePrefix) {
+            directive.removeFirst(politePrefix.count)
+            break
+        }
+        return ["build", "fix", "implement", "wire", "add", "create", "make", "change",
+                "refactor", "patch", "update", "commit"].contains {
+            directive == $0 || directive.hasPrefix($0 + " ")
+        }
     }
 
     private static func normalized(_ text: String) -> String {

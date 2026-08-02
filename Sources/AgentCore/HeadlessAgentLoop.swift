@@ -83,6 +83,12 @@ public struct HeadlessAgentLoop: Sendable {
     private let replanThreshold = 2      // consecutive tool failures before steering a re-plan
     private let maxReplans = 2           // budget so a doomed run can't loop on re-plans forever
 
+    /// A compactor may preserve the first messages of a multi-turn REPL transcript even though they
+    /// belong to an OLD turn. Keep the current turn's raw user request as the final controlling message
+    /// after every compaction, so a weak model cannot snap back to the first-ever topic. The stable marker
+    /// lets repeated compactions replace (rather than accumulate) the reminder.
+    static let currentTurnObjectiveMarker = "[CURRENT TURN OBJECTIVE — controlling user request after compaction]"
+
     public init(providers: ProviderRegistry,
                 providerId: String,
                 model: String?,
@@ -154,7 +160,25 @@ public struct HeadlessAgentLoop: Sendable {
         }
         guard omitted > 0 else { return }
         cp.messages = compacted
+        reassertCurrentTurnObjective(&cp)
         sink.emit(.contextCompacted(omitted: omitted))
+    }
+
+    /// Re-anchor a compacted transcript to THIS run/turn. `cp.goal` may be a large compiled Captain
+    /// brief, so project it back to the fenced original request instead of defeating compaction by
+    /// appending the whole wrapper. This is deliberately a final `.user` message: both the text and
+    /// native provider encoders preserve it, and the next model call sees the current objective last.
+    private func reassertCurrentTurnObjective(_ cp: inout LoopCheckpoint) {
+        let objective = Self.scopeRequestSource(for: cp.goal)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !objective.isEmpty else { return }
+        cp.messages.removeAll {
+            $0.role == .user && $0.content.hasPrefix(Self.currentTurnObjectiveMarker)
+        }
+        cp.messages.append(ChatMessage(
+            role: .user,
+            content: Self.currentTurnObjectiveMarker + "\n" + objective
+        ))
     }
 
     /// Produce the compaction summary with a cheap, non-streaming same-model call. Returns nil on any
@@ -231,7 +255,9 @@ public struct HeadlessAgentLoop: Sendable {
         await skillTracker?.loadedNames() ?? []
     }
 
-    static func scopeRequestSource(for goal: String) -> String {
+    /// Return the operator's actual request from a compiled/scoped/memory-wrapped goal.
+    /// Public so Kist's learning layer can label a turn without persisting injected context.
+    public static func scopeRequestSource(for goal: String) -> String {
         let source = extractBetween(goal, start: PromptCompiler.scopeSourceStart, end: PromptCompiler.scopeSourceEnd)
             ?? extractAfterMemoryGoalMarker(goal)
             ?? strippingAppendedMemory(goal)
@@ -362,6 +388,7 @@ public struct HeadlessAgentLoop: Sendable {
         guard let summary = try? await streamCompletion(messages: [prompt], settings: settings),
               !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         cp.messages = contextWindow.compacted(prefix: split.prefix, summary: summary, suffix: split.suffix)
+        reassertCurrentTurnObjective(&cp)
         persist(&cp)
     }
 
@@ -1765,4 +1792,3 @@ public struct HeadlessAgentLoop: Sendable {
         """
     }
 }
-

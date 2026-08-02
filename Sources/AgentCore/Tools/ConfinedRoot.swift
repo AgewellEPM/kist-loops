@@ -253,7 +253,9 @@ public final class ConfinedRoot: Sendable {
     /// Recursively visit entries under `base`, confined by O_NOFOLLOW directory opens —
     /// a symlinked directory is never descended, so the walk cannot escape the root.
     /// `visit` receives the path RELATIVE TO `base`.
-    public func walk(_ base: String, skipDirs: Set<String> = [], visit: (_ relPath: String, _ isDir: Bool) throws -> Void) throws {
+    public func walk(_ base: String, skipDirs: Set<String> = [],
+                     skipRelativePrefixes: Set<String> = [],
+                     visit: (_ relPath: String, _ isDir: Bool) throws -> Void) throws {
         let comps = try relativeComponents(base)
         let (parent, leafOpt) = try openParentDir(comps, createIntermediates: false)
         let baseFD: Int32
@@ -264,7 +266,8 @@ public final class ConfinedRoot: Sendable {
         } else {
             baseFD = parent
         }
-        try walkFD(baseFD, prefix: "", skipDirs: skipDirs, visit: visit)   // takes ownership of baseFD
+        try walkFD(baseFD, prefix: "", skipDirs: skipDirs,
+                   skipRelativePrefixes: skipRelativePrefixes, visit: visit)   // takes ownership of baseFD
     }
 
     // MARK: - Internals
@@ -325,7 +328,9 @@ public final class ConfinedRoot: Sendable {
         return (dirfd, comps.last)
     }
 
-    private func walkFD(_ dirfd: Int32, prefix: String, skipDirs: Set<String>, visit: (_ relPath: String, _ isDir: Bool) throws -> Void) throws {
+    private func walkFD(_ dirfd: Int32, prefix: String, skipDirs: Set<String>,
+                        skipRelativePrefixes: Set<String>,
+                        visit: (_ relPath: String, _ isDir: Bool) throws -> Void) throws {
         guard let dirp = fdopendir(dirfd) else { close(dirfd); return }
         defer { closedir(dirp) }
         var subdirs: [String] = []
@@ -336,6 +341,9 @@ public final class ConfinedRoot: Sendable {
             guard fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
             let kind = st.st_mode & mode_t(S_IFMT)
             let rel = prefix.isEmpty ? name : prefix + "/" + name
+            if skipRelativePrefixes.contains(where: { rel == $0 || rel.hasPrefix($0 + "/") }) {
+                continue
+            }
             if kind == mode_t(S_IFDIR) {
                 if skipDirs.contains(name) { continue }
                 try visit(rel, true)
@@ -349,7 +357,8 @@ public final class ConfinedRoot: Sendable {
             let sub = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
             guard sub >= 0 else { continue }
             let rel = prefix.isEmpty ? name : prefix + "/" + name
-            try walkFD(sub, prefix: rel, skipDirs: skipDirs, visit: visit)
+            try walkFD(sub, prefix: rel, skipDirs: skipDirs,
+                       skipRelativePrefixes: skipRelativePrefixes, visit: visit)
         }
     }
 

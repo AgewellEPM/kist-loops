@@ -100,15 +100,18 @@ struct TUIConversation {
                 ui.endTranscriptBlock()
                 // An ESC'd turn is a user decision, not a reliability failure — don't learn from it.
                 if reasonBox.value == nil {
-                    selfMonitor(goal: input, success: outcome.success)
+                    selfMonitor(goal: input, success: outcome.success,
+                                mode: perm.mode.isPlan ? .plan : .inline)
                 }
             }
         }
     }
 
-    private func selfMonitor(goal: String, success: Bool) {
+    private func selfMonitor(goal: String, success: Bool, mode: PromptCompiler.Mode) {
         guard let recorder else { return }
-        let report = TrajectoryAnalyzer.analyze(recorder.snapshot())
+        let intent = PromptCompiler.compile(goal, mode: mode).intent
+        let report = TrajectoryAnalyzer.analyze(recorder.snapshot(),
+                                                taskIntent: intent)
         if !report.healthy {
             let labels = report.issues.map { $0.kind.rawValue }.joined(separator: ", ")
             ui.appendTranscript(c("2", "self-check · \(labels)") + "\r\n")

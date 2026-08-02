@@ -666,6 +666,24 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertFalse(store.renderKnowledgeDebt().contains(record.id))
     }
 
+    func testCurrentObjectiveWinsOverStaleCompletedBoardTaskForCapsuleTitle() {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let store = OrganizationalLearningStore(projectRoot: root,
+                                                now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let stale = Plan(tasks: [PlanTask(id: 1,
+                                          title: "RESEARCH: Verify current Kist agent/orchestration capabilities",
+                                          status: .done,
+                                          kind: .research)])
+
+        let capsule = store.recordTurn(plan: stale, spans: [], trajectory: [],
+                                       outcomeSummary: "Fixed the leading whitespace.", success: true,
+                                       objective: "fix the amount of empty space at the start")
+
+        XCTAssertEqual(capsule.taskTitle, "fix the amount of empty space at the start")
+        XCTAssertFalse(capsule.taskTitle.contains("agent/orchestration"))
+    }
+
     func testBoardMeetingWritesReportAndSeedsResearchTasks() {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
