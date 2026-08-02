@@ -21,11 +21,17 @@ enum TerminalCard {
 
         func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
 
-        /// One content row, padded (or clipped-safe) to the inner width.
+        /// One content row, padded — or CLIPPED — to exactly the inner width so the border never
+        /// breaks. Overflowing content is clipped to cells (clip strips ANSI, so an over-long colored
+        /// row loses its color but stays square — alignment wins over color in that rare case).
         func row(_ content: String) {
-            let w = TerminalCellText.width(content)
-            let padded = w >= inner ? content : content + String(repeating: " ", count: inner - w)
-            rows.append(c("2", "│ ") + padded + c("2", " │"))
+            var fitted = content
+            if TerminalCellText.width(fitted) > inner {
+                fitted = TerminalCellText.clipHead(fitted, maxCells: inner)
+            }
+            let w = TerminalCellText.width(fitted)
+            if w < inner { fitted += String(repeating: " ", count: inner - w) }
+            rows.append(c("2", "│ ") + fitted + c("2", " │"))
         }
         func blank() { row("") }
         func heading(_ text: String, _ code: String = "95;1") { row(c(code, text)) }
@@ -70,6 +76,8 @@ enum TerminalCard {
         let builder = Builder(width: W, color: color)
         body(builder)
         func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
+        // Clip an over-long title so the top border stays exactly W cells (leaves room for ╭─ · · ╮).
+        let title = TerminalCellText.width(title) > W - 6 ? TerminalCellText.clipHead(title, maxCells: W - 6) : title
         let titleCells = TerminalCellText.width(title)
         let dashes = max(0, W - 5 - titleCells)   // ╭ + "─ " + title + " " + dashes + ╮
         var out = "\n" + c("2", "╭─ ") + c(titleCode, title) + c("2", " " + String(repeating: "─", count: dashes) + "╮") + "\n"

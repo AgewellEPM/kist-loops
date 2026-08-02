@@ -55,6 +55,25 @@ final class UsagePanelTests: XCTestCase {
         }
     }
 
+    func testCostByActivityAttributesRolesToEngineeringWork() {
+        XCTAssertEqual(UsagePanel.activity(for: "architect"), "Architecture")
+        XCTAssertEqual(UsagePanel.activity(for: "coder"), "Code generation")
+        XCTAssertEqual(UsagePanel.activity(for: "critic"), "Review & tests")
+        XCTAssertEqual(UsagePanel.activity(for: "deep-research-worker"), "Deep research")
+        XCTAssertEqual(UsagePanel.activity(for: "captain"), "Orchestration")
+        XCTAssertEqual(UsagePanel.activity(for: nil), "Orchestration")
+
+        let now = Date(timeIntervalSince1970: 1_782_700_000)
+        let spans = [
+            llm(id: "a", now: now, role: "architect", vendor: "gemini", model: "g", input: 80_000, output: 4_000),
+            llm(id: "c", now: now, role: "coder", vendor: "gemini", model: "g", input: 20_000, output: 2_000),
+        ]
+        let out = UsagePanel.render(sessionSpans: spans, ledgerSpans: spans, now: now.addingTimeInterval(5), color: false)
+        XCTAssertTrue(out.contains("Cost by activity"))
+        XCTAssertTrue(out.contains("Architecture"))
+        XCTAssertTrue(out.contains("Code generation"))
+    }
+
     func testUsagePanelHandlesEmptyTraceHonestly() {
         let out = UsagePanel.render(sessionSpans: [], ledgerSpans: [], color: false)
 

@@ -151,18 +151,32 @@ struct UsagePanel {
                 let outTok = llm.reduce(0) { $0 + $1.completionTokens }
                 let apiSec = Int((llm.reduce(0.0) { $0 + $1.durationMs } / 1000).rounded())
                 let edits = tools.filter { mutating.contains($0.toolName ?? "") && $0.status == .ok }.count
-                b.kv("Cost", formatCost(sessionSummary))
+                b.kv("Cost", priceLabel(llm.compactMap { $0.vendor }, sessionSummary))
                 b.kv("Duration", "\(formatDuration(session)) wall · \(formatSeconds(apiSec)) in model")
                 b.kv("Tokens", "\(formatTokens(sessionSummary.tokens)) · \(formatTokens(inTok)) in · \(formatTokens(outTok)) out")
                 b.kv("Calls", "\(llm.count) model · \(tools.count) tool" + (errors > 0 ? " · \(errors) error" : ""))
                 if edits > 0 { b.kv("Edits", "\(edits) file write/edit call(s)") }
+
+                // Cost by activity — the headline: WHERE the reasoning/budget actually went, by the
+                // engineering task each model call served. Lets you see "monitoring burned 17%" and
+                // decide to switch a cheaper model for it. Share is by tokens (a reasoning-time proxy).
+                let acts = activityBuckets(llm)
+                if !acts.isEmpty {
+                    b.blank(); b.heading("Cost by activity — where the reasoning went", "93;1")
+                    let totalTok = max(1, acts.reduce(0) { $0 + $1.tokens })
+                    for a in acts.prefix(8) {
+                        b.kv("  " + a.name,
+                             "\(share(a.tokens, of: totalTok)) · \(formatTokens(a.tokens)) · \(priceLabel(a.vendors, a.cost))",
+                             keyWidth: 20)
+                    }
+                }
 
                 b.blank(); b.heading("By model — who did the work")
                 let models = modelBuckets(llm)
                 if models.isEmpty { b.row(b.c("2", "(no model token spans)")) }
                 for m in models.prefix(8) {
                     b.bullet("•", glyphCode: "92;1",
-                             "\(m.name) — \(formatTokens(m.input)) in · \(formatTokens(m.output)) out · \(costLabel(m.name, m.cost))")
+                             "\(m.name) — \(formatTokens(m.input)) in · \(formatTokens(m.output)) out · \(priceLabel([m.name], m.cost))")
                 }
 
                 let toolCounts = countBuckets(tools.compactMap { $0.toolName }.filter { !$0.hasPrefix("mcp__") })
@@ -190,13 +204,17 @@ struct UsagePanel {
             if week.isEmpty || weekSummary.tokens == 0 {
                 b.row(b.c("2", "No local traced token usage this week."))
             } else {
-                let weekTokens = max(weekSummary.tokens, sessionSummary.tokens)
-                b.row(b.c("2", "session ") + bar(value: sessionSummary.tokens, total: weekTokens) + " " + share(sessionSummary.tokens, of: weekTokens))
-                b.row(b.c("2", "week    ") + bar(value: weekSummary.tokens, total: weekTokens) + " " + formatTokens(weekSummary.tokens))
-                b.kv("  week cost", formatCost(weekSummary))
+                // Bar = THIS session's share of the week (session-in-week tokens ÷ week tokens), so a
+                // session that began before the week can't read a misleading 100% (Codex catch).
+                let sessionInWeek = session.filter { $0.startedAt >= weekStart && $0.startedAt <= now }
+                    .reduce(0) { $0 + $1.totalTokens }
+                b.row(b.c("2", "this session ") + bar(value: sessionInWeek, total: weekSummary.tokens)
+                      + " " + share(sessionInWeek, of: weekSummary.tokens) + b.c("2", " of the week"))
+                b.kv("  week total", formatTokens(weekSummary.tokens))
+                b.kv("  week cost", priceLabel(week.compactMap { $0.vendor }, weekSummary))
                 // Per-provider week split — how hard each subscription / key was leaned on.
                 for m in modelBuckets(week.filter { $0.kind == .llmCall }, byVendor: true).prefix(6) {
-                    b.kv("  " + m.name, "\(formatTokens(m.input + m.output)) · \(costLabel(m.name, m.cost))")
+                    b.kv("  " + m.name, "\(formatTokens(m.input + m.output)) · \(priceLabel([m.name], m.cost))")
                 }
             }
 
@@ -219,6 +237,36 @@ struct UsagePanel {
     }
 
     // MARK: - Rich breakdown helpers
+
+    /// Map an agent role to a human ENGINEERING ACTIVITY, so cost/reasoning can be attributed to what
+    /// the work actually was — the thing token counts alone never tell you. (Background-watch / idle-poll
+    /// are session MODES, not roles; attributing those needs session-mode tagging on spans — a follow-up.)
+    static func activity(for role: String?) -> String {
+        let r = (role ?? "").lowercased()
+        if r.contains("architect") || r.contains("planner") || r.contains("design") { return "Architecture" }
+        if r.contains("coder") || r.contains("builder") || r.contains("developer") || r.contains("implement") { return "Code generation" }
+        if r.contains("critic") || r.contains("review") || r.contains("verif") || r.contains("test") || r.contains("audit") { return "Review & tests" }
+        if r.contains("research") { return "Deep research" }
+        if r.contains("council") || r.contains("fleet") || r.contains("consensus") { return "Council" }
+        if r.contains("analyst") || r.contains("worker") { return "Analysis" }
+        if r.isEmpty || r.contains("captain") || r.contains("default") || r.contains("orchestr") { return "Orchestration" }
+        return "Other"
+    }
+
+    struct ActivityBucket { let name: String; let tokens: Int; let cost: UsageCostSummary; let vendors: [String] }
+
+    private static func activityBuckets(_ llm: [AgentSpan]) -> [ActivityBucket] {
+        let priced = llm.filter { $0.totalTokens > 0 }
+        let groups = Dictionary(grouping: priced, by: { activity(for: $0.role) })
+        var out = groups.map { name, spans in
+            ActivityBucket(name: name,
+                           tokens: spans.reduce(0) { $0 + $1.totalTokens },
+                           cost: UsageCost.summarize(spans: spans),
+                           vendors: spans.compactMap { $0.vendor })
+        }
+        out.sort { $0.tokens != $1.tokens ? $0.tokens > $1.tokens : $0.name < $1.name }
+        return out
+    }
 
     struct ModelBucket { let name: String; let input: Int; let output: Int; let cost: UsageCostSummary }
 
@@ -259,7 +307,8 @@ struct UsagePanel {
     /// `mcp__<server>__<tool>` → `<server>`.
     private static func mcpServer(_ tool: String) -> String {
         let parts = String(tool.dropFirst("mcp__".count)).components(separatedBy: "__")
-        return parts.first ?? tool
+        let server = parts.first ?? ""
+        return server.isEmpty ? "(mcp)" : server
     }
 
     private static func formatSeconds(_ seconds: Int) -> String {
@@ -328,15 +377,21 @@ struct UsagePanel {
     }
 
     /// Keyless subscription providers (Claude Max / ChatGPT plan) — no per-token charge, so their
-    /// cost reads "subscription", not "unpriced".
+    /// cost reads "subscription", not "unpriced". Local runtimes are free.
     private static let subscriptionVendors = ["claude-cli", "codex-cli"]
+    private static let localVendors = ["mlx", "ollama"]
 
-    private static func costLabel(_ name: String, _ cost: UsageCostSummary) -> String {
-        let lower = name.lowercased()
-        if cost.knownUSD == 0, subscriptionVendors.contains(where: { lower.hasPrefix($0) }) {
-            return "subscription"
-        }
-        return formatCost(cost)
+    /// An honest cost label for a set of vendor names + a cost summary. Metered $ wins; a zero-$ bucket
+    /// reads "subscription" (Claude/Codex plan), "free (local)" (mlx/ollama), else "unpriced". Mixed
+    /// metered+subscription is annotated so a real $ figure never hides subscription burn.
+    private static func priceLabel(_ vendorNames: [String], _ cost: UsageCostSummary) -> String {
+        let v = vendorNames.map { $0.lowercased() }
+        let hasSub = v.contains { name in subscriptionVendors.contains { name.hasPrefix($0) } }
+        let hasLocal = v.contains { name in localVendors.contains { name.hasPrefix($0) } }
+        if cost.knownUSD > 0 { return formatCost(cost) + (hasSub ? " + subscription" : "") }
+        if hasSub { return "subscription" }
+        if hasLocal { return "free (local)" }
+        return "unpriced"
     }
 
     private static func formatCost(_ summary: UsageCostSummary) -> String {

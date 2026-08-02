@@ -1015,7 +1015,8 @@ struct KistREPL {
             if !UsageLedger.append(projectRoot: projectRoot, spans: spans) {
                 print("\u{001B}[37musage ledger warning · could not persist local usage accounting\u{001B}[0m")
             }
-            print(UsagePanel.render(sessionSpans: spans, projectRoot: projectRoot))
+            print(UsagePanel.render(sessionSpans: spans, projectRoot: projectRoot,
+                                    color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
         }
 
         func dispatchSelfHealAgents(report: SelfHealMissionReport,
