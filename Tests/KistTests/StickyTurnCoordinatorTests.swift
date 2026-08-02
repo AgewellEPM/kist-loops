@@ -446,11 +446,9 @@ final class StickyTurnCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(screen.row, 1)
     }
 
-    func testStickyDefaultsOnAndSelfTestDispatchesBeforeRegistry() throws {
-        // Sticky is now default-ON (2026-08-01) — the always-there bar — after the self-test passed.
-        // `--no-sticky-turns` opts out; the coordinator's serialized ownership is the safe default.
-        XCTAssertTrue(KistOptions.parse(["hello"]).stickyTurns)
-        XCTAssertFalse(KistOptions.parse(["--no-sticky-turns", "hello"]).stickyTurns)
+    func testStickyRemainsOptInAndSelfTestDispatchesBeforeRegistry() throws {
+        XCTAssertFalse(KistOptions.parse(["hello"]).stickyTurns)
+        XCTAssertTrue(KistOptions.parse(["--sticky-turns", "hello"]).stickyTurns)
         XCTAssertFalse(KistOptions.parse(["--sticky-turns", "--no-sticky-turns", "hello"]).stickyTurns)
         XCTAssertTrue(KistOptions.parse(["--sticky-bar-self-test"]).stickyBarSelfTest)
 
