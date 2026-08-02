@@ -279,9 +279,11 @@ final class DeploymentProvenanceTests: XCTestCase {
             wrapper,
             environment: ["HOME": home.path, "KIST_CAPTURE": capture.path])
         XCTAssertEqual(result.status, 0, result.stderr)
+        // The wrapper also forces --sticky-turns (pinned chat box) unless the caller opted out; it is
+        // prepended last, so it leads the injected-authority list.
         XCTAssertEqual(
             try sourceFile(capture.appendingPathExtension("args")),
-            "--allow-read\n/Volumes\n--allow-shell\n--enable-computer-use\n")
+            "--sticky-turns\n--allow-read\n/Volumes\n--allow-shell\n--enable-computer-use\n")
         XCTAssertEqual(
             try sourceFile(capture.appendingPathExtension("secret")),
             "loaded\n")
@@ -296,8 +298,8 @@ final class DeploymentProvenanceTests: XCTestCase {
         XCTAssertEqual(result.status, 0, result.stderr)
         XCTAssertEqual(
             try sourceFile(capture.appendingPathExtension("args")),
-            explicit.map { "\($0)\n" }.joined(),
-            "explicit caller authority must be forwarded exactly once and in caller order")
+            "--sticky-turns\n" + explicit.map { "\($0)\n" }.joined(),
+            "explicit caller authority forwarded exactly once in order; --sticky-turns added (no opt-out)")
 
         let attackerHome = root.appendingPathComponent("attacker-home", isDirectory: true)
         let startupMarker = root.appendingPathComponent("hostile-startup-ran")
