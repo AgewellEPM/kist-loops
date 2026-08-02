@@ -1621,6 +1621,12 @@ struct KistREPL {
                         print("No confidence to explain yet — that turn used no tools (a plain answer). Run a turn that reads/edits/searches first.")
                     }
                     continue
+                case "version", "ver", "changelog", "whatsnew", "whats-new":
+                    // What shipped in this version + when it was built (real commit/branch/date from
+                    // the deployment manifest) + the changelog — so `/version` reads like a release note.
+                    print(KistChangelog.render(provenance: KistBuildInfo.provenance(),
+                                               color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
+                    continue
                 case "failures", "failure", "failure-analysis":
                     print(CaptainFailureAnalysis.handleCommand(args, projectRoot: projectRoot))
                     continue
