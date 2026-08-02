@@ -106,9 +106,10 @@ final class KistOptionsTests: XCTestCase {
     }
 
     func testStickyTurnsFlag() {
-        XCTAssertFalse(KistOptions.parse(["hi"]).stickyTurns)                    // default OFF (safe)
-        XCTAssertTrue(KistOptions.parse(["--sticky-turns", "hi"]).stickyTurns)    // explicit opt-in
-        XCTAssertFalse(KistOptions.parse(["--sticky-turns", "--no-sticky-turns", "hi"]).stickyTurns)
+        XCTAssertTrue(KistOptions.parse(["hi"]).stickyTurns)                     // default ON (2026-08-02, validated)
+        XCTAssertTrue(KistOptions.parse(["--sticky-turns", "hi"]).stickyTurns)    // explicit on
+        XCTAssertFalse(KistOptions.parse(["--no-sticky-turns", "hi"]).stickyTurns)         // opt-out disables it
+        XCTAssertFalse(KistOptions.parse(["--sticky-turns", "--no-sticky-turns", "hi"]).stickyTurns)  // last-flag opt-out wins
         XCTAssertTrue(KistOptions.parse(["--pinned-bar", "x"]).pinnedBar)        // unrelated bar flag intact
     }
 
