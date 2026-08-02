@@ -173,4 +173,37 @@ final class StatusDashboardTests: XCTestCase {
         XCTAssertTrue(s.contains("⊘ /Users/lukekist/Down"))
         XCTAssertTrue(s.contains("aaaaaaaaaaaaaaaaaaaaaa"))
     }
+
+    func testCompactResearchAndConfidenceStayWithinWidthWithColor() {
+        let confidence = ConfidenceReport(
+            score: 0.45,
+            base: 0.95,
+            factors: [
+                .init(label: "Reliability", penalty: 0.5,
+                      detail: "several tool calls failed",
+                      raise: "re-run or drop every failing step so the trajectory comes back clean")
+            ])
+        let dashboard = StatusDashboard(
+            research: [
+                .init(title: "Fourteen chars!",
+                      priority: .high,
+                      reason: "test",
+                      visit: "test",
+                      impact: 5,
+                      estimatedLearning: "test",
+                      expectedBenefit: ["test"])
+            ],
+            confidenceReport: confidence,
+            width: 16)
+        XCTAssertEqual(dashboard.width, 24, "dashboard minimum must fit its fixed operator labels")
+
+        for rendered in [dashboard.render(color: true), dashboard.renderCompact(color: true)] {
+            for line in TerminalCellText.stripANSI(rendered)
+                .split(separator: "\n", omittingEmptySubsequences: false) {
+                XCTAssertLessThanOrEqual(
+                    line.count, dashboard.width,
+                    "colored dashboard line exceeded configured width: \(line)")
+            }
+        }
+    }
 }

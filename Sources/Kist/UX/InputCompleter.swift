@@ -15,7 +15,7 @@ enum InputCompleter {
         "/tasks", "/todo", "/action", "/test", "/plan-execute", "/pe", "/research", "/council", "/consult",
         "/fleet-status", "/cockpit", "/fleet", "/team", "/roles", "/agent", "/agents",
         "/persona", "/personality", "/specialist", "/specialists", "/providers", "/health",
-        "/probe", "/usage", "/summary", "/failures", "/failure", "/logs", "/details", "/proof", "/bench", "/eval",
+        "/probe", "/usage", "/summary", "/confidence", "/why", "/failures", "/failure", "/logs", "/details", "/proof", "/bench", "/eval",
         "/replay", "/protocols", "/commands", "/save-chat", "/clear", "/exit", "/quit", "/q",
         "/chain", "/pipeline", "/copilot", "/cp", "/reflect", "/reflection", "/learn",
         "/knowledge", "/knowledge-debt", "/debt", "/teach", "/rules", "/organizational-rules",

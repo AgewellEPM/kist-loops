@@ -231,7 +231,16 @@ extension KistREPL {
     }
 
 
-    static func renderSimpleSummary(projectRoot: String, spans: [AgentSpan], trajectory: [ActionRecord]) -> String {
+    /// Whether stdout should carry ANSI color: a real terminal AND `NO_COLOR` unset. The single
+    /// decision so every REPL surface (summary, /confidence, the end-of-turn panel) honors the
+    /// NO_COLOR convention identically instead of each re-deriving it from a bare `isatty`.
+    static var stdoutColorEnabled: Bool {
+        isatty(fileno(stdout)) != 0 && ProcessInfo.processInfo.environment["NO_COLOR"] == nil
+    }
+
+    static func renderSimpleSummary(projectRoot: String, spans: [AgentSpan], trajectory: [ActionRecord],
+                                    color: Bool = KistREPL.stdoutColorEnabled) -> String {
+        func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
         let plan = PlanStore(projectRoot: projectRoot).load()
         let toolCalls = trajectory.count
         let modelCalls = spans.filter { $0.kind == .llmCall }.count
@@ -254,13 +263,17 @@ extension KistREPL {
             nextLine = "set a goal with /goals add <step> or ask the agent for the next action"
         }
 
-        return """
-        Summary
-        What happened: \(modelCalls) model call(s), \(toolCalls) tool call(s), \(usage).
-        What changed: check the task board and `git diff`; Kist does not infer correctness from edits.
-        Tool errors: \(toolErrorSummary(trajectory)).
-        What to do next: \(nextLine)
-        """
+        let errText = toolErrorSummary(trajectory)
+        let hadErrors = trajectory.contains { !$0.success }
+        // Each label gets a dim tint so the eye separates label from value; the header is neon cyan so
+        // the block reads as its own section, and the error line goes red only when something failed.
+        return [
+            c("96;1", "◈ Summary"),
+            c("2", "What happened: ") + "\(modelCalls) model call(s), \(toolCalls) tool call(s), \(usage).",
+            c("2", "What changed: ") + "check the task board and `git diff`; Kist does not infer correctness from edits.",
+            c("2", "Tool errors: ") + (hadErrors ? c("31", errText) : errText) + ".",
+            c("2", "What to do next: ") + c("36", nextLine),
+        ].joined(separator: "\n")
     }
 
     /// Summarize tool-call errors WITHOUT implying the run failed. A single tool error

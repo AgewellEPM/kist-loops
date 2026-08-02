@@ -211,6 +211,10 @@ struct KistREPL {
         // it so a user interrupt never books a false "task failed" obstacle lesson.
         var lastTurnInterrupted = false
 
+        // Preserve the exact report shown by the last completed turn. The recorder is reset before
+        // slash-command dispatch, so rebuilding `/confidence` from it would always explain an empty turn.
+        var lastConfidenceReport: ConfidenceReport?
+
         // The SINGLE safe path for every conversational turn: run it under the esc-interrupt watcher,
         // shuttling the inout transcript through a box (it can't cross the escaping work closure). The
         // caller MUST arm the loop first (armTurnLoop / perm.arm) — this is why direct `loop.turn(...)`
@@ -754,9 +758,12 @@ struct KistREPL {
             }
             let dashboard = Self.buildDashboard(roles: roleSelection, projectRoot: projectRoot,
                                                 trajectory: trajectory, grounded: grounded)
+            lastConfidenceReport = dashboard.confidenceReport
             let compact = !success || !Self.turnHasMutatingWork(trajectory)
-            print(compact ? dashboard.renderCompact() : dashboard.render())
-            print("\u{001B}[2mproof: /logs · cost: /usage · board: /tasks · /summary for detail\u{001B}[0m")
+            let panelColor = Self.stdoutColorEnabled
+            print(compact ? dashboard.renderCompact(color: panelColor) : dashboard.render(color: panelColor))
+            let hint = "proof: /logs · cost: /usage · board: /tasks · /summary for detail"
+            print(panelColor ? "\u{001B}[2m\(hint)\u{001B}[0m" : hint)
         }
 
         func runSelfHealCommand(_ rawArgs: String) async {
@@ -1133,7 +1140,12 @@ struct KistREPL {
                     // verified-only, human-on-submit wizard. Never auto-submits.
                     print(await BountyConsole.handle(args, projectRoot: projectRoot, complete: bountyComplete))
                     continue
-                case "clear": transcript = []; humanTranscript = []; print("\u{001B}[37m(context cleared)\u{001B}[0m"); continue
+                case "clear":
+                    transcript = []
+                    humanTranscript = []
+                    lastConfidenceReport = nil
+                    print("\u{001B}[37m(context cleared)\u{001B}[0m")
+                    continue
                 case "plan":
                     let want: Bool
                     switch args.lowercased() {
@@ -1198,6 +1210,15 @@ struct KistREPL {
                     let spans = await traceRecorder?.all() ?? []
                     let trajectory = recorder?.snapshot() ?? []
                     print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans, trajectory: trajectory))
+                    continue
+                case "confidence", "why":
+                    // Explain the exact report the panel showed for the last completed turn. Do not
+                    // consult the recorder here: it was intentionally reset before slash dispatch.
+                    if let report = lastConfidenceReport {
+                        print(report.renderBreakdown(color: Self.stdoutColorEnabled))
+                    } else {
+                        print("No confidence to explain yet — that turn used no tools (a plain answer). Run a turn that reads/edits/searches first.")
+                    }
                     continue
                 case "failures", "failure", "failure-analysis":
                     print(CaptainFailureAnalysis.handleCommand(args, projectRoot: projectRoot))
@@ -2537,14 +2558,11 @@ struct KistREPL {
                   impact: debt.expectedBenefit.first ?? debt.reason,
                   severity: debt.impact)
         }
-        // Confidence — grounded, healthy, low-failure ⇒ high. nil when there were no actions (a plain answer).
-        var confidence: Double? = nil
-        if !trajectory.isEmpty {
-            let failures = trajectory.filter { !$0.success }.count
-            let rate = Double(failures) / Double(trajectory.count)
-            let healthy = TrajectoryAnalyzer.analyze(trajectory).healthy
-            confidence = min(0.98, max(0.30, 0.95 - rate * 0.4 - (healthy ? 0 : 0.15) - (grounded ? 0 : 0.15)))
-        }
+        // Confidence — grounded, healthy, low-failure ⇒ high. The ConfidenceReport keeps the FACTORS
+        // (reliability/health/grounding) so the panel shows a battery gauge + the top drag and
+        // `/confidence` can explain why. nil when there were no actions (a plain answer).
+        let confidenceReport = ConfidenceReport.compute(report: TrajectoryAnalyzer.analyze(trajectory),
+                                                        grounded: grounded)
         // "Next" must not FREEZE on a stale board task when the user just asked a QUESTION that never
         // touched the board (Luke's "I asked something and Next never changed" bug — a task stuck
         // inProgress made plan.active return it forever). Only surface a specific board Next when THIS
@@ -2564,7 +2582,7 @@ struct KistREPL {
                                          estimatedImpact: "High")
                                },
                                observation: insights.observation,
-                               confidence: confidence,
+                               confidenceReport: confidenceReport,
                                next: next)
     }
 
@@ -2669,6 +2687,7 @@ struct KistREPL {
           /probe            live one-token provider probe (catches stale model ids)
           /usage            rich session + local-week token/cost panel
           /summary          simple human summary: happened / changed / failed / next
+          /confidence       explain the last turn's score and what would raise it  [alias /why]
           /failures         show latest failure capsule; /failures verify <evidence> closes repair loop
           /reflect          show the latest Learning Capsule; /reflect now captures one from current state
           /knowledge        show persistent Knowledge Debt; add/done manage debt items

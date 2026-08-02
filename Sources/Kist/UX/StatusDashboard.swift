@@ -78,6 +78,10 @@ public struct StatusDashboard: Sendable, Equatable {
     public let futureEvolution: FutureEvolution?
     public let observation: Observation?
     public let confidence: Double?   // 0…1, nil to hide
+    /// The explainable confidence: keeps WHY the score is what it is (reliability/health/grounding),
+    /// so the panel can show a battery gauge + the top drag, and `/confidence` can show the full
+    /// breakdown. When present it drives the score; `confidence` remains for back-compat callers.
+    public let confidenceReport: ConfidenceReport?
     public let next: String?
     public let width: Int
 
@@ -85,16 +89,39 @@ public struct StatusDashboard: Sendable, Equatable {
                 research: [ResearchItem] = [], knowledgeDebt: [KnowledgeDebt] = [],
                 questions: [String] = [], futureEvolution: FutureEvolution? = nil,
                 observation: Observation? = nil, confidence: Double? = nil,
+                confidenceReport: ConfidenceReport? = nil,
                 next: String? = nil, width: Int = 72) {
         self.minds = minds; self.tasks = tasks; self.learned = learned; self.research = research
         self.knowledgeDebt = knowledgeDebt; self.questions = questions
         self.futureEvolution = futureEvolution; self.observation = observation
-        self.confidence = confidence.map { min(1, max(0, $0)) }
-        self.next = next; self.width = max(16, width)
+        self.confidenceReport = confidenceReport
+        self.confidence = (confidenceReport?.score ?? confidence).map { min(1, max(0, $0)) }
+        // Literal section labels such as "🔋 Confidence" and "/confidence for why" need a
+        // usable minimum. Below 24 columns the dashboard cannot preserve those labels honestly.
+        self.next = next; self.width = max(24, width)
+    }
+
+    // MARK: - Neon category palette
+    // Each section owns a distinct bright hue so the eye can jump straight to a section instead of
+    // scanning a wall of white. Bright (9x) + bold so headers pop off the transcript.
+    enum Cat {
+        static let active   = "96;1"   // cyan   — who's working
+        static let build    = "95;1"   // magenta— the build queue
+        static let research = "94;1"   // blue   — research
+        static let learned  = "92;1"   // green  — what we learned
+        static let debt     = "93;1"   // yellow — knowledge debt
+        static let question = "95;1"   // magenta— open questions
+        static let evolve   = "93;1"   // yellow — future evolution
+        static let observe  = "96;1"   // cyan   — captain observation
+        static let next     = "96;1"   // cyan   — next
     }
 
     // ANSI
     private func c(_ code: String, _ s: String, _ on: Bool) -> String { on ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
+    /// A neon section header: `icon title` in the category hue.
+    private func header(_ icon: String, _ title: String, _ code: String, _ on: Bool) -> String {
+        c(code, "\(icon) \(title)", on)
+    }
     private func stars(_ value: Int) -> String {
         String(repeating: "★", count: min(5, max(1, value))) + String(repeating: "☆", count: 5 - min(5, max(1, value)))
     }
@@ -105,17 +132,20 @@ public struct StatusDashboard: Sendable, Equatable {
         var out = "\n" + rule + "\n"
 
         if !minds.isEmpty {
-            out += "\n" + c("1", "🧠 Active Minds", color) + "\n"
+            out += "\n" + header("🧠", "Active Minds", Cat.active, color) + "\n"
             for m in minds {
-                let mark = m.active ? c("32", "✓", color) : c("2", "·", color)
-                let line = "\(mark) \(m.name) \(c("2", "(\(m.role))", color))"
-                out += (m.active ? line : c("2", "\(m.name) (\(m.role))", color).prependMark("·")) + "\n"
+                let plainMark = m.active ? "✓ " : "· "
+                let renderedMark = c(m.active ? "32" : "2", m.active ? "✓" : "·", color) + " "
+                out += wrappedLine("\(m.name) (\(m.role))",
+                                   firstPrefix: plainMark,
+                                   continuationPrefix: "  ",
+                                   firstRenderedPrefix: renderedMark)
             }
             out += "\n" + rule + "\n"
         }
 
         if !tasks.isEmpty {
-            out += "\n" + c("1", "📋 Build Queue", color) + "\n\n"
+            out += "\n" + header("📋", "Build Queue", Cat.build, color) + "\n\n"
             for t in tasks {
                 switch t.state {
                 case .done:
@@ -132,7 +162,7 @@ public struct StatusDashboard: Sendable, Equatable {
         }
 
         if !learned.isEmpty {
-            out += "\n" + c("1", "🧠 What We Learned", color) + "\n\n"
+            out += "\n" + header("🧠", "What We Learned", Cat.learned, color) + "\n\n"
             for item in learned.prefix(5) {
                 out += wrappedLine(item, firstPrefix: "• ", continuationPrefix: "  ")
             }
@@ -140,7 +170,7 @@ public struct StatusDashboard: Sendable, Equatable {
         }
 
         if !research.isEmpty {
-            out += "\n" + c("1", "🔬 Research Queue", color) + "\n\n"
+            out += "\n" + header("🔬", "Research Queue", Cat.research, color) + "\n\n"
             for (label, priority) in [("High Priority", ResearchItem.Priority.high),
                                       ("Medium Priority", .medium)] {
                 let items = research.filter { $0.priority == priority }
@@ -154,11 +184,12 @@ public struct StatusDashboard: Sendable, Equatable {
                         out += wrappedLine(item.visit, firstPrefix: "  Visit: ", continuationPrefix: "         ",
                                            firstRenderedPrefix: c("2", "  Visit: ", color))
                     }
-                    out += c("2", "  Impact: ", color) + stars(item.impact)
-                    if !item.estimatedLearning.isEmpty {
-                        out += c("2", " · learning: ", color) + item.estimatedLearning
-                    }
-                    out += "\n"
+                    let impact = stars(item.impact)
+                        + (item.estimatedLearning.isEmpty ? "" : " · learning: \(item.estimatedLearning)")
+                    out += wrappedLine(impact,
+                                       firstPrefix: "  Impact: ",
+                                       continuationPrefix: "          ",
+                                       firstRenderedPrefix: c("2", "  Impact: ", color))
                     if !item.expectedBenefit.isEmpty {
                         out += wrappedLine(item.expectedBenefit.joined(separator: "; "),
                                            firstPrefix: "  Expected benefit: ",
@@ -172,7 +203,7 @@ public struct StatusDashboard: Sendable, Equatable {
         }
 
         if !knowledgeDebt.isEmpty {
-            out += "\n" + c("1", "📚 Knowledge Debt", color) + "\n\n"
+            out += "\n" + header("📚", "Knowledge Debt", Cat.debt, color) + "\n\n"
             for item in knowledgeDebt {
                 out += stars(item.severity) + "\n"
                 out += wrappedLine(item.topic, firstPrefix: "\(item.need): ",
@@ -184,7 +215,7 @@ public struct StatusDashboard: Sendable, Equatable {
         }
 
         if !questions.isEmpty {
-            out += "\n" + c("1", "🧠 Questions", color) + "\n\n"
+            out += "\n" + header("🧠", "Questions", Cat.question, color) + "\n\n"
             for question in questions {
                 out += wrappedLine(question, firstPrefix: "? ", continuationPrefix: "  ")
             }
@@ -192,7 +223,7 @@ public struct StatusDashboard: Sendable, Equatable {
         }
 
         if let futureEvolution, !futureEvolution.capability.isEmpty {
-            out += "\n" + c("1", "💡 Future Evolution", color) + "\n\n"
+            out += "\n" + header("💡", "Future Evolution", Cat.evolve, color) + "\n\n"
             out += c("2", "Next logical capability", color) + "\n"
             out += wrappedLine(futureEvolution.capability) + "\n"
             if !futureEvolution.estimatedImpact.isEmpty {
@@ -203,7 +234,7 @@ public struct StatusDashboard: Sendable, Equatable {
         }
 
         if let observation, !observation.message.isEmpty {
-            out += "\n" + c("1", "Captain Observation", color) + "\n"
+            out += "\n" + header("🧭", "Captain Observation", Cat.observe, color) + "\n"
             out += wrappedLine(observation.message)
             if !observation.recommendedReading.isEmpty {
                 out += wrappedLine(observation.recommendedReading.joined(separator: ", "),
@@ -218,21 +249,42 @@ public struct StatusDashboard: Sendable, Equatable {
             out += "\n" + rule + "\n"
         }
 
-        if let confidence {
-            let filled = Int((confidence * 10).rounded())
-            let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: 10 - filled)
-            let col = confidence >= 0.75 ? "32" : (confidence >= 0.5 ? "33" : "31")
-            out += "\n" + c("1", "Confidence", color) + "\n"
-            out += c(col, bar, color) + " " + "\(Int((confidence * 100).rounded()))%" + "\n"
-            out += "\n" + rule + "\n"
-        }
+        out += confidenceSection(color: color)
 
         if let next, !next.isEmpty {
-            out += "\n" + c("1", "Next", color) + "\n"
+            out += "\n" + header("→", "Next", Cat.next, color) + "\n"
             out += wrappedLine(next, firstPrefix: "→ ", continuationPrefix: "  ",
-                               firstRenderedPrefix: c("36", "→ ", color))
+                               firstRenderedPrefix: c(Cat.next, "→ ", color))
             out += "\n" + rule + "\n"
         }
+        return out
+    }
+
+    /// The confidence block: a battery gauge in its charge color + the top factor dragging it down +
+    /// a `/confidence` pointer to the full breakdown. Shared by full + compact renders so the bar is
+    /// green-when-good everywhere (the compact panel used to print it with NO color at all).
+    private func confidenceSection(color: Bool) -> String {
+        let rule = c("2", String(repeating: "━", count: width), color)
+        if let report = confidenceReport {
+            var out = "\n" + header("🔋", "Confidence", report.batteryCode, color) + "\n"
+            out += report.bar(width: 10, color: color) + "\n"
+            if let top = report.pending.max(by: { $0.penalty < $1.penalty }) {
+                out += wrappedLine(top.label.lowercased() + " · ↑ " + top.raise,
+                                   firstPrefix: "drag: ",
+                                   continuationPrefix: "      ",
+                                   firstRenderedPrefix: c("2", "drag: ", color))
+            }
+            out += wrappedLine("/confidence for why")
+            out += "\n" + rule + "\n"
+            return out
+        }
+        guard let confidence else { return "" }
+        let filled = Int((confidence * 10).rounded())
+        let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: 10 - filled)
+        let col = confidence >= 0.75 ? "92;1" : (confidence >= 0.5 ? "93;1" : "91;1")
+        var out = "\n" + header("🔋", "Confidence", col, color) + "\n"
+        out += c(col, bar, color) + " " + c(col, "\(Int((confidence * 100).rounded()))%", color) + "\n"
+        out += "\n" + rule + "\n"
         return out
     }
 
@@ -242,7 +294,7 @@ public struct StatusDashboard: Sendable, Equatable {
         let rule = c("2", String(repeating: "━", count: width), color)
         var out = "\n" + rule + "\n"
         if !minds.isEmpty {
-            out += "\n" + c("1", "Active", color) + "\n"
+            out += "\n" + header("🧠", "Active", Cat.active, color) + "\n"
             let activeLine = minds.prefix(3)
                 .map { "\($0.active ? "✓" : "·") \($0.name) \($0.role)" }
                 .joined(separator: " · ")
@@ -250,38 +302,35 @@ public struct StatusDashboard: Sendable, Equatable {
             out += rule + "\n"
         }
         if !tasks.isEmpty {
-            out += "\n" + c("1", "Build Queue", color) + "\n"
+            out += "\n" + header("📋", "Build Queue", Cat.build, color) + "\n"
             for task in tasks.prefix(3) {
                 let mark: String
                 switch task.state {
-                case .done: mark = "✓"
-                case .pending: mark = "⏳"
-                case .blocked: mark = "⊘"
+                case .done: mark = c("92;1", "✓", color)
+                case .pending: mark = c("93;1", "⏳", color)
+                case .blocked: mark = c("91;1", "⊘", color)
                 }
-                out += wrappedLine(task.title, firstPrefix: "\(mark) ", continuationPrefix: "  ")
+                out += wrappedLine(task.title, firstPrefix: "· ", continuationPrefix: "  ",
+                                   firstRenderedPrefix: mark + " ")
             }
             if tasks.count > 3 { out += c("2", "… +\(tasks.count - 3) more · /tasks", color) + "\n" }
             out += rule + "\n"
         }
         if !research.isEmpty {
-            out += "\n" + c("1", "Research", color) + "\n"
+            out += "\n" + header("🔬", "Research", Cat.research, color) + "\n"
             for item in research.prefix(3) {
-                let roi = item.impact >= 5 ? " · high ROI" : ""
-                out += wrappedLine(item.title + roi, firstPrefix: "• ", continuationPrefix: "  ")
+                let title = item.title + (item.impact >= 5 ? " · high ROI" : "")
+                out += wrappedLine(title, firstPrefix: "• ", continuationPrefix: "  ",
+                                   firstRenderedPrefix: c(Cat.research, "•", color) + " ")
             }
             out += c("2", "details: /summary", color) + "\n"
             out += rule + "\n"
         }
-        if let confidence {
-            let filled = Int((confidence * 10).rounded())
-            let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: 10 - filled)
-            out += "\n" + c("1", "Confidence", color) + "\n" + bar + " " + "\(Int((confidence * 100).rounded()))%" + "\n"
-            out += rule + "\n"
-        }
+        out += confidenceSection(color: color)
         if let next, !next.isEmpty {
-            out += "\n" + c("1", "Next", color) + "\n"
+            out += "\n" + header("→", "Next", Cat.next, color) + "\n"
             out += wrappedLine(next, firstPrefix: "→ ", continuationPrefix: "  ",
-                               firstRenderedPrefix: c("36", "→ ", color))
+                               firstRenderedPrefix: c(Cat.next, "→ ", color))
             out += "\n" + rule + "\n"
         }
         return out
@@ -309,8 +358,8 @@ public struct StatusDashboard: Sendable, Equatable {
 
         var lines: [String] = []
         var current = ""
-        var capacity = max(8, width - firstPrefix.count)
-        let continuationCapacity = max(8, width - continuationPrefix.count)
+        var capacity = max(1, width - firstPrefix.count)
+        let continuationCapacity = max(1, width - continuationPrefix.count)
 
         func pushCurrent() {
             lines.append(current)
@@ -342,8 +391,4 @@ public struct StatusDashboard: Sendable, Equatable {
         if !current.isEmpty { lines.append(current) }
         return lines
     }
-}
-
-private extension String {
-    func prependMark(_ m: String) -> String { m + " " + self }
 }
