@@ -24,6 +24,8 @@ enum KistChangelog {
                     "NO_COLOR + mono screen-reader theme honored on every surface",
                     "/version: this changelog view, as a bordered card",
                     "/usage: in-depth card — per-provider (incl. claude-cli / codex-cli subscription) tokens + cost, subagents, tools, MCP servers, weekly split",
+                    "/usage: cost-by-activity — attributes budget to Architecture / Code / Review & tests / Research / Orchestration",
+                    "/autonomy: where the time went — Thinking / Researching / Coding / Running / Delegating bars",
                 ]),
         Release(version: "0.16.0", date: "2026-08-01",
                 headline: "Consensus reviews + self-fixing captain",

@@ -1594,6 +1594,12 @@ struct KistREPL {
                 case "usage", "cost", "tokens":
                     await printSessionUsage()
                     continue
+                case "autonomy", "activity", "pulse":
+                    // What the AI actually spent its time doing this session — Thinking / Researching /
+                    // Coding / Running / Delegating — so you can see WHY a turn took what it took.
+                    let spans = await traceRecorder?.all() ?? []
+                    print(AutonomyMeter.render(spans: spans, color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
+                    continue
                 case "logs", "details", "proof":
                     print(proofStore?.renderLast() ?? "No proof log yet. Run a turn first.")
                     continue
