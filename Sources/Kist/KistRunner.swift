@@ -479,7 +479,10 @@ enum KistRunner {
                 // only the loopFactory site had it, so typing was captured INVISIBLY on fresh and
                 // pinned-model sessions — the exact missed-sibling shape.)
                 func makeReplSink(showReasoning: Bool) -> TerminalEventSink {
-                    let sink = TerminalEventSink(showReasoning: showReasoning, style: .calm, proofStore: proofStore,
+                    // Honor NO_COLOR + the configured mono (screen-reader) theme, not just isatty, so the
+                    // tool lane + streamed-prose coloring go dark exactly when the dashboard does.
+                    let sink = TerminalEventSink(color: KistREPL.stdoutColorEnabled(projectRoot: root),
+                                                 showReasoning: showReasoning, style: .calm, proofStore: proofStore,
                                                  typedInput: { TurnInputQueue.shared.preview() })
                     TurnInputQueue.shared.addOnChange { sink.refreshLiveStatus() }
                     return sink

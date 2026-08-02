@@ -284,7 +284,11 @@ struct KistREPL {
             // ambiguous, and self-assessment reads its OWN source instead of asking clarifying questions.
             var out = kistSelfContext() + "\n\n" + compiled
             if let retrieval = retrievalContext(for: objective) {
-                print("\u{001B}[2m↳ \u{001B}[0m\u{001B}[96;1m🧠 Captain retrieval\u{001B}[0m\u{001B}[2m · \(retrieval.retrieved.count) memory · \(retrieval.decisionCards.count) decision cards\u{001B}[0m")
+                if Self.stdoutColorEnabled(projectRoot: projectRoot) {
+                    print("\u{001B}[2m↳ \u{001B}[0m\u{001B}[96;1m🧠 Captain retrieval\u{001B}[0m\u{001B}[2m · \(retrieval.retrieved.count) memory · \(retrieval.decisionCards.count) decision cards\u{001B}[0m")
+                } else {
+                    print("↳ Captain retrieval · \(retrieval.retrieved.count) memory · \(retrieval.decisionCards.count) decision cards")
+                }
                 out = Self.attachCaptainRetrievalContext(to: out, retrieval: retrieval)
             }
             return out
@@ -762,7 +766,10 @@ struct KistREPL {
             }
             let dashboard = Self.buildDashboard(roles: roleSelection, projectRoot: projectRoot,
                                                 trajectory: trajectory, grounded: grounded)
-            lastConfidenceReport = dashboard.confidenceReport
+            // Only remember the report for `/confidence` on a SUCCESSFUL turn: a provider failure after
+            // one clean tool call computes a misleading ~95% that must not be inherited by the next
+            // `/confidence` (Codex catch). A failed turn keeps the last successful turn's report.
+            if success { lastConfidenceReport = dashboard.confidenceReport }
             let compact = !success || !Self.turnHasMutatingWork(trajectory)
             let panelColor = Self.stdoutColorEnabled(projectRoot: projectRoot)
             print(compact ? dashboard.renderCompact(color: panelColor) : dashboard.render(color: panelColor))
@@ -1974,7 +1981,7 @@ struct KistREPL {
                 default:
                     if let expanded = commands.expand(name, args: args) {
                         proofStore?.startTurn(goal: expanded)
-                        if let display = personaDisplay?(expanded) { print("\u{001B}[95;1m🎭 \(display)\u{001B}[0m") }
+                        if let display = personaDisplay?(expanded) { print(Self.stdoutColorEnabled(projectRoot: projectRoot) ? "\u{001B}[95;1m🎭 \(display)\u{001B}[0m" : "↳ \(display)") }
                         armTurnLoop()   // arm the permission tier — never run a turn on a stale loop
                         let compiled = briefCompiler?(expanded, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? expanded
                         let enriched = attachCaptainContext(to: compiled, objective: expanded)
@@ -2206,12 +2213,16 @@ struct KistREPL {
                     }
                     activeBinding = decision.binding
                 }
-                print("\u{001B}[2m↳ 🧭 routed to \u{001B}[0m\u{001B}[94;1m\(Self.render(decision.binding))\u{001B}[0m\u{001B}[2m (\(decision.reason))\u{001B}[0m")
+                if Self.stdoutColorEnabled(projectRoot: projectRoot) {
+                    print("\u{001B}[2m↳ 🧭 routed to \u{001B}[0m\u{001B}[94;1m\(Self.render(decision.binding))\u{001B}[0m\u{001B}[2m (\(decision.reason))\u{001B}[0m")
+                } else {
+                    print("↳ routed to \(Self.render(decision.binding)) (\(decision.reason))")
+                }
             }
 
             armTurnLoop()   // apply the permission tier (plan/approvals); confirm bypass if just armed
             let compiled = briefCompiler?(messageText, roleSelection.bindings, perm.mode.isPlan ? .plan : .inline, humanTranscript) ?? messageText
-            if let display = personaDisplay?(messageText) { print("\u{001B}[95;1m🎭 \(display)\u{001B}[0m") }
+            if let display = personaDisplay?(messageText) { print(Self.stdoutColorEnabled(projectRoot: projectRoot) ? "\u{001B}[95;1m🎭 \(display)\u{001B}[0m" : "↳ \(display)") }
             var enriched = attachCaptainContext(to: compiled, objective: messageText)
             // AUTO-EXPLORE: a lookup/find/self question ("find what we did for tinkyspeak", "how does your
             // X work") is answered from OUR OWN FILES, not the model's memory. Search the estate in-process

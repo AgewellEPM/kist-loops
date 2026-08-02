@@ -66,7 +66,10 @@ struct TerminalEventSink: RuntimeEventSink {
     /// status line so the input is visibly alive 24/7. nil = feature off (non-REPL sinks).
     private let typedInput: (@Sendable () -> (pending: String, queuedCount: Int))?
 
-    init(color: Bool = isatty(fileno(stdout)) != 0,
+    // Default color honors the NO_COLOR convention (a real TTY is not enough). The configured `mono`
+    // screen-reader theme is settings-scoped, so the REPL passes an explicit `color:` computed from
+    // KistREPL.stdoutColorEnabled(projectRoot:) at the interactive construction site.
+    init(color: Bool = (isatty(fileno(stdout)) != 0 && ProcessInfo.processInfo.environment["NO_COLOR"] == nil),
          showReasoning: Bool = false,
          style: Style = .standard,
          proofStore: TurnProofStore? = nil,
@@ -114,12 +117,14 @@ struct TerminalEventSink: RuntimeEventSink {
 
     /// Emit any buffered partial line before non-prose output (a tool line, the done line) or at turn
     /// end. The partial line is rendered too — `colorizePairs` leaves an unclosed marker literal, so a
-    /// half-typed `**bold` stays safe.
+    /// half-typed `**bold` stays safe. A trailing newline is appended so the cursor leaves that row:
+    /// the NEXT event's status repaint (`\r` + clear-to-EOL) would otherwise erase the flushed line
+    /// (Codex catch — an unterminated final answer or interrupted line silently disappeared).
     private func flushProse() {
         guard !state.proseBuffer.isEmpty else { return }
         let line = state.proseBuffer
         state.proseBuffer = ""
-        write(renderStreamedLine(line))
+        write(renderStreamedLine(line) + "\n")
     }
 
     /// Render one prose line, honoring the running fence state (which this call may toggle).
@@ -594,12 +599,20 @@ struct TerminalEventSink: RuntimeEventSink {
         }
     }
 
-    /// Colorize a calm success summary: the head (what happened) stays bright and readable, the
-    /// `· N tok · /logs …` metadata tail goes dim so the eye lands on the content, not the plumbing.
+    /// Colorize a calm success summary: content segments stay bright and readable, only genuine
+    /// `· N tok · /logs …` METADATA segments go dim. Dimming everything after the first " · " wrongly
+    /// greyed content that contains a middot (e.g. "Renamed A · B.swift") — so classify per segment.
     private func colorizeSummary(_ s: String) -> String {
         let parts = s.components(separatedBy: " · ")
         guard parts.count > 1 else { return c("37;1", s) }
-        return c("37;1", parts[0]) + c("2", " · " + parts.dropFirst().joined(separator: " · "))
+        func isMeta(_ p: String) -> Bool {
+            let l = p.lowercased()
+            return l.contains("tok") || l.contains("/logs") || l.contains("for details") || l.contains("details:")
+        }
+        return parts.enumerated().map { i, p in
+            let seg = (i == 0 ? "" : " · ") + p
+            return isMeta(p) ? c("2", seg) : c("37;1", seg)
+        }.joined()
     }
 
     private func truncate(_ s: String, _ n: Int) -> String {
