@@ -1073,6 +1073,10 @@ struct StreamingTranscriptFirewall {
                        let scalar = decoded.unicodeScalars.first,
                        decoded.unicodeScalars.count == 1 {
                         switch scalar.properties.generalCategory {
+                        case .format where scalar.value == 0x200D:
+                            // ZWJ only joins a grapheme; it cannot move the cursor or reorder
+                            // terminal text. Preserve legitimate emoji such as 👩‍💻.
+                            output.append(contentsOf: bytes)
                         case .control, .format, .lineSeparator, .paragraphSeparator,
                              .surrogate, .unassigned:
                             // UTF-8 encodings of C1, bidi/format controls, and logical line
@@ -1201,6 +1205,10 @@ enum TerminalCellText {
             } else if value >= 0x20, value != 0x7F,
                       !(0x80...0x9F).contains(value) {
                 switch scalars[i].properties.generalCategory {
+                case .format where value == 0x200D:
+                    // ZWJ joins an emoji grapheme (👩‍💻); unlike bidi/isolates it cannot steer the
+                    // terminal. Preserve it so sanitization does not visibly rewrite user text.
+                    out.append(scalars[i])
                 case .control, .format, .lineSeparator, .paragraphSeparator, .surrogate, .unassigned:
                     break
                 default:
@@ -1251,6 +1259,9 @@ enum TerminalCellText {
     private static func width(_ character: Character) -> Int {
         let scalars = Array(character.unicodeScalars)
         if scalars.contains(where: { $0.value == 0x200D }) { return 2 } // joined emoji cluster
+        // Emoji variation/keycap sequences occupy one two-cell glyph in Terminal.app even when
+        // their base scalar (©, ❤, a digit) is normally narrow.
+        if scalars.contains(where: { $0.value == 0xFE0F || $0.value == 0x20E3 }) { return 2 }
         var widest = 0
         for scalar in scalars {
             if scalar.value < 0x20 || scalar.value == 0x7F || scalar.value == 0x200D
@@ -1271,6 +1282,28 @@ enum TerminalCellText {
     private static func isWide(_ value: UInt32) -> Bool {
         (0x1100...0x115F).contains(value)
             || value == 0x2329 || value == 0x232A
+            // BMP scalars with default Emoji_Presentation / East_Asian_Width=Wide. Emoji that
+            // require VS16 are handled as clusters above.
+            || (0x231A...0x231B).contains(value)
+            || (0x23E9...0x23EC).contains(value)
+            || value == 0x23F0 || value == 0x23F3
+            || (0x25FD...0x25FE).contains(value)
+            || (0x2614...0x2615).contains(value)
+            || (0x2648...0x2653).contains(value)
+            || value == 0x267F || value == 0x2693 || value == 0x26A1
+            || (0x26AA...0x26AB).contains(value)
+            || (0x26BD...0x26BE).contains(value)
+            || (0x26C4...0x26C5).contains(value)
+            || value == 0x26CE || value == 0x26D4 || value == 0x26EA
+            || (0x26F2...0x26F3).contains(value)
+            || value == 0x26F5 || value == 0x26FA || value == 0x26FD
+            || value == 0x2705 || (0x270A...0x270B).contains(value)
+            || value == 0x2728 || value == 0x274C || value == 0x274E
+            || (0x2753...0x2755).contains(value) || value == 0x2757
+            || (0x2795...0x2797).contains(value)
+            || value == 0x27B0 || value == 0x27BF
+            || (0x2B1B...0x2B1C).contains(value)
+            || value == 0x2B50 || value == 0x2B55
             || (0x2E80...0xA4CF).contains(value)
             || (0xAC00...0xD7A3).contains(value)
             || (0xF900...0xFAFF).contains(value)

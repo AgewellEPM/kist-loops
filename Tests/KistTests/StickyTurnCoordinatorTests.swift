@@ -102,9 +102,13 @@ final class StickyTurnCoordinatorTests: XCTestCase {
         XCTAssertEqual(TerminalCellText.width("abc"), 3)
         XCTAssertEqual(TerminalCellText.width("中"), 2)
         XCTAssertEqual(TerminalCellText.width("🙂"), 2)
+        XCTAssertEqual(TerminalCellText.width("⏳"), 2)
+        XCTAssertEqual(TerminalCellText.width("©️"), 2)
+        XCTAssertEqual(TerminalCellText.width("❤️"), 2)
+        XCTAssertEqual(TerminalCellText.width("1️⃣"), 2)
         XCTAssertEqual(TerminalCellText.width("e\u{301}"), 1)
-        XCTAssertEqual(TerminalCellText.width("👩‍💻"), 4,
-                       "format controls such as ZWJ are removed from fixed physical rows")
+        XCTAssertEqual(TerminalCellText.width("👩‍💻"), 2,
+                       "a harmless ZWJ emoji cluster is preserved and occupies one wide glyph")
 
         let clipped = TerminalCellText.clipTail("prefix-中🙂-END", maxCells: 8)
         XCTAssertTrue(clipped.hasPrefix("…"))
