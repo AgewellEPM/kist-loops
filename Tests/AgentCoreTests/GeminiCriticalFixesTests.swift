@@ -27,6 +27,18 @@ final class GeminiCriticalFixesTests: XCTestCase {
         XCTAssertFalse(GeminiProvider.supportsThinkingBudget(model: "gemini-3.5-flash"))
     }
 
+    // Regression (chain-of-thought leak): Gemini streams a "thinking" summary part with `thought:true`
+    // (the model headers it "[CURRENT_TURN_THOUGHT]"). It must NOT be concatenated into the visible answer.
+    func testSSEDropsThoughtPartsFromTheAnswer() {
+        let sse = #"{"candidates":[{"content":{"parts":[{"thought":true,"text":"[CURRENT_TURN_THOUGHT] the user wants X; I will read files"},{"text":"Here is the answer."}]}}]}"#
+        let deltas = GeminiProvider.events(fromSSE: sse).compactMap { e -> String? in
+            if case .delta(let t) = e { return t }; return nil
+        }
+        XCTAssertEqual(deltas, ["Here is the answer."])
+        XCTAssertFalse(deltas.joined().contains("CURRENT_TURN_THOUGHT"),
+                       "the model's private thought must never leak into the streamed answer")
+    }
+
     // MARK: CRITICAL-1 — grounded_answer makes grounding reachable for the tool-using agent
 
     func testGroundedAnswerReturnsTextAndRejectsEmpty() async throws {

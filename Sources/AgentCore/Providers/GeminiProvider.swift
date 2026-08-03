@@ -131,7 +131,13 @@ public struct GeminiProvider: ChatProvider {
         var out: [StreamEvent] = []
         if let candidates = json["candidates"] as? [[String: Any]], let c0 = candidates.first {
             if let content = c0["content"] as? [String: Any], let parts = content["parts"] as? [[String: Any]] {
-                for part in parts { if let text = part["text"] as? String, !text.isEmpty { out.append(.delta(text)) } }
+                for part in parts {
+                    // Skip Gemini "thinking" summary parts (`thought: true`): they carry the model's
+                    // private reasoning (which it often headers "[CURRENT_TURN_THOUGHT]"), NOT the answer.
+                    // Concatenating them leaked chain-of-thought straight into the visible reply.
+                    if (part["thought"] as? Bool) == true { continue }
+                    if let text = part["text"] as? String, !text.isEmpty { out.append(.delta(text)) }
+                }
             }
             if let reason = c0["finishReason"] as? String { out.append(.finish(reason: reason)) }
         }
