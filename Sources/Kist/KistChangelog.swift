@@ -13,6 +13,20 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.1", date: "2026-08-03",
+                headline: "Action-first builds, /mode, honest goals",
+                changes: [
+                    "/build — fire the plan→execute worker on a plan (stop researching, start building); a clear build request now auto-runs it",
+                    "/mode — set how Kist talks: conversation · science · build · friend · nobs; /mode level <grade..college>; /mode persona <write your own voice>",
+                    "/competitive <target> — deep R&D cross-compare OUR project vs a competitor/product/URL",
+                    "Routing: 'ask/use/bring <model>' actually switches models now; the strongest keyed provider is the default (no more defaulting to MiMo, which 400s)",
+                    "BUILD STATUS: every build turn ends with a PATCH→APPLY→FILES→BUILD/TEST→BOARD checklist, so 'done' can't be faked",
+                    "Self-heal: the researcher hands the builder a clean machine-readable spec (not the whole transcript), reproduces the failure first, halts instead of churning more research, and escalates to a heavy-hitter model",
+                    "Goals & research now reflect YOUR project — the hardcoded Cursor/OpenHands/Claude-Code watch-list only appears when developing Kist itself",
+                    "Fixed: mouse-scroll no longer cancels your turn or eats Enter at the approval prompt",
+                    "Fixed: Gemini's private thinking no longer leaks into the answer",
+                    "Internal: KistREPL's 2,992-line run() decomposed into focused modules (720-line core), fully test-verified",
+                ]),
         Release(version: "0.17.0", date: "2026-08-02",
                 headline: "Readable terminal — color, confidence, sticky bar",
                 changes: [
