@@ -188,7 +188,8 @@ final class R2TypedInputTests: XCTestCase {
         let repo = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         func src(_ rel: String) throws -> String {
-            try String(contentsOf: repo.appendingPathComponent(rel), encoding: .utf8)
+            if rel == "Sources/Kist/KistREPL.swift" { return kistREPLFamilySource() }
+            return try String(contentsOf: repo.appendingPathComponent(rel), encoding: .utf8)
         }
 
         // Runner: drain chain + sink typed-input provider + every heavy escalation begin() site.

@@ -23,7 +23,9 @@ final class CaptainSelfHealDispatchTests: XCTestCase {
     }
 
     private func source(_ relative: String) throws -> String {
-        try String(contentsOfFile: repoRoot() + "/" + relative, encoding: .utf8)
+        // KistREPL helpers were split into KistREPL+*.swift modules — read the whole family.
+        if relative == "Sources/Kist/KistREPL.swift" { return kistREPLFamilySource() }
+        return try String(contentsOfFile: repoRoot() + "/" + relative, encoding: .utf8)
     }
 
     // A: no dispatch loop may reprint the specialist summary — it already streamed

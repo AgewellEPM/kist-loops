@@ -94,10 +94,10 @@ final class PermissionBarTests: XCTestCase {
                 sites.append("\(url.lastPathComponent): \(line.trimmingCharacters(in: .whitespaces))")
             }
         }
-        let offenders = sites.filter { site in !allowedFiles.contains(where: { site.hasPrefix($0 + ":") }) }
+        let offenders = sites.filter { site in !allowedFiles.contains(where: { site.hasPrefix($0 + ":") }) && !site.hasPrefix("KistREPL") }
         XCTAssertTrue(offenders.isEmpty, "un-allowlisted turn site(s) bypass arming: \(offenders)")
         // KistREPL must have EXACTLY one (the helper) — pins that the REPL didn't sprout a second.
-        let inRepl = sites.filter { $0.hasPrefix("KistREPL.swift:") }
+        let inRepl = sites.filter { $0.hasPrefix("KistREPL") }
         XCTAssertEqual(inRepl.count, 1, "KistREPL must have exactly one turn site (runTurnInterruptible) — found: \(inRepl)")
     }
 

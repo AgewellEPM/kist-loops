@@ -84,8 +84,7 @@ final class HeavyRouteResultTests: XCTestCase {
     func testExistingREPLHeavyRoutesReturnAndRecordTheirActualResults() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let repl = try String(contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
-                              encoding: .utf8)
+        let repl = kistREPLFamilySource()
         let runner = try String(contentsOf: root.appendingPathComponent("Sources/Kist/KistRunner.swift"),
                                 encoding: .utf8)
 

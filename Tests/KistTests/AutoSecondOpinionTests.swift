@@ -262,7 +262,7 @@ final class AutoSecondOpinionTests: XCTestCase {
 
     // The repair gate must honor autoFix and return findings to the original author, never the reviewer.
     func testRepairRequiresAutoFixAndUsesOriginalAuthor() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("guard copilot.autoFix else"), "autoFix must authorize every repair")
         XCTAssertTrue(repl.contains("let fixer = author"), "findings must return to the original author")
         XCTAssertFalse(repl.contains("let fixer = autoReviewer"), "the reviewer must not take over authorship")
@@ -270,13 +270,13 @@ final class AutoSecondOpinionTests: XCTestCase {
     }
 
     func testRecordedMutationWithoutTextualDiffIsReviewIncomplete() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("a mutation was recorded, but no turn-scoped textual git diff is available"),
                       "non-git, ignored, binary, or committed changes must not fall back to reviewing prose as if it were the artifact")
     }
 
     func testUltraModeTreatsMissingVotesAsIncompleteAndAuthorRepairs() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("func runUltraReview(") && repl.contains("func ultraRoster("),
                       "the consensus chain + capability-ordered roster must exist")
         XCTAssertTrue(repl.contains("case .incomplete(let reason):") && repl.contains("missing.append"),
@@ -330,7 +330,7 @@ final class AutoSecondOpinionTests: XCTestCase {
     // Wiring source pin: the review path must actually BUILD grounding and pass it into the prompt builders —
     // else the fix is dead code. Pins reviewerGrounding() (self-identity + project memory) and its use.
     func testReviewPassesGroundingToThePromptBuilders() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("func reviewerGrounding()"),
                       "there must be a helper that assembles the reviewer's grounding")
         XCTAssertTrue(repl.contains("kistSelfContext()") && repl.contains("ProjectMemory(root: projectRoot).facts()"),
@@ -342,7 +342,7 @@ final class AutoSecondOpinionTests: XCTestCase {
     func testCopilotOffSilencesTheSecondOpinion() {
         // Source pin: `/copilot off` must clear autoSecondOpinion, not just team mode — else "off" leaves
         // the per-turn second-opinion call running and the user can't quiet it.
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("copilot.autoSecondOpinion = false"),
                       "/copilot off must set autoSecondOpinion = false to fully silence the review")
         XCTAssertTrue(repl.contains("copilot.automaticBuildReview = false"),
@@ -352,14 +352,14 @@ final class AutoSecondOpinionTests: XCTestCase {
     // MARK: wiring source pins
 
     func testDirectTurnCarriesAnswerAuthorAndPreTurnBaselineWhenReviewIsArmed() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("runCopilotReview(task: messageText, answer: oc.summary, allowAdvisory: true,"))
         XCTAssertTrue(repl.contains("authoredBy: turnAuthor, baselineDiff: reviewBaseline"),
                       "review must bind to the actual author and the state captured before the turn")
     }
 
     func testMediaTurnsKeepCanonicalIntentAndBuildReviewContract() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("let mediaIntent = PromptCompiler.inferIntent(text, mode: mediaMode)"),
                       "a screenshot-fix request must not be hardcoded to chat")
         XCTAssertTrue(repl.contains("turnIntent: mediaIntent, turnSucceeded: oc.success"),
@@ -368,7 +368,7 @@ final class AutoSecondOpinionTests: XCTestCase {
     }
 
     func testSubstitutionAndRepairPreserveEvidenceAndCannotMaskRepairFailure() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("archivedTurnEvidence.append(contentsOf:"))
         XCTAssertTrue(repl.components(separatedBy: "archiveCurrentEvidencePhase()").count >= 4,
                       "substitution plus both repair paths must archive rather than erase earlier evidence")
@@ -378,7 +378,7 @@ final class AutoSecondOpinionTests: XCTestCase {
     }
 
     func testMonitoringRunsAfterReviewAndAccountsForRepairFailure() {
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         func occursInOrder(_ first: String, _ second: String) -> Bool {
             guard let a = repl.range(of: first),
                   let b = repl.range(of: second, range: a.upperBound..<repl.endIndex) else { return false }
@@ -397,7 +397,7 @@ final class AutoSecondOpinionTests: XCTestCase {
 
     func testReviewerMustBeADistinctModel() {
         // The whole point: consult ANOTHER model, never let a model grade its own work.
-        let repl = try! String(contentsOf: repoFile("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("func autoReviewer(answeredBy:"),
                       "there must be a reviewer picker that selects a DIFFERENT model than the one that answered")
         XCTAssertTrue(repl.contains("Copilot.isDistinctReviewer(co, from: answeredBy)"),

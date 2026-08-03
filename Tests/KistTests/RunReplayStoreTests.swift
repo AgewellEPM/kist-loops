@@ -86,9 +86,7 @@ final class RunReplayStoreTests: XCTestCase {
     }
 
     func testREPLActuallyEmitsTypedTurnDecisions() throws {
-        let repl = try String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
 
         XCTAssertTrue(repl.contains("kind: .routeSelected"))
         XCTAssertTrue(repl.contains("kind: .reviewAssessment"))

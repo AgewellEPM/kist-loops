@@ -470,8 +470,7 @@ final class StickyTurnCoordinatorTests: XCTestCase {
     func testRawAndFixedScreenHandoffOrderIsPinnedAtEveryCallSite() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let repl = try String(contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
-                              encoding: .utf8)
+        let repl = kistREPLFamilySource()
         let session = try String(contentsOf:
             root.appendingPathComponent("Sources/Kist/UX/TurnInteractionSession.swift"),
                                  encoding: .utf8)
@@ -982,8 +981,7 @@ final class StickyTurnCoordinatorTests: XCTestCase {
     func testMediaTurnSuspendsBeforeAnyInlineProtocolAndSignalsUseSafeRuntime() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let repl = try String(contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
-                              encoding: .utf8)
+        let repl = kistREPLFamilySource()
         let mediaStart = try XCTUnwrap(repl.range(of: "func runMediaTurn("))
         let mediaTail = repl[mediaStart.lowerBound...]
         let suspend = try XCTUnwrap(mediaTail.range(of: "pinnedBar.suspend()"))

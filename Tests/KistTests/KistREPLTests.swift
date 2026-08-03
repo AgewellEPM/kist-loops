@@ -471,10 +471,7 @@ final class KistREPLTests: XCTestCase {
     }
 
     func testDurableTurnLearningRunsOnceAfterReviewAndFinalVerdict() throws {
-        let sourceURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = kistREPLFamilySource()
         let summaryStart = try XCTUnwrap(source.range(of: "func printTurnSummary("))
         let learningStart = try XCTUnwrap(source.range(of: "func recordSubmittedTurnLearning("))
         let summaryBody = String(source[summaryStart.lowerBound..<learningStart.lowerBound])
