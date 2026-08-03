@@ -10,7 +10,7 @@ import Glibc
 /// turns), repeat. The Claude-Code-style interactive surface. The loop already streams its
 /// actions/results to the `TerminalEventSink`, so the REPL just manages input + the transcript.
 final class KistREPL {
-    let loop: HeadlessAgentLoop
+    var loop: HeadlessAgentLoop
     let commands: KistCommands
     /// Escalate to a SUPERVISED FLEET from inside the conversation (nil when unavailable, e.g. resume).
     var fleet: ((_ goal: String, _ agents: Int, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
@@ -140,6 +140,25 @@ final class KistREPL {
     var editTools: Set<String> = []
     var initialPermissionMode: PermissionMode = .normal
 
+    // MARK: - Per-session mutable state (promoted from run() locals so decomposed helpers can share it)
+    // Assigned at the top of run(); the nested-func-turned-methods read/write these instead of captures.
+    var perm: PermissionController!            // set first thing in run() (needs sensitiveTools/editTools)
+    var activeBinding = ProviderBinding(providerId: "unknown")   // reassigned first thing in run()
+    var extendedThinking = false
+    var showReasoning = false
+    var usageSnapshot: [AgentSpan] = []
+    var submittedTurnSpans: [AgentSpan] = []
+    var transcript: [ChatMessage] = []
+    var humanTranscript: [ChatMessage] = []
+    var style = ReplStyle()
+    var currentPersona = "captain"
+    var copilot = CopilotConfig()
+    var archivedTurnEvidence: [ActionRecord] = []
+    var repairPhaseFailed = false
+    var noInlinePreviewHintShown = false
+    var lastTurnInterrupted = false
+    var lastConfidenceReport: ConfidenceReport?
+
     // KistREPL is a class (reference type) so run()'s decomposed helpers can share mutable session
     // state as properties instead of 30 captured locals. Only loop + commands are required; the rest
     // are configured by the runner after construction (repl.X = …).
@@ -152,20 +171,13 @@ final class KistREPL {
         // Captured at session start so the status line can tell a plan THIS session is working
         // from a stale plan a prior session (or a council seed) left on disk — see PlanStatusVisibility.
         let sessionStart = Date()
-        var loop = self.loop   // mutable local: /plan toggles plan mode on the held loop
-        // The interactive permission tier (shift+tab bar). Source of truth for plan-mode + approvals;
-        // applied to `loop` before each turn via armTurnLoop(). See PermissionController.
-        var perm = PermissionController(mode: initialPermissionMode, sensitive: sensitiveTools, edit: editTools)
-        var roleSelection = self.roleSelection
-        var router = self.router
-        var autoRouting = self.autoRouting   // /model pins (off) · /model auto re-enables
-        var extendedThinking = loop.isExtendedThinking   // --think default; /think toggles it on the held loop
-        var showReasoning = loop.isExtendedThinking      // launched with --think ⇒ show reasoning (stays consistent across /model rebuilds)
-        var usageSnapshot: [AgentSpan] = []
-        var submittedTurnSpans: [AgentSpan] = []
-        // The model the conversation is currently talking to. In auto mode it changes per turn as the
-        // heuristic routes; pinning with /model fixes it. Drives the loop rebuild + the routed banner.
-        var activeBinding = roleSelection.fallback
+        // Per-session mutable state now lives on `self` (promoted from run() locals) so the decomposed
+        // turn/review/self-heal helpers share it. `loop`, `roleSelection`, `router`, `autoRouting` are
+        // already properties; assign the runtime-dependent ones here.
+        perm = PermissionController(mode: initialPermissionMode, sensitive: sensitiveTools, edit: editTools)
+        extendedThinking = loop.isExtendedThinking   // --think default; /think toggles it on the held loop
+        showReasoning = loop.isExtendedThinking      // launched with --think ⇒ show reasoning
+        activeBinding = roleSelection.fallback
         let headerMode = autoRouting ? "auto-routing"
             : (TeamLanguage.describeTeam(roleSelection.bindings)
                ?? Self.render(roleSelection.fallback))
@@ -177,21 +189,16 @@ final class KistREPL {
         let pinnedBar = PinnedBar(enabled: pinnedBarEnabled)
         pinnedBar.activate()
         defer { pinnedBar.deactivate() }
-        var transcript: [ChatMessage] = []
-        var humanTranscript: [ChatMessage] = []
-        // How Kist talks this session (set with `/mode`): interaction mode / reading level / custom
-        // persona. Loaded from the project so it survives relaunches; injected into each turn's prompt.
-        var style = ReplStyle.load(projectRoot: projectRoot)
+        // `transcript`, `humanTranscript`, `currentPersona`, `copilot` are now properties (promoted).
+        // `style` (set with `/mode`) loads from the project so it survives relaunches.
+        style = ReplStyle.load(projectRoot: projectRoot)
         let inputReader = EnhancedPromptReader()
         var cachedSymbols: [String]?
         var clipboardVisionApprovedForSession = autoApproveClipboardVision
-        var currentPersona = "captain"   // personality layer; professional default, /persona to switch
-        var copilot = CopilotConfig()    // /copilot: auto second-AI review of the diff after a coding turn
         // The shared recorder is phase-local so substitution/review logic can make decisions about the
         // current attempt. Preserve drained phases separately so final review, verification, learning, and
         // replay still see the complete submitted-turn evidence in execution order.
-        var archivedTurnEvidence: [ActionRecord] = []
-        var repairPhaseFailed = false
+        // archivedTurnEvidence + repairPhaseFailed are now properties (promoted).
         func resetTurnEvidence() {
             archivedTurnEvidence.removeAll(keepingCapacity: true)
             submittedTurnSpans.removeAll(keepingCapacity: true)
@@ -212,7 +219,6 @@ final class KistREPL {
         }
         // Show the "this terminal can't render inline images" hint at most once per session, so a
         // user on Terminal.app (no inline-image protocol) isn't left thinking the drop silently broke.
-        var noInlinePreviewHintShown = false
 
         func rememberHumanTurn(user: String, assistantSummary: String) {
             humanTranscript.append(ChatMessage(role: .user, content: user))
@@ -245,11 +251,9 @@ final class KistREPL {
 
         // R1: set by runTurnInterruptible when ESC stopped the turn; selfMonitor consults + resets
         // it so a user interrupt never books a false "task failed" obstacle lesson.
-        var lastTurnInterrupted = false
 
         // Preserve the exact report shown by the last completed turn. The recorder is reset before
         // slash-command dispatch, so rebuilding `/confidence` from it would always explain an empty turn.
-        var lastConfidenceReport: ConfidenceReport?
 
         // The SINGLE safe path for every conversational turn: run it under the esc-interrupt watcher,
         // shuttling the inout transcript through a box (it can't cross the escaping work closure). The
@@ -1484,8 +1488,8 @@ final class KistREPL {
                                                 completionCandidates: completionCandidates,
                                                 commandNames: InputCompleter.builtInCommands + commands.names.map { "/\($0)" },
                                                 onPaste: { PasteboardReader.text() },
-                                                barHint: { perm.barHint(includeInterrupt: true) },
-                                                onCycle: { perm.cycle() },
+                                                barHint: { self.perm.barHint(includeInterrupt: true) },
+                                                onCycle: { self.perm.cycle() },
                                                 // Runs from the prompt reader's defer before RawMode.disable().
                                                 // Kernel echo must never coexist with the fixed panel.
                                                 beforeRawRestore: { pinnedBar.suspend() },
