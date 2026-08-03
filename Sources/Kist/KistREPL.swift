@@ -158,6 +158,7 @@ final class KistREPL {
     var noInlinePreviewHintShown = false
     var lastTurnInterrupted = false
     var lastConfidenceReport: ConfidenceReport?
+    var chainServer: ChainServer?              // /chain — the local automation-builder web server (kept alive for the session)
     var sessionStart = Date()
     var pinnedBar: PinnedBar!                  // assigned at run() start (needs pinnedBarEnabled)
     var inputReader = EnhancedPromptReader()

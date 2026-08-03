@@ -53,6 +53,9 @@ extension KistREPL {
                             and optionally hand the builder brief to plan-execute  [alias /consult]
           /research <g>     gather an evidence dossier, run council over it, and seed the task board
           /competitive <t>  deep R&D cross-compare OUR project vs a competitor/product/URL  [alias /vs]
+          /chain [list|run <name>]
+                            automation center — opens a visual workflow builder (trigger→steps);
+                            Zapier × LangGraph for Kist. /chain list · /chain run <name>  [alias /automate]
           /mode [x]         how Kist talks: conversation·science·build·friend·nobs·normal,
                             /mode level <1..8|highschool|college>, /mode persona <your own voice>
           /legal-research <g + optional doc path>

@@ -13,6 +13,14 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.2", date: "2026-08-03",
+                headline: "/chain — a visual automation center",
+                changes: [
+                    "/chain — opens a local visual workflow builder (Zapier × LangGraph for Kist): drag a trigger into a graph of Kist steps + conditions, connect them, Save and Run",
+                    "Chains are saved as JSON in .kist/chains/ and can be run from the terminal too: /chain list · /chain run <name>",
+                    "Each 'Kist step' passes its output to the next ({{input}}); conditions branch on the text; schedule triggers are ready for daily automations",
+                    "Next: real tool-using turns per step + Scribe import + daily-email→respond wiring",
+                ]),
         Release(version: "0.17.1", date: "2026-08-03",
                 headline: "Action-first builds, /mode, honest goals",
                 changes: [

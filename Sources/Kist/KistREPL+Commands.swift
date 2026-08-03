@@ -984,6 +984,43 @@ extension KistREPL {
                     }
                     style.save(projectRoot: projectRoot)
                     return .handled
+                case "chain", "chains", "automate", "flow":
+                    // The automation center — Zapier × LangGraph for Kist. `/chain` opens the visual
+                    // web builder; `/chain list` lists saved chains; `/chain run <name>` runs one here.
+                    let store = ChainStore(projectRoot: projectRoot)
+                    let stepBinding = activeBinding
+                    let complete = modelComplete
+                    // Each "Kist step" runs as a completion on the active model (v1). Real tool-using
+                    // turns per step (so a step can send email / edit files) are the next increment.
+                    let runStep: @Sendable (String) async -> String = { prompt in
+                        await complete?(stepBinding.providerId, stepBinding.model,
+                                        "You are one step in a Kist automation chain. Do the task and return ONLY the result text.",
+                                        prompt) ?? "(no model available for this step)"
+                    }
+                    let runChain: @Sendable (Chain) async -> ChainRunner.RunResult = { c in
+                        await ChainRunner(runStep: runStep).run(c)
+                    }
+                    let sub = args.split(separator: " ", maxSplits: 1).map(String.init)
+                    if sub.first?.lowercased() == "list" {
+                        let cs = store.all()
+                        print(cs.isEmpty ? "\u{001B}[2mno chains yet — type /chain to open the builder\u{001B}[0m"
+                              : cs.map { "\u{001B}[36m⛓\u{001B}[0m \($0.name) \u{001B}[2m(\($0.id))\($0.schedule.map { " · \($0)" } ?? "")\u{001B}[0m" }.joined(separator: "\n"))
+                        return .handled
+                    }
+                    if sub.first?.lowercased() == "run", sub.count > 1 {
+                        guard let c = store.find(sub[1]) else { print("\u{001B}[31mno chain named '\(sub[1])'\u{001B}[0m — /chain list"); return .handled }
+                        print("\u{001B}[36;1m⛓ running \(c.name)…\u{001B}[0m")
+                        let r = await runChain(c)
+                        for s in r.steps { print("\u{001B}[2m  \(s.title) [\(s.kind.rawValue)] →\u{001B}[0m \(s.output.prefix(200))") }
+                        return .handled
+                    }
+                    // default: open the visual builder
+                    let server = ChainServer(store: store, runChain: runChain)
+                    guard let url = server.start() else { print("\u{001B}[31mcould not start the chain builder (port busy?)\u{001B}[0m"); return .handled }
+                    chainServer = server   // keep it alive for the session
+                    print("\u{001B}[36;1m⛓ chain builder\u{001B}[0m \u{001B}[2m· open\u{001B}[0m \u{001B}[94;1m\(url.absoluteString)\u{001B}[0m \u{001B}[2m(leave kist running)\u{001B}[0m")
+                    _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/open"), arguments: [url.absoluteString])
+                    return .handled
                 case "research", "deepdive", "sweep", "deep":
                     let researchGoal = args.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !researchGoal.isEmpty else {
