@@ -201,7 +201,7 @@ final class AutoModelRouterTests: XCTestCase {
 
     func testStartupHeaderShowsModeAndHint() {
         let auto = StartupHeader.render(mode: "auto-routing", projectRoot: "/tmp/x", planMode: false, color: false)
-        XCTAssertTrue(auto.contains("kist · v0.17.0 · auto-routing"))
+        XCTAssertTrue(auto.contains("kist · \(KistBuildInfo.startupLabel) · auto-routing"))
         XCTAssertTrue(auto.contains("auto-routing"))
         XCTAssertTrue(auto.contains("/model to pin"))
         let pinned = StartupHeader.render(mode: "gemini-2.5-flash", projectRoot: "/tmp/x", planMode: false, color: false)

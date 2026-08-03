@@ -215,9 +215,10 @@ final class DeploymentProvenanceTests: XCTestCase {
     }
 
     func testBuildInfoIsHonestSemanticVersionAndVersionFastPathPrecedesInitialization() throws {
-        XCTAssertEqual(KistBuildInfo.productVersion, "0.17.0")
-        XCTAssertEqual(KistBuildInfo.versionText, "kist 0.17.0")
-        XCTAssertEqual(KistBuildInfo.startupLabel, "v0.17.0")
+        // Version-agnostic: derived strings must stay consistent with productVersion on every bump
+        // (the semver-format check below pins that productVersion itself is a valid version).
+        XCTAssertEqual(KistBuildInfo.versionText, "kist \(KistBuildInfo.productVersion)")
+        XCTAssertEqual(KistBuildInfo.startupLabel, "v\(KistBuildInfo.productVersion)")
         let semver = try NSRegularExpression(
             pattern: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"#)
         let versionRange = NSRange(
