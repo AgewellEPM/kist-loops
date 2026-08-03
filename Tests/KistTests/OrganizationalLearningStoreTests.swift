@@ -690,8 +690,12 @@ final class OrganizationalLearningStoreTests: XCTestCase {
     }
 
     func testBoardMeetingWritesReportAndSeedsResearchTasks() {
-        let root = tempRoot()
-        defer { try? FileManager.default.removeItem(atPath: root) }
+        // The strategic-intelligence competitor watch-list is Kist's own roadmap → only seeded inside a
+        // Kist project now; use a kist-named root so this test exercises it.
+        let base = tempRoot()
+        let root = base + "/kist-loops"
+        try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: base) }
         let plan = Plan(title: "Kist Captain",
                         tasks: [PlanTask(id: 1,
                                          title: "ACTION: wire Captain orchestration",
@@ -1969,8 +1973,10 @@ final class OrganizationalLearningStoreTests: XCTestCase {
     }
 
     func testStrategicIntelligenceCommandShowsRecordsAfterEvolve() {
-        let root = tempRoot()
-        defer { try? FileManager.default.removeItem(atPath: root) }
+        let base = tempRoot()
+        let root = base + "/kist-loops"
+        try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: base) }
         let plan = Plan(title: "Kist Strategic Intelligence",
                         tasks: [PlanTask(id: 1,
                                          title: "ACTION: build Strategic Intelligence",

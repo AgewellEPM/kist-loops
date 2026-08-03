@@ -56,7 +56,8 @@ enum StrategicIntelligencePlanner {
                       debts: [KnowledgeDebtRecord],
                       insights: DashboardInsightBundle,
                       learning: [CaptainLearningSummary],
-                      generatedAt: Double) -> StrategicIntelligenceSnapshot {
+                      generatedAt: Double,
+                      isKistProject: Bool = false) -> StrategicIntelligenceSnapshot {
         let context = [
             objective,
             strategy.objective,
@@ -71,7 +72,10 @@ enum StrategicIntelligencePlanner {
         let toolLifecycle = orchestration || containsAny(context, ["mcp", "tool", "permission", "sandbox", "browser"])
         let localReasoning = containsAny(context, ["local", "offline", "apple", "foundation", "latency", "privacy"])
 
-        var targets = baselineTargets()
+        // The hardcoded competitor/roadmap watch-list (Cursor/OpenHands/Claude Code/MCP/Apple) is Kist's
+        // OWN self-improvement roadmap — only relevant when developing Kist itself. On any other project it
+        // made the "goals" never change (same 5 items every turn, unrelated to the actual work). Gate it.
+        var targets = isKistProject ? baselineTargets() : []
         if orchestration {
             promote(["cursor-background-agents", "openhands-planner-runtime", "claude-code-subagents-hooks"], in: &targets)
         }

@@ -13,13 +13,17 @@ extension OrganizationalLearningStore {
         let strategy = CaptainStrategist.plan(objective: strategyObjective(plan: plan),
                                               evidence: CaptainProjectEvidence.capture(projectRoot: projectRoot),
                                               specialists: makeSpecialistRegistry(projectRoot).load())
+        // The hardcoded Kist competitor watch-list only belongs when developing Kist itself.
+        let pname = URL(fileURLWithPath: projectRoot).lastPathComponent.lowercased()
+        let isKistProject = pname == "kist" || pname == "kist-loops" || pname.hasPrefix("kist-") || pname == "mythos"
         let intelligence = StrategicIntelligencePlanner.build(
             objective: strategy.objective,
             strategy: strategy,
             debts: debts,
             insights: insights,
             learning: captainLearningRetrievalSummaries(),
-            generatedAt: now().timeIntervalSince1970)
+            generatedAt: now().timeIntervalSince1970,
+            isKistProject: isKistProject)
         let strategicResearch = strategicResearchItems(from: intelligence)
         let combinedInsights = DashboardInsightBundle(
             research: mergeResearch(strategicResearch + insights.research),
