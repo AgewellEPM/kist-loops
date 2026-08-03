@@ -158,6 +158,12 @@ final class KistREPL {
     var noInlinePreviewHintShown = false
     var lastTurnInterrupted = false
     var lastConfidenceReport: ConfidenceReport?
+    var sessionStart = Date()
+    var pinnedBar: PinnedBar!                  // assigned at run() start (needs pinnedBarEnabled)
+    var inputReader = EnhancedPromptReader()
+    var cachedSymbols: [String]?
+    var clipboardVisionApprovedForSession = false
+    var activeInteractionSession: TurnInteractionSession?
 
     // KistREPL is a class (reference type) so run()'s decomposed helpers can share mutable session
     // state as properties instead of 30 captured locals. Only loop + commands are required; the rest
@@ -168,12 +174,11 @@ final class KistREPL {
     }
 
     func run() async {
-        // Captured at session start so the status line can tell a plan THIS session is working
-        // from a stale plan a prior session (or a council seed) left on disk — see PlanStatusVisibility.
-        let sessionStart = Date()
         // Per-session mutable state now lives on `self` (promoted from run() locals) so the decomposed
         // turn/review/self-heal helpers share it. `loop`, `roleSelection`, `router`, `autoRouting` are
-        // already properties; assign the runtime-dependent ones here.
+        // already properties; assign the runtime-dependent ones here. `sessionStart` (property) is
+        // captured so the status line can tell a plan THIS session worked from a stale prior plan.
+        sessionStart = Date()
         perm = PermissionController(mode: initialPermissionMode, sensitive: sensitiveTools, edit: editTools)
         extendedThinking = loop.isExtendedThinking   // --think default; /think toggles it on the held loop
         showReasoning = loop.isExtendedThinking      // launched with --think ⇒ show reasoning
@@ -186,15 +191,13 @@ final class KistREPL {
         // R2b: pin the input panel to the bottom (scroll-region). Activated AFTER the header so the
         // header lands in normal scrollback; deactivated on EVERY exit path so the shell is never left
         // with a stuck region. When disabled/non-TTY the leads below are byte-identical to the old inline box.
-        let pinnedBar = PinnedBar(enabled: pinnedBarEnabled)
-        pinnedBar.activate()
-        defer { pinnedBar.deactivate() }
+        pinnedBar = PinnedBar(enabled: pinnedBarEnabled)
+        self.pinnedBar.activate()
+        defer { self.pinnedBar.deactivate() }
         // `transcript`, `humanTranscript`, `currentPersona`, `copilot` are now properties (promoted).
         // `style` (set with `/mode`) loads from the project so it survives relaunches.
         style = ReplStyle.load(projectRoot: projectRoot)
-        let inputReader = EnhancedPromptReader()
-        var cachedSymbols: [String]?
-        var clipboardVisionApprovedForSession = autoApproveClipboardVision
+        clipboardVisionApprovedForSession = autoApproveClipboardVision
         // The shared recorder is phase-local so substitution/review logic can make decisions about the
         // current attempt. Preserve drained phases separately so final review, verification, learning, and
         // replay still see the complete submitted-turn evidence in execution order.
@@ -366,7 +369,7 @@ final class KistREPL {
         func runMediaTurn(_ atts: [MediaAttachment], prompt: String) async {
             // Inline image protocols (OSC/APC), ANSI previews, and binary/fullscreen media renderers
             // must own a normal terminal. Abandon sticky capture before emitting even the first byte.
-            pinnedBar.suspend()
+            self.pinnedBar.suspend()
             armTurnLoop()
             if let preview = TerminalMediaRenderer.preview(attachments: atts) {
                 FileHandle.standardOutput.write(Data(("\n" + preview + "\n").utf8))
@@ -1441,7 +1444,6 @@ final class KistREPL {
                                              symbolCache: { cachedSymbols ?? [] })
         }
 
-        var activeInteractionSession: TurnInteractionSession?
         while true {
             // The previous submitted message is complete only now: post-review and usage rendering
             // have finished. `finish()` releases descriptor capture + DECSTBM while stdin is still
@@ -1450,7 +1452,7 @@ final class KistREPL {
             if let session = activeInteractionSession {
                 await session.finish()
                 activeInteractionSession = nil
-                pinnedBar.endStickyTurn()
+                self.pinnedBar.endStickyTurn()
             }
             // Claude-Code-style rounded input box: a top border, then a `│ ❯` prompt line the reader edits
             // inside, a bottom border, and the hint. (Plan mode flags the prompt yellow.)
@@ -1463,14 +1465,14 @@ final class KistREPL {
             let status = await renderStatusLine()
             // R2b: re-pin if the terminal was resized since the last prompt, then draw the panel in the
             // pinned strip. `panelLead()` is "\n" when the bar is off ⇒ identical to the old inline box.
-            pinnedBar.resume()                 // re-pin the strip after a turn ran with the region torn down
-            pinnedBar.refreshSizeIfNeeded()
+            self.pinnedBar.resume()                 // re-pin the strip after a turn ran with the region torn down
+            self.pinnedBar.refreshSizeIfNeeded()
             // Size the reserved strip to the ACTUAL status height (1 line, or 2 when a task board is
             // active) so the box never overflows the pinned region and corrupts the panel mid-plan.
             let statusRows = status.isEmpty ? 1 : status.split(separator: "\n", omittingEmptySubsequences: false).count
-            let panelLead = pinnedBar.panelLead(statusRows: statusRows)
+            let panelLead = self.pinnedBar.panelLead(statusRows: statusRows)
             let line: String
-            let promptWasPinned = pinnedBar.active
+            let promptWasPinned = self.pinnedBar.active
             // R2a: a drained line was typed while the user may have WALKED AWAY — never block the
             // backlog on an interactive y/N confirm for it (router guard below).
             var lineFromQueue = false
@@ -1480,7 +1482,7 @@ final class KistREPL {
                 lineFromQueue = true
                 // There is no prompt reader/raw-mode defer on this path. Release the fixed screen
                 // explicitly before the new turn session takes stdin ownership.
-                pinnedBar.suspend()
+                self.pinnedBar.suspend()
             } else {
                 FileHandle.standardOutput.write(Data((panelLead + status + "\n" + topBorder + "\n").utf8))
                 let read = inputReader.readLine(prompt: promptColor,
@@ -1492,7 +1494,7 @@ final class KistREPL {
                                                 onCycle: { self.perm.cycle() },
                                                 // Runs from the prompt reader's defer before RawMode.disable().
                                                 // Kernel echo must never coexist with the fixed panel.
-                                                beforeRawRestore: { pinnedBar.suspend() },
+                                                beforeRawRestore: { self.pinnedBar.suspend() },
                                                 // R2a: half-typed text from during the turn lands here.
                                                 initialText: TurnInputQueue.shared.takePending())
                 switch read {
@@ -1513,13 +1515,13 @@ final class KistREPL {
                 var setBracketedPasteMode: (@Sendable (Bool) -> Void)?
                 if stickyTurnsEnabled, promptWasPinned {
                     onInputChange = { pending, queuedCount in
-                        pinnedBar.updateStickyTypeahead(
+                        self.pinnedBar.updateStickyTypeahead(
                             pending: pending, queuedCount: queuedCount)
                     }
-                    onScreenLeaseBegin = { pinnedBar.beginInputScreenLease() }
-                    onScreenLeaseEnd = { pinnedBar.endInputScreenLease() }
-                    onScreenReleaseBeforeFinish = { pinnedBar.suspend() }
-                    setBracketedPasteMode = { pinnedBar.setBracketedPasteEnabled($0) }
+                    onScreenLeaseBegin = { self.pinnedBar.beginInputScreenLease() }
+                    onScreenLeaseEnd = { self.pinnedBar.endInputScreenLease() }
+                    onScreenReleaseBeforeFinish = { self.pinnedBar.suspend() }
+                    setBracketedPasteMode = { self.pinnedBar.setBracketedPasteEnabled($0) }
                 }
                 let session = TurnInteractionSession(
                     queue: TurnInputQueue.shared,
@@ -1540,9 +1542,9 @@ final class KistREPL {
                    turnSession?.safelyOwnsRawStdin == true {
                     // The prompt reader released DECSTBM before restoring cooked mode. Re-pin only
                     // after this turn's one watcher has confirmed raw stdin ownership.
-                    pinnedBar.resume()
-                    if pinnedBar.active {
-                        FileHandle.standardOutput.write(Data((pinnedBar.transcriptLead()
+                    self.pinnedBar.resume()
+                    if self.pinnedBar.active {
+                        FileHandle.standardOutput.write(Data((self.pinnedBar.transcriptLead()
                             + "\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
                         committedEchoWritten = true
                         let snapshot = TurnInputQueue.shared.preview()
@@ -1552,11 +1554,11 @@ final class KistREPL {
                             pending: snapshot.pending,
                             queuedCount: snapshot.queuedCount,
                             hint: perm.barHint(includeInterrupt: true))
-                        stickyCaptureSucceeded = pinnedBar.beginStickyTurn(panel: panel)
+                        stickyCaptureSucceeded = self.pinnedBar.beginStickyTurn(panel: panel)
                     }
                     if !stickyCaptureSucceeded {
                         // Raw ownership or capture setup failed. Stay on the full-screen fallback.
-                        pinnedBar.suspend()
+                        self.pinnedBar.suspend()
                     }
                 }
 

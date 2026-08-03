@@ -143,7 +143,7 @@ final class KistREPLTests: XCTestCase {
                       "/mode command must exist")
         XCTAssertTrue(repl.contains("if let styleDirective = style.directive()"),
                       "the selected style must be injected into each turn's prompt")
-        XCTAssertTrue(repl.contains("var style = ReplStyle.load(projectRoot: projectRoot)"),
+        XCTAssertTrue(repl.contains("style = ReplStyle.load(projectRoot: projectRoot)"),
                       "style must be loaded from the project so it persists across relaunches")
     }
 
