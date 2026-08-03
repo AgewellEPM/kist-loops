@@ -171,6 +171,9 @@ struct KistREPL {
         defer { pinnedBar.deactivate() }
         var transcript: [ChatMessage] = []
         var humanTranscript: [ChatMessage] = []
+        // How Kist talks this session (set with `/mode`): interaction mode / reading level / custom
+        // persona. Loaded from the project so it survives relaunches; injected into each turn's prompt.
+        var style = ReplStyle.load(projectRoot: projectRoot)
         let inputReader = EnhancedPromptReader()
         var cachedSymbols: [String]?
         var clipboardVisionApprovedForSession = autoApproveClipboardVision
@@ -543,6 +546,14 @@ struct KistREPL {
             let repairSuffix = repairPhaseFailed ? " repair=failed-or-interrupted" : ""
             proofStore?.record(.init(kind: .turnFinalized, tool: nil, success: finalSuccess,
                                      text: "intent=\(intent.rawValue) expected=\(expected.rawValue) result=\(finalSuccess ? "completed" : "failed")\(repairSuffix) checkpoint=\(outcome.checkpointId)"))
+            // BUILD STATUS CONTRACT: for any turn that was supposed to change code, print a hard
+            // PATCH→APPLY→FILES→BUILD/TEST→BOARD checklist from the recorded trajectory. This makes
+            // "I will apply the patch" vs "the patch is applied and verified" impossible to confuse —
+            // the exact gap Luke hit where a plan was laundered into a done summary.
+            if expected == .mutation {
+                let status = BuildStatusReport(trajectory: trajectory)
+                print(status.render(color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
+            }
             return finalSuccess
         }
 
@@ -1030,10 +1041,22 @@ struct KistREPL {
                 print("\u{001B}[31mself-heal dispatch needs specialist run support in this REPL\u{001B}[0m")
                 return
             }
+            // Automatic repair must not run while the session is in plan mode
+            // (read-only proposals). The builder/critic need edit_file+run_command;
+            // in plan mode those are blocked mid-run, which is exactly the useless
+            // "blocked by plan mode" half-dispatch we saw. Silently forcing execute
+            // would be privilege escalation, so defer with an actionable message.
+            if automatic && perm.effectivePlan {
+                print("\u{001B}[33mCaptain self-heal deferred: plan mode is on (read-only). Turn plan mode off to let repair specialists act.\u{001B}[0m")
+                return
+            }
             let store = OrganizationalLearningStore(projectRoot: projectRoot)
             var priorEvidence: [String] = []
+            // The clean HANDOFF: the researcher produces a machine-readable repair spec, and the BUILDER
+            // receives ONLY that (not the research transcript) so it executes instead of re-researching.
+            var researcherHandoff: SelfHealHandoff?
             if automatic {
-                print("\u{001B}[33mCaptain supervisor dispatch\u{001B}[0m · \(report.agentAssignments.count) repair specialist(s) · evidence chained")
+                print("\u{001B}[33mCaptain supervisor dispatch\u{001B}[0m · \(report.agentAssignments.count) repair specialist(s) · clean handoff")
             }
             for assignment in report.agentAssignments {
                 let agentColor = SpecialistRegistry(projectRoot: projectRoot)
@@ -1044,13 +1067,35 @@ struct KistREPL {
                 let evidenceBrief = priorEvidence.isEmpty
                     ? ""
                     : "\n\nEvidence from earlier self-heal specialists:\n" + priorEvidence.joined(separator: "\n\n")
+                // The builder gets the immutable handoff spec ONLY — no transcript, no "here's another
+                // idea". Every other role keeps the chained evidence (they review/decide on the work).
+                let taskForAgent: String
+                if assignment.specialistName == "self-heal-builder", let h = researcherHandoff, h.isActionable {
+                    taskForAgent = h.builderBrief()
+                } else {
+                    taskForAgent = assignment.task + evidenceBrief
+                }
                 print("\u{001B}[2m⇢ self-heal delegating to \(tinted) · \(assignment.role) · preferred \(assignment.preferredModel)\u{001B}[0m")
                 if let summary = await runSpecialist(assignment.specialistName,
-                                                      assignment.task + evidenceBrief,
+                                                      taskForAgent,
                                                       perm.effectiveApproval(),
                                                       perm.effectivePlan) {
-                    print("\u{001B}[36;1m⇠ \(assignment.specialistName)\u{001B}[0m\n\(summary)")
+                    print("\u{001B}[36;1m⇠ \(assignment.specialistName)\u{001B}[0m")
                     priorEvidence.append("## \(assignment.specialistName)\n\(summary)")
+                    // Parse the researcher's handoff. ACTION-FIRST: if it didn't hand off an actionable
+                    // repair, HALT — do not churn more research/review/teach tasks on an unproven cause.
+                    if assignment.specialistName == "self-heal-researcher" {
+                        researcherHandoff = SelfHealHandoff.parse(from: summary)
+                        if let h = researcherHandoff, h.isActionable {
+                            print("\u{001B}[36m⇢ handoff → builder\u{001B}[0m\u{001B}[2m · \(h.rootCause) · \(Int((h.confidence*100).rounded()))% · files: \(h.targetFiles.joined(separator: ", "))\u{001B}[0m")
+                        } else {
+                            _ = store.recordSelfHealSpecialistOutput(objective: objective,
+                                                                     assignment: assignment, summary: summary)
+                            let why = researcherHandoff?.blockedReason ?? "no actionable handoff (root cause not pinned)"
+                            print("\u{001B}[33mself-heal halted after research: \(why). Escalate — not opening more research.\u{001B}[0m")
+                            break
+                        }
+                    }
                     if let artifact = store.recordSelfHealSpecialistOutput(objective: objective,
                                                                             assignment: assignment,
                                                                             summary: summary) {
@@ -1218,7 +1263,12 @@ struct KistREPL {
                                                       assignment.task,
                                                       perm.effectiveApproval(),
                                                       perm.effectivePlan) {
-                    print("\u{001B}[36;1m⇠ \(assignment.specialistName)\u{001B}[0m\n\(summary)")
+                    // The specialist's output already streamed live through the
+                    // spawner's own TerminalEventSink; re-printing `summary` here
+                    // duplicated the whole answer (and dumped raw plan/CoT twice).
+                    // Emit only a compact completion marker — the full text is still
+                    // captured into evidence + the artifact below.
+                    print("\u{001B}[36;1m⇠ \(assignment.specialistName)\u{001B}[0m")
                     if let artifact = OrganizationalLearningStore(projectRoot: projectRoot)
                         .recordDomainLearningSpecialistOutput(objective: report.objective,
                                                               assignment: assignment,
@@ -1262,7 +1312,12 @@ struct KistREPL {
                                                       assignment.task + evidenceBrief,
                                                       perm.effectiveApproval(),
                                                       perm.effectivePlan) {
-                    print("\u{001B}[36;1m⇠ \(assignment.specialistName)\u{001B}[0m\n\(summary)")
+                    // The specialist's output already streamed live through the
+                    // spawner's own TerminalEventSink; re-printing `summary` here
+                    // duplicated the whole answer (and dumped raw plan/CoT twice).
+                    // Emit only a compact completion marker — the full text is still
+                    // captured into evidence + the artifact below.
+                    print("\u{001B}[36;1m⇠ \(assignment.specialistName)\u{001B}[0m")
                     priorEvidence.append("## \(assignment.specialistName)\n\(summary)")
                 } else {
                     print("\u{001B}[31mlegal research agent unavailable: \(assignment.specialistName)\u{001B}[0m")
@@ -1854,8 +1909,10 @@ struct KistREPL {
                         print("\u{001B}[2m⇢ delegating to \(tinted)…\u{001B}[0m")
                         // Pass the parent's EFFECTIVE floor (honors the unconfirmed-bypass fail-safe — an
                         // unconfirmed bypass reads as normal, so it can't hand the child an empty floor).
-                        if let summary = await runSpecialist(name, task, perm.effectiveApproval(), perm.effectivePlan) {
-                            print("\u{001B}[36;1m⇠ \(name)\u{001B}[0m\n\(summary)")
+                        if await runSpecialist(name, task, perm.effectiveApproval(), perm.effectivePlan) != nil {
+                            // Output already streamed live through the spawner's
+                            // TerminalEventSink; a concise marker avoids reprinting it.
+                            print("\u{001B}[36;1m⇠ \(name)\u{001B}[0m")
                         } else {
                             print("\u{001B}[31mno specialist named '\(name)'\u{001B}[0m — /agents to list")
                         }
@@ -2370,6 +2427,35 @@ struct KistREPL {
                         await planExecute(args, roleSelection.bindings)
                     }
                     continue
+                case "build", "implement", "buildit", "ship-it", "makeit":
+                    // THE BRIDGE from "here's the plan" to actually building it. `/build <goal>` fires the
+                    // plan→execute worker (real code + build/tests), not another analysis turn. With NO
+                    // args it BUILDS THE PLAN JUST PROPOSED — so after Kist lays out a plan you type
+                    // `/build` and it executes it instead of researching forever. Compose with `/ultra`
+                    // first for consensus review on the build.
+                    guard let planExecute else { print("\u{001B}[31m/build isn't available here\u{001B}[0m"); continue }
+                    let buildGoal: String
+                    if !args.isEmpty {
+                        buildGoal = Self.expandBoardReference(args, projectRoot: projectRoot,
+                                                              sessionStartedAt: sessionStart)
+                    } else {
+                        let lastUser = humanTranscript.reversed().first { $0.role == .user }?.content
+                        let lastPlan = humanTranscript.reversed().first { $0.role == .assistant }?.content
+                        guard let lastUser else {
+                            print("usage: /build <goal> — or run it right after a plan and it builds what was just proposed")
+                            continue
+                        }
+                        buildGoal = "EXECUTE and BUILD the plan you just proposed — implement it now with real "
+                            + "code and a passing build/test. Do NOT re-research, re-plan, or re-analyze; the "
+                            + "plan is already decided.\n\nOriginal request: \(lastUser)"
+                            + (lastPlan.map { "\n\nThe plan to execute:\n\($0)" } ?? "")
+                    }
+                    print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · firing plan→execute worker (real code + build/tests)\u{001B}[0m")
+                    await runHeavyRoute(goal: buildGoal, intent: .build, mode: .planExecute,
+                                        execution: "build", startProof: true) {
+                        await planExecute(buildGoal, roleSelection.bindings)
+                    }
+                    continue
                 case "council", "consult":
                     guard let council else { print("\u{001B}[31m/council isn't available here\u{001B}[0m"); continue }
                     guard let invocation = Self.parseCouncilArgs(args) else {
@@ -2384,9 +2470,9 @@ struct KistREPL {
                         await council(invocation.goal, roleSelection.bindings, invocation.execute)
                     }
                     continue
-                case "dig", "digdeep", "minds", "mind":
+                case "dig", "digdeep", "minds", "mind", "effort":
                     guard let digDeep else { print("\u{001B}[31m/dig isn't available here\u{001B}[0m"); continue }
-                    guard !args.isEmpty else { print("usage: /dig <question> — ask every reachable model in parallel and synthesize"); continue }
+                    guard !args.isEmpty else { print("usage: /dig (a.k.a. /effort) <question> — ask every reachable model in parallel and synthesize"); continue }
                     await runHeavyRoute(goal: args, intent: .review, mode: .inline,
                                         execution: "dig-in-deep", startProof: true) {
                         await digDeep(args, roleSelection.bindings)
@@ -2415,6 +2501,44 @@ struct KistREPL {
                         print("usage: /ultra | /ultra off   (review consensus; original author repairs, max 3)")
                     }
                     continue
+                case "mode", "modes", "voice":
+                    // Set HOW Kist talks: interaction mode / reading level / custom persona. Persisted.
+                    let a = args.trimmingCharacters(in: .whitespaces)
+                    func showMode() {
+                        print("\u{001B}[36;1m/mode\u{001B}[0m \u{001B}[2m· current:\u{001B}[0m \(style.summary)")
+                        print("\u{001B}[2m  interaction: conversation · science · build · friend · nobs · normal\u{001B}[0m")
+                        print("\u{001B}[2m  reading level: /mode level <1..8 | highschool | college>\u{001B}[0m")
+                        print("\u{001B}[2m  custom voice:  /mode persona <describe the partner you want>  (/mode persona off)\u{001B}[0m")
+                    }
+                    if a.isEmpty { showMode(); continue }
+                    let parts = a.split(separator: " ", maxSplits: 1).map(String.init)
+                    let head = parts[0].lowercased()
+                    let rest = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+                    switch head {
+                    case "off", "normal", "default", "reset", "clear":
+                        style = ReplStyle()
+                        print("\u{001B}[32m✓ mode reset to normal\u{001B}[0m")
+                    case "level", "reading", "grade", "readinglevel":
+                        if ["off", "none", "clear"].contains(rest.lowercased()) {
+                            style.readingLevel = nil; print("\u{001B}[32m✓ reading level cleared\u{001B}[0m")
+                        } else if let lvl = ReplStyle.ReadingLevel.parse(rest) {
+                            style.readingLevel = lvl; print("\u{001B}[32m✓ reading level · \(lvl.label)\u{001B}[0m")
+                        } else { print("\u{001B}[31musage: /mode level <1..8 | highschool | college>\u{001B}[0m"); continue }
+                    case "persona", "personality":
+                        if rest.isEmpty { print("usage: /mode persona <describe the partner you want>  (/mode persona off)"); continue }
+                        if ["off", "none", "clear"].contains(rest.lowercased()) {
+                            style.persona = nil; print("\u{001B}[32m✓ persona cleared\u{001B}[0m")
+                        } else {
+                            style.persona = rest; print("\u{001B}[32m✓ persona set\u{001B}[0m \u{001B}[2m· \(style.summary)\u{001B}[0m")
+                        }
+                    default:
+                        if let m = ReplStyle.Mode.parse(a) {
+                            style.mode = m; style.persona = nil       // picking a mode clears a custom persona
+                            print("\u{001B}[32m✓ mode · \(m.rawValue)\u{001B}[0m \u{001B}[2m(\(style.summary))\u{001B}[0m")
+                        } else { print("\u{001B}[31munknown mode '\(a)'\u{001B}[0m"); showMode(); continue }
+                    }
+                    style.save(projectRoot: projectRoot)
+                    continue
                 case "research", "deepdive", "sweep", "deep":
                     let researchGoal = args.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !researchGoal.isEmpty else {
@@ -2433,6 +2557,35 @@ struct KistREPL {
                     await runHeavyRoute(goal: researchGoal, intent: .research, mode: .inline,
                                         execution: "research", startProof: true) {
                         await research(researchGoal, roleSelection.bindings)
+                    }
+                    continue
+                case "competitive", "compete", "competitor", "vs":
+                    // Point Kist at a competitor/URL/product and get a deep, cited R&D cross-comparison
+                    // of OUR project vs theirs. Rides the /research evidence pipeline (web + our own
+                    // estate sweep + council), framed as head-to-head competitive analysis.
+                    guard let research else { print("\u{001B}[31m/competitive isn't available here\u{001B}[0m"); continue }
+                    let target = args.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !target.isEmpty else {
+                        print("usage: /competitive <competitor, product, or URL> — deep R&D cross-compare vs our project")
+                        continue
+                    }
+                    let competitiveGoal = """
+                    Competitive analysis & R&D cross-comparison — head to head.
+                    Compare OUR current project (repo root: \(projectRoot)) against the target: \(target)
+
+                    Deliver a deep, evidence-cited report:
+                    • THEM — what the target does and how (features, architecture, positioning, pricing/GTM), from primary sources.
+                    • US — what our project actually does (use the estate sweep of our own files), our distinct approach and ownership.
+                    • HEAD-TO-HEAD — what stands out on each side; where we win, where they win, where we're at parity.
+                    • MARKET — who else plays here, what's table stakes, and where the space is heading.
+                    • GAPS & R&D MOVES — concrete, prioritized things we could build to differentiate or leapfrog.
+                    Ground every claim in a source; clearly separate verified facts from inference. Do not inflate.
+                    Target: \(target)
+                    """
+                    print("\u{001B}[36;1m📊 competitive\u{001B}[0m\u{001B}[2m · cross-comparing our project vs \(target)\u{001B}[0m")
+                    await runHeavyRoute(goal: competitiveGoal, intent: .research, mode: .inline,
+                                        execution: "competitive-analysis", startProof: true) {
+                        await research(competitiveGoal, roleSelection.bindings)
                     }
                     continue
                 default:
@@ -2522,9 +2675,15 @@ struct KistREPL {
             // so talking changes the system, not just the prompt. Conservative: only fires on an explicit
             // agent-introduction structure (won't touch "build a login page" / "research the gemini api").
             var messageBody = input
+            // When the user explicitly names a model this turn ("ask deepseek …", "use claude"),
+            // that pin must WIN — the auto-router below must not silently re-route it (e.g. a task
+            // with reasoning keywords would otherwise flip "ask deepseek architect X" to a different
+            // reasoning model). Set on an explicit .setModel intent; gates the autoRoute block.
+            var userPinnedModelThisTurn = false
             if let intent = ControlIntentParser.parse(input, knownProviders: providerAliases) {
                 switch intent.action {
                 case .setModel(let binding):
+                    userPinnedModelThisTurn = true
                     if let err = roleSelection.setDefault(binding, knownProviders: providerAliases) {
                         print("\u{001B}[31m\(err)\u{001B}[0m")
                     } else {
@@ -2663,6 +2822,20 @@ struct KistREPL {
                 }
                 continue
             }
+            // ACTION-FIRST (Luke 2026-08-02): a clear BUILD request fires the plan→execute WORKER, not an
+            // inline chat turn that just analyzes. Research-first was the disease — Kist produced perfect
+            // plans and never built them. Only for an explicit build intent, not in plan mode, not a
+            // team/queued line. The worker's edits stay approval-gated; /plan (or "just plan …") keeps it
+            // read-only. This is the main-turn half of the "stop researching, start building" contract.
+            if turnIntent == .build, turnMode != .plan, !armedTeamThisTurn, !lineFromQueue, let planExecute {
+                print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · action-first: firing the plan→execute worker (edits still ask; /plan for read-only)\u{001B}[0m")
+                await runHeavyRoute(goal: messageText, intent: .build, mode: .planExecute,
+                                    execution: "build", startProof: false) {
+                    await planExecute(messageText, roleSelection.bindings)
+                }
+                await printTurnSummary()
+                continue
+            }
             let routingWasInterrupted = MutableBox(false)
             var routeProposal: ConversationRouter.Proposal?
             if let router, !lineFromQueue, !armedTeamThisTurn {
@@ -2718,7 +2891,7 @@ struct KistREPL {
 
             // AUTO MODEL ROUTING: unless a model is pinned, pick the best one for THIS request (cheap
             // heuristic). Only rebuild the loop when the routed model actually changes, and disclose it.
-            if autoRouting, let autoRoute {
+            if autoRouting, !userPinnedModelThisTurn, let autoRoute {
                 let decision = autoRoute(messageText, false, activeBinding)
                 if decision.binding != activeBinding {
                     if let loopFactory {
@@ -2740,6 +2913,9 @@ struct KistREPL {
                                           humanTranscript, turnIntent) ?? messageText
             if let display = personaDisplay?(messageText) { print(Self.stdoutColorEnabled(projectRoot: projectRoot) ? "\u{001B}[95;1m🎭 \(display)\u{001B}[0m" : "↳ \(display)") }
             var enriched = attachCaptainContext(to: compiled, objective: messageText)
+            // STYLE (`/mode`): prepend the requested voice — interaction mode / reading level / custom
+            // persona — so the model actually adopts it for this reply.
+            if let styleDirective = style.directive() { enriched = styleDirective + "\n\n" + enriched }
             // AUTO-EXPLORE: a lookup/find/self question ("find what we did for tinkyspeak", "how does your
             // X work") is answered from OUR OWN FILES, not the model's memory. Search the estate in-process
             // (full FS read, bypassing the tool sandbox) and inject what we find so the model stops
@@ -2812,604 +2988,5 @@ struct KistREPL {
             await printTurnUsage()
             recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
         }
-    }
-
-    /// Read a line without echoing it (for pasting an API key inline). Falls back to a visible readLine
-    /// when there's no controlling TTY (pipes/tests).
-    static func readHiddenLine() -> String {
-        if let c = getpass("") { return String(cString: c).trimmingCharacters(in: .whitespacesAndNewlines) }
-        return (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    enum DocumentExportRequestResult: Equatable {
-        case notDocumentExport
-        case handled(String)
-        case failed(String)
-    }
-
-    static func handleDocumentExportRequest(_ input: String,
-                                            humanTranscript: [ChatMessage],
-                                            projectRoot: String,
-                                            now: Date = Date()) -> DocumentExportRequestResult {
-        guard DocumentExport.parseIntent(input) != nil else { return .notDocumentExport }
-        do {
-            guard let message = try DocumentExport.writeLatestAssistantDocument(input: input,
-                                                                                transcript: humanTranscript,
-                                                                                projectRoot: projectRoot,
-                                                                                now: now) else {
-                return .notDocumentExport
-            }
-            return .handled(message)
-        } catch {
-            return .failed(error.localizedDescription)
-        }
-    }
-
-    struct SelfCodebaseAuditRequest: Equatable {
-        var projectRoot: String
-        var seedRepairs: Bool
-    }
-
-    static func selfCodebaseAuditRequest(_ input: String,
-                                         currentProjectRoot: String,
-                                         environment: [String: String] = ProcessInfo.processInfo.environment) -> SelfCodebaseAuditRequest? {
-        guard isSelfCodebaseAuditIntent(input) else { return nil }
-        let current = ToolContext.canonicalize(currentProjectRoot) ?? currentProjectRoot
-        if isKistSourceRoot(current) {
-            return SelfCodebaseAuditRequest(projectRoot: current,
-                                            seedRepairs: selfCodebaseAuditShouldSeedRepairs(input))
-        }
-        guard !isConcreteCodeProjectRoot(current) else { return nil }
-        guard let root = resolveKistSourceRoot(currentProjectRoot: current, environment: environment) else {
-            return nil
-        }
-        return SelfCodebaseAuditRequest(projectRoot: root,
-                                        seedRepairs: selfCodebaseAuditShouldSeedRepairs(input))
-    }
-
-    static func isSelfCodebaseAuditIntent(_ input: String) -> Bool {
-        let lower = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !lower.isEmpty else { return false }
-        let selfRefs = [
-            "your codebase", "your code base", "your source", "your repo", "your repository",
-            "your project", "your own code", "kist codebase", "kist source", "kist repo",
-            "check yourself", "audit yourself", "self-test", "self test", "immune"
-        ]
-        guard selfRefs.contains(where: { lower.contains($0) }) else { return false }
-        let auditWords = [
-            "check", "chck", "audit", "review", "go through", "look through", "scan",
-            "error", "errors", "bug", "bugs", "issue", "issues", "broken", "self-test",
-            "self test", "immune", "fix", "repair", "heal"
-        ]
-        return auditWords.contains { lower.contains($0) }
-    }
-
-    static func selfCodebaseAuditShouldSeedRepairs(_ input: String) -> Bool {
-        let lower = input.lowercased()
-        let repairWords = ["fix", "repair", "heal", "patch", "apply", "resolve", "build it", "install"]
-        return repairWords.contains { lower.contains($0) }
-    }
-
-    static func resolveKistSourceRoot(currentProjectRoot: String,
-                                      environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
-        let current = ToolContext.canonicalize(currentProjectRoot) ?? currentProjectRoot
-        if isKistSourceRoot(current) { return current }
-        let home = environment["HOME"] ?? NSHomeDirectory()
-        let envRoot = environment["KIST_SOURCE_ROOT"].flatMap { ToolContext.canonicalize($0) }
-        var candidates = [
-            envRoot,
-            home + "/Downloads/kist-loops",
-            home + "/kist-loops",
-            home + "/Projects/kist-loops",
-            home + "/Developer/kist-loops",
-        ].compactMap { $0 }
-        candidates.append(contentsOf: shallowKistSourceCandidates(in: home + "/Downloads"))
-        candidates.append(contentsOf: shallowKistSourceCandidates(in: home))
-        for candidate in uniquePaths(candidates) {
-            if isKistSourceRoot(candidate) {
-                return ToolContext.canonicalize(candidate) ?? candidate
-            }
-        }
-        return nil
-    }
-
-    private static func isKistSourceRoot(_ path: String) -> Bool {
-        let root = ToolContext.canonicalize(path) ?? path
-        let fm = FileManager.default
-        return fm.fileExists(atPath: root + "/Package.swift")
-            && fm.fileExists(atPath: root + "/Sources/Kist/KistREPL.swift")
-            && fm.fileExists(atPath: root + "/Sources/AgentCore")
-    }
-
-    private static func isConcreteCodeProjectRoot(_ path: String) -> Bool {
-        let root = ToolContext.canonicalize(path) ?? path
-        let fm = FileManager.default
-        let markers = ["Package.swift", "package.json", "pyproject.toml", "Cargo.toml", "go.mod", "deno.json"]
-        if markers.contains(where: { fm.fileExists(atPath: root + "/" + $0) }) { return true }
-        guard let names = try? fm.contentsOfDirectory(atPath: root) else { return false }
-        return names.contains { $0.hasSuffix(".xcodeproj") || $0.hasSuffix(".xcworkspace") }
-    }
-
-    private static func shallowKistSourceCandidates(in directory: String) -> [String] {
-        let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: directory) else { return [] }
-        return names
-            .filter { name in
-                let lower = name.lowercased()
-                return lower.contains("kist") || lower.contains("mythos")
-            }
-            .map { (directory as NSString).appendingPathComponent($0) }
-    }
-
-    private static func uniquePaths(_ paths: [String]) -> [String] {
-        var seen = Set<String>()
-        var out: [String] = []
-        for path in paths {
-            let clean = ToolContext.canonicalize(path) ?? path
-            guard !seen.contains(clean) else { continue }
-            seen.insert(clean)
-            out.append(clean)
-        }
-        return out
-    }
-
-    static func attachCaptainRetrievalContext(to prompt: String,
-                                              retrieval: CaptainRetrievalContext) -> String {
-        let base = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let block = """
-        ---
-        CAPTAIN WORKING MEMORY
-        This section is retrieved disk-backed memory for the current objective. Treat it as evidence, constraints, and decision rationale. Use it to research before expertise, expertise before organization, and organization before execution.
-
-        \(retrieval.briefing)
-        ---
-        """
-        if base.isEmpty { return block }
-        return base + "\n\n" + block
-    }
-
-    /// Dragging a screenshot thumbnail into Terminal.app fires many drop events → the SAME file path gets
-    /// typed dozens/hundreds of times (Luke: "1 image repeated 1000x"). Bracketed-paste de-dup misses it
-    /// because a drag arrives as raw keystrokes, not a paste. So: at submit time, any path-like token that
-    /// appears 3+ times is a flood — keep the FIRST occurrence, drop the rest, leave the real message intact.
-    static func collapseFloodedPaths(_ input: String) -> String {
-        let toks = input.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        guard toks.count > 3 else { return input }
-        var counts: [String: Int] = [:]
-        for t in toks where t.contains("/") && t.count > 12 { counts[t, default: 0] += 1 }
-        let flooded = Set(counts.filter { $0.value >= 3 }.keys)
-        guard !flooded.isEmpty else { return input }
-        var seen = Set<String>()
-        var out: [String] = []
-        for t in toks {
-            if flooded.contains(t) {
-                if seen.contains(t) { continue }
-                seen.insert(t)
-            }
-            out.append(t)
-        }
-        return out.joined(separator: " ")
-    }
-
-    /// The uncommitted working-tree diff vs HEAD (staged + unstaged) PLUS untracked NEW files. `git diff
-    /// HEAD` omits untracked files entirely, so a turn that CREATES a file (very common — "write a new
-    /// module") would otherwise produce an empty diff and the `/copilot` co-reviewer would review nothing.
-    /// Untracked files are appended as synthetic `new file` blocks. Every path receives its own bounded
-    /// representation: a large pre-existing untracked file must never consume a global budget and make a
-    /// later file invisible to the pre/post turn delta. Capture failures are explicit incomplete markers,
-    /// never an empty string that a caller could mistake for a clean tree.
-    static func workingTreeDiff(projectRoot: String) -> String {
-        func git(_ args: [String], maxBytes: Int = 1_000_000) -> (text: String, truncated: Bool, digest: String)? {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            p.arguments = ["git", "-C", projectRoot] + args
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = FileHandle.nullDevice
-            do { try p.run() } catch { return nil }
-            // Drain incrementally before waiting so a large diff cannot deadlock or be materialized in
-            // memory. Hash discarded bytes as well: if a same-sized change occurs beyond the captured
-            // prefix, the turn delta still changes to an explicit incomplete-review marker.
-            var captured = Data()
-            var totalBytes = 0
-            var digest: UInt64 = 14_695_981_039_346_656_037
-            while true {
-                let chunk = pipe.fileHandleForReading.readData(ofLength: 64 * 1_024)
-                if chunk.isEmpty { break }
-                totalBytes += chunk.count
-                for byte in chunk {
-                    digest ^= UInt64(byte)
-                    digest &*= 1_099_511_628_211
-                }
-                let remaining = max(0, maxBytes - captured.count)
-                if remaining > 0 { captured.append(contentsOf: chunk.prefix(remaining)) }
-            }
-            p.waitUntilExit()
-            guard p.terminationStatus == 0,
-                  let text = String(data: captured, encoding: .utf8) else { return nil }
-            return (text, totalBytes > maxBytes, String(digest, radix: 16))
-        }
-        let tracked = git(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"])
-        var out = tracked?.text
-            ?? "[review input incomplete: tracked git diff capture failed]\n"
-        if let tracked, tracked.truncated {
-            out += "\n[review input incomplete: tracked diff exceeded 1000000 bytes; digest=\(tracked.digest)]\n"
-        }
-        // NUL delimiters preserve literal newlines and other unusual bytes in repository paths. The path
-        // is subsequently opened through ConfinedRoot, not as an absolute filesystem string.
-        let untrackedCapture = git(["ls-files", "--others", "--exclude-standard", "-z", "--"])
-        if untrackedCapture == nil {
-            out += "\n[review input incomplete: untracked git path capture failed]\n"
-        }
-        if let untrackedCapture, untrackedCapture.truncated {
-            out += "\n[review input incomplete: untracked path list exceeded 1000000 bytes; digest=\(untrackedCapture.digest)]\n"
-        }
-        let untracked = untrackedCapture?.truncated == false
-            ? (untrackedCapture?.text ?? "").split(separator: "\0").map(String.init)
-            : []
-        let maxUntrackedFiles = 256
-        guard untracked.count <= maxUntrackedFiles else {
-            let digest = untrackedCapture?.digest ?? "unavailable"
-            out += "\n[review input incomplete: untracked file count \(untracked.count) exceeded \(maxUntrackedFiles); digest=\(digest)]\n"
-            return out
-        }
-        let confined: ConfinedRoot
-        do {
-            confined = try ConfinedRoot(root: projectRoot)
-        } catch {
-            out += "\n[review input incomplete: project root could not be opened safely]\n"
-            return out
-        }
-        let perFileBudget = 20_000
-        let maxAggregateBytes = 1_500_000
-        var aggregateBytes = out.utf8.count
-        for rel in untracked where !rel.isEmpty {
-            // Read only enough bytes to represent this file's review budget. Loading an entire huge
-            // untracked artifact here used to make an otherwise small build turn hang or exhaust memory.
-            // The confined prefix read uses O_NOFOLLOW for every component, so an untracked symlink can
-            // never make automatic review ingest bytes from outside the repository. Four bytes per Unicode
-            // scalar covers the maximum UTF-8 width; one extra scalar proves worst-case truncation.
-            guard let content = Self.boundedUTF8FileContents(
-                confinedRoot: confined, path: rel, maxBytes: (perFileBudget + 1) * 4
-            ) else {
-                // Preserve the existence of an unreviewable artifact in the turn delta. Silently
-                // dropping it would let a reviewer report clean despite never seeing the file.
-                let block = "\ndiff --git a/\(rel) b/\(rel)\n[review input incomplete: symlink, binary, or unreadable file omitted]\n"
-                guard aggregateBytes + block.utf8.count <= maxAggregateBytes else {
-                    out += "\n[review input incomplete: aggregate repository review capture exceeded \(maxAggregateBytes) bytes]\n"
-                    break
-                }
-                out += block
-                aggregateBytes += block.utf8.count
-                continue
-            }
-            let block = Self.syntheticNewFileDiff(path: rel, content: content, maxChars: perFileBudget)
-            guard aggregateBytes + block.utf8.count <= maxAggregateBytes else {
-                out += "\n[review input incomplete: aggregate repository review capture exceeded \(maxAggregateBytes) bytes]\n"
-                break
-            }
-            out += block
-            aggregateBytes += block.utf8.count
-        }
-        return out
-    }
-
-    /// Read a bounded UTF-8 prefix without ever materializing the whole file. Invalid/binary prefixes are
-    /// not reviewable text. A byte cap can bisect one UTF-8 scalar, so retry after dropping at most three
-    /// trailing bytes before rejecting the file.
-    static func boundedUTF8FileContents(path: String, maxBytes: Int) -> String? {
-        guard maxBytes > 0,
-              let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
-        defer { try? handle.close() }
-        let payload: Data?
-        do { payload = try handle.read(upToCount: maxBytes) }
-        catch { return nil }
-        guard var data = payload else { return nil }
-        if data.contains(0) { return nil }
-        for _ in 0..<4 {
-            if let text = String(data: data, encoding: .utf8) { return text }
-            guard !data.isEmpty else { break }
-            data.removeLast()
-        }
-        return nil
-    }
-
-    /// Symlink-safe variant used for repository review capture. Every component is opened relative to
-    /// the trusted root descriptor with O_NOFOLLOW, and only a bounded prefix enters model context.
-    static func boundedUTF8FileContents(confinedRoot: ConfinedRoot, path: String,
-                                        maxBytes: Int) -> String? {
-        guard maxBytes > 0,
-              let prefix = try? confinedRoot.readDataPrefix(path, maxBytes: maxBytes) else { return nil }
-        var data = prefix.data
-        if data.contains(0) { return nil }
-        for _ in 0..<4 {
-            if let text = String(data: data, encoding: .utf8) { return text }
-            guard !data.isEmpty else { break }
-            data.removeLast()
-        }
-        return nil
-    }
-
-    /// Format an untracked file as a synthetic unified-diff `new file` block so the co-reviewer reads a
-    /// freshly-created file like any other change. Pure + testable; content clipped to `maxChars`.
-    static func syntheticNewFileDiff(path: String, content: String, maxChars: Int) -> String {
-        let clipped = content.count > maxChars
-            ? String(content.prefix(maxChars)) + "\n… [new file truncated at \(maxChars) chars]"
-            : content
-        let body = clipped.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { "+" + $0 }.joined(separator: "\n")
-        return "\ndiff --git a/\(path) b/\(path)\nnew file\n--- /dev/null\n+++ b/\(path)\n\(body)\n"
-    }
-
-    /// The uncommitted changed file paths vs HEAD (name-only) — for the great-loop verifier's anti-gaming
-    /// check (which files did this cycle touch). Empty when git is absent or nothing changed.
-    static func workingTreeChangedFiles(projectRoot: String) -> [String] {
-        // `git status --porcelain` — NOT `git diff --name-only HEAD` — because a from-scratch task's files
-        // are UNTRACKED (the loop never `git add`s), and `git diff HEAD` misses untracked files entirely.
-        // That made the continuity note empty → the loop re-created work already done → DUPLICATE packages
-        // (root + subdir). Porcelain covers modified + added + untracked in one shot; `-uall` lists the
-        // individual files inside new dirs, not just the dir.
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["git", "-C", projectRoot, "status", "--porcelain", "--untracked-files=all"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return [] }
-        return parseGitStatusPorcelain(String(decoding: data, as: UTF8.self))
-    }
-
-    /// Parse `git status --porcelain` output to a list of paths. Each line is `XY <path>` (2 status columns
-    /// + a space); a rename is `R  old -> new` (we take the NEW path). Git-quoted paths (spaces/unicode) are
-    /// unquoted. Pure, so the parsing is unit-tested without a git repo.
-    static func parseGitStatusPorcelain(_ output: String) -> [String] {
-        output.split(separator: "\n").compactMap { line -> String? in
-            let s = String(line)
-            guard s.count > 3 else { return nil }
-            var path = String(s.dropFirst(3))                 // drop the 2 status columns + the space
-            if let r = path.range(of: " -> ") { path = String(path[r.upperBound...]) }   // rename → new name
-            path = path.trimmingCharacters(in: .whitespaces)
-            if path.hasPrefix("\""), path.hasSuffix("\""), path.count >= 2 {
-                path = String(path.dropFirst().dropLast())     // git quotes paths with odd chars
-            }
-            return path.isEmpty ? nil : path
-        }
-    }
-
-    /// Build the glanceable turn dashboard from live session state: the active model/team, the board, a
-    /// derived confidence, and what's next. Pure over its inputs → the REPL just feeds it.
-    static func buildDashboard(roles: RoleSelection, projectRoot: String,
-                               trajectory: [ActionRecord], grounded: Bool,
-                               sessionStartedAt: Date? = nil) -> StatusDashboard {
-        // Active Minds — the Captain is the orchestration process; models are workers it can assign.
-        let fb = roles.fallback
-        var minds: [StatusDashboard.Mind] = [
-            .init(name: "Kist", role: "Captain"),
-            .init(name: TeamLanguage.displayName(fb.providerId), role: "Default model")
-        ]
-        let bindings = roles.bindings
-        for (role, label) in [(AgentRole.worker, "Research"), (.coder, "Builder"), (.critic, "Review")] {
-            let b = bindings.binding(for: role)
-            if b.providerId != fb.providerId {
-                minds.append(.init(name: TeamLanguage.displayName(b.providerId), role: label))
-            }
-        }
-        // Build Queue — actionable items only. Completed tasks drop away so the
-        // board advances instead of repeating the same finished work each turn.
-        let plan = PlanStore(projectRoot: projectRoot).load()
-        let tasks = plan.buildQueue(limit: 6).map { t -> StatusDashboard.Item in
-            let st: StatusDashboard.Item.State
-            switch t.status { case .done: st = .done; case .blocked: st = .blocked; default: st = .pending }
-            return .init(title: t.boardTitle, state: st)
-        }
-        let insights = DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
-                                                       trajectory: trajectory)
-        let learning = OrganizationalLearningStore(projectRoot: projectRoot)
-        let debts = learning.openKnowledgeDebt(limit: 8)
-        let latestCapsule = learning.latestCapsule()
-        let persistedResearch = debts.map { debt -> StatusDashboard.ResearchItem in
-            .init(title: debt.topic,
-                  priority: debt.priority == .high ? .high : .medium,
-                  reason: debt.reason,
-                  visit: debt.visit,
-                  impact: debt.impact,
-                  estimatedLearning: debt.estimatedLearning,
-                  expectedBenefit: debt.expectedBenefit)
-        }
-        let persistedKnowledge = debts.map { debt -> StatusDashboard.KnowledgeDebt in
-            .init(need: "Need to research", topic: debt.topic,
-                  impact: debt.expectedBenefit.first ?? debt.reason,
-                  severity: debt.impact)
-        }
-        // Confidence — grounded, healthy, low-failure ⇒ high. The ConfidenceReport keeps the FACTORS
-        // (reliability/health/grounding) so the panel shows a battery gauge + the top drag and
-        // `/confidence` can explain why. nil when there were no actions (a plain answer).
-        let confidenceReport = ConfidenceReport.compute(report: TrajectoryAnalyzer.analyze(trajectory),
-                                                        grounded: grounded)
-        // "Next" must not FREEZE on a stale board task when the user just asked a QUESTION that never
-        // touched the board (Luke's "I asked something and Next never changed" bug — a task stuck
-        // inProgress made plan.active return it forever). Only surface a specific board Next when THIS
-        // turn actually worked the board (a file mutation or state-changing `tasks` action); otherwise
-        // "Continue". Listing/validating tasks is inspection, not board movement.
-        let workedBoard = turnWorkedBoard(trajectory)
-        let currentActive = sessionStartedAt.map { plan.active(since: $0) } ?? plan.active
-        let next = workedBoard
-            ? (currentActive?.boardTitle ?? plan.nextActionable?.boardTitle ?? plan.next?.boardTitle ?? "Continue")
-            : "Continue"
-        return StatusDashboard(minds: minds,
-                               tasks: Array(tasks),
-                               learned: latestCapsule?.learned ?? [],
-                               research: Self.mergeResearch(insights.research + persistedResearch),
-                               knowledgeDebt: Self.mergeKnowledgeDebt(insights.knowledgeDebt + persistedKnowledge),
-                               questions: insights.questions,
-                               futureEvolution: latestCapsule.map {
-                                   .init(capability: $0.futureEvolution,
-                                         estimatedImpact: "High")
-                               },
-                               observation: insights.observation,
-                               confidenceReport: confidenceReport,
-                               next: next)
-    }
-
-    private static func mergeResearch(_ items: [StatusDashboard.ResearchItem]) -> [StatusDashboard.ResearchItem] {
-        var seen = Set<String>()
-        var out: [StatusDashboard.ResearchItem] = []
-        for item in items {
-            let key = item.title.lowercased()
-            guard seen.insert(key).inserted else { continue }
-            out.append(item)
-            if out.count == 6 { break }
-        }
-        return out
-    }
-
-    private static func mergeKnowledgeDebt(_ items: [StatusDashboard.KnowledgeDebt]) -> [StatusDashboard.KnowledgeDebt] {
-        var seen = Set<String>()
-        var out: [StatusDashboard.KnowledgeDebt] = []
-        for item in items {
-            let key = item.topic.lowercased()
-            guard seen.insert(key).inserted else { continue }
-            out.append(item)
-            if out.count == 5 { break }
-        }
-        return out
-    }
-
-    private func printHelp() {
-        print("""
-        \u{001B}[37m  /help             this help
-          /code [prov[:m]]  coding mode — pin the strong coder (DeepSeek V4 Pro), routing off, research opt-in;
-                            just describe what to build (e.g. /code claude-cli for the Max sub)  [alias /c]
-          /model            arrow-key model picker (↑/↓ · filter · enter/esc); green = ready, red = needs a key  [alias /m]
-          /model import <url>
-                            import any OpenAI-compatible model: discover models at the URL → add API key →
-                            self-heal/self-test/pen-test onboard → persists (shows green in the picker)
-          /model scout <g> safe local/Hugging Face model acquisition plan; no downloads, writes eval gates
-          /model vet <hf:model|mlx:model|ollama:model>
-                            fetch live metadata and apply license/provenance/size gates before any download
-          /model acquire <manifest.json>
-                            verify acquisition manifest hash/commands and seed dry-run/download/onboard gates
-          /model <prov[:m]> switch the model this conversation talks to (e.g. /model openai:gpt-5.5,
-                            /model gemini, or /model :<model> to change model on the current provider)
-          /chain "a" | "b"  run tasks in sequence, each as its own turn (stops on first failure)  [alias /pipeline]
-          /copilot [on|off] auto second-AI review of the diff after each coding turn (advisory only)  [alias /cp]
-          /copilot lead <m> · /copilot co <m>
-                            assign who writes the code (lead) and who reviews the diff (co)
-          /paste [question] read clipboard media (screenshot, image file, video, audio, PDF) and ask  [alias /v]
-          <drag a file in>  drag an image / video / audio / PDF from Finder onto the line — the path
-                            is detected, attached, and read by a vision model (Gemini for video/audio)
-          /media <path>     preview an image/video poster inline in iTerm2, WezTerm, Kitty, or Ghostty
-          /reasoning [on|off]
-                            show/hide provider reasoning streams. Off by default; tool scratch text stays hidden.
-          /plan [on|off]    plan mode: read-only; the agent proposes a plan (bare /plan toggles)
-          /config [k=v]     settings panel over .kist/settings.json (bare shows, k=v sets)  [alias /settings]
-          /context          estimated context-window breakdown (what's filling it)  [alias /ctx]
-          /compact [focus]  summarize older history to free context; keeps recent turns verbatim
-          /theme [name]     color palette: default/dark/light/daltonized(CVD)/high-contrast/mono(screen-reader)
-          /skills           list discovered skills + token cost (what agents can preload)
-          /mcp              list configured MCP servers (what agents can reach)
-          /hooks            list lifecycle hooks (.kist/hooks.json)
-          /permissions      current permission tier + which tools still prompt  [alias /perms]
-          /goals            show the shared goal/action/test board  [aliases /goal /tasks /todo]
-          1                 run task [1] from the board through plan→execute
-          /action <step>    add an ACTION step to the shared board
-          /test <step>      add a TEST step to the shared board
-          /review <step>    add a REVIEW step to the shared board
-                            add acceptance/proof with: | acceptance: ... | verify: ... | evidence: ...
-          /plan-execute <g> build it as a typed plan-DAG (your team: planner→coder→critic)  [alias /pe]
-          /council [--execute] <g>
-                            ask researcher/architect/coder/critic/UX/memory minds, save a kanban board,
-                            and optionally hand the builder brief to plan-execute  [alias /consult]
-          /research <g>     gather an evidence dossier, run council over it, and seed the task board
-          /legal-research <g + optional doc path>
-                            legal research mode: ingest/OCR-extract docs where possible, require jurisdiction,
-                            official sources first, then hand off to /research for a cited memo
-          /fleet-status     the Terminal Captain cockpit: latest fleet's per-agent status + merge-fate  [alias /cockpit]
-          /fleet [--agents N|--agents=N] <g>
-                            spawn a SUPERVISED parallel fleet for the goal — disjoint-lease agents,
-                            forge-proof signoff, joined to a fresh integration branch (never main)  [alias /team]
-          /roles            show role bindings used by /fleet and /plan-execute
-          /roles coder deepseek
-                            assign a provider/model to a role. Roles: planner, worker/researcher, coder/builder, critic
-                            model form: provider:model, e.g. /roles critic gemini:gemini-3.1-pro
-          /roles reset      reset every role to the default provider/model
-          /roles save <n>   save the current AI team as a named profile
-          /roles load <n>   load a saved AI team profile
-          /roles profiles   list saved AI team profiles
-          /roles delete <n> delete a saved AI team profile
-          /agent new <desc> forge a reusable specialist/personality from plain English
-                            aliases: /agents new, /persona new, /specialist new
-          /agents           list saved specialists; /agents show <name> shows the prompt/tools/model
-          /agents run <name> <task>
-                            hard-spawn a specialist (own context/tools/model/limits); returns its summary
-          /tasks            show the shared Plan/Action/Test/Review board (.kist/plan.json)
-                            add/start/done/block/evidence/validate/clear; the agent uses this same board
-          <plain English>   you can also just SAY it: "use deepseek as builder and gemini as critic",
-                            "switch to gemini", "make me an agent that audits SwiftUI" — it rebinds
-                            the runtime or forges the specialist
-          /providers        list provider ids available for /roles
-          /health           offline provider/model/router health
-          /probe            live one-token provider probe (catches stale model ids)
-          /usage            rich session + local-week token/cost panel
-          /summary          simple human summary: happened / changed / failed / next
-          /confidence       explain the last turn's score and what would raise it  [alias /why]
-          /failures         show latest failure capsule; /failures verify <evidence> closes repair loop
-          /reflect          show the latest Learning Capsule; /reflect now captures one from current state
-          /knowledge        show persistent Knowledge Debt; add/done manage debt items
-          /teach            show permanent organizational rules; add promotes a lesson into Captain
-          /learning         show benchmark/live-eval model learning and promotion status
-          /industry         show Strategic Intelligence records and evolution proposals
-          /retrieve <g>     retrieve relevant disk-backed memory into Captain's context window
-          /captain <g>      show research-first strategy, expertise needs, and specialist gaps for an objective
-          /legal <g>        alias for /legal-research; research support only, not legal advice
-          /domain <g>       learn an unfamiliar domain first; add run/now to dispatch research/simulation/critic specialists
-          /model-acquire <manifest.json>
-                            verify a local-model acquisition manifest without downloading
-          /model run <stage> <manifest.json>
-                            run a verified local-model acquisition stage: dry-run, download, inspect,
-                            onboard, or benchmark
-          /self-heal [run]  turn Captain's own observation into assigned repair agents + gated tasks
-          /self-test        run Captain's deterministic self-audit and write a report; add run/--seed for repair tasks
-          /immune [check]   run self-test + repair/simulation evidence loop; default seeds repair tasks
-          /simulate <g>     sandbox-simulate a plan, run probabilistic trials, compare risk, seed evidence gates
-          /symbolic         compile/reuse deterministic workflow gates: list · compile <g> · run <id> <target>
-          /evolve           board meeting: reflect, rank knowledge debt, create specialists, seed research tasks
-          /logs             proof drawer for the last turn: tools, outputs, failures  [alias /details]
-          /replay [id]      durable run replay from .kist/runs (current: \(replayRunID ?? "none"))
-          /bench <task>     provider bake-off for this task
-          /eval <task>      deterministic agent-behavior eval for this task
-          /protocols        MCP/A2A/browser/computer-control status
-          /commands         list custom .kist/commands
-          /save-chat [path] export this conversation to Markdown in the project root
-          /clear            forget the conversation so far
-          /exit /quit /q    leave
-          prompt keys       ↑/↓ history · Tab completion · live command/code highlighting
-          Enter sends only when the » prompt is visible; while a turn streams, wait for the next prompt.
-          <anything else>   ask / build with the agent (it can read/search/edit/run in the project
-                            and, with approval, control apps/browser/Desktop)\u{001B}[0m
-        """)
-    }
-
-    private func printModels(current: ProviderBinding) {
-        print("model · \(Self.render(current))")
-        guard !providerLabels.isEmpty else {
-            print("\u{001B}[37m(provider catalog unavailable — use /providers)\u{001B}[0m")
-            return
-        }
-        print("\u{001B}[37mswitch with: /model <provider[:model]>  or  /model :<model> (keep current provider)\u{001B}[0m")
-        for label in providerLabels {
-            // providerLabels entries look like "openai" or "openai (missing key)".
-            let id = label.split(separator: " ").first.map(String.init) ?? label
-            let models = providerModels[id.lowercased()] ?? []
-            let modelList = models.isEmpty ? "" : "  \u{001B}[37m" + models.joined(separator: ", ") + "\u{001B}[0m"
-            print("  \(label)\(modelList)")
-        }
-    }
-
-    private static func render(_ binding: ProviderBinding) -> String {
-        binding.providerId + (binding.model.map { ":\($0)" } ?? "")
     }
 }

@@ -93,13 +93,68 @@ final class KistREPLTests: XCTestCase {
     func testDashboardNextDoesNotFreezeOnNonBoardTurns() {
         // Regression (Luke's frozen-"Next" bug): a task stuck inProgress made the dashboard "Next" repeat
         // forever even for plain question turns. "Next" must gate on whether THIS turn worked the board.
-        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
+        // buildDashboard now lives in the KistREPL+Dashboard.swift extension (monolith split
+        // 2026-08-02); read the whole KistREPL family so the pin survives file moves.
+        let srcDir = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+            .appendingPathComponent("Sources/Kist")
+        let repl = ((try? FileManager.default.contentsOfDirectory(atPath: srcDir.path)) ?? [])
+            .filter { $0 == "KistREPL.swift" || $0.hasPrefix("KistREPL+") }
+            .compactMap { try? String(contentsOf: srcDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
         XCTAssertTrue(repl.contains("let next = workedBoard"),
                       "the dashboard Next must be gated on workedBoard so it can't freeze on a stale task")
         XCTAssertTrue(repl.contains("? (currentActive?.boardTitle") && repl.contains(": \"Continue\""),
                       "a non-board turn shows 'Continue', not a frozen inProgress task")
+    }
+
+    func testBuildCommandBridgesToPlanExecuteWorker() {
+        // The frozen-in-research bug: Kist produced plans but never executed them. `/build` is the
+        // explicit bridge that fires the plan→execute worker (real code + build/tests), and with no
+        // args it builds the plan just proposed instead of researching again.
+        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("case \"build\", \"implement\", \"buildit\", \"ship-it\", \"makeit\":"),
+                      "/build (and aliases) must be a command")
+        XCTAssertTrue(repl.contains("execution: \"build\"") && repl.contains("await planExecute(buildGoal, roleSelection.bindings)"),
+                      "/build must fire the plan→execute worker, not another analysis turn")
+        XCTAssertTrue(repl.contains("EXECUTE and BUILD the plan you just proposed"),
+                      "no-arg /build must execute the just-proposed plan (stop researching, start building)")
+    }
+
+    func testMainTurnActionFirstFiresBuilderOnBuildIntent() {
+        // Action-first: a clear build intent must fire the plan→execute worker instead of an inline
+        // chat/analysis turn (the "researches forever, never builds" disease).
+        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("if turnIntent == .build, turnMode != .plan, !armedTeamThisTurn, !lineFromQueue, let planExecute {"),
+                      "a build-intent turn (not plan mode) must route to the plan→execute worker")
+        XCTAssertTrue(repl.contains("action-first: firing the plan→execute worker"),
+                      "the action-first build routing must be disclosed to the user")
+    }
+
+    func testModeCommandExistsAndInjectsStyleIntoTurn() {
+        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("case \"mode\", \"modes\", \"voice\":"),
+                      "/mode command must exist")
+        XCTAssertTrue(repl.contains("if let styleDirective = style.directive()"),
+                      "the selected style must be injected into each turn's prompt")
+        XCTAssertTrue(repl.contains("var style = ReplStyle.load(projectRoot: projectRoot)"),
+                      "style must be loaded from the project so it persists across relaunches")
+    }
+
+    func testCompetitiveCommandRunsCrossCompareResearch() {
+        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        XCTAssertTrue(repl.contains("case \"competitive\", \"compete\", \"competitor\", \"vs\":"),
+                      "/competitive (and aliases) must be a command")
+        XCTAssertTrue(repl.contains("execution: \"competitive-analysis\"") && repl.contains("await research(competitiveGoal, roleSelection.bindings)"),
+                      "/competitive must run the evidence/research pipeline as a head-to-head cross-compare")
     }
 
     func testBugHuntCommandDispatchesAFleet() {

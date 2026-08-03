@@ -76,6 +76,27 @@ final class ControlIntentParserTests: XCTestCase {
         XCTAssertEqual(model(parse("use claude")), "anthropic")
     }
 
+    // REGRESSION (live screenshot bug): "ask deepseek …" / "ask grok …" / "call claude …" printed
+    // "routed to gemini (staying on current model)" instead of switching. A bare provider directly
+    // after ask/call/bring is now a model switch, with the rest kept as the task.
+    func testAskBareProviderSwitchesModelAndKeepsTask() {
+        let i = parse("ask deepseek to look at this crash")
+        // "to look" is not a role verb, so this is a plain model switch, not a role bind.
+        XCTAssertEqual(model(i), "deepseek")
+        XCTAssertEqual(i?.residualTask, "look at this crash")
+    }
+
+    func testAskGrokAndCallClaudeSwitchModel() {
+        let known2 = ["deepseek": "deepseek", "gemini": "gemini", "grok": "grok",
+                      "claude": "anthropic", "anthropic": "anthropic"]
+        func modelOf(_ s: String) -> String? {
+            if case .setModel(let b)? = ControlIntentParser.parse(s, knownProviders: known2)?.action { return b.providerId }
+            return nil
+        }
+        XCTAssertEqual(modelOf("ask grok what it thinks"), "grok")
+        XCTAssertEqual(modelOf("call claude on this one"), "anthropic")
+    }
+
     // MARK: false positives — these must NOT change runtime bindings
 
     func testNormalBuildRequestNoIntent() {

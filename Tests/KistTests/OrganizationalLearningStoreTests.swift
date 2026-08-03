@@ -625,8 +625,13 @@ final class OrganizationalLearningStoreTests: XCTestCase {
     }
 
     func testRecordTurnWritesCapsuleAndKnowledgeDebt() {
-        let root = tempRoot()
-        defer { try? FileManager.default.removeItem(atPath: root) }
+        // Kist-meta knowledge debt (Claude Code/Cursor/…) is only seeded inside a real Kist project now
+        // (the DashboardResearchPlanner fix stopped fabricating it on every unrelated project). Use a
+        // kist-named root so this test still exercises debt-seeding.
+        let base = tempRoot()
+        let root = base + "/kist-loops"
+        try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: base) }
         let store = OrganizationalLearningStore(projectRoot: root,
                                                 now: { Date(timeIntervalSince1970: 1_700_000_000) })
         let plan = Plan(title: "Kist Captain",

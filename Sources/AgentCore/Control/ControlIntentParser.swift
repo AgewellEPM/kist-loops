@@ -43,9 +43,12 @@ public enum ControlIntentParser {
     static let switchVerbs: Set<String> = ["use", "switch", "try", "with", "via", "have", "make", "let", "get", "set", "using",
                                            "bring", "ask", "call"]
     /// STRONG switch-intent verbs that alone make a bare provider mention a model-switch DIRECTIVE.
-    /// Deliberately excludes the weaker/conversational "with/have/make/let/get" so "built with gemini"
-    /// or "my own claude" never silently switch the model.
-    static let bareSwitchVerbs: Set<String> = ["use", "switch", "try", "using"]
+    /// "ask/call/bring" are included because "ask grok …", "call claude …", "bring deepseek …" are
+    /// unambiguous "talk to THIS model" directives (the provider sits immediately after the verb, and
+    /// article-preceded object mentions like "the gemini api" are already filtered by providerAt).
+    /// Deliberately still excludes the weaker/conversational "with/have/make/let/get" so "built with
+    /// gemini" or "my own claude" never silently switch the model.
+    static let bareSwitchVerbs: Set<String> = ["use", "switch", "try", "using", "ask", "call", "bring"]
     /// Verbs that introduce an AGENT directive ("have/make/use Gemini review…"). Excludes "with" —
     /// "compare with claude code" / "built with gemini" are descriptions, not commands.
     static let directiveLeadVerbs: Set<String> = ["use", "have", "make", "let", "get", "via", "using",

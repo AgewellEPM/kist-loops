@@ -141,8 +141,9 @@ public enum EffortController {
 /// known ranking (unknown providers rank mid), and it only steps UP, never down from the session default.
 public enum ModelEscalator {
     static let strength: [String: Int] = [
-        "anthropic": 100, "claude": 100, "openai": 95, "gemini": 85, "deepseek": 70,
-        "grok": 65, "moonshot": 60, "mimo": 45, "baichuan": 40, "ollama": 20, "local": 20,
+        "anthropic": 100, "claude": 100, "claude-cli": 100, "openai": 95, "codex-cli": 95,
+        "gemini": 85, "deepseek": 70, "grok": 65, "moonshot": 60, "mimo": 45, "baichuan": 40,
+        "ollama": 20, "local": 20,
     ]
     public static func rank(_ id: String) -> Int { strength[id.lowercased()] ?? 50 }
 

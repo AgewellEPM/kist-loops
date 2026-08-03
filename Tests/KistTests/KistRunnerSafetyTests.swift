@@ -56,6 +56,31 @@ final class KistRunnerSafetyTests: XCTestCase {
         }
     }
 
+    // BUG 2 regression: the default provider must be the STRONGEST keyed cloud provider, not
+    // whatever sorts first in the catalog (MiMo, which 400s on multi-turn tool history). Pin it
+    // on the real source so nobody reintroduces the "first with a key" default.
+    func testDefaultProviderPicksStrongestKeyedNotFirstInCatalog() throws {
+        let source = try runnerSource()
+        XCTAssertTrue(source.contains("ModelEscalator.rank"),
+                      "resolveProvider must rank keyed providers by strength")
+        XCTAssertFalse(source.contains("if let cloud = registry.providers.first(where: { $0.requiresAPIKey && registry.hasKey(for: $0) })"),
+                       "the old first-with-key default (which made MiMo the silent default) must be gone")
+    }
+
+    // BUG 3 regression: self-heal repair specialists that inherit the model must be escalated to the
+    // strongest available provider (not the weak session default). Pin the wiring on real source.
+    func testSelfHealRepairSpecialistsEscalateToStrongestModel() throws {
+        let source = try runnerSource()
+        XCTAssertTrue(source.contains("def.source == \"captain-self-heal\""),
+                      "runSpecialist must special-case self-heal repair agents")
+        XCTAssertTrue(source.contains("ModelEscalator.pick(tier: .frontier"),
+                      "self-heal repair must escalate to the frontier (strongest) model")
+        // Codex P2: repair escalation must not route to keyless LOCAL providers (mlx/ollama) that may be
+        // a dead endpoint — restrict to keyed cloud + keyless subscription hitters.
+        XCTAssertTrue(source.contains("subscriptionHitters"),
+                      "repair escalation must exclude unreachable local providers (keyed cloud + claude-cli/codex-cli only)")
+    }
+
     func testLowRiskPlanExecuteCanSkipSimulationGate() {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }

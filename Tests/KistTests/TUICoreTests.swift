@@ -26,6 +26,55 @@ final class TUICoreTests: XCTestCase {
         XCTAssertEqual(KeyDecoder.decode(Array("ab".utf8) + [0x0D]), [.char("a"), .char("b"), .enter])
     }
 
+    // Regression ("kicked out for no reason"): mouse-scroll reports must be SWALLOWED, not decoded as
+    // ESC. A terminal with mouse reporting on sends bursts of these on scroll; each decoding to .escape
+    // fired double-ESC = cancel/abandon the turn.
+    func testSwallowsSGRMouseReports() {
+        // ESC [ < 65 ; 92 ; 78 M  (one scroll event) → no keys
+        let one = Array("\u{1B}[<65;92;78M".utf8)
+        XCTAssertEqual(KeyDecoder.decode(one), [])
+        // a burst of scroll events → still no keys (must NOT become [.escape, .escape, …])
+        let burst = Array("\u{1B}[<65;92;78M\u{1B}[<65;94;78M\u{1B}[<65;94;78m".utf8)
+        XCTAssertEqual(KeyDecoder.decode(burst), [])
+        // real typing after a mouse report still decodes
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1B}[<65;92;78M".utf8) + Array("hi".utf8)),
+                       [.char("h"), .char("i")])
+    }
+
+    func testSwallowsX10MouseReports() {
+        // ESC [ M + 3 coordinate bytes → no keys
+        XCTAssertEqual(KeyDecoder.decode([0x1B, 0x5B, 0x4D, 0x20, 0x21, 0x21]), [])
+    }
+
+    // Codex P2: a split/malformed X10 report must not eat a following control byte (Enter/ESC).
+    func testIncompleteX10MouseDoesNotEatFollowingKey() {
+        // ESC [ M then Enter (a control byte where a coord should be) → Enter survives
+        XCTAssertEqual(KeyDecoder.decode([0x1B, 0x5B, 0x4D, 0x0D]), [.enter])
+        // ESC [ M + one coord byte, then a real arrow escape → the arrow survives
+        XCTAssertEqual(KeyDecoder.decode([0x1B, 0x5B, 0x4D, 0x20, 0x1B, 0x5B, 0x41]), [.up])
+    }
+
+    // Regression ("can't press Enter" at the approval prompt): a SPLIT/incomplete mouse report must not
+    // eat the keys that follow it. Previously the incomplete branch consumed the rest of the buffer,
+    // swallowing a following Enter (and desyncing arrows into stray chars).
+    func testIncompleteMouseReportDoesNotEatFollowingEnter() {
+        // ESC [ < 65 ; 92 ; 78  (no terminator) then Enter → the Enter must survive
+        let bytes = Array("\u{1B}[<65;92;78".utf8) + [0x0D]
+        XCTAssertEqual(KeyDecoder.decode(bytes), [.enter])
+        // incomplete report immediately followed by a real arrow-key sequence → the arrow survives
+        let withArrow = Array("\u{1B}[<65;92".utf8) + [0x1B, 0x5B, 0x41]   // + ESC [ A (up)
+        XCTAssertEqual(KeyDecoder.decode(withArrow), [.up])
+        // typing after an incomplete report still decodes
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1B}[<9;9".utf8) + Array("ok".utf8)),
+                       [.char("o"), .char("k")])
+    }
+
+    // A real lone ESC and shift+tab must still work after adding mouse handling.
+    func testLoneEscapeAndBackTabStillDecode() {
+        XCTAssertEqual(KeyDecoder.decode([0x1B]), [.escape])
+        XCTAssertEqual(KeyDecoder.decode([0x1B, 0x5B, 0x5A]), [.backTab])
+    }
+
     func testDecodesUTF8MultibyteCharacter() {
         XCTAssertEqual(KeyDecoder.decode(Array("é".utf8)), [.char("é")])
     }

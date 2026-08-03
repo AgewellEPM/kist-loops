@@ -78,6 +78,33 @@ final class DashboardResearchPlannerTests: XCTestCase {
         XCTAssertFalse(bundle.research.prefix(3).contains { $0.title == "Research React clock app examples" })
     }
 
+    // Luke's bug: a NON-Kist project whose task text merely mentions agent/worker/orchestration/mcp used
+    // to trigger the hardcoded Claude/Cursor/OpenHands/Foundation research every turn — "same shit, not
+    // tied to the project." Now those only appear inside a real Kist repo; elsewhere the panel is
+    // board-derived, so it reflects the actual work.
+    func testNonKistProjectWithOrchestrationWordsGetsNoKistMetaResearch() {
+        let plan = Plan(
+            title: "Perslis VM control",
+            tasks: [
+                PlanTask(id: 1,
+                         title: "ACTION: fix the vm_capture agent worker background flow",
+                         detail: "orchestrate the capture, fleet of workers, model routing, mcp server",
+                         kind: .action)
+            ]
+        )
+        let bundle = DashboardResearchPlanner.build(for: plan,
+                                                    projectRoot: "/Users/lukekist/perslis-dos-snake",
+                                                    trajectory: [])
+        for junk in ["Study Claude Code's fleet scheduling", "Analyze Cursor background agents",
+                     "Review OpenHands planning loop", "Read Apple Foundation Models docs",
+                     "Compare Anthropic MCP lifecycle", "Study DGM self-improvement architecture"] {
+            XCTAssertFalse(bundle.research.contains { $0.title == junk },
+                           "non-Kist project must not surface hardcoded Kist-meta research: \(junk)")
+        }
+        // It should instead reflect the current work (prior art for the actual next build task).
+        XCTAssertTrue(bundle.research.allSatisfy { !$0.title.contains("Claude Code") && !$0.title.contains("Cursor") })
+    }
+
     func testHomeDirectoryNameDoesNotFabricateKistOrchestrationDebt() {
         let bundle = DashboardResearchPlanner.build(
             for: Plan(),

@@ -43,7 +43,8 @@ enum KeyDecoder {
             case 0x1B:
                 flushText()
                 let (key, consumed) = decodeEscape(bytes, from: i)
-                keys.append(key); i += consumed
+                if let key { keys.append(key) }   // nil = a consumed-but-ignored sequence (e.g. mouse)
+                i += consumed
             case 0x00...0x1F:
                 // Other control bytes we don't map — skip (don't inject as text).
                 flushText(); i += 1
@@ -55,10 +56,37 @@ enum KeyDecoder {
         return keys
     }
 
-    /// Decode an escape sequence starting at `start` (bytes[start] == 0x1B). Returns the key + how many
-    /// bytes it consumed (≥1). A lone ESC (nothing or non-`[` after) is `.escape`, consuming just it.
-    private static func decodeEscape(_ bytes: [UInt8], from start: Int) -> (TerminalKey, Int) {
+    /// Decode an escape sequence starting at `start` (bytes[start] == 0x1B). Returns the key (nil ⇒
+    /// consumed but IGNORED, e.g. a mouse report) + how many bytes it consumed (≥1). A lone ESC (nothing
+    /// or non-`[` after) is `.escape`, consuming just it.
+    private static func decodeEscape(_ bytes: [UInt8], from start: Int) -> (TerminalKey?, Int) {
         guard start + 1 < bytes.count, bytes[start + 1] == 0x5B else { return (.escape, 1) }   // need ESC [
+        // MOUSE REPORTS must be swallowed, never decoded as keys. A terminal with mouse reporting on
+        // (even from another program) sends BURSTS of these on scroll; treating each as `.escape` fired
+        // double-ESC = cancel/abandon the turn — the "kicked out for no reason" bug. Two encodings:
+        //   SGR   : ESC [ < params (M|m)      (0x3C after '[')
+        //   X10   : ESC [ M  + 3 raw bytes    (0x4D after '[')
+        if start + 2 < bytes.count, bytes[start + 2] == 0x3C {          // SGR mouse: ESC [ < d;d;d (M|m)
+            var k = start + 3
+            while k < bytes.count {
+                let c = bytes[k]
+                if c == 0x4D || c == 0x6D { return (nil, k - start + 1) }             // terminator 'M'/'m'
+                // Mouse params are ONLY digits and ';'. Anything else means this isn't a (complete)
+                // mouse report — stop HERE and consume only what we scanned, so a following key (Enter,
+                // an arrow's ESC, text) is never eaten. This is the "can't press Enter" guard.
+                if !((c >= 0x30 && c <= 0x39) || c == 0x3B) { return (nil, k - start) }
+                k += 1
+            }
+            return (nil, bytes.count - start)                          // ran out mid-report → consume params seen
+        }
+        if start + 2 < bytes.count, bytes[start + 2] == 0x4D {          // X10 mouse: ESC [ M + 3 coord bytes
+            // Coord bytes are printable (value+0x20, i.e. >= 0x20). Stop at any control byte (Enter 0x0D,
+            // ESC 0x1B, …) so a split/malformed report can't swallow a following real key (same guard as SGR).
+            var consumed = 3                                           // ESC [ M
+            var k = start + 3
+            while k < bytes.count, consumed < 6, bytes[k] >= 0x20 { consumed += 1; k += 1 }
+            return (nil, consumed)
+        }
         // CSI: scan the final byte (a letter or '~').
         var j = start + 2
         var params: [UInt8] = []

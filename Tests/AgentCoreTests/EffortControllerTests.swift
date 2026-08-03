@@ -87,6 +87,20 @@ final class EffortControllerTests: XCTestCase {
         XCTAssertEqual(pick, "anthropic")
     }
 
+    // BUG 3: keyless subscription providers (Claude Max / Codex CLI) are heavy hitters and must rank as
+    // such, so strong-on-repair escalates to them rather than sitting on a weak model like MiMo.
+    func testKeylessSubscriptionProvidersRankAsHeavyHitters() {
+        XCTAssertEqual(ModelEscalator.rank("claude-cli"), 100)
+        XCTAssertEqual(ModelEscalator.rank("codex-cli"), 95)
+        XCTAssertGreaterThan(ModelEscalator.rank("claude-cli"), ModelEscalator.rank("mimo"))
+    }
+
+    func testRepairEscalatesFromWeakToStrongestAvailable() {
+        // A self-heal repair agent inheriting MiMo must escalate to the strongest available heavy hitter.
+        XCTAssertEqual(ModelEscalator.pick(tier: .frontier, keyed: ["mimo", "gemini", "claude-cli"], preferred: "mimo"), "claude-cli")
+        XCTAssertEqual(ModelEscalator.pick(tier: .frontier, keyed: ["mimo", "gemini"], preferred: "mimo"), "gemini")
+    }
+
     func testStandardStepsUpOnlyWhenClearlyStronger() {
         // deepseek(70) is only +25 over mimo(45) → steps up; ollama(20) would not.
         XCTAssertEqual(ModelEscalator.pick(tier: .standard, keyed: ["mimo", "deepseek"], preferred: "mimo"), "deepseek")

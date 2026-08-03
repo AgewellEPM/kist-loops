@@ -37,179 +37,6 @@ enum KistRunner {
     }
     private struct ProviderPick { let providerId: String; let model: String? }
 
-    /// The full extra tool set (media/data/memory/vision + the agent-writable Cortex), built once so
-    /// EVERY run path — fresh, goal, and --resume — gets identical capabilities. Cortex is included
-    /// unless --no-memory; Gemini/vision/OpenAI tools are added only when their keys/bindings exist.
-    static func buildExtraTools(root: String, fetchAllowedHosts: [String],
-                                opts: KistOptions, registry: ProviderRegistry) -> [any AgentTool] {
-        // --fast: a lean solo dev tool. Keep ONLY the core code tools (headless: read/write/edit/
-        // apply_patch/search_code/ast_grep/git/symbols/run_command…) + the cheap Cortex; drop the
-        // ~20 media/vision/browse/pentest/research/workflow extras that bloat the prompt and burn
-        // tokens when the user just wants quick dev help. Big prompt cut → cheaper + faster.
-        if opts.fast { return opts.noMemory ? [] : [CortexTool()] }
-        var extraTools: [any AgentTool] = [ReadSpreadsheetTool(), QueryDataTool(), MediaClipTool(),
-                                           SecurityAuditTool(), GovernanceReportTool(), WorkflowTool(),
-                                           ManageTasksTool(), BrowserTool(allowedHosts: fetchAllowedHosts)]
-        // Agent-writable personal memory (the Cortex): the MODEL remembers durable preferences,
-        // project facts, and journals its work across sessions — Claude-style memory, more personal.
-        if !opts.noMemory { extraTools.append(CortexTool()) }
-        if let geminiKey = registry.apiKey(forProviderId: "gemini") {
-            extraTools.append(AnalyzeMediaTool(registry: registry, geminiKey: geminiKey))
-            extraTools.append(GenerateAudioTool(geminiKey: geminiKey))   // Gemini native TTS → WAV
-            extraTools.append(GenerateVideoTool(geminiKey: geminiKey))   // Veo video gen (slow, prototype)
-            extraTools.append(LiveAskTool(geminiKey: geminiKey))   // Gemini Live API (prototype)
-            extraTools.append(CountTokensTool(geminiKey: geminiKey))   // pre-flight token count
-            extraTools.append(GroundedAnswerTool(geminiKey: geminiKey))   // live Google Search grounding
-        }
-        // Durable semantic memory (file-backed vector store). Embedder: local Ollama when opted in
-        // (KIST_EMBEDDER=ollama), else Gemini when its key is present, else off (no silent dependency).
-        if let embedder = Self.makeEmbedder(registry: registry) {
-            let memory = SemanticMemoryService(
-                embedder: embedder,
-                store: FileBackedVectorStore(path: root + "/.kist/memory/vectors.json"))
-            extraTools.append(RememberTool(service: memory))
-            extraTools.append(RecallTool(service: memory))
-        }
-        // Image generation: prefer Gemini's native "Nano Banana" when its key is present, else OpenAI.
-        if let geminiKey = registry.apiKey(forProviderId: "gemini") {
-            extraTools.append(GenerateImageTool(geminiKey: geminiKey))
-            extraTools.append(EditImageTool(geminiKey: geminiKey))   // Nano Banana image editing
-        } else if let openAIKey = registry.apiKey(forProviderId: "openai") {
-            extraTools.append(GenerateImageTool(apiKey: openAIKey))
-        }
-        // COMPUTER-USE — DEFAULT-DENY (council-mandated 2026-07-03). The desktop/screen/perception tools are
-        // registered ONLY when explicitly armed with --enable-computer-use. Unarmed, they are ABSENT from the
-        // registry entirely, so they cannot fire on ANY surface (one-shot / eval / bench / fleet / spawned
-        // sub-agent / coding loop). This closes the unattended-input-injection escalation: an agent running in
-        // its normal (unarmed) mode has no desktop tools, and a nested kist has arming refused in KistOptions.
-        if opts.enableComputerUse {
-            extraTools.append(ComputerControlTool())   // app launcher (open_app/url) — host OS automation, armed-only
-            // THE HANDS: real screen capture + mouse/keyboard injection (macOS). Armed-only; approval-gated
-            // (sensitiveTools) AND reclassified .dangerous so the approval floor catches it on every surface.
-            extraTools.append(DesktopControlTool())
-            // Readiness diagnostic — read-only; still only present when computer-use is armed.
-            extraTools.append(ComputerUseCheckTool())
-            extraTools.append(ComputerUseSelfTestTool.wired())
-            // Structured UI grounding via the Accessibility tree — deterministic element bounds. Approval-gated
-            // (sensitiveTools) because it can expose focused-app labels/values.
-            extraTools.append(UIElementsTool.wired())
-            extraTools.append(AXPressTool.wired())   // direct AX press by label — the most reliable action
-            // Moondream point-to-click: the AIM for the desktop hands. Wired only when a Moondream cloud key
-            // OR a local server URL is configured, so there's no silent network dependency.
-            let env = ProcessInfo.processInfo.environment
-            if env["MOONDREAM_API_KEY"] != nil || env["MOONDREAM_BASE_URL"] != nil {
-                extraTools.append(LocateTool.moondream())
-                extraTools.append(PointClickTool.wired())   // the tight loop: capture+locate+click in one call
-                extraTools.append(WaitForScreenTool.wired())   // continuous perception: wait until X appears
-                extraTools.append(LookTool.wired())   // fast "what's on screen?" — cheap scene understanding
-                extraTools.append(WatchScreenTool.wired(monitor: PerceptionMonitor()))   // always-on background watch
-            }
-        }
-        if let vision = firstVisionBinding(registry) {
-            extraTools.append(ViewImageTool(registry: registry, binding: vision))
-            extraTools.append(WatchVideoTool(registry: registry, binding: vision))
-            // LiveScreenWatchTool CAPTURES THE HOST SCREEN (screencapture) — host-control, so it's arming-gated
-            // like the other computer-use tools (Codex High, 2026-07-03). ViewImage/WatchVideo/Translate below
-            // only process media that's explicitly PROVIDED, not the live desktop, so they stay ungated.
-            if opts.enableComputerUse {
-                extraTools.append(LiveScreenWatchTool(registry: registry, binding: vision))
-            }
-            extraTools.append(TranslateDocumentTool(registry: registry, binding: vision,
-                                                    geminiKey: registry.apiKey(forProviderId: "gemini")))
-            let visualVerify = VisualVerifyTool(registry: registry, binding: vision, allowedHosts: fetchAllowedHosts)
-            extraTools.append(visualVerify)
-            extraTools.append(ResearchRunTool(allowedHosts: fetchAllowedHosts,
-                                              visual: { arguments, context in
-                                                  try await visualVerify.execute(arguments: arguments, context: context)
-                                              }))
-        }
-        return extraTools
-    }
-
-    /// On --resume, surface the CURRENT cortex memory so the agent starts the resumed turn already
-    /// knowing (its toolset includes `cortex` too, so this is a convenience, not the only path).
-    /// GUARDED: append only after an ASSISTANT turn so provider message-alternation stays valid;
-    /// no-op when memory is off or empty. Pure → unit-tested.
-    static func withMemoryRefresh(_ cp: LoopCheckpoint, memory: String, enabled: Bool) -> LoopCheckpoint {
-        guard enabled, !memory.isEmpty, cp.messages.last?.role == .assistant else { return cp }
-        var out = cp
-        out.messages.append(ChatMessage(role: .user, content: "MEMORY REFRESH — what kist knows about you now:\n" + memory))
-        return out
-    }
-
-    /// The full session memory injected into a run's brief: the Cortex (who Luke is + this project +
-    /// recent journal) folded with ProjectMemory (this repo's planning notes). Used by the one-shot
-    /// and TUI paths so cortex is injected in EVERY mode, not only the interactive REPL.
-    /// Per-cycle token budget: an even share of what REMAINS across the cycles LEFT, floored so a cycle is
-    /// never starved below a unit of real work, and capped at the full remaining (the last cycle can use it
-    /// all). Adaptive (uses the live remaining), so budget unspent by cheap early cycles flows forward to
-    /// finish the task — instead of a rigid total/maxCycles that dies mid-work and forces a fresh restart.
-    static func perCycleBudget(remaining: Int, cycleIndex: Int, maxCycles: Int, floor: Int = 60_000) -> Int {
-        guard remaining > 0 else { return 0 }
-        let cyclesLeft = max(1, maxCycles - cycleIndex)
-        let evenShare = remaining / cyclesLeft
-        return min(remaining, max(floor, evenShare))
-    }
-
-    /// Cross-cycle CONTINUITY note. Each great-loop cycle is a fresh conversation, so without a reminder the
-    /// model has amnesia and re-creates work a prior cycle already did (dogfood: built the package at ./ then
-    /// re-created it under ./MathKit/ → duplication, never converged). From cycle 1 on, if prior cycles
-    /// changed files, tell the model to CONTINUE that work (not restart) and list the files. nil on cycle 0
-    /// (nothing done yet) or when no files changed (a read-only/analysis task).
-    static func continuityNote(cycleIndex: Int, changedFiles: [String]) -> String? {
-        guard cycleIndex > 0, !changedFiles.isEmpty else { return nil }
-        return "WORK ALREADY IN PROGRESS (prior cycles) — CONTINUE it; do NOT recreate the project from "
-            + "scratch or under a new subdirectory. If a build/manifest file already exists, build and TEST "
-            + "what's here. Files changed so far:\n"
-            + changedFiles.prefix(60).map { "  - \($0)" }.joined(separator: "\n")
-    }
-
-    /// The failure detail of the LAST failed `run_command` in a cycle's trajectory — the concrete
-    /// build/test/compiler error to carry into the next cycle. nil when the last run_command succeeded or
-    /// none failed (so a cycle that ended green doesn't push a stale error forward).
-    static func lastCommandFailure(in trajectory: [ActionRecord]) -> String? {
-        guard let last = trajectory.last(where: { $0.tool == "run_command" }) else { return nil }
-        guard !last.success, let detail = last.failureDetail else { return nil }
-        let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// Tools irrelevant to an autonomous CODING loop — dropped so their schemas don't inflate EVERY model
-    /// call. Dogfood: the full set was ~70 tools / ~25k schema chars (~6.5k tokens/call), and a coding cycle
-    /// spent ~half its budget re-sending schemas for media / app-UI-testing / desktop-control / pentest /
-    /// enterprise-reporting tools it never uses — so cycles couldn't converge to a verified done. Kept:
-    /// file/shell/edit/lsp/memory/tasks/web/research/symbols (everything a build+test+fix loop needs).
-    static func isLoopIrrelevantTool(_ name: String) -> Bool {
-        if name.hasPrefix("isolated-tester__") { return true }   // app UI-testing MCP — not code building
-        let drop: Set<String> = [
-            "computer_control", "desktop_control", "tap", "locate", "look", "wait_for_screen", "watch_screen", "computer_use_check", "computer_use_selftest", "ui_elements", "ax_press",   // desktop/GUI control — not code building
-            "pentest", "security_audit", "business_workflow", "governance_report",
-            "edit_image", "generate_audio", "analyze_media", "watch_video", "extract_clip", "view_image",
-        ]
-        return drop.contains(name)
-    }
-
-    static func sessionMemory(root: String, opts: KistOptions) -> String? {
-        guard !opts.noMemory else { return nil }
-        let projectName = (root as NSString).lastPathComponent
-        let parts = [CortexMemory().context(projectName: projectName), ProjectMemory(root: root).planningContext()]
-            .compactMap { $0 }.filter { !$0.isEmpty }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
-    }
-
-    /// Auto-log a completed goal run to the cortex JOURNAL, so the work log fills itself instead of
-    /// only when the model remembers to call the cortex tool. One bounded line; no-op under
-    /// --no-memory; best-effort (a journal write must never fail the run). Secrets in the goal are
-    /// redacted at CortexMemory's write choke point.
-    static func autoJournalRun(goal: String, success: Bool, root: String, enabled: Bool) {
-        guard enabled, !goal.isEmpty else { return }
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"; df.timeZone = .current
-        df.locale = Locale(identifier: "en_US_POSIX")
-        let g = goal.split(separator: "\n").first.map(String.init) ?? goal
-        try? CortexMemory().logWork("[\(success ? "done" : "paused")] \(g.prefix(100)) · \((root as NSString).lastPathComponent)",
-                                    date: df.string(from: Date()))
-    }
-
     /// Tools that mutate state, run code/network, or read live desktop/app state — prompt for approval in
     /// interactive mode.
     static let sensitiveTools: Set<String> = [
@@ -582,10 +409,28 @@ enum KistRunner {
                     let childApproval = mode?.approvalTools(sensitive: specSensitive, editTools: specEdit) ?? parentApproval
                     let approval = parentApproval.union(childApproval)
                     let planMode = parentPlan || (mode?.isPlan ?? false)
+                    // STRONG-ON-REPAIR: a self-heal repair specialist that INHERITS the model must not
+                    // inherit a weak session model (e.g. MiMo, which 400s). Bind inheriting repair agents
+                    // to the strongest AVAILABLE provider (claude/codex/deepseek/gemini) so a failed turn
+                    // is retried by a heavy hitter. Specialists with an explicit model (critic=deepseek)
+                    // resolve that first and are unaffected.
+                    var repairRoleDefault = ProviderBinding(providerId: providerId, model: model)
+                    if def.source == "captain-self-heal" {
+                        // Only escalate to a provider we can actually reach: keyed CLOUD providers plus the
+                        // keyless SUBSCRIPTION heavy hitters (claude-cli/codex-cli). Keyless LOCAL providers
+                        // (mlx/ollama) are excluded — they outrank mimo but may point at a dead endpoint, so
+                        // escalating to them would route a repair to a server that isn't running (Codex P2).
+                        let subscriptionHitters: Set<String> = ["claude-cli", "codex-cli"]
+                        let available = registry.providers
+                            .filter { ($0.requiresAPIKey && registry.hasKey(for: $0)) || subscriptionHitters.contains($0.id) }
+                            .map { $0.id }
+                        let strong = ModelEscalator.pick(tier: .frontier, keyed: available, preferred: providerId)
+                        if strong != providerId { repairRoleDefault = ProviderBinding(providerId: strong) }
+                    }
                     let spawner = SpecialistSpawner(
                         providers: registry, baseTools: tools, context: context,
                         sink: TerminalEventSink(showReasoning: false), interactor: terminalInteractor,
-                        aliasTable: [:], roleDefault: ProviderBinding(providerId: providerId, model: model),
+                        aliasTable: [:], roleDefault: repairRoleDefault,
                         defaultMaxIterations: opts.maxIterations, extendedThinking: opts.extendedThinking)
                     return await spawner.run(specialist: def, task: task, approvalTools: approval, planMode: planMode).summary
                 }
@@ -1087,443 +932,6 @@ enum KistRunner {
         return 0
     }
 
-    // MARK: - Operator surface (health / bench / eval / protocols)
-
-    private static func replayRun(projectRoot: String, id: String) -> Int32 {
-        note(RunReplayStore.render(projectRoot: projectRoot, id: id))
-        return 0
-    }
-
-    /// Live model-id preflight: GET /models per keyed provider, diff vs the catalog, flag dead ids.
-    private static func providerDoctorReport(_ registry: ProviderRegistry) async -> String {
-        let reports = await ProviderDoctor.check(
-            providers: ProviderCatalog.openAICompatible,
-            apiKey: { registry.apiKey(forProviderId: $0.id) },
-            fetch: { url, key in await ProviderDoctor.liveFetch(modelsURL: url, apiKey: key) })
-        return ProviderDoctor.render(reports)
-    }
-
-    private static func providerHealth(_ registry: ProviderRegistry, probe: Bool) async -> Int32 {
-        let report: ProviderHealthReport
-        if probe {
-            let bindings = registry.providers.map { ProviderBinding(providerId: $0.id, model: $0.defaultModel) }
-            report = await ProviderHealthChecker.liveProbe(registry, bindings: bindings)
-        } else {
-            report = ProviderHealthChecker.catalogReport(registry)
-        }
-        note(report.render())
-        if probe, report.rows.contains(where: { $0.state == .staleCatalog }) {
-            note("router · stale model detected; fallback is enabled for availability/model/key failures")
-        }
-        return report.rows.contains(where: { $0.state == .failed || $0.state == .staleCatalog }) ? 1 : 0
-    }
-
-    private static func protocolStatus(projectRoot: String) -> Int32 {
-        note(protocolStatusText(projectRoot: projectRoot))
-        let (_, issues) = MCPClientConfig.load(projectRoot: ToolContext.canonicalize(projectRoot) ?? projectRoot)
-        return issues.isEmpty ? 0 : 1
-    }
-
-    private static func protocolStatusText(projectRoot: String) -> String {
-        let root = ToolContext.canonicalize(projectRoot) ?? projectRoot
-        let (servers, issues) = MCPClientConfig.load(projectRoot: root)
-        var lines = ["protocols · \(root)"]
-        lines.append("MCP · \(servers.count) configured server(s)" + (servers.contains { $0.name == "isolated-tester" } ? " · IsolatedTester app verification present" : ""))
-        for server in servers.sorted(by: { $0.name < $1.name }) {
-            lines.append("  ✓ \(server.name) · \(server.command) \(server.args.joined(separator: " "))")
-        }
-        for issue in issues {
-            lines.append("  ! \(issue.server): \(issue.reason)")
-        }
-        lines.append("A2A · native agent-card/task schema ready · endpoint not exposed yet")
-        lines.append("browser · first-class browse tool with SSRF entry-host guard")
-        lines.append("computer_control · first-class approval-gated desktop/app control tool")
-        return lines.joined(separator: "\n")
-    }
-
-    private struct BenchRow {
-        let provider: String
-        let model: String?
-        let success: Bool
-        let latencyMs: Int
-        let toolFailures: Int
-        let steps: Int
-        let usage: UsageCostSummary
-        let summary: String
-    }
-
-    private static func runBench(_ opts: KistOptions, goal: String, registry: ProviderRegistry,
-                                 root: String, tools: ToolRegistry, context: ToolContext) async -> Int32 {
-        guard !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            err("usage: kist --bench \"<task>\"")
-            return 2
-        }
-        let preferred = ["mimo", "deepseek", "gemini", "openai"]
-        let candidates = preferred.compactMap { id -> (any ChatProvider)? in
-            guard let p = registry.provider(id: id), registry.hasKey(for: p) else { return nil }
-            return p
-        }
-        guard !candidates.isEmpty else {
-            err("bench · no preferred providers have keys (wanted: \(preferred.joined(separator: ", ")))")
-            return 2
-        }
-        note("bench · \(candidates.map(\.id).joined(separator: ", ")) · \(goal)")
-        var rows: [BenchRow] = []
-        for provider in candidates {
-            let trajectory = TrajectoryRecorder()
-            let trace = TraceRecorder(traceId: TraceID.make())
-            let started = Date()
-            let loop = makeLoop(registry: registry, providerId: provider.id, model: nil, context: context,
-                                tools: tools, checkpoints: LoopCheckpointStore(), maxIterations: opts.maxIterations,
-                                budget: opts.makeBudget(),
-                                interactor: AutoApproveInteractor(), approvalTools: [],
-                                planMode: opts.planMode, extendedThinking: opts.extendedThinking, toolMode: ToolMode(rawValue: opts.toolMode) ?? .auto,
-                                roles: RoleBindings(default: ProviderBinding(providerId: provider.id)),
-                                delegationDepth: 0, sinkOverride: NullEventSink(),
-                                recorder: trajectory, traceRecorder: trace,
-                                traceRole: "bench")
-            let outcome = await loop.run(goal: goal)
-            let latency = Int(Date().timeIntervalSince(started) * 1000)
-            let steps = trajectory.snapshot()
-            let spans = await trace.all()
-            let usage = UsageCost.summarize(spans: spans)
-            rows.append(BenchRow(provider: provider.id, model: provider.defaultModel,
-                                 success: outcome.success, latencyMs: latency,
-                                 toolFailures: steps.filter { !$0.success }.count,
-                                 steps: steps.count, usage: usage,
-                                 summary: outcome.summary))
-        }
-        note(renderBench(rows))
-        return rows.contains(where: \.success) ? 0 : 1
-    }
-
-    private static func renderBench(_ rows: [BenchRow]) -> String {
-        var out = "bench result\n"
-        out += "| Provider | Result | Latency | Steps | Tool failures | Usage |\n"
-        out += "| --- | --- | ---: | ---: | ---: | --- |\n"
-        for row in rows {
-            let result = row.success ? "pass" : "fail"
-            out += "| \(row.provider) | \(result) | \(row.latencyMs)ms | \(row.steps) | \(row.toolFailures) | \(row.usage.render(label: "").trimmingCharacters(in: .whitespaces)) |\n"
-        }
-        out += "\nproof metrics · success, latency, tool failures, token/cost estimate. Run this across 20 real tasks and 3 role profiles before claiming production maturity."
-        return out
-    }
-
-    private static func runEval(_ opts: KistOptions, goal: String, registry: ProviderRegistry,
-                                root: String, tools: ToolRegistry, context: ToolContext,
-                                providerId: String, model: String?) async -> Int32 {
-        guard !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            err("usage: kist --eval \"<task>\"")
-            return 2
-        }
-        let trace = TraceRecorder(traceId: TraceID.make())
-        let runner = EvalRunner(maxIterations: opts.maxIterations)
-        let report = await runner.run([
-            EvalCase(name: "agent-behavior", prompt: goal,
-                     assertions: [.trajectoryHealthy, .maxSteps(opts.maxIterations), .noToolFailures])
-        ], agent: { prompt in
-            let trajectory = TrajectoryRecorder()
-            let loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
-                                tools: tools, checkpoints: LoopCheckpointStore(), maxIterations: opts.maxIterations,
-                                budget: opts.makeBudget(),
-                                interactor: AutoApproveInteractor(), approvalTools: [],
-                                planMode: opts.planMode, extendedThinking: opts.extendedThinking, toolMode: ToolMode(rawValue: opts.toolMode) ?? .auto,
-                                roles: RoleBindings(default: ProviderBinding(providerId: providerId, model: model)),
-                                delegationDepth: 0, sinkOverride: TerminalEventSink(),
-                                recorder: trajectory, traceRecorder: trace,
-                                traceRole: "eval")
-            let outcome = await loop.run(goal: prompt)
-            return EvalRunner.RunOutcome(output: outcome.summary, trajectory: trajectory.snapshot())
-        })
-        note(report.render())
-        printUsageDelta(from: [], to: await trace.all(), label: "eval usage", projectRoot: root)
-        return report.allPassed ? 0 : 1
-    }
-
-    private static func printUsageDelta(from before: [AgentSpan], to after: [AgentSpan],
-                                        label: String, projectRoot: String? = nil) {
-        let oldIds = Set(before.map(\.id))
-        let delta = after.filter { !oldIds.contains($0.id) }
-        if let projectRoot, !UsageLedger.append(projectRoot: projectRoot, spans: delta) {
-            note("usage ledger warning · could not persist local usage accounting")
-        }
-        let summary = UsageCost.summarize(spans: delta)
-        guard summary.tokens > 0 else { return }
-        note(summary.render(label: label))
-    }
-
-    // MARK: - Great-loop (long-horizon: self-assess · learn · escalate · team-review · safety-railed)
-
-    /// Threads a cycle's team-review feedback into the next cycle (locked — the runCycle closure is @Sendable).
-    private final class FeedbackBox: @unchecked Sendable {
-        private let lock = NSLock(); private var v = ""
-        var value: String { lock.lock(); defer { lock.unlock() }; return v }
-        func set(_ s: String) { lock.lock(); v = s; lock.unlock() }
-    }
-
-    /// Providers that server-faulted — the escalator routes around them (fault tolerance). COOLDOWN, not
-    /// permanent: a provider is excluded only for `cooldown` seconds after its last fault, so a transient
-    /// blip on cycle 2 of a 20h run doesn't narrow the escalation pool for the remaining 18 hours — the
-    /// next cycle after the window IS the half-open probe (a 5-model review flagged permanent exclusion).
-    private final class ProviderErrorBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var tracker = ProviderCooldownTracker()   // pure cooldown logic (unit-tested in AgentCore)
-        func insert(_ p: String, at now: Double) { lock.lock(); tracker.recordFault(p, at: now); lock.unlock() }
-        func active(now: Double) -> Set<String> { lock.lock(); defer { lock.unlock() }; return tracker.active(now: now) }
-    }
-
-    private static func runGreatLoop(_ opts: KistOptions, goal: String, registry: ProviderRegistry, root: String,
-                                     tools: ToolRegistry, context: ToolContext, checkpoints: LoopCheckpointStore,
-                                     toolMode: ToolMode, roles: RoleBindings, providerId: String, model: String?) async -> Int32 {
-        // LEAN TOOL SET: the full registry can be ~70 tools / ~25k schema chars (~6.5k tokens) — sent on
-        // EVERY model call. On a coding loop that's dead weight (media, app-UI-testing, desktop control,
-        // pentest, enterprise reporting) that ate ~half a cycle's budget, so cycles couldn't converge.
-        // Drop the coding-irrelevant tools; file/shell/lsp/memory/web/research stay.
-        let loopTools = ToolRegistry(tools.all().filter { !Self.isLoopIrrelevantTool($0.name) })
-        if loopTools.all().count < tools.all().count {
-            note("  · lean tool set: \(loopTools.all().count)/\(tools.all().count) tools (dropped coding-irrelevant schemas)")
-        }
-        let deadline: Double? = opts.loopHours.map { Date().timeIntervalSince1970 + $0 * 3600 }
-        // SAFETY: an unattended --loop must ALWAYS have a token/$ ceiling. If --budget wasn't given, default
-        // to a bounded cap (panel finding: model escalation with no cap could burn unbounded $ over 20h).
-        let defaultTokenCap = 2_000_000
-        let caps = GreatLoopCaps(maxCycles: opts.maxCycles ?? 20, maxTokens: opts.budgetTokens ?? defaultTokenCap,
-                                 deadlineEpoch: deadline, noProgressLimit: 3,
-                                 noDestructive: !opts.yolo, noAutoMerge: true)
-        if opts.budgetTokens == nil { note("  · no --budget given → default token ceiling \(defaultTokenCap) (pass --budget to change)") }
-        note("kist · great-loop · \(providerId)\(model.map { " (\($0))" } ?? "") · \(root) · caps[cycles:\(caps.maxCycles)"
-             + (caps.maxTokens.map { ", tokens:\($0)" } ?? "") + (opts.loopHours.map { ", \($0)h" } ?? "") + "]")
-        let memory = EffortMemory(projectRoot: root)
-        let traceRecorder = TraceRecorder(traceId: TraceID.make())
-        let delegationDepth = opts.delegationDepth
-        // Provider ids that actually have a usable key — candidates for model escalation.
-        let keyed = registry.providers.filter { registry.hasKey(for: $0) }.map { $0.id }
-        let feedback = FeedbackBox()
-        // Fault tolerance: providers that server-errored this run get routed around by the escalator, so a
-        // single flaky provider (e.g. a 500-storm) can't tank every cycle of a 20h loop (live dogfood: an
-        // escalated model 500'd on all 4 cycles and the loop never completed).
-        let erroredProviders = ProviderErrorBox()
-        // Durable, verification-gated learning across cycles AND runs (Phase 1).
-        let lessons: LessonStore? = opts.noMemory ? nil : LessonStore()
-        // GEPA-style evolving policy hints, best-per-signature Pareto frontier (Phase 2).
-        let policy: PolicyStore? = opts.noMemory ? nil : PolicyStore(projectRoot: root)
-        // Gated DGM bridge: proven hints → reviewable promotion queue, NEVER auto-applied (Phase 2.2).
-        let promotions: PromotionCandidateStore? = opts.noMemory ? nil : PromotionCandidateStore(projectRoot: root)
-
-        // ONE work cycle: escalate the model when the task is hard, size the budget so it can't starve the
-        // loop, run the goal (carrying any prior team-review feedback), then — if not done but progressing and
-        // the effort calls for a team — have a SECOND mind review the diff and thread that into the next cycle.
-        let runCycle: @Sendable (String, EffortController.Assessment, Int, Int?) async -> CycleResult = { baseGoal, effort, cycleIndex, budgetRemaining in
-            let nowEpoch = Date().timeIntervalSince1970
-            let cycleProvider = ModelEscalator.pick(tier: effort.modelTier, keyed: keyed, preferred: providerId,
-                                                    exclude: erroredProviders.active(now: nowEpoch))
-            let cycleModel: String? = cycleProvider == providerId ? model : nil
-            if cycleProvider != providerId { note("  ↑ escalating this cycle → \(cycleProvider) (tier \(effort.modelTier.rawValue))") }
-            // Snapshot the provider's retry tally so we can measure FLAKINESS over this cycle: a provider
-            // whose 5xx are absorbed by catalog retries never surfaces a terminal fault, but if it needed
-            // many retries AND the cycle still failed, it's degrading — route around it like a hard fault.
-            let retriesBefore = registry.retryCount(providerId: cycleProvider)
-            // Per-cycle budget: an even share of what REMAINS among the cycles LEFT — not a rigid
-            // total/maxCycles. Cycle 0 still gets ~remaining/maxCycles (so no single early cycle eats
-            // everything — the captain over-spend guard), but early cheap cycles leave more for later, and
-            // the LAST cycle can spend everything still unspent. The old fixed fair-share STARVED a cycle:
-            // it died mid-work (create files, then no budget left to build/test) and the next cycle restarted
-            // from scratch — a trivial task never converged. (dogfood: 200k/2-cycle died pre-build every time.)
-            let perCycle = budgetRemaining.map { Self.perCycleBudget(remaining: $0, cycleIndex: cycleIndex,
-                                                                     maxCycles: caps.maxCycles) }
-            // Inject durable lessons (past cycles + past runs) + the evolved policy hint for this task type.
-            let sig = EffortController.signature(for: baseGoal)
-            let primer = lessons?.primer(forGoal: baseGoal)
-            let policyHint = policy?.bestHint(forSignature: sig)
-            let repoMap = RepoMap.build(projectRoot: root, goal: baseGoal)   // orientation: files → symbols
-            let sessionMem = Self.sessionMemory(root: root, opts: opts)       // cortex + project memory
-            let fb = feedback.value
-            // FENCE the user's task in the scope-source markers so AuthorizationScopeEngine classifies ONLY
-            // the task — NOT the injected memory/repo-map below. (Live-run bug: cortex memory containing
-            // "Production" made a plain create-task misfire as read-only serverDiagnostics, blocking all writes.)
-            var cycleGoal = PromptCompiler.scopeSourceStart + "\n" + baseGoal + "\n" + PromptCompiler.scopeSourceEnd
-            // CONTINUITY across cycles: each cycle is a fresh conversation, so without this the model has
-            // amnesia — it re-creates work a prior cycle already did (live dogfood: it built the package at
-            // ./ in one cycle, then RE-created it under ./MathKit/ in the next → duplication, never converged).
-            // Show the files prior cycles already changed and tell it to CONTINUE, not restart.
-            let priorFiles = KistREPL.workingTreeChangedFiles(projectRoot: root)
-            if let note = Self.continuityNote(cycleIndex: cycleIndex, changedFiles: priorFiles) {
-                cycleGoal += "\n\n" + note
-            }
-            if let sessionMem, !sessionMem.isEmpty { cycleGoal += "\n\nMEMORY — what kist knows about you & this project:\n" + sessionMem }
-            if !repoMap.isEmpty { cycleGoal += "\n\n" + repoMap }
-            if let primer, !primer.isEmpty { cycleGoal += "\n\n" + primer }
-            if let policyHint, !policyHint.isEmpty { cycleGoal += "\n\nLEARNED POLICY — " + policyHint }
-            if !fb.isEmpty { cycleGoal += "\n\nPRIOR CYCLE — fix these before finishing:\n" + fb }
-
-            let recorder = TrajectoryRecorder()
-            let think = effort.thinking != .none
-            let before = await traceRecorder.all()
-
-            // BEST-OF-N (Phase 3.1 exec): on a HARD cycle with a CLEAN tree, try N independent attempts in
-            // ISOLATED worktrees and apply the first VERIFIED winner to the live tree. WorktreeBestOfN never
-            // touches the live tree except a clean winner-apply (dry-run --check'd); any failure / no-winner /
-            // dirty-tree leaves it untouched → fall through to a normal in-tree cycle.
-            if effort.searchWidth > 1, WorktreeBestOfN.isCleanTree(root) {
-                note("  ⑃ best-of-\(effort.searchWidth) · isolated worktrees")
-                let attemptBudget = perCycle.map { max(20_000, $0 / effort.searchWidth) }
-                let won = await WorktreeBestOfN.run(root: root, width: effort.searchWidth, nowEpoch: Date().timeIntervalSince1970) { wtPath, _ in
-                    let wtCtx = ToolContext(projectRoot: wtPath, shell: context.shell, sandbox: context.sandbox,
-                                            externalReadRoots: context.externalReadRoots)
-                    let rec = TrajectoryRecorder()
-                    let wtLoop = makeLoop(registry: registry, providerId: cycleProvider, model: cycleModel, context: wtCtx,
-                                          tools: loopTools, checkpoints: checkpoints, maxIterations: effort.iterationBudget,
-                                          // --max-cost in --loop: SAFE fixed fair-share USD subdivision per
-                                          // attempt (maxCostUSD / (maxCycles × searchWidth)) — the total across
-                                          // all cycles×attempts can never exceed the cap (Codex: was ignored here).
-                                          budget: attemptBudget.map { BudgetLedger(maxTokens: $0, maxUSD: opts.maxCostUSD.map { $0 / Double(max(1, caps.maxCycles * effort.searchWidth)) }) },
-                                          interactor: caps.noDestructive ? NonDestructiveInteractor() : AutoApproveInteractor(),
-                                          planMode: false, extendedThinking: think, toolMode: toolMode, roles: roles,
-                                          delegationDepth: delegationDepth, showReasoning: false,
-                                          sinkOverride: TerminalEventSink(showReasoning: false, style: .calm),
-                                          recorder: rec, traceRecorder: traceRecorder)
-                    let oc = await wtLoop.run(goal: cycleGoal)
-                    let traj = rec.snapshot()
-                    let v = GreatLoopVerifier.verify(trajectory: traj, canRunCommands: context.shell.enabled,
-                                                     changedFiles: KistREPL.workingTreeChangedFiles(projectRoot: wtPath),
-                                                     diff: KistREPL.workingTreeDiff(projectRoot: wtPath))
-                    let g = GroundedReviewValidator.audit(oc.summary, projectRoot: wtPath).isGrounded
-                    return (verified: oc.success && g && v.isVerified,
-                            quality: EffortScorer.quality(success: true, verified: true, failureRate: 0,
-                                                          iterationsUsed: traj.count, iterationBudget: effort.iterationBudget))
-                }
-                if won {
-                    note("  ✓ best-of-N: a verified independent attempt was applied to the tree")
-                    let delta = (await traceRecorder.all()).filter { s in !before.contains(where: { $0.id == s.id }) }
-                    lessons?.record(CycleReflection.lesson(goal: baseGoal, done: true, verdictReason: "verified",
-                                                           reviewGist: nil, summary: "best-of-N: a verified independent attempt was applied",
-                                                           failureRate: 0, at: Date().timeIntervalSince1970))
-                    return CycleResult(doneAndVerified: true, tokensSpent: UsageCost.summarize(spans: delta).tokens,
-                                       madeProgress: true, signals: EffortController.Signals(),
-                                       summary: "best-of-N verified winner applied")
-                }
-                note("  · no best-of-N winner — running a normal in-tree cycle")
-            }
-
-            let loop = makeLoop(registry: registry, providerId: cycleProvider, model: cycleModel, context: context,
-                                tools: loopTools, checkpoints: checkpoints, maxIterations: effort.iterationBudget,
-                                // --max-cost in --loop: SAFE per-cycle USD fair share (maxCostUSD / maxCycles);
-                                // sum across cycles ≤ the cap (Codex: was ignored here).
-                                budget: perCycle.map { BudgetLedger(maxTokens: $0, maxUSD: opts.maxCostUSD.map { $0 / Double(max(1, caps.maxCycles)) }) },
-                                // ENFORCE noDestructive: an unattended --loop (no --yolo) refuses irreversible
-                                // ops (rm -rf/force-push/deploy) while still running build/test/edit.
-                                interactor: caps.noDestructive ? NonDestructiveInteractor() : AutoApproveInteractor(),
-                                planMode: false, extendedThinking: think, toolMode: toolMode, roles: roles,
-                                delegationDepth: delegationDepth, showReasoning: false,
-                                sinkOverride: TerminalEventSink(showReasoning: false, style: .calm),
-                                recorder: recorder, traceRecorder: traceRecorder)
-            let outcome = await loop.run(goal: cycleGoal)
-            // Fault detection: if the cycle failed because the PROVIDER faulted server-side, mark it so the
-            // escalator routes around it (within the cooldown window). PRIMARY signal is the STRUCTURED flag
-            // the loop set from the typed error. FALLBACK (only on a FAILED cycle, where the summary IS the
-            // provider error reason — not agent content): the string classifier, for error shapes that don't
-            // reach the loop as a typed AIProviderError (live dogfood: a gemini 5xx surfaced this way and the
-            // structured flag missed it). No provider==default guard: if the DEFAULT is broken, record it too
-            // — pick() falls back to it only when there's no healthy alternative (single-provider not stranded).
-            // FLAKINESS: retries this cycle that the catalog absorbed. If the provider needed several AND the
-            // cycle didn't complete, treat it as a fault (the live gemini case: intermittent 5xx recovered by
-            // retries burned the budget without ever surfacing a terminal fault, so route-around never fired).
-            let retriesThisCycle = registry.retryCount(providerId: cycleProvider) - retriesBefore
-            let flaky = retriesThisCycle >= 3
-            let faulted = outcome.providerFault
-                || (!outcome.success && ProviderFault.fromSummary(outcome.summary))
-                || (!outcome.success && flaky)
-            if faulted {
-                erroredProviders.insert(cycleProvider, at: nowEpoch)
-                let why = outcome.providerFault ? "server-faulted"
-                    : (retriesThisCycle >= 3 ? "flaky (\(retriesThisCycle) retries)" : "server-faulted")
-                note("  ⚠ \(cycleProvider) \(why) — routing around it (cooldown)")
-            }
-            let trajectory = recorder.snapshot()
-            let intent = PromptCompiler.compile(baseGoal).intent
-            let report = TrajectoryAnalyzer.analyze(trajectory,
-                                                    taskIntent: intent)
-            let failures = trajectory.filter { !$0.success }.count
-            let failureRate = trajectory.isEmpty ? 0 : Double(failures) / Double(trajectory.count)
-            let after = await traceRecorder.all()
-            let delta = after.filter { s in !before.contains(where: { $0.id == s.id }) }
-            let grounded = GroundedReviewValidator.audit(outcome.summary, projectRoot: root).isGrounded
-            let workDiff = KistREPL.workingTreeDiff(projectRoot: root)
-            let workChanged = KistREPL.workingTreeChangedFiles(projectRoot: root)
-            // PHASE 0 — anti-Goodhart done-gate: a claimed done is only real if it's execution-grounded
-            // (a real build/test passed after the edits) AND didn't game the verifier (no deleted/skipped
-            // tests, no `|| true`). Model say-so is never enough over a 20h run.
-            let verdict = GreatLoopVerifier.verify(trajectory: trajectory, canRunCommands: context.shell.enabled,
-                                                   changedFiles: workChanged, diff: workDiff)
-            let done = outcome.success && grounded && verdict.isVerified
-            if outcome.success, !verdict.isVerified { note("  ⨯ done REJECTED by verifier · \(verdict.reason)") }
-            let progressed = trajectory.contains { $0.success }
-
-            // Thread forward what the NEXT cycle must fix: the verifier's rejection (if any) + a second-mind
-            // team review of the diff. Cleared once the goal is genuinely done+verified.
-            var reviewText: String? = nil
-            if done {
-                feedback.set("")
-            } else {
-                var notes: [String] = []
-                if outcome.success, !verdict.isVerified {
-                    notes.append("Your 'done' was REJECTED: \(verdict.reason). A REAL build/test must pass after your edits, and you may NOT weaken/skip/delete tests to make it green.")
-                }
-                // Carry the LAST build/test error forward so the next cycle fixes THIS error instead of
-                // rediscovering it (dogfood: a test naming-collision compile error was lost each cycle).
-                if let failure = Self.lastCommandFailure(in: trajectory) {
-                    notes.append("The last build/test command FAILED with this error — fix it directly (do NOT "
-                        + "assume the tool is broken; run_command works — you ran commands successfully this run):\n" + failure)
-                }
-                if progressed, effort.team != .solo,
-                   !workDiff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let reviewer = ModelEscalator.pick(tier: .frontier, keyed: keyed, preferred: cycleProvider,
-                                                       exclude: erroredProviders.active(now: nowEpoch))
-                    note("  ⎇ team review · \(reviewer)")
-                    if let review = try? await registry.complete(
-                        providerId: reviewer, model: nil,
-                        messages: [ChatMessage(role: .system, content: Copilot.reviewSystemPrompt),
-                                   ChatMessage(role: .user, content: Copilot.reviewPrompt(task: baseGoal, diff: workDiff))],
-                        settings: ModelSettings(temperature: 0.0, maxTokens: 700)),
-                       !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        reviewText = review
-                        notes.append("Team review of your changes:\n" + review)
-                    }
-                }
-                feedback.set(notes.joined(separator: "\n\n"))
-            }
-
-            // LEARN durably: a verification-gated structured lesson (PROVEN only if done+verified).
-            let now = Date().timeIntervalSince1970
-            lessons?.record(CycleReflection.lesson(goal: baseGoal, done: done, verdictReason: verdict.reason,
-                                                   reviewGist: reviewText, summary: outcome.summary,
-                                                   failureRate: failureRate, at: now))
-            // EVOLVE the policy: score the hint we ran under (win = verified done, grounded by Phase 0) and
-            // let this cycle's review seed the next candidate hint for this signature.
-            policy?.record(signature: sig, activeHint: policyHint, won: done, review: reviewText, at: now)
-            // GATED DGM bridge: once a hint proves itself (enough verified wins at a high rate), QUEUE it for
-            // human/DGM review — NEVER auto-applied to Mythos's own prompts (the self-modification line).
-            if let best = policy?.bestCandidate(forSignature: sig),
-               PromotionGate.qualifies(wins: best.wins, trials: best.trials),
-               promotions?.export(PromotionCandidate(signature: sig, hint: best.hint, wins: best.wins,
-                                                      trials: best.trials, at: now)) == true {
-                note("  ⤴ policy proven (\(best.wins)/\(best.trials)) — queued for review (never auto-applied)")
-            }
-
-            return CycleResult(doneAndVerified: done, tokensSpent: UsageCost.summarize(spans: delta).tokens,
-                               madeProgress: progressed,
-                               signals: .init(failureRate: failureRate, iterationsUsed: trajectory.count, isStuck: !report.healthy),
-                               summary: outcome.summary, providerFault: outcome.providerFault)
-        }
-
-        let runner = GreatLoopRunner(goal: goal, caps: caps, memory: memory,
-                                     clock: { Date().timeIntervalSince1970 },
-                                     runCycle: runCycle, emit: { note($0) })
-        let decision = await runner.run()
-        printUsageDelta(from: [], to: await traceRecorder.all(), label: "great-loop usage", projectRoot: root)
-        return decision.succeeded ? 0 : 1
-    }
-
     // MARK: - Council (agent conference -> kanban -> optional builder handoff)
 
     private static func runResearch(_ opts: KistOptions, goal: String,
@@ -1532,50 +940,71 @@ enum KistRunner {
                                     providerId: String, model: String?,
                                     rolesOverride: RoleBindings? = nil) async -> Int32 {
         note("kist · research · \(root)")
-        let start = await tools.execute(name: "research_run",
-                                        arguments: ["action": "start", "goal": goal],
-                                        context: context)
+        // LIVE PROGRESS (Luke 2026-08-02): research used to go dead-silent between blocking tool calls
+        // (only terse note() lines), unlike the build path's live "thinking" display. Show a Codex-style
+        // checklist instead — each step announces what it's doing NOW, then lights up green (✓) when done
+        // or red (✗) if it failed — so the user can see it working rather than staring at a frozen screen.
+        let colored = KistREPL.stdoutColorEnabled(projectRoot: root)
+        func dim(_ s: String) -> String { colored ? "\u{001B}[2m\(s)\u{001B}[0m" : s }
+        func researchStep(_ emoji: String, _ label: String,
+                          _ run: () async -> ToolResult) async -> ToolResult {
+            note(dim("│ \(emoji) \(label) · working…"))
+            let r = await run()
+            if r.success {
+                note(colored ? "\u{001B}[32m│ ✓ \(label)\u{001B}[0m" : "│ ✓ \(label)")
+            } else {
+                let why = r.error ?? r.output
+                note(colored ? "\u{001B}[31m│ ✗ \(label) · \(why)\u{001B}[0m" : "│ ✗ \(label) · \(why)")
+            }
+            return r
+        }
+        note(dim("▤ research · web search → repo context → estate sweep → synthesize"))
+
+        let start = await researchStep("🔎", "start research run") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "start", "goal": goal], context: context)
+        }
         guard start.success, let runID = start.metadata["run_id"] else {
             err("research · failed to start: \(start.error ?? start.output)")
             return 1
         }
-        note("research · run \(runID)")
+        note(dim("│   run \(runID)"))
 
-        let search = await tools.execute(name: "research_run",
-                                         arguments: ["action": "search", "run_id": runID,
-                                                     "query": goal, "limit": 5],
-                                         context: context)
-        if !search.success { note("research · web search blocked · \(search.error ?? search.output)") }
+        _ = await researchStep("🌐", "web search") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "search", "run_id": runID,
+                                            "query": goal, "limit": 5], context: context)
+        }
 
-        let repo = await tools.execute(name: "research_run",
-                                       arguments: ["action": "context", "run_id": runID,
-                                                   "query": goal, "limit": 8],
-                                       context: context)
-        if !repo.success { note("research · repo context blocked · \(repo.error ?? repo.output)") }
+        _ = await researchStep("📂", "repo context") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "context", "run_id": runID,
+                                            "query": goal, "limit": 8], context: context)
+        }
 
         // DEEP ESTATE SWEEP (Luke 2026-07-31): on TOP of the web + current-repo evidence, sweep our OWN
         // system files across ~ and /Volumes IN-PROCESS (bypasses the tool sandbox → reaches our real source
         // at /Volumes/PRO-G40/kist-loops and the rest of the estate). Record the sweep in the SAME durable
         // evidence ledger before synthesis; otherwise a zero-source dossier could be laundered into a
         // successful council artifact, and estate provenance would exist only in transient prompt text.
-        let estate = await tools.execute(name: "research_run",
-                                         arguments: ["action": "estate", "run_id": runID,
-                                                     "query": goal],
-                                         context: context)
+        let estate = await researchStep("🧠", "estate sweep (our own files)") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "estate", "run_id": runID,
+                                            "query": goal], context: context)
+        }
         if estate.success {
-            note("research · recorded \(estate.metadata["files"] ?? "0") system file(s) from our estate")
-        } else {
-            note("research · estate search unavailable · \(estate.error ?? estate.output)")
+            note(dim("│   \(estate.metadata["files"] ?? "0") system file(s) recorded"))
         }
 
-        let synth = await tools.execute(name: "research_run",
-                                        arguments: ["action": "synthesize", "run_id": runID],
-                                        context: context)
+        let synth = await researchStep("📝", "synthesize dossier") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "synthesize", "run_id": runID], context: context)
+        }
         guard synth.success else {
             err("research · incomplete: \(synth.error ?? synth.output)")
             return 1
         }
-        if let report = synth.metadata["report"] { note("research · dossier saved · \(report)") }
+        if let report = synth.metadata["report"] { note(dim("│   dossier saved · \(report)")) }
         let dossier = synth.output
 
         return await runCouncil(opts, goal: goal, execute: opts.councilExecute,
@@ -1741,7 +1170,6 @@ enum KistRunner {
         return trimmed.isEmpty ? "council" : trimmed
     }
 
-
     // MARK: - Fleet (supervised parallel, heterogeneous)
 
     /// Decompose the goal → disjoint subtasks → launch one agent per subtask in its own worktree →
@@ -1873,68 +1301,6 @@ enum KistRunner {
 
     // MARK: - Plan→execute (typed DAG built by the role team)
 
-    /// Build the role team (planner/coder/critic), falling back to the chosen provider. nil after an error.
-    static func resolveRoles(_ opts: KistOptions, _ registry: ProviderRegistry,
-                                     providerId: String, model: String?) -> RoleBindings? {
-        var selection = KistREPL.RoleSelection(default: ProviderBinding(providerId: providerId, model: model))
-        guard applyProfileAndRoleFlags(opts, to: &selection, knownProviders: providerAliases(for: registry)) else { return nil }
-        return selection.bindings
-    }
-
-    private static func applyProfileAndRoleFlags(_ opts: KistOptions, to selection: inout KistREPL.RoleSelection,
-                                                 knownProviders: [String: String]) -> Bool {
-        if let profileName = opts.roleProfile {
-            do {
-                let profile = try RoleProfileStore().profile(named: profileName)
-                if let error = selection.apply(profile, knownProviders: knownProviders) {
-                    err("error: \(error). Try --list-providers."); return false
-                }
-            } catch {
-                err("error: \(error)"); return false
-            }
-        }
-
-        for (spec, role): (String?, AgentRole) in [
-            (opts.plannerSpec, .planner),
-            (opts.workerSpec, .worker),
-            (opts.coderSpec, .coder),
-            (opts.criticSpec, .critic),
-        ] {
-            if let error = selection.assignSpec(spec, to: role, knownProviders: knownProviders) {
-                err("error: \(error). Try --list-providers."); return false
-            }
-        }
-
-        if let error = selection.validationError(knownProviders: knownProviders) {
-            err("error: \(error). Try --list-providers."); return false
-        }
-        selection.canonicalizeProviders(knownProviders: knownProviders)
-        return true
-    }
-
-    private static func providerAliases(for registry: ProviderRegistry) -> [String: String] {
-        var aliases: [String: String] = [:]
-        for provider in registry.providers {
-            aliases[provider.id.lowercased()] = provider.id
-            aliases[provider.name.lowercased()] = provider.id
-        }
-        return aliases
-    }
-
-    private static func firstVisionBinding(_ registry: ProviderRegistry) -> ProviderBinding? {
-        // Prefer Gemini for image/PDF inspection because it already backs video/audio and files.
-        if let g = registry.provider(id: "gemini"), registry.hasKey(for: g),
-           let model = g.availableModels.first(where: { $0.isVision })?.id {
-            return ProviderBinding(providerId: g.id, model: model)
-        }
-        for provider in registry.providers where registry.hasKey(for: provider) {
-            if let model = provider.availableModels.first(where: { $0.isVision })?.id {
-                return ProviderBinding(providerId: provider.id, model: model)
-            }
-        }
-        return nil
-    }
-
     static func briefContext(memoryContext: String?, roles: RoleBindings,
                                      lessons: String? = nil, specialists: String? = nil,
                                      reviewTargets: String? = nil) -> String? {
@@ -1955,25 +1321,6 @@ enum KistRunner {
             parts.append(lessons)                         // advisory lessons from past runs (P3 memory)
         }
         return parts.joined(separator: "\n\n")
-    }
-
-    private static func recordRuntimeLessons(goal: String, success: Bool, recorder: TrajectoryRecorder,
-                                             lessonStore: LessonStore?, maxIterations: Int,
-                                             mode: PromptCompiler.Mode) {
-        let intent = PromptCompiler.compile(goal, mode: mode).intent
-        let report = TrajectoryAnalyzer.analyze(recorder.snapshot(), maxIterations: maxIterations,
-                                                taskIntent: intent)
-        if !report.healthy { note("⚙ self-check · " + report.issues.map { $0.kind.rawValue }.joined(separator: ", ")) }
-        guard let lessonStore else { return }
-        let at = Date().timeIntervalSince1970
-        for issue in report.issues {
-            lessonStore.record(Lesson(kind: .obstacle,
-                                      text: "\(issue.kind.rawValue): \(issue.detail) [goal: \(goal.prefix(80))]",
-                                      source: nil, at: at))
-        }
-        if !success {
-            lessonStore.record(Lesson(kind: .obstacle, text: "task failed: \(goal.prefix(120))", source: nil, at: at))
-        }
     }
 
     /// Run a plan→execute: the planner emits a typed DAG, you approve it (unless --yolo), then the team
@@ -2059,125 +1406,7 @@ enum KistRunner {
                            autoApproveDangerous: opts.auto)
     }
 
-    // MARK: - MCP lifecycle
-
-    /// Build the tool registry = built-in headless tools + any external MCP server tools, run
-    /// `body`, then guarantee MCP servers are shut down (no zombies). MCP is opt-in via config
-    /// (`~/.mcp.json` etc.); with none configured this is just the headless tool set.
-    private static func withTools(projectRoot: String,
-                                  fetchAllowedHosts: [String],
-                                  extraTools: [any AgentTool] = [],
-                                  enableComputerUse: Bool = false,
-                                  _ body: (ToolRegistry) async -> Int32) async -> Int32 {
-        let mcp = MCPClientManager()
-        let discovered = await mcp.discoverAndWrapTools(projectRoot: projectRoot)
-        // Gate host-control (desktop actuation / screen capture) MCP tools behind --enable-computer-use, so a
-        // user-configured desktop MCP can't drive the machine on an unarmed surface (council 2026-07-03).
-        // Targeted by verb, so non-desktop MCP servers (github, db, filesystem) keep working unarmed.
-        let mcpTools = enableComputerUse ? discovered
-            : discovered.filter { !ReversibilityClassifier.isHostControlMCPTool($0.name) }
-        if discovered.count != mcpTools.count {
-            note("mcp · dropped \(discovered.count - mcpTools.count) host-control tool(s) — pass --enable-computer-use to allow")
-        }
-        if !mcpTools.isEmpty, ProcessInfo.processInfo.environment["KIST_VERBOSE"] == "1" {
-            note("mcp · \(mcpTools.count) tool(s) from external servers")
-        }
-        var base: [any AgentTool] = ToolRegistry.headless().all()
-        base.append(WebFetchTool(allowedHosts: fetchAllowedHosts))     // SSRF-guarded web read, optional host allowlist
-        base.append(WebSearchTool())                                   // source discovery for deep research
-        base.append(ResearchRunTool(allowedHosts: fetchAllowedHosts))   // durable evidence-first research dossier
-        // ComputerControlTool (app launcher open_app/url — local OS automation that bypasses the sandbox) and
-        // DesktopControlTool (THE HANDS — real mouse/keyboard injection) are NOT added here. Both are host-
-        // control, registered ONLY under --enable-computer-use via the DEFAULT-DENY block in buildExtraTools
-        // (council 2026-07-03), so neither can be present on an unarmed autonomous surface.
-        base.append(PentestTool())                                    // authorized security testing (allowlist + approval + audit; REPL-only, not headless/mcp)
-        base.append(contentsOf: extraTools)                            // media/data understanding tools
-        base.append(contentsOf: mcpTools.map { $0 as any AgentTool })
-        let code = await body(ToolRegistry(base))
-        await mcp.shutdownAll()
-        return code
-    }
-
     // MARK: - Helpers
-
-    private static func makeLoop(registry: ProviderRegistry, providerId: String, model: String?,
-                                 context: ToolContext, tools: ToolRegistry, checkpoints: LoopCheckpointStore,
-                                 maxIterations: Int,
-                                 budget: BudgetLedger? = nil,
-                                 interactor: RuntimeInteractor = AutoApproveInteractor(),
-                                 approvalTools: Set<String> = [],
-                                 planMode: Bool = false,
-                                 extendedThinking: Bool = false,
-                                 toolMode: ToolMode = .auto,
-                                 roles: RoleBindings? = nil,
-                                 delegationDepth: Int = 1,
-                                 showReasoning: Bool = false,
-                                 sinkOverride: RuntimeEventSink? = nil,
-                                 recorder: TrajectoryRecorder? = nil,
-                                 traceRecorder: TraceRecorder? = nil,
-                                 traceRole: String? = "assistant") -> HeadlessAgentLoop {
-        // The main agent gets `spawn_agent` for delegation; spawned agents receive it only while
-        // the bounded delegation-depth budget remains, so teammates can help without runaway trees.
-        // The SAME budget ledger is shared with spawn so the whole delegation tree draws one cap.
-        let terminalSink: RuntimeEventSink = sinkOverride ?? TerminalEventSink(showReasoning: showReasoning)
-        let spawn = SpawnAgentTool(providers: registry, providerId: providerId, model: model,
-                                   roles: roles,
-                                   baseTools: tools, sink: terminalSink,
-                                   interactor: interactor, approvalTools: approvalTools,
-                                   maxIterations: maxIterations,
-                                   delegationDepth: delegationDepth,
-                                   extendedThinking: extendedThinking,
-                                   budget: budget)
-        // PROACTIVE specialist delegation: give the main agent `spawn_specialist` so it can hand a
-        // matching subtask to a named specialist (Claude-exact — the model reads their descriptions and
-        // delegates). Ceiling is `tools` (no spawn_* → a specialist can't recursively fan out). Only added
-        // when specialists exist, so the roster is never empty in the tool description.
-        let specialists = SpecialistRegistry(projectRoot: context.projectRoot).load()
-        var extraTools: [any AgentTool] = [spawn]
-        if !specialists.isEmpty {
-            let specSpawner = SpecialistSpawner(
-                providers: registry, baseTools: tools, context: context,
-                sink: terminalSink, interactor: interactor,
-                aliasTable: [:], roleDefault: ProviderBinding(providerId: providerId, model: model),
-                defaultMaxIterations: maxIterations, extendedThinking: extendedThinking, budget: budget)
-            // SECURITY (Codex HIGH): a proactively-spawned specialist is pinned to the canonical NORMAL
-            // approval floor (`Self.sensitiveTools`), NOT the loop's `approvalTools` param. The param is []
-            // under --yolo and is captured once at construction, so using it would let a --yolo-launched
-            // session that later TIGHTENS still spawn guards-off children (escalation). The constant normal
-            // floor can never be escalated below: a delegated specialist always re-asserts sensitive-tool
-            // approvals — even in --yolo, where the main agent stays guards-off but a spawned sub-agent does
-            // not inherit that. Child ≥ parent restrictiveness in every session state.
-            extraTools.append(SpawnSpecialistTool(specialists: specialists, spawner: specSpawner,
-                                                  approvalTools: Self.sensitiveTools))
-        }
-        let mainTools = ToolRegistry(tools.all() + extraTools)
-        // Lifecycle hooks (kist-modularized security fix): user-level (~/.kist/hooks.json) always load;
-        // the WORKSPACE-local <root>/.kist/hooks.json is opt-in (KIST_TRUST_PROJECT_HOOKS=1) because a
-        // hostile cloned repo could ship one and hooks run as /bin/sh — auto-loading it is an
-        // untrusted-workspace RCE (same guard MCPClientConfig applies to .mcp.json).
-        let allowProjectHooks = ProcessInfo.processInfo.environment["KIST_TRUST_PROJECT_HOOKS"] == "1"
-        let (hooks, projectHooksRefused) = AgentHooks.loadTrusted(
-            projectRoot: context.projectRoot, allowProjectHooks: allowProjectHooks)
-        if let hooks, !hooks.isEmpty { note("hooks · \(hooks.specs.count) configured") }
-        if projectHooksRefused {
-            note("hooks · .kist/hooks.json present but NOT loaded (untrusted workspace) — set KIST_TRUST_PROJECT_HOOKS=1 to trust it")
-        }
-        return HeadlessAgentLoop(providers: registry, providerId: providerId, model: model,
-                                 tools: mainTools, context: context, sink: terminalSink,
-                                 interactor: interactor, approvalTools: approvalTools,
-                                 planMode: planMode, toolMode: toolMode, hooks: hooks,
-                                 checkpoints: checkpoints, maxIterations: maxIterations,
-                                 extendedThinking: extendedThinking,
-                                 budget: budget,
-                                 contextWindow: ContextWindowManager.forModel(
-                                    capabilities: registry.capabilities(providerId: providerId, model: model)
-                                 ),
-                                 recorder: recorder,
-                                 traceRecorder: traceRecorder,
-                                 traceRole: traceRole,
-                                 // Verified local-model stop sequences from Drop-a-Key/Drop-a-Doc onboarding.
-                                 modelProfiles: LocalModelProfileStore.default())
-    }
 
     /// Explicit flag > config > first configured cloud provider > first local. Nil after an error.
     private static func resolveProvider(_ opts: KistOptions, _ registry: ProviderRegistry, configProvider: String?) -> String? {
@@ -2185,7 +1414,11 @@ enum KistRunner {
             guard registry.provider(id: pid) != nil else { err("error: unknown provider '\(pid)'. Try --list-providers."); return nil }
             return pid
         }
-        if let cloud = registry.providers.first(where: { $0.requiresAPIKey && registry.hasKey(for: $0) }) { return cloud.id }
+        // Pick the STRONGEST keyed cloud provider, not whatever sorts first in the catalog. MiMo is
+        // listed first but 400s on multi-turn tool history, so "first with a key" silently made it the
+        // default and turns died with 0 tool calls. Rank by ModelEscalator strength instead.
+        let keyedCloud = registry.providers.filter { $0.requiresAPIKey && registry.hasKey(for: $0) }
+        if let best = keyedCloud.max(by: { ModelEscalator.rank($0.id) < ModelEscalator.rank($1.id) }) { return best.id }
         if let local = registry.providers.first(where: { !$0.requiresAPIKey }) { return local.id }
         err("error: no provider has a key. Set one (e.g. export OPENAI_API_KEY=…) or use --provider. See --list-providers.")
         return nil
@@ -2252,7 +1485,7 @@ enum KistRunner {
         }
     }
 
-    private static func stdinIsTTY() -> Bool {
+    static func stdinIsTTY() -> Bool {
         #if canImport(Darwin) || canImport(Glibc)
         return isatty(fileno(stdin)) != 0
         #else
@@ -2260,114 +1493,4 @@ enum KistRunner {
         #endif
     }
 
-    /// `kist mcp auth <server> <metadata-url> [client-id] [scope]` — one-time interactive OAuth authorize
-    /// for a remote MCP server. Discovers the auth-server metadata, opens the browser, catches the loopback
-    /// redirect, exchanges the code, and persists the token where the client manager reads it.
-    private static func runMCPAuth(_ args: [String]) async -> Int32 {
-        guard args.count >= 2, let metaURL = URL(string: args[1]) else {
-            print("usage: kist mcp auth <server-name> <metadata-url> [client-id] [scope]")
-            print("  <metadata-url> is the OAuth authorization-server metadata (RFC 8414), e.g. https://host/.well-known/oauth-authorization-server")
-            return 2
-        }
-        let server = args[0]
-        let clientID = args.count >= 3 ? args[2] : nil
-        let scope = args.count >= 4 ? args[3] : nil
-        do {
-            print("· discovering OAuth metadata for '\(server)' …")
-            let metadata = try await MCPOAuthFlow.discoverMetadata(metaURL)
-            print("· opening your browser to authorize (complete the login there) …")
-            try await MCPOAuthFlow.authorize(serverName: server, metadata: metadata, clientID: clientID,
-                                             scope: scope, store: OAuthTokenStore())
-            print("\u{001B}[32m✓ authorized '\(server)' — token stored. It will be used (and refreshed) automatically.\u{001B}[0m")
-            return 0
-        } catch {
-            print("\u{001B}[31m✗ authorize failed: \(error.localizedDescription)\u{001B}[0m")
-            return 1
-        }
-    }
-
-    private static func listProviders(_ registry: ProviderRegistry) -> Int32 {
-        print("Providers (✓ = key configured / no key needed):")
-        for p in registry.providers {
-            let mark = registry.hasKey(for: p) ? "\u{001B}[32m✓\u{001B}[0m" : "\u{001B}[31m✗\u{001B}[0m"
-            let kind = p.requiresAPIKey ? "key: \(p.keyAccount)" : "local"
-            print("  \(mark) \(p.id.padding(toLength: 12, withPad: " ", startingAt: 0)) \(p.name)  (\(kind))")
-        }
-        return 0
-    }
-
-    /// `--ship`: the build already ran hands-free in the autopilot sandbox; now the council of minds
-    /// reviews the actual result (changed-file manifest + goal) and returns GO/NO-GO. Deploy stays your call.
-    private static func runShipReview(goal: String, registry: ProviderRegistry, roles: RoleBindings, root: String) async {
-        // Capture a REAL diff the council can judge — including NEW files' content (which `git diff`
-        // alone omits until staged). Stage everything, drop kist's own run artifacts, read the staged
-        // diff, then fully unstage to leave the working tree exactly as the build left it.
-        _ = gitCapture(["-C", root, "add", "-A"])
-        _ = gitCapture(["-C", root, "reset", "-q", "--", ".kist"])
-        let statSummary = gitCapture(["-C", root, "diff", "--cached", "--stat"])
-        let fullDiff = String(gitCapture(["-C", root, "diff", "--cached"]).prefix(14000))
-        _ = gitCapture(["-C", root, "reset", "-q"])
-        let hadChanges = !statSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let build = ShipPipeline.BuildResult(
-            hadChanges: hadChanges,
-            diffSummary: hadChanges ? (statSummary + "\n\n" + fullDiff) : "(no changes in the working tree)",
-            testsPassed: false,
-            testSummary: "no automated test suite was run for this fresh build — judge the CODE itself against the goal (this is a new build, not a regression to an existing tested codebase)",
-            signoffSummary: "built hands-free in the autopilot OS sandbox",
-            testsRan: false)   // no suite for a fresh build → the council judges the code (NOT a test failure)
-        note("")
-        note("ship · council of minds reviewing the build…")
-        let decision = await ShipPipeline(council: CouncilPromotionJudge(providers: registry, roles: roles)).review(goal: goal, build: build)
-        if let v = decision.verdict {
-            for vote in v.votes {
-                note("  \(vote.shipWorthy ? "\u{001B}[32m✓\u{001B}[0m" : "\u{001B}[31m✗\u{001B}[0m") \(vote.name): \(vote.reason.prefix(140))")
-            }
-        }
-        guard decision.canDeploy else {
-            note("ship · \u{001B}[31;1m✗ NO-GO\u{001B}[0m — \(decision.reason)")
-            return
-        }
-        note("ship · \u{001B}[32;1m● GO\u{001B}[0m — the council blessed it. \(decision.reason)")
-        // THE CAPTAIN GATE: you are the captain. The council can't deploy alone — it needs your sign-off.
-        // (This is the human captain gate; the Ed25519 cryptographic captain in the codebase is for
-        // unforgeable multi-party/CI sign-off — overkill for a local single user.) Non-TTY → never deploy.
-        guard stdinIsTTY() else {
-            note("ship · captain sign-off needed — re-run in your terminal, or commit the build yourself.")
-            return
-        }
-        FileHandle.standardError.write(Data("ship · captain — deploy this build (commit it)? [y/N] ".utf8))
-        let answer = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
-        guard answer == "y" || answer == "yes" else {
-            note("ship · held by the captain — not committed. Ship it yourself when ready.")
-            return
-        }
-        _ = gitCapture(["-C", root, "add", "-A"])
-        _ = gitCapture(["-C", root, "reset", "-q", "--", ".kist"])   // don't commit kist's run artifacts
-        let safeGoal = goal.replacingOccurrences(of: "\n", with: " ").prefix(72)
-        let commit = gitCapture(["-C", root, "commit", "-m", "ship: \(safeGoal)"])
-        note("ship · \u{001B}[32;1m● DEPLOYED\u{001B}[0m — committed the build. \(commit.split(separator: "\n").first.map(String.init) ?? "")")
-        note("ship · push / host it with your deploy step when ready — kist won't push for you.")
-    }
-
-    /// Capture a git command's stdout (best-effort; "" on any failure).
-    private static func gitCapture(_ args: [String]) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["git"] + args
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        do { try p.run() } catch { return "" }
-        p.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
-
-    private static func listRuns(_ store: LoopCheckpointStore) -> Int32 {
-        let runs = store.resumable()
-        if runs.isEmpty { print("no resumable runs."); return 0 }
-        print("Resumable runs (newest first):")
-        for c in runs {
-            print("  \(c.id)  [\(c.status.rawValue)]  iter \(c.iteration)  \(c.providerId)  \(c.title)")
-        }
-        return 0
-    }
 }

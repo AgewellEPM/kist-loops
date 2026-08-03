@@ -17,21 +17,17 @@ struct DashboardInsightBundle: Sendable, Equatable {
 enum DashboardResearchPlanner {
     static func build(for plan: Plan, projectRoot: String,
                       trajectory: [ActionRecord], limit: Int = 6) -> DashboardInsightBundle {
-        let context = contextText(plan: plan, projectRoot: projectRoot, trajectory: trajectory)
-        let lower = context.lowercased()
         let projectName = URL(fileURLWithPath: projectRoot).lastPathComponent.lowercased()
-        // A user's HOME directory named `lukekist` is not the Kist source project. Substring matching
-        // classified every unrelated turn there as orchestration work and auto-created the same six
-        // Claude/Cursor/OpenHands debts after each answer. Match project-shaped names only.
+        // The hardcoded Claude Code / Cursor / OpenHands / MCP / Foundation-Models items are research
+        // for building KIST ITSELF. A broad substring match (agent/worker/background/mcp/…) fired on
+        // almost every turn — even on unrelated projects run from ~ — so the panel showed the SAME
+        // irrelevant suggestions forever instead of reflecting the actual work. Gate them on being in
+        // the real Kist repo; everywhere else, research is derived from the current board/next task.
         let isKistProject = projectName == "kist" || projectName == "kist-loops"
             || projectName.hasPrefix("kist-") || projectName == "mythos"
         let orchestrationContext = isKistProject
-            || containsAny(lower, ["captain", "orchestrat", "swarm", "fleet", "delegate",
-                                   "worker", "agent", "handoff", "model routing", "background"])
-        let learningContext = orchestrationContext
-            || containsAny(lower, ["benchmark", "eval", "learning", "evolve", "flywheel", "promotion"])
-        let toolContext = orchestrationContext
-            || containsAny(lower, ["mcp", "tool lifecycle", "permission", "server"])
+        let learningContext = isKistProject
+        let toolContext = isKistProject
 
         var seen = Set<String>()
         var research: [StatusDashboard.ResearchItem] = []
@@ -103,7 +99,7 @@ enum DashboardResearchPlanner {
             ))
         }
 
-        if orchestrationContext || containsAny(lower, ["local", "offline", "foundation", "apple", "latency", "cloud"]) {
+        if isKistProject {
             add(StatusDashboard.ResearchItem(
                 title: "Read Apple Foundation Models docs",
                 priority: .medium,
@@ -176,24 +172,6 @@ enum DashboardResearchPlanner {
                                       knowledgeDebt: debt,
                                       questions: questions,
                                       observation: observation)
-    }
-
-    private static func contextText(plan: Plan, projectRoot: String, trajectory: [ActionRecord]) -> String {
-        var parts = [URL(fileURLWithPath: projectRoot).lastPathComponent, plan.title]
-        for task in plan.tasks {
-            parts.append(task.title)
-            parts.append(task.detail)
-            parts.append(task.acceptance)
-            parts.append(task.verification)
-            parts.append(task.link ?? "")
-            parts.append(contentsOf: task.evidence)
-        }
-        parts.append(contentsOf: trajectory.map(\.tool))
-        return parts.joined(separator: "\n")
-    }
-
-    private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
-        needles.contains { text.contains($0) }
     }
 
     private static func firstNonEmpty(_ values: String...) -> String {
