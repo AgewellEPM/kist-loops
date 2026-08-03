@@ -9,7 +9,7 @@ import Glibc
 /// The conversational shell: read a line, run an agent turn on it (context carried across
 /// turns), repeat. The Claude-Code-style interactive surface. The loop already streams its
 /// actions/results to the `TerminalEventSink`, so the REPL just manages input + the transcript.
-struct KistREPL {
+final class KistREPL {
     let loop: HeadlessAgentLoop
     let commands: KistCommands
     /// Escalate to a SUPERVISED FLEET from inside the conversation (nil when unavailable, e.g. resume).
@@ -139,6 +139,14 @@ struct KistREPL {
     var sensitiveTools: Set<String> = []
     var editTools: Set<String> = []
     var initialPermissionMode: PermissionMode = .normal
+
+    // KistREPL is a class (reference type) so run()'s decomposed helpers can share mutable session
+    // state as properties instead of 30 captured locals. Only loop + commands are required; the rest
+    // are configured by the runner after construction (repl.X = …).
+    init(loop: HeadlessAgentLoop, commands: KistCommands) {
+        self.loop = loop
+        self.commands = commands
+    }
 
     func run() async {
         // Captured at session start so the status line can tell a plan THIS session is working
