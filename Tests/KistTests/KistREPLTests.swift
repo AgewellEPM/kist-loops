@@ -29,9 +29,7 @@ final class KistREPLTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
-            encoding: .utf8)
+        let source = kistREPLFamilySource()
         let start = try XCTUnwrap(source.range(of: #"case "research", "deepdive", "sweep", "deep":"#))
         let tail = source[start.lowerBound...]
         let end = try XCTUnwrap(tail.range(of: "\n                default:"))
@@ -50,9 +48,7 @@ final class KistREPLTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
-            encoding: .utf8)
+        let source = kistREPLFamilySource()
         let start = try XCTUnwrap(source.range(of: "switch proposal.route"))
         let tail = source[start.lowerBound...]
         let end = try XCTUnwrap(tail.range(of: "\n                    continue"))
@@ -112,9 +108,7 @@ final class KistREPLTests: XCTestCase {
         // The frozen-in-research bug: Kist produced plans but never executed them. `/build` is the
         // explicit bridge that fires the plan→execute worker (real code + build/tests), and with no
         // args it builds the plan just proposed instead of researching again.
-        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("case \"build\", \"implement\", \"buildit\", \"ship-it\", \"makeit\":"),
                       "/build (and aliases) must be a command")
         XCTAssertTrue(repl.contains("execution: \"build\"") && repl.contains("await planExecute(buildGoal, roleSelection.bindings)"),
@@ -126,9 +120,7 @@ final class KistREPLTests: XCTestCase {
     func testMainTurnActionFirstFiresBuilderOnBuildIntent() {
         // Action-first: a clear build intent must fire the plan→execute worker instead of an inline
         // chat/analysis turn (the "researches forever, never builds" disease).
-        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("if turnIntent == .build, turnMode != .plan, !armedTeamThisTurn, !lineFromQueue, let planExecute {"),
                       "a build-intent turn (not plan mode) must route to the plan→execute worker")
         XCTAssertTrue(repl.contains("action-first: firing the plan→execute worker"),
@@ -136,9 +128,7 @@ final class KistREPLTests: XCTestCase {
     }
 
     func testModeCommandExistsAndInjectsStyleIntoTurn() {
-        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("case \"mode\", \"modes\", \"voice\":"),
                       "/mode command must exist")
         XCTAssertTrue(repl.contains("if let styleDirective = style.directive()"),
@@ -148,9 +138,7 @@ final class KistREPLTests: XCTestCase {
     }
 
     func testCompetitiveCommandRunsCrossCompareResearch() {
-        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("case \"competitive\", \"compete\", \"competitor\", \"vs\":"),
                       "/competitive (and aliases) must be a command")
         XCTAssertTrue(repl.contains("execution: \"competitive-analysis\"") && repl.contains("await research(competitiveGoal, roleSelection.bindings)"),
@@ -158,9 +146,7 @@ final class KistREPLTests: XCTestCase {
     }
 
     func testBugHuntCommandDispatchesAFleet() {
-        let repl = try! String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/Kist/KistREPL.swift"), encoding: .utf8)
+        let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("case \"bughunt\", \"monkey\", \"monkeybash\", \"hunt\", \"breakit\":"),
                       "/bughunt (and aliases) must be a command")
         XCTAssertTrue(repl.contains("let bugGoal = Self.bugHuntBrief(inv.goal)")
