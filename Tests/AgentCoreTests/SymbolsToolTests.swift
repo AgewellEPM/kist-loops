@@ -116,6 +116,31 @@ final class SymbolsToolTests: XCTestCase {
         XCTAssertEqual(r.error?.contains("unsupported file type"), true)
     }
 
+    // 2026-08-04: `symbols outline` on a DIRECTORY (e.g. Sources/AgentCore) errored "unsupported
+    // file type" instead of outlining the module. A directory now outlines every supported file.
+    func testOutlineDirectoryOutlinesEverySupportedFile() async throws {
+        try write("Sources/A.swift", "struct Alpha {\n    func run() {}\n}\n")
+        try write("Sources/sub/B.swift", "func beta() {}\nclass Gamma {}\n")
+        try write("Sources/notes.md", "# ignored — unsupported\n")
+        let r = try await SymbolsTool().execute(arguments: ["action": "outline", "path": "Sources"], context: ctx())
+        XCTAssertTrue(r.success, r.error ?? "should succeed on a directory")
+        XCTAssertTrue(r.output.contains("type Alpha"))
+        XCTAssertTrue(r.output.contains("func beta"))
+        XCTAssertTrue(r.output.contains("type Gamma"))
+        XCTAssertFalse(r.output.contains("notes.md"), "unsupported files are skipped, not errored on")
+        XCTAssertEqual(r.metadata["files"], "2", "two supported source files outlined")
+        XCTAssertEqual(r.metadata["action"], "outline")
+    }
+
+    // A genuinely-unsupported FILE (not a directory) still gives the honest error — the directory
+    // fallback must not swallow the real "unsupported type" case.
+    func testOutlineUnsupportedFileStillErrorsNotTreatedAsDir() async throws {
+        try write("data.bin", "binary-ish\n")
+        let r = try await SymbolsTool().execute(arguments: ["action": "outline", "path": "data.bin"], context: ctx())
+        XCTAssertFalse(r.success)
+        XCTAssertEqual(r.error?.contains("unsupported file type"), true)
+    }
+
     // MARK: - tool: find
 
     func testFindLocatesDefinitionAcrossRepo() async throws {

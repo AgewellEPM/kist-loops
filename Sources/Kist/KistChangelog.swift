@@ -13,6 +13,12 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.8", date: "2026-08-04",
+                headline: "symbols outline works on a whole directory/module",
+                changes: [
+                    "Fixed: `symbols outline` on a directory (e.g. Sources/AgentCore) errored 'unsupported file type' — it now outlines every supported source file inside the directory (bounded, per-file caps)",
+                    "A genuinely unsupported FILE still gives the honest error; only directories get the new walk",
+                ]),
         Release(version: "0.17.7", date: "2026-08-04",
                 headline: "Builds don't choke on the model's essay anymore",
                 changes: [
