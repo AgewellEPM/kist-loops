@@ -46,11 +46,44 @@ final class GenerateToolTests: XCTestCase {
         XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```\nx=1\n```"), "x=1")
         // Not wrapped → untouched.
         XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("just prose"), "just prose")
-        // Prose CONTAINING a fenced sample (two interior fences) → left intact, not mangled.
-        let prose = "Here is code:\n```py\nx=1\n```\nThat's it."
-        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence(prose), prose)
         // Inner backticks/content survive; only the outer fence is stripped.
         XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```bash\necho `date`\n```"), "echo `date`")
+    }
+
+    // 2026-08-04 VISUAL dogfood: the model returned an ESSAY wrapping the code PLUS sibling ```bash```
+    // blocks; the whole essay was written to hello.asm and nasm choked on "Okay, here's…". The real
+    // code block (the largest) must be extracted, prose + sibling samples dropped.
+    func testExtractsCodeFromProseWithSiblingFences() {
+        let reply = """
+        Okay, here's the x86 real-mode DOS .COM assembly code that fulfills your requirements.
+
+        **Assembly Code (hello.asm):**
+        ```assembly
+        org 100h
+        mov ah, 09h
+        mov dx, message
+        int 21h
+        mov ah, 4Ch
+        int 21h
+        message db "HELLO FROM KIST", 0Dh, 0Ah, "$"
+        ```
+
+        **How to Assemble (using NASM):**
+        ```bash
+        nasm hello.asm -o hello.com
+        ```
+
+        **Expected Output:**
+        ```
+        HELLO FROM KIST
+        ```
+        """
+        let code = GenerateTool.unwrapSoleCodeFence(reply)
+        XCTAssertTrue(code.hasPrefix("org 100h"), "must start with the real code, not the prose: \(code.prefix(40))")
+        XCTAssertTrue(code.contains("message db"), "the whole code block must be present")
+        XCTAssertFalse(code.contains("Okay"), "no prose")
+        XCTAssertFalse(code.contains("```"), "no fence markers")
+        XCTAssertFalse(code.contains("nasm hello.asm -o"), "the sibling ```bash``` sample must be dropped")
     }
 
     func testEmptyOutputIsFailure() async throws {

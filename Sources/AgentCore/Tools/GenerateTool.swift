@@ -34,23 +34,30 @@ public struct GenerateTool: AgentTool {
     }
 
     /// If the ENTIRE text is a single ```lang … ``` block, return the inner code; otherwise return
-    /// it unchanged. Guards: the opening line must be ONLY a fence (+ optional lang tag), the last
-    /// non-blank line must be exactly ```, and there must be no interior closing fence (which would
-    /// mean multiple blocks / prose — leave those alone so a real answer keeps its code samples).
+    /// Extract the real code from a model reply meant to be a file's content. Handles the three
+    /// shapes models actually return: (1) raw code (no fence) → unchanged; (2) a sole ```lang…```
+    /// block → its inner content; (3) PROSE wrapping one or MORE fenced blocks (e.g. "Okay, here's
+    /// the code:\n```asm\n<code>\n```\nHow to run:\n```bash\nnasm …\n```") → the LARGEST fenced
+    /// block (the actual code; the sibling bash/output blocks are small). This is the 2026-08-04
+    /// visual-dogfood bug: the model wrapped DOS asm in an essay + extra ```bash``` blocks, the
+    /// whole essay was written to hello.asm, and nasm choked on "Okay, here's…".
     static func unwrapSoleCodeFence(_ text: String) -> String {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard t.hasPrefix("```") else { return text }
-        var lines = t.components(separatedBy: "\n")
-        guard lines.count >= 2 else { return text }
-        let openLine = lines[0].trimmingCharacters(in: .whitespaces)
-        guard openLine.range(of: #"^```[A-Za-z0-9_+#.\-]*$"#, options: .regularExpression) != nil else { return text }
-        guard let closeIdx = lines.lastIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
-              closeIdx >= 1, lines[closeIdx].trimmingCharacters(in: .whitespaces) == "```" else { return text }
-        // Any interior line that is exactly ``` means this isn't a single block — don't unwrap.
-        if closeIdx > 1 {
-            for i in 1..<closeIdx where lines[i].trimmingCharacters(in: .whitespaces) == "```" { return text }
+        let lines = text.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
+        let isFence: (String) -> Bool = { line in
+            let s = line.trimmingCharacters(in: .whitespaces)
+            return s.range(of: #"^```[A-Za-z0-9_+#.\-]*$"#, options: .regularExpression) != nil
         }
-        return lines[1..<closeIdx].joined(separator: "\n")
+        // Pair fence markers into (open, close) blocks by toggling — code blocks don't nest.
+        var blocks: [(open: Int, close: Int)] = []
+        var open: Int? = nil
+        for (i, line) in lines.enumerated() where isFence(line) {
+            if let o = open { blocks.append((o, i)); open = nil } else { open = i }
+        }
+        // No COMPLETE fenced block ⇒ it's already raw content (or an unterminated fence) — leave it.
+        guard let best = blocks.filter({ $0.close > $0.open + 1 })
+                               .max(by: { ($0.close - $0.open) < ($1.close - $1.open) })
+        else { return text }
+        return lines[(best.open + 1)..<best.close].joined(separator: "\n")
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {

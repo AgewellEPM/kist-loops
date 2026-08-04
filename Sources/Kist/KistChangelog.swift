@@ -13,6 +13,14 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.7", date: "2026-08-04",
+                headline: "Builds don't choke on the model's essay anymore",
+                changes: [
+                    "Fixed the real DOS/code-build failure (caught by a VISUAL test): when the model wraps code in prose + markdown fences (\"Okay, here's the code:\" + ```asm``` + ```bash``` samples), the whole essay was written into the source file and the compile died on line 1",
+                    "generate now extracts the actual code — the largest fenced block — out of any surrounding explanation and sibling samples",
+                    "The planner now tells file-bound generate steps to output ONLY the raw file contents (no prose, no ``` fences)",
+                    "Verified visually end-to-end: a real DOS .COM built + assembled with nasm + verified — 4/4 steps green",
+                ]),
         Release(version: "0.17.6", date: "2026-08-04",
                 headline: "It builds its own DOS apps now — end to end",
                 changes: [

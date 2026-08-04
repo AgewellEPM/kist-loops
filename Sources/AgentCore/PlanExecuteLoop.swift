@@ -543,6 +543,10 @@ public struct PlanExecuteLoop: Sendable {
           its output in a later step via ${id} — do NOT fetch content from the web or search for it.
           Only use fetch_url/search_code when the goal genuinely needs live or repo-specific data.
           (A short fixed string may be written directly in a tool's arguments without `generate`.)
+        - When a `generate` step's output is WRITTEN TO A FILE (a later write_file uses ${it}), its
+          prompt MUST end with: "Output ONLY the raw file contents — no explanation, no markdown code
+          fences, no ``` — just the exact bytes of the file." Otherwise the model's prose/fences get
+          written into the file and the build/compile fails on line 1.
         - To use an earlier step's output, put ${id} inside an argument string (e.g. "${E1}"). A ${id}
           reference automatically makes this step depend on that step.
         - "dependsOn" lists prerequisite step ids. The DAG MUST be acyclic and every id unique.
