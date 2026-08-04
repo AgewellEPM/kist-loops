@@ -196,13 +196,13 @@ final class AgentCoreTests: XCTestCase {
 
     func testCatalogAll_hasExpectedProviders() {
         let ids = Set(ProviderCatalog.all.map { $0.id })
-        // The 18 HTTP providers are unconditional; the two subscription-CLI providers appear
+        // The 19 HTTP providers are unconditional; the two subscription-CLI providers appear
         // iff their binary is installed on this machine (the catalog gates on isInstalled so
         // enumeration-driven selection can never pick a provider that cannot run).
         var expected: Set<String> = [
             "mimo", "zhipu", "moonshot", "deepseek", "qwen", "doubao", "hunyuan", "ernie",
             "yi", "stepfun", "baichuan", "minimax", "openai", "grok", "mlx",
-            "anthropic", "gemini", "ollama",
+            "anthropic", "gemini", "watsonx", "ollama",
         ]
         if CLIChatProvider.claudeCode().isInstalled() { expected.insert("claude-cli") }
         if CLIChatProvider.codexCLI().isInstalled() { expected.insert("codex-cli") }
