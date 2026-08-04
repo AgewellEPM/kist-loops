@@ -1,0 +1,114 @@
+#!/bin/sh
+# kist-operator — ONE operator over THREE independent systems.
+#
+#   🧠 BRAIN   = kist     the Swift agent CLI (~/bin/kist-current). Decides + orchestrates.
+#   🖐 HANDS   = perslis  the legacy/VM runner + MCP gateway. Executes DOS/Win9x work.
+#   📚 ORACLE  = jeeves   the offline COBOL/legacy knowledge (cobol-jeeves + jeeves-floor). Knows.
+#
+# The three are SEPARATE codebases and are NEVER blended (different repos, languages, deploys —
+# audited 2026-08-04). This operator does NOT merge them; it BOOTS + HEALTH-CHECKS all three and
+# runs them as ONE system: kist is the front, and it reaches perslis (hands) + jeeves (oracle) as
+# MCP limbs (declared in ~/.mcp.json). One command, one unified operator, three independent parts.
+#
+# Usage:
+#   kist-operator            status card for all three systems (read-only)
+#   kist-operator up         best-effort start what's down (Ollama), then status
+#   kist-operator run [args] health-check, then hand off to kist as the unified front
+#   kist-operator doctor     verbose per-check detail
+
+set -u
+HOME_DIR="${HOME:-/Users/lukekist}"
+MCP="$HOME_DIR/.mcp.json"
+
+# ── colors (respect NO_COLOR + non-tty) ──────────────────────────────────────
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  B=$(printf '\033[1m'); DIM=$(printf '\033[2m'); R=$(printf '\033[0m')
+  GRN=$(printf '\033[92m'); RED=$(printf '\033[91m'); YEL=$(printf '\033[93m')
+  CYN=$(printf '\033[96m'); MAG=$(printf '\033[95m'); BLU=$(printf '\033[94m')
+else
+  B=''; DIM=''; R=''; GRN=''; RED=''; YEL=''; CYN=''; MAG=''; BLU=''
+fi
+
+FAILS=0
+ok()   { printf '  %s✓%s %s\n' "$GRN" "$R" "$1"; }
+bad()  { printf '  %s✗%s %s\n' "$RED" "$R" "$1"; FAILS=$((FAILS+1)); }
+warn() { printf '  %s•%s %s\n' "$YEL" "$R" "$1"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ollama_up() { curl -s --max-time 3 http://localhost:11434/api/tags >/dev/null 2>&1; }
+mcp_has()   { [ -f "$MCP" ] && grep -q "\"$1\"" "$MCP" 2>/dev/null; }
+
+# ── the three systems ────────────────────────────────────────────────────────
+check_brain() {
+  printf '%s🧠 BRAIN%s  %skist — the agent, decides + orchestrates%s\n' "$CYN$B" "$R" "$DIM" "$R"
+  if [ -x "$HOME_DIR/bin/kist-current" ]; then
+    ver=$("$HOME_DIR/bin/kist-current" --version 2>/dev/null)
+    ok "kist binary — ${ver:-present}"
+  else bad "kist binary missing (~/bin/kist-current) — build in kist-loops"; fi
+  [ -x "$HOME_DIR/bin/kist" ] && ok "launcher ~/bin/kist" || warn "no ~/bin/kist wrapper (run kist-current directly)"
+}
+
+check_hands() {
+  printf '\n%s🖐 HANDS%s  %sperslis — runs DOS/Win9x/legacy artifacts%s\n' "$MAG$B" "$R" "$DIM" "$R"
+  if have perslis; then ok "perslis CLI"; else bad "perslis CLI missing (~/bin/perslis)"; fi
+  if have qemu-system-i386; then ok "qemu-system-i386 (the VM engine)"; else bad "qemu missing (brew install qemu)"; fi
+  g=$(ls "$HOME_DIR"/.kist/vm/golden/*.qcow2 2>/dev/null | head -1)
+  if [ -n "$g" ]; then ok "golden VM image — $(basename "$g")"; else warn "no golden win98 image under ~/.kist/vm/golden"; fi
+  if pgrep -f "qemu-system" >/dev/null 2>&1; then ok "a VM is live right now"; else warn "no VM running (perslis will launch one on demand)"; fi
+  mcp_has perslis && ok "wired to the brain (MCP: perslis)" || bad "NOT wired to kist — add 'perslis' to ~/.mcp.json"
+}
+
+check_oracle() {
+  printf '\n%s📚 ORACLE%s %sjeeves — offline COBOL/legacy knowledge%s\n' "$BLU$B" "$R" "$DIM" "$R"
+  if have cobol-jeeves; then ok "cobol-jeeves CLI"; else bad "cobol-jeeves missing (~/bin/cobol-jeeves)"; fi
+  if ollama_up; then
+    ok "Ollama serving (localhost:11434)"
+    if ollama list 2>/dev/null | grep -qi "cobol-jeeves"; then ok "model cobol-jeeves-ft loaded"
+    else warn "cobol-jeeves-ft model not listed (ollama pull / register it)"; fi
+  else bad "Ollama not serving — run 'kist-operator up' or 'ollama serve'"; fi
+  if have cobc; then ok "cobc (GnuCOBOL) — the --check compile gate"; else bad "cobc missing (brew install gnu-cobol)"; fi
+  { mcp_has jeeves-floor || mcp_has jeeves-floor-code; } && ok "wired to the brain (MCP: jeeves-floor)" \
+     || warn "jeeves-floor MCP not in ~/.mcp.json (oracle reachable via cobol-jeeves CLI only)"
+}
+
+status() {
+  printf '%s╭─ kist-operator ─ one operator, three systems ─╮%s\n' "$DIM" "$R"
+  check_brain; check_hands; check_oracle
+  printf '\n'
+  if [ "$FAILS" -eq 0 ]; then
+    printf '%s● all three systems GO%s — run the unified front with: %skist-operator run%s\n' "$GRN$B" "$R" "$B" "$R"
+  else
+    printf '%s● %d blocking issue(s)%s — fix the ✗ above, then: %skist-operator run%s\n' "$YEL$B" "$FAILS" "$R" "$B" "$R"
+  fi
+  printf '%sthree separate repos · unified at runtime via MCP · never blended%s\n' "$DIM" "$R"
+}
+
+boot_up() {
+  if ! ollama_up; then
+    printf '%sstarting Ollama…%s\n' "$DIM" "$R"
+    if have ollama; then nohup ollama serve >/dev/null 2>&1 & sleep 3; fi
+  fi
+  status
+}
+
+run_unified() {
+  shift 2>/dev/null || true
+  if [ ! -x "$HOME_DIR/bin/kist-current" ]; then
+    printf '%sFATAL: the BRAIN (kist) is not built — nothing to run.%s\n' "$RED$B" "$R" >&2; exit 1
+  fi
+  # Non-fatal preflight for the limbs so the operator still runs with a degraded system, loudly.
+  ollama_up || printf '%s• ORACLE degraded: Ollama not serving (jeeves offline)%s\n' "$YEL" "$R" >&2
+  mcp_has perslis || printf '%s• HANDS not MCP-wired: perslis missing from ~/.mcp.json%s\n' "$YEL" "$R" >&2
+  printf '%s→ handing off to kist (brain) with perslis+jeeves as MCP limbs%s\n' "$CYN" "$R" >&2
+  # kist wrapper loads the MCP servers = hands + oracle become live limbs of this one session.
+  if [ -x "$HOME_DIR/bin/kist" ]; then exec "$HOME_DIR/bin/kist" "$@"; else exec "$HOME_DIR/bin/kist-current" "$@"; fi
+}
+
+case "${1:-status}" in
+  status|"")   status ;;
+  up)          boot_up ;;
+  run)         run_unified "$@" ;;
+  doctor)      status ;;   # (verbose reserved; status already prints every check)
+  -h|--help)   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)           printf 'unknown command: %s (try: status | up | run | doctor)\n' "$1" >&2; exit 2 ;;
+esac
