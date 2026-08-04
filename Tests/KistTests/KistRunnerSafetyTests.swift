@@ -252,6 +252,49 @@ final class KistRunnerSafetyTests: XCTestCase {
         XCTAssertFalse(result.canExecute, "a FAILED preflight trial still blocks — leniency is about coverage, not failures")
     }
 
+    // 2026-08-04: "build me a win98 hangman app" was hard-refused TWICE on the gate's own invented
+    // 64-68% estimate. An EXPLICIT user request below critical risk downgrades a sub-threshold
+    // verdict to ADVISORY (inform + proceed) — the human already decided. Same failing-trial setup
+    // as the autonomous test above, so the ONLY variable is the initiator.
+    func testUserRequestedPlanExecuteProceedsWithAdvisoryOnSubThresholdVerdict() throws {
+        let root = try makeCleanGitRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try "print(1) \n".write(toFile: root + "/main.swift", atomically: true, encoding: .utf8)
+        let result = CaptainSimulationEnforcer.preflight(mode: .planExecute,
+                                                         objective: "build me a win98 hangman app",
+                                                         projectRoot: root,
+                                                         initiator: .userRequest,
+                                                         now: { Date(timeIntervalSince1970: 1_700_002_500) })
+        XCTAssertTrue(result.canExecute,
+                      "an explicit user build must not be vetoed by the gate's estimate: \(result.terminalLines)")
+        XCTAssertTrue(result.terminalLines.contains { $0.contains("simulation gate · advisory") },
+                      "the verdict must still be SHOWN as an advisory, not silently swallowed")
+        XCTAssertTrue(result.terminalLines.contains { $0.contains("proceeding") })
+    }
+
+    func testUserRequestedCriticalRiskStillBlocks() throws {
+        let root = try makeCleanGitRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let objective = "deploy the billing service to production"
+        XCTAssertEqual(CaptainSimulationEnforcer.riskLevel(mode: .planExecute, objective: objective), .critical)
+        let result = CaptainSimulationEnforcer.preflight(mode: .planExecute, objective: objective,
+                                                         projectRoot: root,
+                                                         initiator: .userRequest,
+                                                         now: { Date(timeIntervalSince1970: 1_700_002_600) })
+        XCTAssertFalse(result.canExecute,
+                       "critical-risk signals (production/billing) hard-block even for an explicit user request")
+    }
+
+    func testRunnerPassesUserRequestInitiatorToPlanExecuteGate() throws {
+        // Source pin: runPlanExecute is only reachable from explicit user commands, so it must
+        // declare initiator: .userRequest — losing this line silently restores the hard veto.
+        let source = try runnerSource()
+        let planExecuteStart = try XCTUnwrap(source.range(of: "private static func runPlanExecute"))
+        let body = String(source[planExecuteStart.lowerBound...].prefix(4000))
+        XCTAssertTrue(body.contains("initiator: .userRequest"),
+                      "runPlanExecute's simulation preflight must pass initiator: .userRequest")
+    }
+
     func testRunnerKeepsFleetSimulationPreflightBeforeSideEffects() throws {
         let source = try runnerSource()
         let fleetStart = try XCTUnwrap(source.range(of: "private static func runFleet"))

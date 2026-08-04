@@ -13,6 +13,13 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.5", date: "2026-08-04",
+                headline: "Your build command is an order, not a suggestion",
+                changes: [
+                    "The simulation gate no longer vetoes an explicit build: when YOU type /build (or /pe, --plan-execute), a sub-threshold estimate is shown as an ADVISORY and the build proceeds — no more 'captain refused: 64% is below 70%' on work you asked for",
+                    "Safety kept where it's real: critical-risk signals (production, delete, payments, secrets) still hard-block, autonomous flows keep the fail-closed gate, and a failed evidence write still stops the run",
+                    "3 new tests pin it: advisory-proceeds on user request, critical still blocks, and the call site declares the user-request initiator",
+                ]),
         Release(version: "0.17.4", date: "2026-08-04",
                 headline: "Colors back, resize fixed, legacy work routes to Perslis",
                 changes: [

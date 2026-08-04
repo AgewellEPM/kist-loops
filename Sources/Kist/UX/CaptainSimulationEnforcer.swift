@@ -17,6 +17,10 @@ struct CaptainSimulationPreflightResult: Sendable, Equatable {
     enum Decision: Sendable, Equatable {
         case notRequired(reason: String)
         case allowed(report: CaptainSimulationGateReport, risk: CaptainSimulationEnforcer.RiskLevel)
+        /// The gate's verdict was sub-threshold but the objective is an EXPLICIT user request below
+        /// critical risk — the human already made the call, so the estimate informs, it doesn't veto.
+        /// (2026-08-04: "build me a win98 hangman app" was refused twice on an invented 64-68% score.)
+        case advisory(report: CaptainSimulationGateReport, risk: CaptainSimulationEnforcer.RiskLevel, reasons: [String])
         case blocked(report: CaptainSimulationGateReport, risk: CaptainSimulationEnforcer.RiskLevel, reasons: [String])
     }
 
@@ -26,7 +30,7 @@ struct CaptainSimulationPreflightResult: Sendable, Equatable {
 
     var canExecute: Bool {
         switch decision {
-        case .notRequired, .allowed: return true
+        case .notRequired, .allowed, .advisory: return true
         case .blocked: return false
         }
     }
@@ -34,7 +38,7 @@ struct CaptainSimulationPreflightResult: Sendable, Equatable {
     var report: CaptainSimulationGateReport? {
         switch decision {
         case .notRequired: return nil
-        case .allowed(let report, _), .blocked(let report, _, _): return report
+        case .allowed(let report, _), .advisory(let report, _, _), .blocked(let report, _, _): return report
         }
     }
 
@@ -44,6 +48,11 @@ struct CaptainSimulationPreflightResult: Sendable, Equatable {
             return ["simulation gate · skipped for \(mode.title): \(reason)"]
         case .allowed(let report, let risk):
             return summaryLines(prefix: "simulation gate · passed", report: report, risk: risk)
+        case .advisory(let report, let risk, let reasons):
+            var lines = summaryLines(prefix: "simulation gate · advisory", report: report, risk: risk)
+            lines.append(contentsOf: reasons.map { "simulation gate · caution: \($0)" })
+            lines.append("simulation gate · proceeding — you asked for this build; the estimate informs, it doesn't veto")
+            return lines
         case .blocked(let report, let risk, let reasons):
             var lines = summaryLines(prefix: "simulation gate · blocked", report: report, risk: risk)
             lines.append(contentsOf: reasons.map { "simulation gate · reason: \($0)" })
@@ -77,6 +86,17 @@ enum CaptainSimulationEnforcer {
         }
     }
 
+    /// Who asked for this work. An EXPLICIT user request (typed /build, /pe, --plan-execute) below
+    /// critical risk downgrades a sub-threshold verdict to ADVISORY — the human already decided;
+    /// refusing on the gate's own probability estimate is theater, not safety. Autonomous callers
+    /// (and every caller that doesn't say otherwise) keep the fail-closed block. Critical-risk
+    /// signals (production/delete/payments/secrets) and a failed REQUIRED evidence write always
+    /// block regardless of initiator.
+    enum Initiator: Sendable, Equatable {
+        case userRequest
+        case autonomous
+    }
+
     enum RiskLevel: String, Sendable, Equatable, Comparable {
         case low
         case medium
@@ -102,6 +122,7 @@ enum CaptainSimulationEnforcer {
                           projectRoot: String,
                           evidenceMode: EvidenceMode = .full,
                           noMemory: Bool = false,
+                          initiator: Initiator = .autonomous,
                           now: @escaping @Sendable () -> Date = { Date() }) -> CaptainSimulationPreflightResult {
         let normalized = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         let risk = riskLevel(mode: mode, objective: normalized)
@@ -141,12 +162,22 @@ enum CaptainSimulationEnforcer {
                 decision: .allowed(report: report, risk: risk))
         }
 
+        let reasons = blockReasons(report: report, risk: risk)
+        // Explicit user request below critical risk → the sub-threshold verdict INFORMS, it doesn't
+        // veto. Exception: a REQUIRED evidence write that failed stays fail-closed for everyone
+        // (real disk failure ⇒ no trustworthy audit trail for the run that follows).
+        if initiator == .userRequest, risk < .critical,
+           !(report.persistenceRequired && !report.writeSucceeded) {
+            return CaptainSimulationPreflightResult(
+                mode: mode,
+                objective: normalized,
+                decision: .advisory(report: report, risk: risk, reasons: reasons))
+        }
+
         return CaptainSimulationPreflightResult(
             mode: mode,
             objective: normalized,
-            decision: .blocked(report: report,
-                               risk: risk,
-                               reasons: blockReasons(report: report, risk: risk)))
+            decision: .blocked(report: report, risk: risk, reasons: reasons))
     }
 
     static func riskLevel(mode: CaptainSimulationPreflightMode,

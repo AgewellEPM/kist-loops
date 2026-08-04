@@ -1346,11 +1346,15 @@ enum KistRunner {
             err("captain refused to execute: domain-learning gate did not accept this plan.")
             return 1
         }
+        // Plan-execute is reachable only from EXPLICIT user commands (/build, /pe, --plan-execute,
+        // council-execute) — the human already decided, so a sub-threshold estimate is advisory,
+        // not a veto. Critical-risk signals and failed evidence writes still hard-block.
         let planPreflight = CaptainSimulationEnforcer.preflight(mode: .planExecute,
                                                                 objective: goal,
                                                                 projectRoot: root,
                                                                 evidenceMode: opts.noMemory ? .redacted : .full,
-                                                                noMemory: opts.noMemory)
+                                                                noMemory: opts.noMemory,
+                                                                initiator: .userRequest)
         for line in planPreflight.terminalLines { note(line) }
         guard planPreflight.canExecute else {
             err("captain refused to execute: simulation gate did not accept this plan.")
