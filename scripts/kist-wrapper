@@ -14,7 +14,10 @@ HOME="$INSTALL_HOME"
 # Luke's ~/bin bridges (perslis/legacy-fetch/…). The sanitized path above was only for sourcing
 # secrets; exporting it into kist made every run_command fail "executable not found: brew"
 # (2026-08-03 regression — the DOS-clock plan died on tools that were installed all along).
-PATH="/opt/homebrew/bin:/usr/local/bin:$INSTALL_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# System dirs FIRST: the appended user-writable dirs (homebrew, ~/bin) must never shadow
+# /usr/bin binaries for the agent runtime — the recovered tools exist only in the appended dirs,
+# so append order resolves them identically.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$INSTALL_HOME/bin"
 export HOME PATH
 has_computer=0; has_shell=0; has_read=0
 for arg in "$@"; do

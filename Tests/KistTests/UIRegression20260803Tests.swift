@@ -67,17 +67,22 @@ final class UIRegression20260803Tests: XCTestCase {
     }
 
     func testNoNewLiveIsattyColorSitesCreepIn() throws {
-        // Allow-list: the snapshot itself, TerminalMediaRenderer (transport guard for inline-image
-        // protocols — emitting APC/DCS into a captured pipe would be wrong), and KistRunner's
-        // sticky-bar-self-test entry guard. Everything else must use TerminalCapabilities.
-        let allowed: Set<String> = ["TerminalCapabilities.swift", "TerminalMediaRenderer.swift", "KistRunner.swift"]
+        // Allow-list per SPELLING: the snapshot itself; TerminalMediaRenderer (transport guard for
+        // inline-image protocols — emitting APC/DCS into a captured pipe would be wrong); KistRunner's
+        // sticky-bar-self-test entry guard; and the STDOUT_FILENO transport guards (the coordinator's
+        // own TTY detection + ModelPicker's fail-closed raw-mode gate). Everything else must use
+        // TerminalCapabilities.stdoutIsInteractive.
+        let allowed: [String: Set<String>] = [
+            "isatty(fileno(stdout))": ["TerminalCapabilities.swift", "TerminalMediaRenderer.swift", "KistRunner.swift"],
+            "isatty(STDOUT_FILENO)": ["TerminalScreenCoordinator.swift", "ModelPicker.swift"],
+        ]
         let kistDir = repoRoot().appendingPathComponent("Sources/Kist")
         let e = FileManager.default.enumerator(at: kistDir, includingPropertiesForKeys: nil)
         var offenders: [String] = []
         while let url = e?.nextObject() as? URL {
-            guard url.pathExtension == "swift", !allowed.contains(url.lastPathComponent) else { continue }
-            if (try? String(contentsOf: url, encoding: .utf8))?.contains("isatty(fileno(stdout))") == true {
-                offenders.append(url.lastPathComponent)
+            guard url.pathExtension == "swift", let src = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            for (spelling, files) in allowed where !files.contains(url.lastPathComponent) && src.contains(spelling) {
+                offenders.append("\(url.lastPathComponent) [\(spelling)]")
             }
         }
         XCTAssertEqual(offenders, [], "live isatty(stdout) reads outside the allow-list: \(offenders) — use TerminalCapabilities.stdoutIsInteractive")
@@ -95,11 +100,19 @@ final class UIRegression20260803Tests: XCTestCase {
 
     // MARK: - (3) wrapper PATH carries the real toolchain
 
-    func testWrapperExportsToolchainPath() {
+    func testWrapperExportsToolchainPath() throws {
         let wrapper = source("scripts/kist-wrapper")
         XCTAssertTrue(wrapper.contains("/opt/homebrew/bin"),
                       "wrapper PATH must include Homebrew — its absence killed every brew/nasm/dosbox-x step")
         XCTAssertTrue(wrapper.contains("$INSTALL_HOME/bin"),
                       "wrapper PATH must include ~/bin so the perslis/legacy bridges resolve")
+        // ORDER pin: system dirs BEFORE the user-writable dirs, on the exported line (not a comment) —
+        // a planted /opt/homebrew/bin/git must never shadow /usr/bin/git for the agent runtime.
+        let exportLine = try XCTUnwrap(
+            wrapper.split(separator: "\n").last { $0.hasPrefix("PATH=") && $0.contains("/opt/homebrew/bin") })
+        let usrBin = try XCTUnwrap(exportLine.range(of: "/usr/bin"))
+        let homebrew = try XCTUnwrap(exportLine.range(of: "/opt/homebrew/bin"))
+        XCTAssertLessThan(usrBin.lowerBound, homebrew.lowerBound,
+                          "system dirs must precede user-writable dirs in the exported PATH")
     }
 }

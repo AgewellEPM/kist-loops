@@ -34,11 +34,12 @@ public enum PlanLint {
     /// A run_command that package-installs a retro emulator/assembler on the HOST — the shape that
     /// burned the DOS-clock run (2026-08-03: brew-install NASM/DOSBox steps, all doomed). Legacy
     /// work routes through Perslis; findings feed the planner's bounded repair loop, forcing a
-    /// re-plan onto the perslis tools. Word-boundary match so `qemu-img` inside a longer arg
-    /// doesn't false-positive a non-install command.
+    /// re-plan onto the perslis tools. The verb→target span excludes `;`/`&` so an ALLOWED
+    /// two-command chain (`brew install jq && nasm clock.asm`) can't cross-match, and the
+    /// word-boundary keeps `qemu-img convert` (a non-install command) clean.
     static func installsLegacyEmulator(_ command: String) -> Bool {
         command.range(
-            of: #"\b(brew|apt(-get)?|port|dnf|yum)\b(\s+\S+)*?\s+install\b.*\b(dosbox(-x)?|nasm|qemu|wine|86box|pcem|vice|freedos|masm)\b"#,
+            of: #"\b(brew|apt(-get)?|port|dnf|yum)\b(\s+\S+)*?\s+(install|reinstall|upgrade)\b[^;&]*\b(dosbox(-x)?|nasm|qemu|wine|86box|pcem|vice|freedos|masm)\b"#,
             options: [.regularExpression, .caseInsensitive]) != nil
     }
 

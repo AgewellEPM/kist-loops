@@ -20,7 +20,7 @@ enum KistChangelog {
                     "Fixed screen corruption when moving/stretching the terminal window: the pinned-during-turns bar (--sticky-turns) is opt-in again per the project contract — the input box still appears between turns as always",
                     "Fixed 'executable not found: brew/nasm/dosbox-x': the launcher was scrubbing Homebrew and ~/bin off PATH; the real toolchain (and the perslis/legacy bridges) now resolve",
                     "DOS/Win9x/legacy goals now route through the Perslis system (perslis VM tools when the gateway is up, the perslis/legacy-fetch CLIs otherwise) — the planner is forbidden from brew-installing emulators, and a lint backstop rejects such plans",
-                    "24 new regression tests pin every fixed site (color sites, wrapper contract, PATH resolution order, both planner branches, lint)",
+                    "17 new regression tests + 3 updated pins cover every fixed site (color sites, wrapper contract + PATH order, resolution tiers, both planner branches, lint)",
                 ]),
         Release(version: "0.17.3", date: "2026-08-03",
                 headline: "IBM watsonx.ai as a model — hand the thinking to Watson",

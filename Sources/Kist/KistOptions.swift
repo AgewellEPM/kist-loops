@@ -371,6 +371,9 @@ struct KistOptions {
                                     Read-only: write/edit/move/delete stay confined to the project
                                     root. Never inherited by a nested kist. "/" is refused.
           --sandbox                 Run shell commands inside the macOS Seatbelt OS sandbox.
+          --sticky-turns            EXPERIMENTAL opt-in: keep the input box pinned DURING turns
+                                    (scroll-region). Off by default — known to corrupt on window
+                                    resize in some terminals; --no-sticky-turns restores the default.
           --trust-worktree-tests    Let the fleet verifier trust an IN-REPO test harness (base-trusted
                                     test.sh / swift-test / npm). OFF by default: only a held-out operator
                                     oracle (~/.kist/test-command) verifies. Opt in ONLY for your own honest
