@@ -13,6 +13,15 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.3", date: "2026-08-03",
+                headline: "IBM watsonx.ai as a model — hand the thinking to Watson",
+                changes: [
+                    "watsonx (IBM) is now a built-in provider — talk to it with /model watsonx, or let kist drive the conversation and hand the hard reasoning to Watson via /roles critic watsonx, /roles planner watsonx, or /copilot co watsonx",
+                    "Models: Llama 3.3 70B, Mistral Large, Granite 3 8B, Llama 3.2 90B Vision (pick with /model watsonx:<id> or WATSONX_MODEL)",
+                    "Handles IBM's real auth: IAM API-key→bearer-token exchange (cached ~1h, auto-refresh) — not a static key",
+                    "Setup: export WATSONX_API_KEY and WATSONX_PROJECT_ID (region via WATSONX_URL, default us-south). Missing project id fails fast with exact guidance",
+                    "Routes through the universal text tool-protocol, so Watson keeps full tool access and won't break on multi-turn tool histories",
+                ]),
         Release(version: "0.17.2", date: "2026-08-03",
                 headline: "/chain — a visual automation center",
                 changes: [

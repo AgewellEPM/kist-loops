@@ -127,7 +127,7 @@ public enum ProviderCatalog {
     /// look permanently "ready" to every enumeration-driven selection/fallback path and dead-end at
     /// request time (Codex review 532fa03 issue 1).
     public static let all: [any ChatProvider] =
-        openAICompatible + [AnthropicProvider(), GeminiProvider(), OllamaProvider()]
+        openAICompatible + [AnthropicProvider(), GeminiProvider(), WatsonXProvider(), OllamaProvider()]
         + [CLIChatProvider.claudeCode(), CLIChatProvider.codexCLI()].filter { $0.isInstalled() }
 }
 
