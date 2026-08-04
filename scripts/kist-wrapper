@@ -10,18 +10,23 @@ export HOME PATH
 # shellcheck source=/dev/null
 [ -f "$INSTALL_HOME/.config/kist/secrets.env" ] && . "$INSTALL_HOME/.config/kist/secrets.env"
 HOME="$INSTALL_HOME"
-PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+# The agent runtime needs the REAL toolchain path: Homebrew (brew/nasm/dosbox-x…), /usr/local, and
+# Luke's ~/bin bridges (perslis/legacy-fetch/…). The sanitized path above was only for sourcing
+# secrets; exporting it into kist made every run_command fail "executable not found: brew"
+# (2026-08-03 regression — the DOS-clock plan died on tools that were installed all along).
+PATH="/opt/homebrew/bin:/usr/local/bin:$INSTALL_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export HOME PATH
-has_computer=0; has_shell=0; has_read=0; has_sticky=0
+has_computer=0; has_shell=0; has_read=0
 for arg in "$@"; do
   [ "$arg" = "--enable-computer-use" ] && has_computer=1
   [ "$arg" = "--allow-shell" ] && has_shell=1
   [ "$arg" = "--allow-read" ] && has_read=1
-  # Luke wants the chat box ALWAYS pinned — force --sticky-turns unless he opted out (--no-sticky-turns).
-  { [ "$arg" = "--sticky-turns" ] || [ "$arg" = "--no-sticky-turns" ]; } && has_sticky=1
 done
 [ "$has_computer" -eq 1 ] || set -- --enable-computer-use "$@"
 [ "$has_shell" -eq 1 ] || set -- --allow-shell "$@"
 [ "$has_read" -eq 1 ] || set -- --allow-read /Volumes "$@"
-[ "$has_sticky" -eq 1 ] || set -- --sticky-turns "$@"
+# --sticky-turns is OPT-IN ONLY (project CLAUDE.md contract). The wrapper forced it on 2026-08-02;
+# result: during-turn stdout capture bleached the whole UI white (isatty=0 → no ANSI) and the
+# DECSTBM scroll region corrupted the screen on window resize (2026-08-03 regression). Never
+# re-add the force here — a user who wants it types --sticky-turns.
 exec "$INSTALL_HOME/bin/kist-current" "$@"

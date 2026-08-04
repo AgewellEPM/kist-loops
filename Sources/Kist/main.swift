@@ -15,6 +15,10 @@ if KistBuildInfo.isVersionRequest(kistRawArguments) {
 // (we mix print() with raw FileHandle writes for the inline prompt + token stream).
 setvbuf(stdout, nil, _IONBF, 0)
 
+// Snapshot stdout TTY-ness BEFORE any screen coordinator can dup2 a capture pipe onto fd 1 —
+// color decisions made mid-capture must reflect the real terminal (2026-08-03 white-out fix).
+TerminalCapabilities.prime()
+
 let opts = KistOptions.parse(kistRawArguments)
 
 // Mark this process so any CHILD kist (an agent's run_command → `kist …`) detects nesting and refuses

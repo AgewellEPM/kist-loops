@@ -20,12 +20,26 @@ public enum PlanLint {
                 if segments > 2 {
                     out.append("step \(step.id) chains \(segments) shell commands — split into singular steps (at most two chained commands per step, e.g. `cd X && make`)")
                 }
+                if installsLegacyEmulator(cmd) {
+                    out.append("step \(step.id) installs a legacy emulator/toolchain on the host — forbidden; route DOS/Win9x work through Perslis (perslis__vm_launch → perslis__vm_write_file → perslis__win98_run_command, or the `perslis`/`perslis-play`/`legacy-fetch` host CLIs)")
+                }
             }
         }
         if plan.steps.count > 24 {
             out.append("plan has \(plan.steps.count) steps — over-decomposed; merge trivial neighbors (target ≤ 24)")
         }
         return out
+    }
+
+    /// A run_command that package-installs a retro emulator/assembler on the HOST — the shape that
+    /// burned the DOS-clock run (2026-08-03: brew-install NASM/DOSBox steps, all doomed). Legacy
+    /// work routes through Perslis; findings feed the planner's bounded repair loop, forcing a
+    /// re-plan onto the perslis tools. Word-boundary match so `qemu-img` inside a longer arg
+    /// doesn't false-positive a non-install command.
+    static func installsLegacyEmulator(_ command: String) -> Bool {
+        command.range(
+            of: #"\b(brew|apt(-get)?|port|dnf|yum)\b(\s+\S+)*?\s+install\b.*\b(dosbox(-x)?|nasm|qemu|wine|86box|pcem|vice|freedos|masm)\b"#,
+            options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// Count chained command segments, QUOTE-AWARE: `&&`, `||`, `;`, and newlines split units of

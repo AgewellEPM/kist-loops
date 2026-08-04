@@ -21,7 +21,7 @@ actor TerminalInteractor: RuntimeInteractor {
     func setAutopilot(_ on: Bool) { autopilot = on }
     var isAutopilot: Bool { autopilot }
 
-    init(color: Bool = isatty(fileno(stdout)) != 0,
+    init(color: Bool = TerminalCapabilities.stdoutIsInteractive,
          autoApproveRoutine: Bool = false,
          autoApproveDangerous: Bool = false) {
         self.color = color

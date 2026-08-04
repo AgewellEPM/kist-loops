@@ -252,9 +252,11 @@ extension KistREPL {
     /// Whether stdout should carry ANSI color. A real TTY is necessary, while either `NO_COLOR`
     /// or the configured screen-reader `mono` theme disables escapes for every REPL surface.
     /// Injectable terminal/environment inputs keep the accessibility decision directly testable.
+    /// TTY-ness is the LAUNCH-TIME snapshot, never live isatty — during a sticky-turn capture fd 1
+    /// is a pipe and a live read bleached every mid-turn surface white (2026-08-03 regression).
     static func stdoutColorEnabled(
         projectRoot: String,
-        isTTY: Bool = isatty(fileno(stdout)) != 0,
+        isTTY: Bool = TerminalCapabilities.stdoutIsInteractive,
         noColorEnv: Bool = ProcessInfo.processInfo.environment["NO_COLOR"] != nil
     ) -> Bool {
         guard isTTY else { return false }

@@ -250,8 +250,21 @@ public struct RunCommandTool: AgentTool {
         for dir in path.split(separator: ":") {
             if let resolved = canonicalExecutable(String(dir) + "/" + exe) { return resolved }
         }
+        // Well-known toolchain dirs, tried ONLY after the env PATH walk fails. A launcher that
+        // scrubs PATH to the system dirs (the ~/bin/kist wrapper did until 2026-08-03) made every
+        // Homebrew tool "executable not found" even though `brew`/`nasm`/`dosbox-x` were installed.
+        // APPEND, never prepend: env PATH keeps precedence so a user-writable /opt/homebrew/bin can
+        // never shadow a system binary. (This adds no capability — absolute paths already worked.)
+        for dir in wellKnownFallbackDirs where !path.split(separator: ":").contains(Substring(dir)) {
+            if let resolved = canonicalExecutable(dir + "/" + exe) { return resolved }
+        }
         return nil
     }
+
+    /// Searched after the env PATH, in this order. macOS arm64 Homebrew first, then the Intel/
+    /// manual-install prefix. Deliberately NOT ~/bin: exposing a user's private bridges to
+    /// unattended runs is the launcher's call (the wrapper adds it to PATH), not a baked-in default.
+    static let wellKnownFallbackDirs = ["/opt/homebrew/bin", "/usr/local/bin"]
 
     /// Shell metacharacters whose presence means the command NEEDS a real shell (so it can't be safely
     /// promoted to structured execution): pipes, redirects, sequencing, subshells, expansion, quoting,

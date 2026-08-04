@@ -830,7 +830,7 @@ enum KistRunner {
             Self.autoJournalRun(goal: goal, success: outcome.success, root: root, enabled: !opts.noMemory)
             print(KistREPL.renderSimpleSummary(projectRoot: root, spans: await traceRecorder.all(), trajectory: recorder.snapshot()))
             let grounding = GroundedReviewValidator.audit(outcome.summary, projectRoot: root)
-            if !grounding.isGrounded { print(grounding.render(color: isatty(fileno(stdout)) != 0)) }
+            if !grounding.isGrounded { print(grounding.render(color: TerminalCapabilities.stdoutIsInteractive)) }
             printUsageDelta(from: [], to: await traceRecorder.all(), label: "usage", projectRoot: root)
             note("replay · kist --replay \(runReplay.manifest.runID)")
             if !outcome.success { note("paused — resume with: kist --resume \(outcome.checkpointId)") }
@@ -1052,7 +1052,7 @@ enum KistRunner {
         note("council · board saved · \(path)")
         // Legible primitive, not a wall of prose (#6/#7): mind gists → decision → next tasks → test plan.
         // The full board stays in the saved artifact (the proof drawer, #8).
-        print(CouncilCard.render(result, artifactPath: path, color: isatty(fileno(stdout)) != 0))
+        print(CouncilCard.render(result, artifactPath: path, color: TerminalCapabilities.stdoutIsInteractive))
         let projectPlan = seedCouncilProjectBoard(goal: goal, finalPlan: result.finalPlan, artifactPath: path, root: root)
         note("task board seeded · \(projectPlan.tasks.count) tasks · show with /goals")
         memory?.recordEpisode(Episode(goal: "council: \(goal)", success: true,
@@ -1083,7 +1083,7 @@ enum KistRunner {
                                      recorder: recorder, budget: runBudget).runWide(goal: goal)
         let path = try? writeCouncilArtifact(result.markdown, goal: goal, root: root)
         if let path { note("dig in deep · panel saved · \(path)") }
-        print(CouncilCard.render(result, artifactPath: path, color: isatty(fileno(stdout)) != 0))
+        print(CouncilCard.render(result, artifactPath: path, color: TerminalCapabilities.stdoutIsInteractive))
         for line in await recorder.summary().terminalLines() { note(line) }
         return 0
     }

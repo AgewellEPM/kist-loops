@@ -92,6 +92,13 @@ public enum CapabilityRegistry {
         ("Visual Verification", ["visual_verify", "view_image", "browse", "edit_file", "write_file"]),
         ("Vision/Media/Data", ["view_image", "generate_image", "edit_image", "generate_audio", "generate_video", "watch_video", "live_screen_watch",
                                "analyze_media", "translate_document", "extract_clip", "read_spreadsheet", "query_data"]),
+        // Perslis = Luke's legacy-software system (win98/DOS VM + era toolchains). Naming these here
+        // lifts them out of the anonymous "MCP/Other" blob on BOTH prompt surfaces (planner + chat),
+        // so legacy goals route onto the VM instead of brew-installing emulators on the host.
+        ("Legacy DOS/Win9x VM (Perslis)", ["perslis__vm_launch", "perslis__vm_write_file", "perslis__win98_run_command",
+                                           "perslis__win98_run_commands", "perslis__win98_run_command_recipe",
+                                           "perslis__legacy_launch", "perslis__vm_control", "perslis__vm_ocr",
+                                           "perslis__vm_finalize_poweroff"]),
         ("Planning/Coordination", ["tasks", "ask_user", "spawn_agent", "generate"]),
     ]
 

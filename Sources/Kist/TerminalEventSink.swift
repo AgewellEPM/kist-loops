@@ -69,7 +69,9 @@ struct TerminalEventSink: RuntimeEventSink {
     // Default color honors the NO_COLOR convention (a real TTY is not enough). The configured `mono`
     // screen-reader theme is settings-scoped, so the REPL passes an explicit `color:` computed from
     // KistREPL.stdoutColorEnabled(projectRoot:) at the interactive construction site.
-    init(color: Bool = (isatty(fileno(stdout)) != 0 && ProcessInfo.processInfo.environment["NO_COLOR"] == nil),
+    // TTY-ness comes from the LAUNCH-TIME snapshot, never live isatty: a sink constructed during a
+    // sticky-turn capture (fd 1 = pipe) would otherwise cache color=false for its whole lifetime.
+    init(color: Bool = (TerminalCapabilities.stdoutIsInteractive && ProcessInfo.processInfo.environment["NO_COLOR"] == nil),
          showReasoning: Bool = false,
          style: Style = .standard,
          proofStore: TurnProofStore? = nil,

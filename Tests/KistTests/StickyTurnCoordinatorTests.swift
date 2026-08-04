@@ -450,8 +450,8 @@ final class StickyTurnCoordinatorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(screen.row, 1)
     }
 
-    func testStickyDefaultsOnWithOptOutAndSelfTestDispatchesBeforeRegistry() throws {
-        XCTAssertTrue(KistOptions.parse(["hello"]).stickyTurns)                    // default ON (2026-08-02)
+    func testStickyDefaultsOffWithOptInAndSelfTestDispatchesBeforeRegistry() throws {
+        XCTAssertFalse(KistOptions.parse(["hello"]).stickyTurns)                   // default OFF (2026-08-03: white-out + resize corruption)
         XCTAssertTrue(KistOptions.parse(["--sticky-turns", "hello"]).stickyTurns)
         XCTAssertFalse(KistOptions.parse(["--no-sticky-turns", "hello"]).stickyTurns)   // opt-out still available
         XCTAssertFalse(KistOptions.parse(["--sticky-turns", "--no-sticky-turns", "hello"]).stickyTurns)

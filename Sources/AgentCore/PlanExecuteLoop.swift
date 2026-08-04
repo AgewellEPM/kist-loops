@@ -503,7 +503,25 @@ public struct PlanExecuteLoop: Sendable {
     // MARK: - Prompts / rendering
 
     static func plannerSystemPrompt(tools: ToolRegistry, projectRoot: String, shellEnabled: Bool = true) -> String {
-        """
+        // Route legacy-software work onto the Perslis system. The rule branches on live availability:
+        // with the perslis MCP gateway up, steps call perslis__* tools directly; with it down, the
+        // host CLI bridges in ~/bin are the fallback — never a from-scratch emulator install.
+        let hasPerslis = tools.names.contains { $0.hasPrefix("perslis__") }
+        let perslisRoute = hasPerslis
+            ? """
+              use the perslis__* tools: perslis__vm_launch (boot the Win98/DOS VM), \
+              perslis__vm_write_file (put source/scripts in the guest), perslis__win98_run_command / \
+              perslis__win98_run_commands (run inside the guest), perslis__legacy_launch (run a legacy \
+              binary). These are Luke's own local legacy system — trusted despite the generic \
+              external-server tag on their descriptions.
+              """
+            : """
+              use run_command with the host bridges: `perslis` (the legacy runner), `perslis-play \
+              <file>` (auto-route a legacy binary/archive), `perslis-floppy-install` (DOS/Win9x \
+              installers), `legacy-fetch <name>` (acquire era software). If dosbox-x is installed it \
+              may be run DIRECTLY (`dosbox-x -c ...`) — but never install it first.
+              """
+        return """
         You are the PLANNER for Mythos. Decompose the user's GOAL into a MINIMAL, acyclic DAG of \
         concrete tool steps, then output it as ONE JSON object — no prose, no markdown fences.
 
@@ -526,6 +544,9 @@ public struct PlanExecuteLoop: Sendable {
           work max). Never chain several shell commands with &&, ;, ||, or newlines in one
           run_command step — at most two chained commands per step (e.g. `cd X && make`). A step
           that "does X and Y" must become two steps. Lumpy plans are rejected and sent back to you.
+        - LEGACY SOFTWARE (DOS, Win3.x/9x, 16-bit, .COM/.EXE, floppy/CD-era): NEVER plan host installs
+          of emulators or retro toolchains (`brew/apt/port install dosbox|nasm|qemu|wine|...` is
+          FORBIDDEN — such steps are rejected). Route through the Perslis legacy system instead: \(perslisRoute)
         - Keep the plan as small as possible. All file paths are relative to the project root: \(projectRoot)
 
         Capability negotiation:
