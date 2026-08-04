@@ -33,6 +33,26 @@ public struct GenerateTool: AgentTool {
         self.recorder = recorder; self.budget = budget; self.sink = sink
     }
 
+    /// If the ENTIRE text is a single ```lang … ``` block, return the inner code; otherwise return
+    /// it unchanged. Guards: the opening line must be ONLY a fence (+ optional lang tag), the last
+    /// non-blank line must be exactly ```, and there must be no interior closing fence (which would
+    /// mean multiple blocks / prose — leave those alone so a real answer keeps its code samples).
+    static func unwrapSoleCodeFence(_ text: String) -> String {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix("```") else { return text }
+        var lines = t.components(separatedBy: "\n")
+        guard lines.count >= 2 else { return text }
+        let openLine = lines[0].trimmingCharacters(in: .whitespaces)
+        guard openLine.range(of: #"^```[A-Za-z0-9_+#.\-]*$"#, options: .regularExpression) != nil else { return text }
+        guard let closeIdx = lines.lastIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+              closeIdx >= 1, lines[closeIdx].trimmingCharacters(in: .whitespaces) == "```" else { return text }
+        // Any interior line that is exactly ``` means this isn't a single block — don't unwrap.
+        if closeIdx > 1 {
+            for i in 1..<closeIdx where lines[i].trimmingCharacters(in: .whitespaces) == "```" { return text }
+        }
+        return lines[1..<closeIdx].joined(separator: "\n")
+    }
+
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let prompt = try requireString("prompt", from: arguments)
         let settings = ModelSettings(temperature: 0.3, maxTokens: maxTokens)
@@ -51,7 +71,11 @@ public struct GenerateTool: AgentTool {
             let (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
                                                                       messages: [ChatMessage(role: .user, content: prompt)],
                                                                       settings: settings)
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Strip a sole surrounding markdown code fence: models return ```lang\n<code>\n``` and a
+            // later write_file wrote the backticks verbatim → the file was corrupt (2026-08-04: nasm
+            // choked on ```asm at line 1). Only unwrapped when the WHOLE output is ONE fenced block,
+            // so prose that merely contains a fence is left intact.
+            let trimmed = Self.unwrapSoleCodeFence(text.trimmingCharacters(in: .whitespacesAndNewlines))
             let measured = usage.isZero ? TokenUsage.estimate(promptChars: prompt.count, completionChars: text.count) : usage
             // R0.4 sibling (review catch 2026-07-28): coder `generate` steps are often the LONGEST
             // calls in a plan and previously contributed nothing to the live token line — the same

@@ -94,6 +94,9 @@ public struct ToolEffectObservation: Sendable, Equatable, Codable {
     }
 
     /// Source and unclassifiable mutations fail strict; clearly documentary/config/data mutations do not.
+    /// NOTE: a build/test that ALSO rewrites source (auto-fixing linter — `eslint --fix`, `ruff --fix`)
+    /// deliberately STILL requires fresh proof; a compiler that only emits a non-source artifact
+    /// (`nasm … -o out.com`) is `mutation == .none` and is already exempt here.
     public var requiresBuildVerification: Bool {
         mutation == .source || mutation == .unknownTarget
     }

@@ -127,7 +127,12 @@ enum KistRunner {
         // refusal via binaryRefusalReason, independent of the interactor (--auto/--yolo/AutoApprove can't run
         // osascript); nested kist forces enableComputerUse=false so it's covered. Armed ⇒ normal approval.
         let shellDeny = opts.enableComputerUse ? ShellPolicy.baseDeny : ShellPolicy.defaultDeny
-        let shell: ShellPolicy = opts.allowShell ? ShellPolicy(enabled: true, autoApprove: true, deny: shellDeny) : .denied
+        // `sandboxed` tracks the SAME opts.sandbox that arms the Seatbelt policy below, so raw shell
+        // (pipes/redirects) can run hands-off ONLY when the kernel is actually confining the process
+        // (writes → project root, network denied); they can never diverge.
+        let shell: ShellPolicy = opts.allowShell
+            ? ShellPolicy(enabled: true, autoApprove: true, deny: shellDeny, sandboxed: opts.sandbox)
+            : .denied
         let sandbox: SandboxPolicy = opts.sandbox ? .confined() : .disabled
         // External READ-ONLY roots (--allow-read). Warn loudly on a root that doesn't resolve —
         // ToolContext drops it silently (fail-closed), and the user should know their CD/USB

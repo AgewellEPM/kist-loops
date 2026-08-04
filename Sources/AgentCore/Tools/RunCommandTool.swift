@@ -100,6 +100,12 @@ public struct RunCommandTool: AgentTool {
                 if let reason = await context.shell.shellStringRefusalReason(for: command) {
                     throw ToolError.shellDenied(reason)
                 }
+                // Defense-in-depth: raw shell auto-approves ONLY under the sandbox. If the policy said
+                // sandboxed but the context's OS sandbox is not actually enabled (a mis-wire), FAIL
+                // CLOSED — never run a hands-off raw shell string unconfined.
+                if context.shell.sandboxed && !context.sandbox.enabled {
+                    throw ToolError.shellDenied("raw shell was auto-approved for the OS sandbox, but the sandbox is not active — refusing")
+                }
                 launchPath = "/bin/sh"
                 launchArgs = ["-c", command]
             }

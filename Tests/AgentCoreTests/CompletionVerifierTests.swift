@@ -259,6 +259,54 @@ final class CompletionVerifierTests: XCTestCase {
         }
     }
 
+    // 2026-08-04 dogfood: the EXACT plan-execute trajectory (write .asm → nasm build → strings) that
+    // kept reporting "unverified" even though the .COM was correct. Built the way verifyTrajectory does:
+    // explicit effectObservation from ToolEffectCatalog.observe on the real args.
+    func testDOSBuildTrajectoryVerifiesEndToEnd() {
+        let writeAsm = ActionRecord(
+            tool: "write_file", argsFingerprint: "path=hello.asm", success: true,
+            effectObservation: ToolEffectCatalog.observe(
+                tool: "write_file", arguments: ["path": "hello.asm", "content": "org 100h"],
+                outcomeMetadata: ["changed": "true"]))
+        XCTAssertTrue(writeAsm.observedEffects.requiresBuildVerification,
+                      "writing a .asm source must be a build-requiring mutation (else the whole gate is moot)")
+        let nasm = ActionRecord(
+            tool: "run_command", argsFingerprint: #"args=["-f","bin","hello.asm","-o","hello.com"]&executable=nasm"#,
+            success: true,
+            effectObservation: ToolEffectCatalog.observe(
+                tool: "run_command", arguments: ["executable": "nasm", "args": ["-f", "bin", "hello.asm", "-o", "hello.com"]],
+                outcomeMetadata: [:]))
+        XCTAssertEqual(nasm.observedEffects.verification, .buildOrTest,
+                       "the recorded nasm effect must be buildOrTest")
+        let strings = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=strings hello.com", success: true,
+            effectObservation: ToolEffectCatalog.observe(
+                tool: "run_command", arguments: ["command": "strings hello.com"], outcomeMetadata: [:]))
+        XCTAssertEqual(strings.observedEffects.mutation, .none,
+                       "`strings` is read-only — it must not be misread as the 'last edit'")
+        let outcome = v.check(trajectory: [writeAsm, nasm, strings],
+                              canRunCommands: true, expectedOutcome: .mutation, taskIntent: .build)
+        XCTAssertTrue(outcome.isAccept, "write→nasm→strings must verify; got: \(outcome)")
+    }
+
+    // 2026-08-04 dogfood: assembling a DOS .COM IS the build; `nasm hello.asm` must count so a correct
+    // artifact isn't reported "unverified — ran no build/test."
+    func testClassifierAcceptsAssemblersBuildingASource() {
+        for c in ["nasm -f bin hello.asm -o hello.com", "yasm -f elf32 boot.s", "as boot.s -o boot.o"] {
+            XCTAssertTrue(CommandClassifier.isBuildOrTest("command=\(c)"), "\(c) should verify (assembling a source)")
+        }
+        // A bare version/help query assembles nothing → not a build.
+        for c in ["nasm -v", "nasm --version", "as --help"] {
+            XCTAssertFalse(CommandClassifier.isBuildOrTest("command=\(c)"), "\(c) must NOT count (no source input)")
+        }
+        // STRUCTURED form (executable+args) — the shape plan-execute actually records.
+        XCTAssertTrue(CommandClassifier.isBuildOrTest(#"args=["-f","bin","hello.asm","-o","hello.com"]&executable=nasm"#),
+                      "structured nasm assemble must verify")
+        // And via observe(arguments:) directly (the live plan-execute path).
+        XCTAssertTrue(CommandClassifier.observe(arguments: ["executable": "nasm", "args": ["-f", "bin", "hello.asm", "-o", "hello.com"]]).verification == .buildOrTest,
+                      "observe(arguments:) must classify structured nasm as build")
+    }
+
     func testClassifierRejectsTrivialCommands() {
         for c in ["ls -la", "echo done", "cat file.txt", "pwd", "git status", "mkdir foo", "which swift"] {
             XCTAssertFalse(CommandClassifier.isBuildOrTest("command=\(c)"), "\(c) must NOT count as verification")

@@ -42,10 +42,14 @@ public struct ExecutablePlan: Sendable, Codable, Equatable {
 
     // MARK: - Variable references
 
-    /// The pattern for an inter-step output reference: `${id}` where id is the alphanumeric step id.
-    static let refPattern = try! NSRegularExpression(pattern: #"\$\{([A-Za-z0-9_-]+)\}"#)
+    /// The pattern for an inter-step output reference. `${id}` = the whole output of step `id`;
+    /// `${id.field.sub}` = a dotted path into `id`'s output parsed as JSON, so a step can chain a
+    /// FIELD of a structured MCP tool result (e.g. `${E1.qmp}` after a vm_launch). Group 1 = id,
+    /// group 2 = optional dotted field path.
+    static let refPattern = try! NSRegularExpression(pattern: #"\$\{([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_.-]+))?\}"#)
 
-    /// Step ids referenced via `${id}` inside a step's argumentsJSON.
+    /// Step ids referenced via `${id}` / `${id.field}` inside a step's argumentsJSON (base id only,
+    /// so dependency detection is unchanged by the optional field suffix).
     public static func referencedIds(in argumentsJSON: String) -> Set<String> {
         let range = NSRange(argumentsJSON.startIndex..., in: argumentsJSON)
         var ids = Set<String>()
@@ -69,23 +73,63 @@ public struct ExecutablePlan: Sendable, Codable, Equatable {
         return substitute(obj, outputs: outputs) as? [String: Any] ?? [:]
     }
 
-    /// Recursively substitute `${id}` in every string value of a parsed JSON tree.
+    /// Recursively substitute `${id}` / `${id.field}` in every string value of a parsed JSON tree.
     private static func substitute(_ value: Any, outputs: [String: String]) -> Any {
         switch value {
         case let s as String:
-            let range = NSRange(s.startIndex..., in: s)
-            guard refPattern.firstMatch(in: s, range: range) != nil else { return s }
-            var result = s
-            for id in referencedIds(in: s) {
-                result = result.replacingOccurrences(of: "${\(id)}", with: outputs[id] ?? "")
-            }
-            return result
+            return substituteRefs(in: s, outputs: outputs)
         case let dict as [String: Any]:
             return dict.mapValues { substitute($0, outputs: outputs) }
         case let arr as [Any]:
             return arr.map { substitute($0, outputs: outputs) }
         default:
             return value
+        }
+    }
+
+    /// Replace each `${id}` / `${id.field}` token in one string. Whole-ref → the step's raw output;
+    /// field-ref → the dotted path resolved against that output parsed as JSON. Unresolved refs
+    /// (unknown id, non-JSON output for a field-ref, missing field) become "" — the same fail-soft
+    /// contract as before, so an unresolvable ref never leaks the literal `${...}` token downstream.
+    private static func substituteRefs(in s: String, outputs: [String: String]) -> String {
+        let ns = s as NSString
+        let matches = refPattern.matches(in: s, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return s }
+        var result = ""
+        var cursor = 0
+        for m in matches {
+            result += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
+            let id = ns.substring(with: m.range(at: 1))
+            let fieldRange = m.range(at: 2)
+            if fieldRange.location != NSNotFound {
+                result += extractField(from: outputs[id], path: ns.substring(with: fieldRange)) ?? ""
+            } else {
+                result += outputs[id] ?? ""
+            }
+            cursor = m.range.location + m.range.length
+        }
+        result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+        return result
+    }
+
+    /// Resolve a dotted `path` into `json` (a step's output). Scalars stringify; a nested
+    /// object/array re-serializes to compact JSON. nil if the output is absent/not-JSON or the path
+    /// misses — the caller substitutes "" so a bad field-ref can't inject the literal token.
+    private static func extractField(from json: String?, path: String) -> String? {
+        guard let json, let data = json.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        var current: Any = root
+        for component in path.split(separator: ".") {
+            guard let dict = current as? [String: Any], let next = dict[String(component)] else { return nil }
+            current = next
+        }
+        switch current {
+        case let str as String: return str
+        case let num as NSNumber: return num.stringValue
+        default:
+            guard let data = try? JSONSerialization.data(withJSONObject: current),
+                  let encoded = String(data: data, encoding: .utf8) else { return nil }
+            return encoded
         }
     }
 }

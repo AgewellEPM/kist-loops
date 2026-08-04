@@ -285,6 +285,20 @@ final class R3MicroTaskTests: XCTestCase {
         XCTAssertFalse(p.contains("${E1}"), "the unresolved template must not leak into the ask")
     }
 
+    // 2026-08-04 dogfood: run_command set error="exit code 1" while nasm's REAL diagnostic lived in
+    // `output`; the repair prompt read only `error ?? output` so the coder retried blind. Both must show.
+    func testStepRepairPromptSurfacesCapturedOutputNotJustTerseError() {
+        let p = PlanExecuteLoop.stepRepairPrompt(
+            step: PlanStep(id: "E3", intent: "assemble", tool: "run_command",
+                           argumentsJSON: #"{"command":"nasm hello.asm"}"#),
+            ranArgs: ["command": "nasm -f bin hello.asm -o hello.com"],
+            failure: StepResult(stepId: "E3", tool: "run_command", success: false,
+                                output: "hello.asm:1: error: label or instruction expected, found `'",
+                                error: "exit code 1"))
+        XCTAssertTrue(p.contains("exit code 1"), "the terse error is still shown")
+        XCTAssertTrue(p.contains("hello.asm:1: error"), "the REAL captured diagnostic must reach the repairer")
+    }
+
     func testDangerousStepSummaryShowsTheArgsBeingApproved() {
         // A repaired retry runs model-invented args nobody has reviewed — approving on the tool
         // name alone is uninformed consent (review catch: the gate prompt dropped the args).

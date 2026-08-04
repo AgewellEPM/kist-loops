@@ -133,6 +133,39 @@ final class ExecutablePlanTests: XCTestCase {
         XCTAssertEqual((resolved["opts"] as? [String: Any])?["k"] as? String, "beta")
     }
 
+    // MARK: - Field-path refs (${id.field}) — chaining a structured MCP tool output
+    // (2026-08-04: a vm plan passed the literal `${E3.qmp}` to perslis because only whole-output
+    // refs resolved; the tool then tried to open a socket at "${E3.qmp}".)
+
+    func testResolveFieldPathExtractsJSONField() {
+        // vm_launch returns {"pid":..,"qmp":".."}; a later step chains ${E3.qmp}.
+        let launch = #"{"pid":64406,"qmp":"/tmp/perslis-run.sock","vnc":5900}"#
+        let resolved = ExecutablePlan.resolveArguments(#"{"qmp":"${E3.qmp}"}"#, outputs: ["E3": launch])
+        XCTAssertEqual(resolved["qmp"] as? String, "/tmp/perslis-run.sock",
+                       "field ref must resolve, not pass the literal token")
+    }
+
+    func testResolveFieldPathScalarsAndNesting() {
+        let out = #"{"a":{"b":{"c":"deep"}},"n":42,"flag":true}"#
+        XCTAssertEqual(ExecutablePlan.resolveArguments(#"{"v":"${E1.a.b.c}"}"#, outputs: ["E1": out])["v"] as? String, "deep")
+        XCTAssertEqual(ExecutablePlan.resolveArguments(#"{"v":"${E1.n}"}"#, outputs: ["E1": out])["v"] as? String, "42")
+        XCTAssertEqual(ExecutablePlan.resolveArguments(#"{"v":"pid=${E1.n}"}"#, outputs: ["E1": out])["v"] as? String, "pid=42")
+    }
+
+    func testResolveFieldPathMissingOrNonJSONBecomesEmpty() {
+        // id exists but output isn't JSON → "" (never the literal token).
+        XCTAssertEqual(ExecutablePlan.resolveArguments(#"{"v":"${E1.qmp}"}"#, outputs: ["E1": "plain text"])["v"] as? String, "")
+        // id exists, JSON, but field missing → "".
+        XCTAssertEqual(ExecutablePlan.resolveArguments(#"{"v":"${E1.nope}"}"#, outputs: ["E1": #"{"qmp":"x"}"#])["v"] as? String, "")
+        // whole-ref still works alongside field-refs.
+        XCTAssertEqual(ExecutablePlan.resolveArguments(#"{"v":"${E1}"}"#, outputs: ["E1": #"{"qmp":"x"}"#])["v"] as? String, #"{"qmp":"x"}"#)
+    }
+
+    func testFieldRefStillCountsBaseIdAsDependency() {
+        // The optional .field suffix must not change dependency detection.
+        XCTAssertEqual(ExecutablePlan.referencedIds(in: #"{"qmp":"${E3.qmp}","x":"${E1}"}"#), ["E3", "E1"])
+    }
+
     // MARK: - Codable round-trip (checkpoint/resume)
 
     func testPlanCodableRoundTrips() throws {

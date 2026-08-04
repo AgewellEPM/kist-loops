@@ -13,6 +13,17 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.6", date: "2026-08-04",
+                headline: "It builds its own DOS apps now — end to end",
+                changes: [
+                    "Dogfooded: `/build a DOS program` now generates the assembly, assembles it with nasm, verifies it, and reports ● done — proven producing a real 30-byte hello.com",
+                    "Fixed the #1 build-breaker: `generate` was wrapping code in ```markdown fences``` and writing the backticks into the file (nasm choked on line 1) — fences are now stripped",
+                    "Legacy builds go NATIVE-first: assembling/compiling uses nasm/dosbox-x directly; the Perslis VM is only for RUNNING real Win9x/DOS software (no more routing a nasm build into the VM)",
+                    "Repair loop now SEES the real error: a failing command's stderr (e.g. nasm's message) reaches the fixer instead of a blind 'exit code 1'",
+                    "Hands-off verify works under --sandbox: raw shell (pipes/strings/grep) auto-approves when the OS sandbox confines it; un-sandboxed still needs approval",
+                    "The completion gate learned that `nasm` IS a build and `strings`/`xxd`/`nm`/… are read-only inspection — a correct binary is no longer reported 'unverified' forever",
+                    "Steps can chain a FIELD of a prior tool's JSON output: ${E1.qmp}; and the planner is taught the real Perslis calling convention (image is a path, qmp is a reused socket)",
+                ]),
         Release(version: "0.17.5", date: "2026-08-04",
                 headline: "Your build command is an order, not a suggestion",
                 changes: [

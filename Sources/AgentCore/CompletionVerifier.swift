@@ -607,6 +607,15 @@ public enum CommandClassifier {
                 isRelativeProjectPath($0)
                     && sourceExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
             }
+        case "nasm", "yasm", "as", "ml", "ml64", "tasm", "wasm":
+            // Assembling a source file IS the build for a DOS/asm project (2026-08-04 dogfood: a
+            // correct hello.com was reported "unverified" because `nasm hello.asm` wasn't recognized).
+            // A bare version/help query (no source input) is not a build.
+            let asmExtensions: Set<String> = ["asm", "s", "nas", "inc", "a51"]
+            return rawArgs.contains {
+                isRelativeProjectPath($0)
+                    && asmExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
+            }
         case "flake8":
             return !args.contains("--bug-report")
         case "rubocop":
@@ -884,6 +893,12 @@ public enum CommandClassifier {
         "test", "[", "uname", "date", "whoami", "id", "du", "df", "sort", "uniq", "cut", "tr",
         "jq", "readlink", "realpath", "basename", "dirname", "diff", "cmp", "md5", "shasum", "sha256sum",
         "cd", "export", "unset", "set", "ulimit",
+        // Binary/artifact inspection — read-only, the shape a build VERIFIES itself with (2026-08-04
+        // dogfood: `strings hello.com` was misread as a mutation, becoming the "last edit" so the
+        // build before it was never credited). None of these write their input.
+        "strings", "xxd", "od", "hexdump", "nm", "objdump", "otool", "readelf", "size",
+        "base64", "cksum", "sha1sum", "sha512sum", "b2sum", "tac", "nl", "column", "comm",
+        "join", "paste", "fold", "expand", "unexpand", "tabs",
     ]
 
     /// Raw-shell expansion happens after this parser sees the argv. It can synthesize an exit-early flag

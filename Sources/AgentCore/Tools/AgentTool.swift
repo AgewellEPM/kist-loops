@@ -93,19 +93,26 @@ public struct ShellPolicy: Sendable {
     public let deny: [String]
     /// Interactive per-command gate (returns true to permit). Ignored when `autoApprove`.
     public let approval: (@Sendable (String) async -> Bool)?
+    /// The run is confined by the OS (Seatbelt) sandbox. RAW shell strings (pipes/redirects) can then
+    /// auto-approve WITHOUT an interactive handler: the advisory deny-list is no longer the boundary —
+    /// the KERNEL is (writes confined to the project root, network denied), and RunCommandTool
+    /// fails CLOSED if a requested sandbox is unavailable. Un-sandboxed raw shell still needs a human.
+    public let sandboxed: Bool
 
     public init(
         enabled: Bool,
         autoApprove: Bool = false,
         allow: Set<String> = [],
         deny: [String] = ShellPolicy.defaultDeny,
-        approval: (@Sendable (String) async -> Bool)? = nil
+        approval: (@Sendable (String) async -> Bool)? = nil,
+        sandboxed: Bool = false
     ) {
         self.enabled = enabled
         self.autoApprove = autoApprove
         self.allow = allow
         self.deny = deny
         self.approval = approval
+        self.sandboxed = sandboxed
     }
 
     /// Shell completely off. The safe default for any context that doesn't opt in.
@@ -210,8 +217,12 @@ public struct ShellPolicy: Sendable {
         for bad in deny where lower.contains(bad.lowercased()) {
             return "matches deny-list entry '\(bad)'"
         }
+        // Under the OS sandbox the kernel is the boundary, so a hands-off run may execute raw shell
+        // (pipes/redirects) without an interactive handler — the advisory deny-list above still applies.
+        if sandboxed { return nil }
         guard let approval = approval else {
-            return "raw shell commands require interactive approval (unavailable here); use executable+args instead"
+            return "raw shell commands require interactive approval (unavailable here); "
+                 + "use executable+args, or run under the OS sandbox (--sandbox / --auto)"
         }
         let ok = await approval(command)
         return ok ? nil : "denied at the approval prompt"

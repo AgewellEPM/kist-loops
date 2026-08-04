@@ -32,6 +32,27 @@ final class GenerateToolTests: XCTestCase {
         XCTAssertEqual(result.output, "hello")
     }
 
+    // 2026-08-04 dogfood: generate returned ```asm\n<code>\n``` and write_file wrote the backticks,
+    // so nasm choked on line 1. A sole surrounding fence must be unwrapped before the output is used.
+    func testStripsSoleCodeFenceSoFilesArentCorrupted() async throws {
+        let fenced = "```asm\norg 100h\nmov ah, 09h\nint 21h\n```"
+        let result = try await tool(fenced).execute(arguments: ["prompt": "x"], context: ToolContext(projectRoot: root))
+        XCTAssertEqual(result.output, "org 100h\nmov ah, 09h\nint 21h")
+        XCTAssertFalse(result.output.contains("```"), "no fence backticks may reach the written file")
+    }
+
+    func testUnwrapSoleCodeFenceEdgeCases() {
+        // Plain fence, no lang tag.
+        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```\nx=1\n```"), "x=1")
+        // Not wrapped → untouched.
+        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("just prose"), "just prose")
+        // Prose CONTAINING a fenced sample (two interior fences) → left intact, not mangled.
+        let prose = "Here is code:\n```py\nx=1\n```\nThat's it."
+        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence(prose), prose)
+        // Inner backticks/content survive; only the outer fence is stripped.
+        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```bash\necho `date`\n```"), "echo `date`")
+    }
+
     func testEmptyOutputIsFailure() async throws {
         let result = try await tool("   \n  ").execute(arguments: ["prompt": "x"], context: ToolContext(projectRoot: root))
         XCTAssertFalse(result.success)
