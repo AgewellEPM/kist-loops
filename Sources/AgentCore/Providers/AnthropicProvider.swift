@@ -25,7 +25,9 @@ public struct AnthropicProvider: ChatProvider {
         AIModel(id: "claude-3-5-haiku-20241022", displayName: "Claude 3.5 Haiku", isVision: true)
     ]
 
-    private let endpoint = "https://api.anthropic.com/v1/messages"
+    /// Messages endpoint — override with `ANTHROPIC_API_URL` (proxy/staging); default is the public API.
+    private let endpoint = ProcessInfo.processInfo.environment["ANTHROPIC_API_URL"]
+        ?? "https://api.anthropic.com/v1/messages"
     /// Anthropic API version pin (required header).
     private let anthropicVersion = "2023-06-01"
 

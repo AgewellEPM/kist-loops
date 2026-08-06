@@ -307,9 +307,20 @@ extension KistREPL {
                     await runBench(args)
                     return .handled
                 case "eval":
+                    // No args or "suite" → the GOLDEN regression suite (replay fixed set, score, compare to
+                    // baseline, flag a drop). `/eval <task>` → ad-hoc assertions for one task.
+                    let evalArg = args.trimmingCharacters(in: .whitespaces).lowercased()
+                    if evalArg.isEmpty || evalArg == "suite" || evalArg == "regression" || evalArg == "golden" {
+                        guard let runEvalSuite else { print("\u{001B}[31m/eval isn't available here\u{001B}[0m"); return .handled }
+                        await runEvalSuite()
+                        return .handled
+                    }
                     guard let runEval else { print("\u{001B}[31m/eval isn't available here\u{001B}[0m"); return .handled }
-                    guard !args.isEmpty else { print("usage: /eval <task>"); return .handled }
                     await runEval(args)
+                    return .handled
+                case "eval-suite", "evalsuite", "regression-suite":
+                    guard let runEvalSuite else { print("\u{001B}[31m/eval-suite isn't available here\u{001B}[0m"); return .handled }
+                    await runEvalSuite()
                     return .handled
                 case "fleet-status", "cockpit", "fleetstatus":
                     // Terminal Captain cockpit: the latest fleet's per-agent status + honest merge-fate.
@@ -547,12 +558,14 @@ extension KistREPL {
                     // (/research · /council · /plan) — this drops you straight into the build loop.
                     // `/code <prov[:model]>` pins a different coder (e.g. /code claude-cli for the Max sub).
                     let codeSpec = args.trimmingCharacters(in: .whitespaces)
-                    let coderBinding: ProviderBinding = codeSpec.isEmpty
-                        ? ProviderBinding(providerId: "deepseek", model: "deepseek-v4-pro")
-                        : {
-                            let parts = codeSpec.split(separator: ":", maxSplits: 1).map(String.init)
-                            return ProviderBinding(providerId: parts[0], model: parts.count > 1 ? parts[1] : nil)
-                          }()
+                    // Bare `/code` default is configuration, not a baked-in model: KIST_CODER_DEFAULT=<prov[:model]>
+                    // overrides the shipped DeepSeek pin without touching source.
+                    let envDefault = ProcessInfo.processInfo.environment["KIST_CODER_DEFAULT"]?
+                        .trimmingCharacters(in: .whitespaces)
+                    let spec = !codeSpec.isEmpty ? codeSpec
+                        : (envDefault?.isEmpty == false ? envDefault! : "deepseek:deepseek-v4-pro")
+                    let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+                    let coderBinding = ProviderBinding(providerId: parts[0], model: parts.count > 1 ? parts[1] : nil)
                     if let error = roleSelection.setDefault(coderBinding, knownProviders: providerAliases) {
                         print("\u{001B}[31m\(error)\u{001B}[0m"); return .handled
                     }
@@ -915,13 +928,76 @@ extension KistREPL {
                         await council(invocation.goal, roleSelection.bindings, invocation.execute)
                     }
                     return .handled
-                case "dig", "digdeep", "minds", "mind", "effort":
+                case "dig", "digdeep", "minds", "mind":
                     guard let digDeep else { print("\u{001B}[31m/dig isn't available here\u{001B}[0m"); return .handled }
-                    guard !args.isEmpty else { print("usage: /dig (a.k.a. /effort) <question> — ask every reachable model in parallel and synthesize"); return .handled }
+                    guard !args.isEmpty else { print("usage: /dig <question> — ask every reachable model in parallel and synthesize"); return .handled }
                     await runHeavyRoute(goal: args, intent: .review, mode: .inline,
                                         execution: "dig-in-deep", startProof: true) {
                         await digDeep(args, roleSelection.bindings)
                     }
+                    return .handled
+                case "effort":
+                    // The CONFLICT-ESCALATION LADDER: build solo (L1) → on a FAILED hard gate, escalate —
+                    // a DISTINCT adversarial mind enters (L2), a rater enters (L3), then the full gauntlet
+                    // (ultra). Cheap path ships fast; only failure spends more minds. `/effort <goal>` auto-
+                    // escalates from L1; `/effort <1|2|3|ultra> <goal>` starts at that rung.
+                    guard planExecute != nil else { print("\u{001B}[31m/effort isn't available here\u{001B}[0m"); return .handled }
+                    let (startLevel, effortGoalRaw) = Self.parseEffortArgs(args)
+                    let effortGoal: String
+                    if !effortGoalRaw.isEmpty {
+                        effortGoal = Self.expandBoardReference(effortGoalRaw, projectRoot: projectRoot, sessionStartedAt: sessionStart)
+                    } else if let lastUser = humanTranscript.reversed().first(where: { $0.role == .user })?.content {
+                        effortGoal = "BUILD this now with real code and a passing build/test: \(lastUser)"
+                    } else {
+                        print("usage: /effort [1|2|3|ultra] <what to build> — escalating multi-model build (solo → reviewer → rater → full gauntlet)")
+                        return .handled
+                    }
+                    await runHeavyRoute(goal: effortGoal, intent: .build, mode: .planExecute,
+                                        execution: "effort-ladder", startProof: true) {
+                        await runEffort(goal: effortGoal, startLevel: startLevel)
+                    }
+                    return .handled
+                case "dashboard", "kanban", "kist-dashboard", "fallout-dashboard", "pipboy", "pip-boy":
+                    // The full Fallout/Pip-Boy GUI dashboard (talent tree, history, arch/cortex/sessions/vms).
+                    // Restored after the re-home dropped it. Optional view: [conversation|flow|timeline|fleet|vms|plan].
+                    await launchDashboard(command: name, args: args)
+                    return .handled
+                case "fix", "repair":
+                    // THE CAPTAIN BUTTON: plan → force action → build → the symbolic judge rules "done"
+                    // (never the model). Drives the proven /build worker in a bounded force-retry loop and
+                    // refuses to stop until there's a VERIFIED, non-monolith artifact. `/fix` alone fixes
+                    // the objective just discussed; `/fix <goal>` fixes that.
+                    guard planExecute != nil else { print("\u{001B}[31m/fix isn't available here\u{001B}[0m"); return .handled }
+                    let fixGoal: String
+                    if !args.isEmpty {
+                        fixGoal = Self.expandBoardReference(args, projectRoot: projectRoot, sessionStartedAt: sessionStart)
+                    } else if let lastUser = humanTranscript.reversed().first(where: { $0.role == .user })?.content {
+                        fixGoal = "FIX this — implement it now with real code and a passing build/test; do NOT "
+                            + "just analyze or plan.\n\nRequest: \(lastUser)"
+                    } else {
+                        print("usage: /fix <what to fix> — or run it right after describing a problem and it fixes that")
+                        return .handled
+                    }
+                    await runHeavyRoute(goal: fixGoal, intent: .build, mode: .planExecute,
+                                        execution: "captain-fix", startProof: true) {
+                        await runCaptainFix(goal: fixGoal)
+                    }
+                    return .handled
+                case "audit", "security", "security-audit", "vuln", "sast", "secscan":
+                    // Security audit: secret-scan + SAST + dependency check → severity-ranked report.
+                    // `/audit owasp` → OWASP-Top-10-Agentic governance posture.
+                    await runSecurityAudit(args: args)
+                    return .handled
+                case "scorecard", "models", "model-scorecard", "modelstats", "trackrecord":
+                    // The Captain's per-model track record: successes/failures/loops + the rank nudge or
+                    // auto-avoid it applies when picking. Makes "don't burn shit" legible.
+                    showScorecard()
+                    return .handled
+                case "ballbusting", "ballbust", "ball-busting", "roast", "bustmyballs":
+                    // The no-mercy review organ: point a skeptical reviewer at the current work, forbid
+                    // gaslighting, name every flaw, propose a fix for each. `/ballbusting` reviews the
+                    // working-tree diff; `/ballbusting <text>` roasts a plan/idea.
+                    await runBallbusting(args: args)
                     return .handled
                 case "ultra", "consensus", "flawless":
                     // Explicit consensus mode: heterogeneous reviewers report findings; the original author
@@ -1039,6 +1115,22 @@ extension KistREPL {
                     await runHeavyRoute(goal: researchGoal, intent: .research, mode: .inline,
                                         execution: "research", startProof: true) {
                         await research(researchGoal, roleSelection.bindings)
+                    }
+                    return .handled
+                case "dive", "codebase", "read-code", "digest":
+                    // MULTI-MODEL deep-dive of OUR OWN code — LOCAL and repo-scoped (no web, no cross-repo
+                    // sweep). Reads the actual files under the project root, grounds a dossier in them, then
+                    // fans that real code out to every reachable model for a synthesized, file-cited truth.
+                    let diveGoal = args.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !diveGoal.isEmpty else {
+                        print("usage: /dive <question about our code> — multi-model read of OUR repo (local, no web)")
+                        return .handled
+                    }
+                    guard let dive else { print("\u{001B}[31m/dive isn't available here\u{001B}[0m"); return .handled }
+                    print("\u{001B}[36;1m🔬 dive\u{001B}[0m\u{001B}[2m · reading our code (local, no web) → multi-model → truth\u{001B}[0m")
+                    await runHeavyRoute(goal: diveGoal, intent: .research, mode: .inline,
+                                        execution: "codebase-dive", startProof: true) {
+                        await dive(diveGoal, roleSelection.bindings)
                     }
                     return .handled
                 case "competitive", "compete", "competitor", "vs":

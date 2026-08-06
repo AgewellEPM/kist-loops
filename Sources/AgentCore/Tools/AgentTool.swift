@@ -345,6 +345,11 @@ public struct ToolContext: Sendable {
         for ext in externalReadRoots where resolved == ext || resolved.hasPrefix(ext + "/") {
             return (try ConfinedRoot(root: ext, readOnly: true), resolved)
         }
+        // macOS drag/screenshot inbox: a file the user ATTACHED (dragged/pasted a screenshot) lands
+        // here read-only. Vision/media tools may read it without a --allow-read grant. See mediaDropInbox().
+        if let inbox = Self.mediaDropInbox(), resolved == inbox || resolved.hasPrefix(inbox + "/") {
+            return (try ConfinedRoot(root: inbox, readOnly: true), resolved)
+        }
         throw ToolError.pathEscape(path: path, root: readableRootsDescription(projectReal: rootReal))
     }
 
@@ -357,6 +362,15 @@ public struct ToolContext: Sendable {
             guard case .pathEscape = escape else { throw escape }
             let resolved = Self.canonicalizeAllowingMissing(path)
             for ext in externalReadRoots where resolved == ext || resolved.hasPrefix(ext + "/") {
+                if mustExist && !FileManager.default.fileExists(atPath: resolved) {
+                    throw ToolError.notFound(path)
+                }
+                return resolved
+            }
+            // macOS drag/screenshot inbox — user-attached media is readable read-only (see mediaDropInbox()).
+            // MUST mirror confinedRootForReading: view_image validates here, then reads bytes there — a fix
+            // in one without the other passes validation and then fails the read (or vice versa).
+            if let inbox = Self.mediaDropInbox(), resolved == inbox || resolved.hasPrefix(inbox + "/") {
                 if mustExist && !FileManager.default.fileExists(atPath: resolved) {
                     throw ToolError.notFound(path)
                 }
@@ -385,9 +399,32 @@ public struct ToolContext: Sendable {
     /// "…escapes the project root (<this>) — refused": name the armed read roots so the
     /// error itself tells the model where reads ARE allowed.
     private func readableRootsDescription(projectReal: String) -> String {
-        externalReadRoots.isEmpty
+        var roots = externalReadRoots
+        // Surface the auto-armed drag/screenshot inbox too — it IS readable, so an honest error
+        // must name it (otherwise the model is steered to a pointless `cp` or --allow-read).
+        if let inbox = Self.mediaDropInbox() { roots.append(inbox) }
+        return roots.isEmpty
             ? projectReal
-            : projectReal + "; also readable read-only: " + externalReadRoots.joined(separator: ", ")
+            : projectReal + "; also readable read-only: " + roots.joined(separator: ", ")
+    }
+
+    /// The macOS per-user drag/screenshot inbox: when you take a screenshot (⌘⇧⌃4 → clipboard, or
+    /// drag the capture thumbnail) or drag a Finder item into the terminal, the OS stages the file
+    /// under `<$TMPDIR>/TemporaryItems/…` (e.g. `…/T/TemporaryItems/NSIRD_screencaptureui_XXXX/
+    /// Screenshot.png`). READ-ONLY vision/media tools (view_image, analyze_media, …) may read a file
+    /// the user handed us there WITHOUT a `--allow-read` grant — attaching the file IS the grant.
+    ///
+    /// Evaluated LIVE per call (not existence-filtered at ToolContext init) so it works even when the
+    /// inbox is created AFTER a long-lived session started — Luke keeps terminals open for weeks, so
+    /// the inbox frequently does not exist at launch. Returns nil until the inbox exists; `canonicalize`
+    /// resolves the `/var → /private/var` symlink so the prefix compare matches the caller's resolved
+    /// path. Scoped to `TemporaryItems` (NOT all of $TMPDIR) so we don't expose other apps' temp files.
+    /// WRITE tools are unaffected — they route through `confinedRoot()` (project root only).
+    static func mediaDropInbox() -> String? {
+        let base = NSTemporaryDirectory()          // per-user $TMPDIR, e.g. /var/folders/xx/…/T/
+        guard !base.isEmpty else { return nil }
+        let inbox = (base as NSString).appendingPathComponent("TemporaryItems")
+        return canonicalize(inbox)                 // nil until it exists; re-checked live each call
     }
 
     /// Resolve a caller-supplied path to an absolute path GUARANTEED to live inside

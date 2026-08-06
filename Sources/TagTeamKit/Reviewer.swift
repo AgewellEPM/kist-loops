@@ -49,7 +49,12 @@ public struct DeepSeekReviewer: Reviewer {
 
     public func review(diff: String) async throws -> String {
         guard !apiKey.isEmpty else { throw ReviewerError.missingKey("DEEPSEEK_API_KEY") }
-        var req = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!)
+        // Host overridable via DEEPSEEK_BASE_URL (mirror/proxy); default is the public API.
+        let base = ProcessInfo.processInfo.environment["DEEPSEEK_BASE_URL"] ?? "https://api.deepseek.com"
+        guard let reviewURL = URL(string: base + "/chat/completions") else {
+            throw ReviewerError.missingKey("DEEPSEEK_BASE_URL is not a valid URL: \(base)")
+        }
+        var req = URLRequest(url: reviewURL)
         req.httpMethod = "POST"
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -49,7 +49,25 @@ public struct ReadFileTool: AgentTool {
         // Routes through the READING resolver so an absolute path under an armed external
         // read root (e.g. --allow-read /Volumes for a CD) is readable; writes never are.
         let (confined, readPath) = try context.confinedRootForReading(path)
-        let content = try confined.readString(readPath)
+        let content: String
+        do {
+            content = try confined.readString(readPath)
+        } catch let err as ToolError {
+            // A DIRECTORY (including the confinement root itself, whose relative components are empty)
+            // surfaces from the O_NOFOLLOW read path as `.notFound` or "not a regular file" — which the
+            // humanizer renders as the misleading "it doesn't exist here". That lie derails agents: it's
+            // exactly what sent the self-heal researcher in circles after `read_file /Users/lukekist`
+            // (the project root). Re-map to an actionable steer toward list_files when the path really
+            // is a directory. The real read already went through ConfinedRoot safely; this probe only
+            // shapes the error message.
+            // NEVER mask a path-escape/denied read as "a directory" (Codex P3): a rejected out-of-scope
+            // path must keep its escape message so the model is steered correctly, not toward list_files.
+            if case .pathEscape = err { throw err }
+            if Self.pathIsDirectory(path, context: context) {
+                return .failure("\(path) is a directory, not a file — use list_files to see its contents, then read_file a specific file inside it")
+            }
+            throw err
+        }
         let lines = content.components(separatedBy: "\n")
 
         let start = max(0, (optionalInt("start_line", from: arguments) ?? 1) - 1)
@@ -77,6 +95,17 @@ public struct ReadFileTool: AgentTool {
             metadata["next_end_line"] = String(nextEnd)
         }
         return ToolResult(success: true, output: output, metadata: metadata)
+    }
+
+    /// Best-effort probe used ONLY to shape read_file's error message (the actual read stays on the
+    /// TOCTOU-safe ConfinedRoot path). Resolves the caller path the same way the read did — absolute
+    /// as-is (armed external roots pass absolute paths), else relative to the project root.
+    private static func pathIsDirectory(_ path: String, context: ToolContext) -> Bool {
+        let abs = path.hasPrefix("/")
+            ? path
+            : (context.projectRoot as NSString).appendingPathComponent(path)
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: abs, isDirectory: &isDir) && isDir.boolValue
     }
 
     /// Read a builtin skill from the embedded bundle (whole file, size-capped inside `readBuiltin`)

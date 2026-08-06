@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 swift build --product kist >/dev/null
 BIN="$(swift build --product kist --show-bin-path)/kist"
-export KIST_RECEIPT_KEY="gauntlet-org-shared-secret-0123456789"
+export KIST_RECEIPT_KEY="${KIST_RECEIPT_KEY:-gauntlet-org-shared-secret-0123456789}"
 PASS=0; FAIL=0
 T="$(mktemp -d)"
 newrepo() { d="$T/$1"; rm -rf "$d"; mkdir -p "$d"; ( cd "$d" && git init -q && git config user.email t@t \

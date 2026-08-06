@@ -476,7 +476,7 @@ extension OrganizationalLearningStore {
         }
         guard !executable.contains("/") else { return nil }
         let path = ProcessInfo.processInfo.environment["PATH"]
-            ?? "/opt/homebrew/bin:/usr/local/bin:/Users/lukekist/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            ?? "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         for dir in path.split(separator: ":").map(String.init) {
             let candidate = (dir as NSString).appendingPathComponent(executable)
             let resolved = (candidate as NSString).resolvingSymlinksInPath

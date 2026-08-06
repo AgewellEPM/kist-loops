@@ -23,9 +23,18 @@ final class KistREPL {
     var digDeep: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Run an evidence-first research pass, feed the dossier to council, and seed the shared board.
     var research: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
+    /// `/dive` — a LOCAL, repo-scoped multi-model read of OUR OWN code (no web, no cross-repo estate sweep).
+    /// Grounds a dossier in the actual files under the project root, then fans it to every reachable model.
+    var dive: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Forge a specialist from a plain-English role description (AgentForge), bounded by the loop's tool
     /// ceiling, validated, and saved to the registry. nil = forging unavailable in this mode.
     var forge: ((_ description: String, _ roles: RoleBindings) async -> Void)? = nil
+    /// The Captain's deterministic model pick for a Captain-driven turn (`/fix`): the STRONGEST reachable
+    /// frontier provider (keyed cloud + subscription hitters), NEVER a known-weak/dead one (MiMo, cold
+    /// local endpoints). Returns nil when the session is ALREADY on the strongest — no needless override.
+    /// Set by the runner (which holds the registry). This is the scoped, opt-in first step of "the Captain
+    /// decides what model to call" — it does NOT change the global per-turn router.
+    var captainStrongRoles: (@Sendable () -> RoleBindings?)? = nil
     /// The intent router (Increment B): classify a plain message as chat|build|plan|research|council|fleet and PROPOSE an
     /// escalation (never silently spend). nil = auto-route off (explicit slash commands only).
     var router: ConversationRouter? = nil
@@ -77,6 +86,11 @@ final class KistREPL {
     var runBench: ((_ goal: String) async -> Void)? = nil
     /// Eval assertions for a task.
     var runEval: ((_ goal: String) async -> Void)? = nil
+    /// Run the GOLDEN eval suite (regression gate): replay the fixed task set, score, compare to baseline.
+    var runEvalSuite: (() async -> Void)? = nil
+    /// Auto-capture a durable lesson into SEMANTIC (vector) memory on a verified win, so a future session
+    /// can recall it. nil when no embedder is configured. Fail-soft — never blocks or throws into a turn.
+    var rememberLesson: (@Sendable (_ text: String) async -> Void)? = nil
     /// A configured vision-capable provider to borrow for media turns when the active model can't see
     /// (nil if none is configured). Set by the runner to e.g. "gemini" when its key is present.
     var visionProviderId: String? = nil

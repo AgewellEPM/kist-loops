@@ -8,7 +8,7 @@ DASHBOARD_SOURCE=${KIST_DASHBOARD_UNDER_TEST:-$REPO_ROOT/scripts/kist-dashboard}
 SAFE_REBUILD_SOURCE=${KIST_SAFE_REBUILD_UNDER_TEST:-$REPO_ROOT/scripts/kist-safe-rebuild.sh}
 [[ -x "$REBUILD_SOURCE" && -x "$DASHBOARD_SOURCE" && -x "$SAFE_REBUILD_SOURCE" ]] \
   || { printf 'missing rebuild/dashboard/safe-rebuild launchers\n' >&2; exit 1; }
-TMP=$(/usr/bin/mktemp -d /Users/lukekist/.kist-release-registry-test.XXXXXX)
+TMP=$(/usr/bin/mktemp -d "${HOME}/.kist-release-registry-test.XXXXXX")
 GLOBAL_SNAPSHOT_DECOY=""
 LEASE_HOLDER_PID=""
 LEASE_TEST_RELEASE=""

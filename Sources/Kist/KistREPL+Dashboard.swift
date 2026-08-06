@@ -4,6 +4,41 @@ import AgentCore
 // Glanceable turn dashboard: assemble live minds/board/research/confidence, plus the
 // research/knowledge-debt de-dup mergers. Extracted verbatim from KistREPL.swift.
 extension KistREPL {
+    /// Launch the canonical Fallout/Pip-Boy GUI dashboard for the REPL. The `/dashboard` command was
+    /// dropped when kist-loops was re-homed as the captain; this restores it. The full GUI (talent/tech
+    /// tree, history, arch/builds/cortex/sessions/vms views) lives under `~/.kist`; the deployed
+    /// `~/bin/kist-dashboard` launcher owns the server start, provenance validation, browser open, and
+    /// readiness probe, so we just invoke it and surface its output (the ready URL, or an error).
+    ///
+    /// FIRE-AND-FORGET launch: the REPL must NEVER block on the launcher (Codex P2 — the launcher may hold
+    /// the readiness probe or foreground the local server, which `waitUntilExit()` would freeze the REPL
+    /// on). We spawn detached, discard output, and reap on a background task; the launcher opens the browser
+    /// itself. `command` is only the display label.
+    func launchDashboard(command: String, args: String) async {
+        let launcher = (NSHomeDirectory() as NSString).appendingPathComponent("bin/kist-dashboard")
+        guard FileManager.default.isExecutableFile(atPath: launcher) else {
+            print("\u{001B}[31m/dashboard: launcher not installed at \(launcher) — run `kist-rebuild` to install it\u{001B}[0m")
+            return
+        }
+        let view = args.trimmingCharacters(in: .whitespaces).lowercased()
+        let root = projectRoot
+        print("\u{001B}[36m↳ launching Kist dashboard\(view.isEmpty ? "" : " · \(view)") — opening in your browser…\u{001B}[0m")
+        print("\u{001B}[2m  (if it doesn't appear, run `~/bin/kist-dashboard` directly to see the error)\u{001B}[0m")
+        // Detached + non-blocking: run(), then reap in the background. The REPL returns immediately.
+        Task.detached(priority: .utility) {
+            var procArgs: [String] = []
+            if !view.isEmpty { procArgs.append(view) }              // the launcher validates the view name
+            procArgs += ["--project-root", root]
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: launcher)
+            p.arguments = procArgs
+            p.standardOutput = FileHandle.nullDevice                // no pipe → no fill-and-block, no capture
+            p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch { return }
+            p.waitUntilExit()                                       // reap here, off the REPL thread
+        }
+    }
+
     /// Build the glanceable turn dashboard from live session state: the active model/team, the board, a
     /// derived confidence, and what's next. Pure over its inputs → the REPL just feeds it.
     static func buildDashboard(roles: RoleSelection, projectRoot: String,

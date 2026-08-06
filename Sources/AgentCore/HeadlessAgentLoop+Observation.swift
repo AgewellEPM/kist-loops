@@ -4,6 +4,20 @@ import Foundation
 // tool-output envelope, and the prompt-injection advisory. Extracted verbatim from
 // HeadlessAgentLoop.swift (see the modular split) — behavior unchanged.
 extension HeadlessAgentLoop {
+    /// The observation text for a completed tool call. On SUCCESS: the tool's output. On FAILURE:
+    /// the error verdict PLUS the tool's actual output — a failing compiler/test's diagnostics are
+    /// the whole point of the observation. (Dogfood find 2026-08-06: `cobc` failures fed the model
+    /// only "exit code 1" — the compiler's stderr was captured in `output` but dropped, so the model
+    /// patched blind, tried a denied `2>&1` re-run, and finally reported it "cannot access stderr".)
+    static func failureAwareRaw(_ result: ToolResult) -> String {
+        if result.success { return result.output }
+        let error = (result.error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if error.isEmpty { return result.output }
+        if output.isEmpty || output == error { return error }
+        return error + "\n" + result.output
+    }
+
     static func toolObservationBody(raw: String, metadata: [String: String], maxBytes: Int) -> String {
         let metadataFooter = renderedMetadataFooter(metadata)
         let annotated = raw + metadataFooter

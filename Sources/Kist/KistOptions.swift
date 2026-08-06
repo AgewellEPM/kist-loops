@@ -7,7 +7,11 @@ struct KistOptions {
     var providerId: String?
     var model: String?
     var project: String
-    var maxIterations: Int = 12
+    // 40, not 12 (dogfood 2026-08-06): every real build task (write→compile→run→fix→verify) died at
+    // the 12-step ceiling with ~$1.30 spent and nothing verified, across 6 consecutive runs. The loop's
+    // OTHER guards bound runaway spend (runaway-cycle detector, budget ledger, verify-before-done);
+    // a too-small ceiling is the one guard that guarantees failure on real work. --max-iterations overrides.
+    var maxIterations: Int = 40
     var allowShell = false          // run_command is OFF by default (file/search tools are safe)
     var allowReadPaths: [String] = []  // --allow-read <dir>: extra READ-ONLY roots for the file tools
                                     // (e.g. /Volumes for a CD/USB drive). Repeatable. Writes stay
@@ -364,7 +368,7 @@ struct KistOptions {
       -p, --provider <id>           Provider id (default: first configured cloud provider, else local).
       -m, --model <id>              Model id (default: the provider's default).
       -C, --project <path>          Project root the agent is confined to (default: current dir).
-          --max-iterations <n>      Max plan→act steps (default: 12).
+          --max-iterations <n>      Max plan→act steps (default: 40).
           --allow-shell             Enable the run_command tool (OFF by default).
           --allow-read <dir>        ALSO allow the file/search tools to READ under <dir> (repeatable),
                                     e.g. --allow-read /Volumes to browse a mounted CD/USB drive.

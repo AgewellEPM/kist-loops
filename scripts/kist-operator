@@ -35,7 +35,7 @@ bad()  { printf '  %s✗%s %s\n' "$RED" "$R" "$1"; FAILS=$((FAILS+1)); }
 warn() { printf '  %s•%s %s\n' "$YEL" "$R" "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-ollama_up() { curl -s --max-time 3 http://localhost:11434/api/tags >/dev/null 2>&1; }
+ollama_up() { curl -s --max-time 3 "${OLLAMA_HOST:-http://localhost:11434}/api/tags" >/dev/null 2>&1; }
 mcp_has()   { [ -f "$MCP" ] && grep -q "\"$1\"" "$MCP" 2>/dev/null; }
 
 # ── the three systems ────────────────────────────────────────────────────────

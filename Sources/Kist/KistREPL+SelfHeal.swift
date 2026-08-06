@@ -258,6 +258,39 @@ extension KistREPL {
                 .recordTurn(plan: plan, spans: submittedTurnSpans, trajectory: trajectory,
                             outcomeSummary: clean, success: success,
                             insights: insights, objective: currentObjective)
+
+            // PER-MODEL SCORECARD (interactive path): record THIS turn's model outcome so /fix, /build and
+            // normal turns also teach the Captain which models fail/loop. Success is REFEREE-measured
+            // (settled turn success AND grounded), NEVER the model's raw claim, so a confident wrong answer
+            // cannot score a model as strong. Feeds captainStrongRoles / ModelEscalator's pick.
+            let goalText = currentObjective ?? clean
+            let report = TrajectoryAnalyzer.analyze(trajectory, taskIntent: PromptCompiler.compile(goalText).intent)
+            let toolFails = trajectory.filter { !$0.success }.count
+            let failureRate = trajectory.isEmpty ? 0 : Double(toolFails) / Double(trajectory.count)
+            let grounded = GroundedReviewValidator.audit(clean, projectRoot: projectRoot).isGrounded
+            let verified = success && grounded
+            CaptainLearningStore(projectRoot: projectRoot).record(CaptainLearningSample(
+                taskSignature: EffortController.signature(for: goalText),
+                taskTags: CaptainLearningSample.inferTaskTags(from: goalText),
+                language: nil, role: "turn",
+                providerId: activeBinding.providerId, model: activeBinding.model,
+                source: .liveEval, success: verified,
+                tokens: UsageCost.summarize(spans: submittedTurnSpans).tokens,
+                toolFailures: toolFails, atEpoch: Date().timeIntervalSince1970,
+                failureReason: verified ? nil
+                    : CaptainLearningSample.scorecardReason(
+                        providerFault: false, flaky: false, verificationRejected: false,
+                        loopKind: report.issues.first?.kind.rawValue, failureRate: failureRate, ungrounded: success),
+                failedAt: verified ? nil : "act",
+                loopKinds: report.issues.map { $0.kind.rawValue },
+                wasStuck: !report.healthy, failureRate: failureRate))
+
+            // Roadmap #3: on a VERIFIED win, auto-capture a durable lesson into semantic memory so a
+            // future session can `recall` it (fire-and-forget, fail-soft — never blocks the turn).
+            if verified, let rememberLesson {
+                let lesson = "SOLVED: \(goalText)\n\n\(clean.prefix(500))"
+                Task { await rememberLesson(lesson) }
+            }
         }
 
         func runSelfHealCommand(_ rawArgs: String) async {

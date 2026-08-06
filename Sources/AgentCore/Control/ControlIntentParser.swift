@@ -49,6 +49,13 @@ public enum ControlIntentParser {
     /// Deliberately still excludes the weaker/conversational "with/have/make/let/get" so "built with
     /// gemini" or "my own claude" never silently switch the model.
     static let bareSwitchVerbs: Set<String> = ["use", "switch", "try", "using", "ask", "call", "bring"]
+    /// IMPERATIVE directives that, directly before a provider, mean "use THIS model" — even when what
+    /// follows isn't a recognized ROLE verb. Fixes "have claude assess now" silently staying on MiMo:
+    /// "have" is a directive lead but "assess" isn't a role, so neither the role branch nor the
+    /// bare-switch branch fired. These stay OUT of bareSwitchVerbs (which also matches "with/via") so a
+    /// DESCRIPTIVE mention ("built with gemini", "my own claude") never switches — only the imperative,
+    /// directly-before-the-provider form does.
+    static let imperativeDirectiveVerbs: Set<String> = ["have", "make", "let", "get"]
     /// Verbs that introduce an AGENT directive ("have/make/use Gemini review…"). Excludes "with" —
     /// "compare with claude code" / "built with gemini" are descriptions, not commands.
     static let directiveLeadVerbs: Set<String> = ["use", "have", "make", "let", "get", "via", "using",
@@ -56,6 +63,15 @@ public enum ControlIntentParser {
     // residual made only of these ⇒ no real task (just a control directive).
     static let glue: Set<String> = ["and", "then", "to", "for", "with", "please", "now", "next", "task",
                                     "this", "it", "the", "a", "from", "on", "as", "instead", ""]
+    /// After "as/like PROVIDER", these mean the provider is being QUOTED/attributed, not COMMANDED:
+    /// "as claude SAID", "as gemini WOULD", "as deepseek DOES". So it is NOT a model switch.
+    static let attributionVerbs: Set<String> = ["said", "says", "say", "saying", "would", "does", "do", "did",
+        "wrote", "writes", "write", "put", "puts", "thinks", "think", "thought", "noted", "notes", "wants",
+        "wanted", "told", "tells", "suggested", "suggests", "recommends", "recommended", "mentioned",
+        "mentions", "explained", "explains", "argues", "argued", "described", "describes"]
+    /// A word right before "as PROVIDER" that makes it a COMPARISON ("SAME as gemini", "JUST as deepseek"),
+    /// or a negation ("NOT as gemini") — a mention, not a directive to act AS that model.
+    static let comparisonLeads: Set<String> = ["same", "such", "just", "exactly", "not"]
 
     /// Standalone settings directives (no provider needed) — checked first.
     static func detectSetting(_ message: String) -> Setting? {
@@ -117,6 +133,25 @@ public enum ControlIntentParser {
                     i = j + 1; continue
                 }
             }
+            // (a-bis) "as PROVIDER" → act AS that model = a plain model switch. Handles Luke's
+            // "can u review this as deepseek then": the word "as" sits BEFORE the provider, so branch (a)
+            // (which wants "PROVIDER as ROLE") never fired and the model silently stayed on MiMo.
+            // GUARDs (Luke hates random switches) — a MENTION is not a command, so skip:
+            //   • attribution/quotation:  "as claude SAID", "as gemini WOULD"      (verb right after)
+            //   • adjacent comparison:    "SAME as gemini", "JUST as deepseek"     (lead right before "as")
+            //   • comparative "as X as":  "as good as claude", "as fast as gemini" (an "as" two words back)
+            //   • "PROVIDER as ROLE":     handled by branch (a) — never here
+            // "like" is deliberately EXCLUDED — "is it like claude code" is a comparison, not a directive.
+            if prev == "as",
+               wd(i - 3) != "as",
+               !Self.attributionVerbs.contains(wd(i + 1)),
+               !Self.comparisonLeads.contains(wd(i - 2)),
+               !(wd(i + 1) == "as" || wd(i + 1) == "for") {
+                bare = binding
+                consumed.insert(i)          // the provider
+                consumed.insert(i - 1)      // the "as"
+                i += 1; continue
+            }
             // (b) DIRECTIVE verb-role: "<cmd-verb> X [to] VERB" or "X to VERB". A casual mention like
             // "claude code terminal" (no command verb before X, no "to" before the verb) is NOT a
             // directive — the product name "Claude Code" must never be read as "make anthropic the coder".
@@ -130,11 +165,21 @@ public enum ControlIntentParser {
                 verbed.append(.init(role: r, binding: binding))
                 consumeProviderAndLeadVerb()
                 if toIntroduced { consumed.insert(i + 1) }
+                // A verb that only DESIGNATES the role — nothing to actually DO after it — must not leak
+                // into the residual task. "gemini to plan" (verb is the last word) and "deepseek to code,
+                // grok …" (another provider follows the verb) are pure team assignments, so consume the
+                // verb. But "gemini review this" / "mimo code it" (a real object follows) keep verb+object
+                // as the task. Fixes Luke's "use deepseek to code, grok to review, gemini to plan" leaving
+                // a garbage "code review plan" residual that then ran as a bogus team task.
+                if providerAt(vj + 1) != nil || wd(vj + 1).isEmpty { consumed.insert(vj) }
                 i += 1; continue
             }
-            // (c) bare provider → a model switch, but ONLY with an explicit switch verb
-            // ("use/switch to/try X"). A bare mention ("my own claude code") is never a directive.
-            if Self.bareSwitchVerbs.contains(prev) || wd(i - 2) == "switch" {
+            // (c) bare provider → a model switch, with an explicit switch verb ("use/switch to/try X")
+            // OR an imperative directive directly before it ("have/make/let/get claude …") — the latter
+            // covers "have claude assess now" where the trailing word isn't a role. A bare mention
+            // ("my own claude code", "built with gemini") is still never a directive.
+            if Self.bareSwitchVerbs.contains(prev) || Self.imperativeDirectiveVerbs.contains(prev)
+                || wd(i - 2) == "switch" {
                 bare = binding
                 consumeProviderAndLeadVerb()
             }

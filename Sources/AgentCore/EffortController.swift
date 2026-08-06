@@ -147,30 +147,45 @@ public enum ModelEscalator {
     ]
     public static func rank(_ id: String) -> Int { strength[id.lowercased()] ?? 50 }
 
+    /// Rank adjusted by the model's live SCORECARD verdict: + for a strong track record, − for a
+    /// failing/looping one. Empty verdicts (cold system / no data) ⇒ identical to the static rank.
+    public static func rank(_ id: String, verdicts: [String: ModelVerdict]) -> Int {
+        rank(id) + (verdicts[id.lowercased()]?.rankDelta ?? 0)
+    }
+
     /// Pick the provider for a cycle. `keyed` = provider ids that HAVE a usable key. economy → keep the
     /// session default; standard → step up only to a meaningfully stronger keyed provider; frontier → the
     /// strongest keyed. Never returns a provider weaker than `preferred`.
+    ///
+    /// `verdicts` (default empty) is the persisted per-model scorecard: it adjusts the effective rank and
+    /// UNIONS chronic offenders into `exclude` — so a model that keeps failing/looping across runs is
+    /// routed around, but a chronic offender is still used if it is the ONLY option (never stranded). With
+    /// no verdicts, behavior is byte-for-byte what it was before the scorecard existed.
     public static func pick(tier: EffortController.ModelTier, keyed: [String], preferred: String,
-                            exclude: Set<String> = []) -> String {
-        // Fault tolerance: a provider that ERRORED this run is routed around (unless it's the only option).
-        let usable = keyed.filter { !exclude.contains($0) }
+                            exclude: Set<String> = [], verdicts: [String: ModelVerdict] = [:]) -> String {
+        func r(_ id: String) -> Int { rank(id, verdicts: verdicts) }
+        // Chronic-offender auto-exclude (from cross-run history) merged with this-run faults.
+        let chronic = Set(verdicts.compactMap { $0.value.exclude ? $0.key : nil })
+        let allExclude = exclude.union(chronic)
+        // Fault tolerance: a routed-around provider is skipped (unless it's the only option).
+        let usable = keyed.filter { !allExclude.contains($0) }
         let candidates = (usable.isEmpty ? (keyed.isEmpty ? [preferred] : keyed) : usable)
-        // If the session default itself errored, treat the strongest usable as the floor to beat.
-        let base = exclude.contains(preferred) ? (candidates.max(by: { rank($0) < rank($1) }) ?? preferred) : preferred
-        let strongest = candidates.max(by: { rank($0) < rank($1) }) ?? base
+        // If the session default itself is routed around, treat the strongest usable as the floor to beat.
+        let base = allExclude.contains(preferred) ? (candidates.max(by: { r($0) < r($1) }) ?? preferred) : preferred
+        let strongest = candidates.max(by: { r($0) < r($1) }) ?? base
         switch tier {
         case .economy:  return base
         case .standard:
             // Step up to a MID model, NOT the reasoning-frontier — a moderate task shouldn't pay
             // gpt-5.5/claude reasoning-token cost (live dogfood: a standard task escalated to gpt-5.5 burned
             // ~28k tokens/call and blew the budget). Reserve rank>85 (openai/anthropic) for .frontier.
-            let mid = candidates.filter { rank($0) <= 85 }.max(by: { rank($0) < rank($1) }) ?? base
+            let mid = candidates.filter { r($0) <= 85 }.max(by: { r($0) < r($1) }) ?? base
             // If the session default itself is EXCLUDED (it faulted), we MUST move — pick the best MID-tier
             // usable, NOT `base` (the strongest overall = a frontier model). Routing around a broken default
             // shouldn't silently upgrade a standard cycle to gpt-5.5/claude.
-            if exclude.contains(preferred) { return mid }
-            return rank(mid) > rank(base) + 15 ? mid : base
-        case .frontier: return rank(strongest) > rank(base) ? strongest : base
+            if allExclude.contains(preferred) { return mid }
+            return r(mid) > r(base) + 15 ? mid : base
+        case .frontier: return r(strongest) > r(base) ? strongest : base
         }
     }
 }

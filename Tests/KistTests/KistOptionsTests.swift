@@ -242,7 +242,7 @@ final class KistOptionsTests: XCTestCase {
 
     func testMaxIterationsParsesAndIgnoresGarbage() {
         XCTAssertEqual(KistOptions.parse(["--max-iterations", "30", "g"]).maxIterations, 30)
-        XCTAssertEqual(KistOptions.parse(["--max-iterations", "notanumber", "g"]).maxIterations, 12)   // default kept
+        XCTAssertEqual(KistOptions.parse(["--max-iterations", "notanumber", "g"]).maxIterations, 40)   // default kept (40 — dogfood 2026-08-06: 12 failed every real build task)
     }
 
     func testResumeFlags() {

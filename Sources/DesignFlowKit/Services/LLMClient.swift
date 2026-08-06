@@ -30,11 +30,19 @@ public enum LLMError: Error, CustomStringConvertible {
 public struct OpenAIClient: LLMClient {
     private let apiKey: String
     private let model: String
-    private let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
+    /// Chat Completions endpoint — override the host with `OPENAI_BASE_URL` (Azure/proxy/compatible servers).
+    private let endpoint: URL
 
     public init(apiKey: String, model: String) {
         self.apiKey = apiKey
         self.model = model
+        let base = ProcessInfo.processInfo.environment["OPENAI_BASE_URL"] ?? "https://api.openai.com"
+        guard let url = URL(string: base.hasSuffix("/")
+                ? base + "v1/chat/completions"
+                : base + "/v1/chat/completions") else {
+            fatalError("OPENAI_BASE_URL is not a valid URL: \(base)")
+        }
+        self.endpoint = url
     }
 
     public func complete(system: String, user: String) async throws -> String {

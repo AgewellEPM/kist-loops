@@ -963,7 +963,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertEqual(persisted, report.text + "\n")
         XCTAssertTrue(report.writeSucceeded)
         XCTAssertTrue(InputCompleter.builtInCommands.contains("/self-test"))
-        XCTAssertFalse(InputCompleter.builtInCommands.contains("/audit"))
+        XCTAssertFalse(InputCompleter.builtInCommands.contains("/no-such-command-xyz"))   // sentinel: a real absent command (/audit is now real)
         XCTAssertNil(KistREPL.selfTestUsageIfNeeded(""))
         XCTAssertNil(KistREPL.selfTestUsageIfNeeded("check"))
         XCTAssertNil(KistREPL.selfTestUsageIfNeeded("run"))

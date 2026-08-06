@@ -200,7 +200,11 @@ enum KistRunner {
         }
 
         // Provider + project root are shared by the REPL and one-shot paths.
-        guard let providerId = resolveProvider(opts, registry, configProvider: config.provider) else { return 2 }
+        // Session-default pick reads the per-model scorecard (best-effort root resolve; the real root guard
+        // is below) so a chronically-failing provider isn't silently made the default (the MiMo trap).
+        let sessionVerdicts: [String: ModelVerdict] = (opts.noMemory ? nil : ToolContext.canonicalize(opts.project))
+            .map { CaptainLearningStore(projectRoot: $0).modelVerdicts() } ?? [:]
+        guard let providerId = resolveProvider(opts, registry, configProvider: config.provider, verdicts: sessionVerdicts) else { return 2 }
         guard let root = ToolContext.canonicalize(opts.project) else {
             err("error: project path does not exist: \(opts.project)"); return 2
         }
@@ -429,7 +433,10 @@ enum KistRunner {
                         let available = registry.providers
                             .filter { ($0.requiresAPIKey && registry.hasKey(for: $0)) || subscriptionHitters.contains($0.id) }
                             .map { $0.id }
-                        let strong = ModelEscalator.pick(tier: .frontier, keyed: available, preferred: providerId)
+                        let shVerdicts: [String: ModelVerdict] = opts.noMemory
+                            ? [:] : CaptainLearningStore(projectRoot: root).modelVerdicts()
+                        let strong = ModelEscalator.pick(tier: .frontier, keyed: available, preferred: providerId,
+                                                         verdicts: shVerdicts)
                         if strong != providerId { repairRoleDefault = ProviderBinding(providerId: strong) }
                     }
                     let spawner = SpecialistSpawner(
@@ -517,6 +524,19 @@ enum KistRunner {
                     _ = await runEval(opts, goal: g, registry: registry, root: root, tools: tools,
                                       context: context, providerId: providerId, model: model)
                 }
+                repl.runEvalSuite = {
+                    _ = await runEvalSuite(opts, registry: registry, root: root, tools: tools,
+                                           context: context, providerId: providerId, model: model)
+                }
+                // Roadmap #3 — auto-capture verified wins into SEMANTIC (vector) memory so a future session
+                // can recall them. Same store the `recall` tool reads (`.kist/memory/vectors.json`), so what
+                // gets auto-saved is auto-findable. Gated on an embedder (local Ollama / Gemini); fail-soft.
+                if !opts.noMemory, let embedder = Self.makeEmbedder(registry: registry) {
+                    let semantic = SemanticMemoryService(
+                        embedder: embedder,
+                        store: FileBackedVectorStore(path: root + "/.kist/memory/vectors.json"))
+                    repl.rememberLesson = { text in try? await semantic.remember(text, metadata: ["kind": "auto-lesson"]) }
+                }
                 repl.providerAliases = providerAliases
                 repl.providerLabels = registry.providers
                     .map { "\($0.id)\(registry.hasKey(for: $0) ? "" : " (missing key)")" }
@@ -595,6 +615,28 @@ enum KistRunner {
                     return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
                                             review: .handledInternally("FleetSupervisor and Foreman own review/signoff"),
                                             verification: verification)
+                }
+                // CAPTAIN MODEL SELECTION (scoped to /fix): pick the STRONGEST reachable model, never a
+                // known-weak/dead one. Same rule as strong-on-repair (self-heal) so it can't diverge:
+                // keyed cloud providers + the keyless subscription heavy-hitters, ranked at the frontier
+                // tier (which floors out MiMo). Returns nil when the session is already on the strongest —
+                // no needless override, and no global routing change (only /fix consults this).
+                let strongRegistry = registry
+                let scorecardRoot = root
+                let scorecardOn = !opts.noMemory
+                repl.captainStrongRoles = {
+                    // Read the persisted per-model scorecard so the pick avoids models that fail/loop across
+                    // runs ("don't burn shit") and prefers proven ones. Empty when memory is off / no data yet.
+                    let verdicts: [String: ModelVerdict] = scorecardOn
+                        ? CaptainLearningStore(projectRoot: scorecardRoot).modelVerdicts() : [:]
+                    let subscriptionHitters: Set<String> = ["claude-cli", "codex-cli"]
+                    let available = strongRegistry.providers
+                        .filter { ($0.requiresAPIKey && strongRegistry.hasKey(for: $0)) || subscriptionHitters.contains($0.id) }
+                        .map { $0.id }
+                    let strong = ModelEscalator.pick(tier: .frontier, keyed: available, preferred: providerId,
+                                                     verdicts: verdicts)
+                    guard strong != providerId else { return nil }
+                    return RoleBindings(default: ProviderBinding(providerId: strong))
                 }
                 repl.planExecute = { g, roles in
                     var o = opts; o.goal = g; o.planExecute = true
@@ -720,6 +762,30 @@ enum KistRunner {
                     return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
                                             review: .handledInternally("research feeds its evidence dossier through the role-bound council"),
                                             verification: verification)
+                }
+                repl.dive = { g, roles in
+                    // Same ESC/typeahead watcher as research — top-level, sequential. Dive is LOCAL-ONLY:
+                    // no web, no cross-repo estate sweep. It reads our code and consults the panel.
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
+                    let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
+                    let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
+                        interrupted.value = reason
+                        if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                        else { TurnInputQueue.shared.commitPending() }
+                        print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
+                              + " — codebase dive stopped\u{001B}[0m")
+                    }) {
+                        await runDive(opts, goal: g, registry: registry, root: root,
+                                      tools: tools, context: context,
+                                      providerId: providerId, model: model, rolesOverride: roles)
+                    }
+                    return HeavyRouteResult(
+                        exitCode: exitCode, interruption: interrupted.value,
+                        review: .handledInternally("the wide panel reads the same grounded code dossier"),
+                        verification: .unavailable(interrupted.value == nil
+                            ? "a grounded code read has no deterministic execution oracle"
+                            : "the dive was interrupted before completion"))
                 }
                 repl.forge = { description, roles in
                     // AgentForge: generate a specialist bounded by the loop's tool ceiling, validate, save.
@@ -1016,6 +1082,78 @@ enum KistRunner {
                                 registry: registry, root: root, tools: tools, context: context,
                                 providerId: providerId, model: model, rolesOverride: rolesOverride,
                                 researchDossier: dossier, researchRunID: runID)
+    }
+
+    /// `/dive` — a MULTI-AGENT deep-dive of OUR OWN CURRENT repo. `/research` is the wrong tool for "what
+    /// does OUR code do": it hits the web and sweeps the whole estate across ~ and /Volumes, which is how
+    /// "why does our build queue never change" wandered into an unrelated repo. Dive stays LOCAL and
+    /// REPO-SCOPED: it reads the actual files under `root`, grounds a dossier in them, then hands that real
+    /// code to every reachable model (wide council) for a synthesized, file-cited truth. No web search, no
+    /// cross-repo estate sweep — the answer is grounded in the code we actually shipped.
+    private static func runDive(_ opts: KistOptions, goal: String,
+                                registry: ProviderRegistry, root: String,
+                                tools: ToolRegistry, context: ToolContext,
+                                providerId: String, model: String?,
+                                rolesOverride: RoleBindings? = nil) async -> Int32 {
+        let colored = KistREPL.stdoutColorEnabled(projectRoot: root)
+        func dim(_ s: String) -> String { colored ? "\u{001B}[2m\(s)\u{001B}[0m" : s }
+        func paint(_ code: String, _ s: String) -> String { colored ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
+        func diveStep(_ emoji: String, _ label: String, _ run: () async -> ToolResult) async -> ToolResult {
+            note(dim("│ \(emoji) \(label) · working…"))
+            let r = await run()
+            note(r.success ? paint("32", "│ ✓ \(label)") : paint("31", "│ ✗ \(label) · \(r.error ?? r.output)"))
+            return r
+        }
+
+        note("kist · dive · reading OUR code · \(root)")
+        // Launched from HOME (not a repo) → there is no single codebase to read, so the grounded answer will
+        // be thin. Say so plainly; the honest fix is to run /dive from inside the target repo.
+        if root == FileManager.default.homeDirectoryForCurrentUser.path {
+            note(paint("33", "│ ⚠ this is your HOME dir, not a repo — cd into the project and re-run /dive for a real code read"))
+        }
+        note(dim("▤ dive · repo map → code read (LOCAL, no web) → multi-model → synthesize"))
+
+        let start = await diveStep("🔎", "start dive run") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "start", "goal": goal], context: context)
+        }
+        guard start.success, let runID = start.metadata["run_id"] else {
+            err("dive · failed to start: \(start.error ?? start.output)")
+            return 1
+        }
+
+        // REPO CONTEXT ONLY — the current project's own files. Deliberately NO web search and NO /Volumes
+        // estate sweep: those two steps are exactly what mis-routed a codebase question into another repo.
+        _ = await diveStep("📂", "repo context (our files)") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "context", "run_id": runID,
+                                            "query": goal, "limit": 12], context: context)
+        }
+
+        let synth = await diveStep("📝", "synthesize from our code") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "synthesize", "run_id": runID], context: context)
+        }
+        guard synth.success else {
+            err("dive · incomplete: \(synth.error ?? synth.output)")
+            return 1
+        }
+
+        // MULTI-AGENT READ: every reachable model analyzes the SAME grounded code dossier; the panel is
+        // synthesized into one file-cited verdict. Wide council = consultation (no build hand-off): dive
+        // answers the question, it does not edit.
+        let brief = """
+        Deep-dive question about OUR OWN codebase (repo root: \(root)): \(goal)
+
+        Answer ONLY from the code evidence below — this is a LOCAL code read, NOT web research. Cite the
+        concrete files/paths the evidence names. If the evidence doesn't settle it, say exactly what's
+        missing and which file to open next. Do NOT speculate about other repos or the outside world.
+
+        ── CODE EVIDENCE (from our repo) ──
+        \(synth.output)
+        """
+        return await runWideCouncil(opts, goal: brief, registry: registry, root: root,
+                                    providerId: providerId, model: model, rolesOverride: rolesOverride)
     }
 
     private static func runCouncil(_ opts: KistOptions, goal: String, execute: Bool,
@@ -1418,16 +1556,18 @@ enum KistRunner {
     // MARK: - Helpers
 
     /// Explicit flag > config > first configured cloud provider > first local. Nil after an error.
-    private static func resolveProvider(_ opts: KistOptions, _ registry: ProviderRegistry, configProvider: String?) -> String? {
+    private static func resolveProvider(_ opts: KistOptions, _ registry: ProviderRegistry, configProvider: String?,
+                                        verdicts: [String: ModelVerdict] = [:]) -> String? {
         if let pid = opts.providerId ?? configProvider {
             guard registry.provider(id: pid) != nil else { err("error: unknown provider '\(pid)'. Try --list-providers."); return nil }
-            return pid
+            return pid   // explicit user choice always wins — the scorecard never overrides it
         }
         // Pick the STRONGEST keyed cloud provider, not whatever sorts first in the catalog. MiMo is
         // listed first but 400s on multi-turn tool history, so "first with a key" silently made it the
-        // default and turns died with 0 tool calls. Rank by ModelEscalator strength instead.
+        // default and turns died with 0 tool calls. Rank by ModelEscalator strength — now ALSO adjusted by
+        // the per-model scorecard, so a chronically-failing provider isn't silently chosen as the default.
         let keyedCloud = registry.providers.filter { $0.requiresAPIKey && registry.hasKey(for: $0) }
-        if let best = keyedCloud.max(by: { ModelEscalator.rank($0.id) < ModelEscalator.rank($1.id) }) { return best.id }
+        if let best = keyedCloud.max(by: { ModelEscalator.rank($0.id, verdicts: verdicts) < ModelEscalator.rank($1.id, verdicts: verdicts) }) { return best.id }
         if let local = registry.providers.first(where: { !$0.requiresAPIKey }) { return local.id }
         err("error: no provider has a key. Set one (e.g. export OPENAI_API_KEY=…) or use --provider. See --list-providers.")
         return nil

@@ -36,6 +36,39 @@ extension KistREPL {
             return parts.joined(separator: "\n\n")
         }
 
+        /// `/ballbusting` — a no-mercy review of the current work: the working-tree diff by default, or a
+        /// plan/description you name. Uses a DISTINCT skeptical reviewer (never self-review) with the
+        /// BallBusting contract: no gaslighting, every flaw named, a concrete fix proposed for each, an
+        /// honest rating. Advisory — it proposes changes; it does not auto-apply them.
+        func runBallbusting(args: String) async {
+            guard let modelComplete else {
+                print("\u{001B}[31mball-busting review is unavailable in this mode\u{001B}[0m"); return
+            }
+            let target = args.trimmingCharacters(in: .whitespacesAndNewlines)
+            let subject: String
+            let label: String
+            if !target.isEmpty {
+                subject = target; label = "your description/plan"
+            } else {
+                let diff = Self.workingTreeDiff(projectRoot: projectRoot)
+                if diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    print("\u{001B}[2mnothing to bust — no working-tree changes. `/ballbusting <what to review>` to roast a plan or idea.\u{001B}[0m")
+                    return
+                }
+                subject = diff; label = "the working-tree diff"
+            }
+            let reviewer = autoReviewer(answeredBy: activeBinding) ?? activeBinding
+            let system = BallBusting.systemPrompt
+            let user = BallBusting.prompt(subject: subject, label: label, grounding: reviewerGrounding())
+            print("\u{001B}[31;1m🔨 ball-busting review\u{001B}[0m\u{001B}[2m · \(TeamLanguage.displayName(reviewer.providerId)) · zero gaslighting, every flaw named + a fix proposed\u{001B}[0m")
+            guard let review = await modelComplete(reviewer.providerId, reviewer.model, system, user),
+                  !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                print("\u{001B}[31mball-busting review returned nothing (reviewer unavailable)\u{001B}[0m")
+                return
+            }
+            print(review)
+        }
+
         // One advisory review pass. Reviews the working-tree DIFF for a coding turn, else the substantive
         // ANSWER text. The result distinguishes "not applicable" from a missing reviewer response so a
         // silent/failed model can never be counted as a clean vote.

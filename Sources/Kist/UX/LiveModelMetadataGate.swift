@@ -1047,7 +1047,14 @@ struct LiveModelMetadataFetcher {
     }
 
     func fetchOllama(modelID: String) async -> Result<LiveModelMetadata, Error> {
-        guard let url = URL(string: "http://localhost:11434/api/show") else {
+        // Same OLLAMA_HOST override the chat provider honors — the metadata gate must query the
+        // daemon that actually serves the model, not a hardcoded localhost.
+        let base: String = {
+            if let host = ProcessInfo.processInfo.environment["OLLAMA_HOST"], !host.isEmpty { return host }
+            return "http://localhost:11434"
+        }()
+        let showURL = base + "/api/show"
+        guard let url = URL(string: showURL) else {
             return .failure(MetadataError.invalidURL)
         }
         var req = URLRequest(url: url)
@@ -1067,7 +1074,7 @@ struct LiveModelMetadataFetcher {
                 source: .ollamaLocal,
                 providerHint: "ollama",
                 modelID: modelID,
-                sourceURL: "http://localhost:11434/api/show",
+                sourceURL: showURL,
                 author: details["family"],
                 license: decoded.license,
                 tags: [],

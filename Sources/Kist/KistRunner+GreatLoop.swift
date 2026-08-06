@@ -62,6 +62,13 @@ extension KistRunner {
         let policy: PolicyStore? = opts.noMemory ? nil : PolicyStore(projectRoot: root)
         // Gated DGM bridge: proven hints → reviewable promotion queue, NEVER auto-applied (Phase 2.2).
         let promotions: PromotionCandidateStore? = opts.noMemory ? nil : PromotionCandidateStore(projectRoot: root)
+        // Per-model scorecard: finally WRITE the (previously dead-wired) CaptainLearningStore every cycle so
+        // the Captain builds durable, cross-session memory of which models succeed / fail / loop.
+        let scorecard: CaptainLearningStore? = opts.noMemory ? nil : CaptainLearningStore(projectRoot: root)
+        // CROSS-RUN model track record read ONCE at run start: the escalator uses it to prefer proven
+        // models and route around chronic failers/loopers. This-run transient faults stay the live
+        // cooldown's job (erroredProviders); the scorecard is the durable, cross-run half.
+        let historyVerdicts: [String: ModelVerdict] = scorecard?.modelVerdicts() ?? [:]
 
         // ONE work cycle: escalate the model when the task is hard, size the budget so it can't starve the
         // loop, run the goal (carrying any prior team-review feedback), then — if not done but progressing and
@@ -69,7 +76,8 @@ extension KistRunner {
         let runCycle: @Sendable (String, EffortController.Assessment, Int, Int?) async -> CycleResult = { baseGoal, effort, cycleIndex, budgetRemaining in
             let nowEpoch = Date().timeIntervalSince1970
             let cycleProvider = ModelEscalator.pick(tier: effort.modelTier, keyed: keyed, preferred: providerId,
-                                                    exclude: erroredProviders.active(now: nowEpoch))
+                                                    exclude: erroredProviders.active(now: nowEpoch),
+                                                    verdicts: historyVerdicts)
             let cycleModel: String? = cycleProvider == providerId ? model : nil
             if cycleProvider != providerId { note("  ↑ escalating this cycle → \(cycleProvider) (tier \(effort.modelTier.rawValue))") }
             // Snapshot the provider's retry tally so we can measure FLAKINESS over this cycle: a provider
@@ -231,7 +239,8 @@ extension KistRunner {
                 if progressed, effort.team != .solo,
                    !workDiff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let reviewer = ModelEscalator.pick(tier: .frontier, keyed: keyed, preferred: cycleProvider,
-                                                       exclude: erroredProviders.active(now: nowEpoch))
+                                                       exclude: erroredProviders.active(now: nowEpoch),
+                                                       verdicts: historyVerdicts)
                     note("  ⎇ team review · \(reviewer)")
                     if let review = try? await registry.complete(
                         providerId: reviewer, model: nil,
@@ -254,6 +263,24 @@ extension KistRunner {
             // EVOLVE the policy: score the hint we ran under (win = verified done, grounded by Phase 0) and
             // let this cycle's review seed the next candidate hint for this signature.
             policy?.record(signature: sig, activeHint: policyHint, won: done, review: reviewText, at: now)
+            // PER-MODEL SCORECARD: record THIS model's outcome — success is the REFEREE-measured `done`
+            // (grounded + verifier-passed), NEVER the model's self-report, so a model that lies its way to
+            // "done" can't score as strong. `failureReason`/`loopKinds`/`wasStuck`/`failureRate` capture the
+            // WHY/WHAT/WHEN the audit asked for, reusing the `faulted`/`report` decisions already made above.
+            let scorecardReason: String? = done ? nil
+                : CaptainLearningSample.scorecardReason(
+                    providerFault: outcome.providerFault, flaky: flaky,
+                    verificationRejected: outcome.success && !verdict.isVerified,
+                    loopKind: report.issues.first?.kind.rawValue, failureRate: failureRate, ungrounded: false)
+            scorecard?.record(CaptainLearningSample(
+                taskSignature: sig, taskTags: CaptainLearningSample.inferTaskTags(from: baseGoal),
+                language: nil, role: "loop-cycle", providerId: cycleProvider, model: cycleModel,
+                source: .liveEval, success: done,
+                tokens: UsageCost.summarize(spans: delta).tokens, toolFailures: failures, atEpoch: now,
+                failureReason: scorecardReason,
+                failedAt: done ? nil : ((outcome.success && !verdict.isVerified) ? "verify" : "act"),
+                loopKinds: report.issues.map { $0.kind.rawValue },
+                wasStuck: !report.healthy, failureRate: failureRate))
             // GATED DGM bridge: once a hint proves itself (enough verified wins at a high rate), QUEUE it for
             // human/DGM review — NEVER auto-applied to Mythos's own prompts (the self-modification line).
             if let best = policy?.bestCandidate(forSignature: sig),

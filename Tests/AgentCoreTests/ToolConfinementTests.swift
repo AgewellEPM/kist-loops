@@ -59,7 +59,11 @@ final class ToolConfinementTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: root + "/adir", withIntermediateDirectories: true)
         let r = await run("read_file", ["path": "adir"])
         XCTAssertFalse(r.success, "read_file on a directory must be a recoverable tool failure")
-        XCTAssertTrue((r.error ?? r.output).contains("not a regular file"))
+        // The message must name the real cause (a directory) and steer to list_files — NOT the old
+        // misleading "doesn't exist here" that derailed the self-heal researcher (2026-08-04).
+        let msg = r.error ?? r.output
+        XCTAssertTrue(msg.contains("is a directory"), msg)
+        XCTAssertTrue(msg.contains("list_files"), msg)
     }
 
     func testWriteFile_throughSymlinkedDir_refused() async {

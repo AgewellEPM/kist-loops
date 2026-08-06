@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BIN="$(swift build --product kist --show-bin-path)/kist"
 swift build --product kist >/dev/null
-export KIST_RECEIPT_KEY="ci-org-shared-secret-key-1234567890"
+export KIST_RECEIPT_KEY="${KIST_RECEIPT_KEY:-ci-org-shared-secret-key-1234567890}"
 FAIL=0
 newrepo() { rm -rf "$1"; mkdir -p "$1"; ( cd "$1" && git init -q && git config user.email t@t && git config user.name t && git config core.autocrlf false ); }
 ok()   { echo "  [OK]   $1"; }

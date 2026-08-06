@@ -82,7 +82,7 @@ public struct HeadlessAgentLoop: Sendable {
     /// Tools that never modify state — the only ones permitted while plan mode is ON.
     /// An ALLOWLIST (not a denylist) so unknown/MCP tools are blocked by default in plan mode.
     public static let readOnlyTools: Set<String> = ["read_file", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search"]
-    private let maxObservationBytes = 8_000
+    let maxObservationBytes = 8_000   // internal: +VerificationReplay envelopes observations too
     private let replanThreshold = 2      // consecutive tool failures before steering a re-plan
     private let maxReplans = 2           // budget so a doomed run can't loop on re-plans forever
 
@@ -260,6 +260,20 @@ public struct HeadlessAgentLoop: Sendable {
         return await driveText(prepared)
     }
 
+    /// Interactive CHAT/REVIEW turns must NOT be handed `spawn_agent` — a weak model (e.g. MiMo) will
+    /// delegate a trivial "review this" into a runaway web-research SUB-agent (Luke, 2026-08-06: a 34-char
+    /// review ask spawned 3 web searches + a fetch_url for ~200k tokens — "too much research, not listening
+    /// to me"). Delegation belongs to the EXPLICIT heavy routes (/effort, /fleet, /council, /dive), never a
+    /// plain reply. build/plan/fleet/research/desktop intents keep it. A direct `web_search` stays available
+    /// (it's a single bounded call); only the RECURSIVE spawn vector is removed, so a simple answer can't
+    /// balloon into a research expedition. nil intent ⇒ unchanged (fail-open, exactly as before).
+    static func conversationalToolset(_ tools: ToolRegistry, intent: TaskBrief.Intent?) -> ToolRegistry {
+        guard intent == .chat || intent == .review else { return tools }
+        let spawnVector: Set<String> = ["spawn_agent", "spawn_specialist"]
+        let kept = tools.all().filter { !spawnVector.contains($0.name) }
+        return kept.count == tools.all().count ? tools : ToolRegistry(kept)
+    }
+
     /// Result of the native loop: either it finished (success or honest failure), or it asks to be
     /// re-driven in the text protocol because the provider rejected native tool-calling mid-run.
     private enum NativeRun {
@@ -281,7 +295,10 @@ public struct HeadlessAgentLoop: Sendable {
 
         reconcile(&cp)   // interrupted-action reconciliation (shared with the native loop)
         let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
-        var system = Self.systemPrompt(tools: tools, projectRoot: scopedContext.projectRoot, planMode: planMode,
+        // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard) —
+        // applies to BOTH the standard prompt and the weak-model primer below (MiMo takes the weak path).
+        let turnTools = Self.conversationalToolset(tools, intent: cp.intent)
+        var system = Self.systemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot, planMode: planMode,
                                        shellEnabled: scopedContext.shell.enabled, skillsXML: skillsXML,
                                        readableRoots: scopedContext.externalReadRoots)
         // Item #4: small local models stall on the strict JSON protocol. Lead with a gentle, example-
@@ -289,7 +306,7 @@ public struct HeadlessAgentLoop: Sendable {
         // models use the native path), so this targets exactly the local/small models that need it.
         let tierModel = providers.provider(id: providerId)?.resolvedModel(model) ?? model
         if ModelTier.of(providerId: providerId, model: tierModel) == .weak {
-            system = Self.weakModelTextPrimer(tools: tools, shellEnabled: scopedContext.shell.enabled) + "\n\n" + system
+            system = Self.weakModelTextPrimer(tools: turnTools, shellEnabled: scopedContext.shell.enabled) + "\n\n" + system
         }
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096, systemPrompt: system, disableThinking: !extendedThinking)
         let profileStopsApplied = applyModelProfileStops(&settings)
@@ -299,6 +316,8 @@ public struct HeadlessAgentLoop: Sendable {
         var consecutiveGathering = 0       // read-only (gathering) calls in a row → forced-synthesis nudge
         var lastSynthesisNudge = -100
         var verificationNudges = 0         // verify-before-done: re-nudge up to a bound, then finish honestly
+        var lastVerify: VerificationReplay? = nil   // last PASSING build/test of this run — re-verify replay candidate
+        var replayAttempted = false                 // one deterministic replay per fresh candidate, never a loop
         var recoveryAttempted = false      // stuck-recovery: one hard reset before giving up
         var recoveryMark = 0               // trajectory length at recovery — judge only actions since
         var steeredSpiral: String? = nil   // last tool-error spiral we corrected — steer ONCE per signature
@@ -355,10 +374,24 @@ public struct HeadlessAgentLoop: Sendable {
                 // VERIFY-BEFORE-DONE (R7): a code change that was never built/tested is NOT done. Nudge
                 // up to N times; if it's STILL unverified, finish HONESTLY as a failure — never launder
                 // an unbuilt change into success (the LLM's "done" doesn't outrank a real build/test).
-                switch verifyBeforeDone(canRunCommands: scopedContext.shell.enabled,
-                                        expectedOutcome: cp.expectedOutcome,
-                                        taskIntent: cp.intent,
-                                        nudges: verificationNudges) {
+                var doneDecision = verifyBeforeDone(canRunCommands: scopedContext.shell.enabled,
+                                                    expectedOutcome: cp.expectedOutcome,
+                                                    taskIntent: cp.intent,
+                                                    nudges: verificationNudges)
+                // SYMBOLIC RE-VERIFY (dogfood 2026-08-06): a done-claim with an unverified source edit
+                // doesn't go back to the model first — if THIS run already produced a passing build/test,
+                // the loop replays that exact approved command and re-judges on the real result. Only
+                // when no replay exists (or it fails) do we spend a nudge asking the model.
+                if case .nudge = doneDecision, let replay = lastVerify, !replayAttempted {
+                    replayAttempted = true
+                    if await replayVerification(replay, cp: &cp, iteration: iteration) {
+                        doneDecision = verifyBeforeDone(canRunCommands: scopedContext.shell.enabled,
+                                                        expectedOutcome: cp.expectedOutcome,
+                                                        taskIntent: cp.intent,
+                                                        nudges: verificationNudges)
+                    }
+                }
+                switch doneDecision {
                 case .nudge(let why):
                     verificationNudges += 1
                     cp.messages.append(ChatMessage(role: .user, content: CompletionVerifier.steering(reason: why)))
@@ -421,14 +454,18 @@ public struct HeadlessAgentLoop: Sendable {
             let executionContext = scopedContext.withScopeOverrideApproved(approvedForScope)
             let result = await tools.execute(name: tool, arguments: action.parameters, context: executionContext)
             sink.emit(.actionFinished(index: iteration, success: result.success, output: result.output, error: result.error))
+            let observed = tools.effectObservation(name: tool, arguments: action.parameters, result: result)
             recorder.record(tool: tool, argsFingerprint: TrajectoryAnalyzer.fingerprint(action.parameters), success: result.success,
-                             failureDetail: result.success ? nil : String((result.error ?? result.output).prefix(1500)),
-                             effectObservation: tools.effectObservation(name: tool, arguments: action.parameters,
-                                                                        result: result))
+                             failureDetail: result.success ? nil : String(Self.failureAwareRaw(result).prefix(1500)),
+                             effectObservation: observed)
+            if let cand = Self.replayCandidate(tool: tool, args: action.parameters, context: executionContext,
+                                               succeeded: result.success, observed: observed) {
+                lastVerify = cand; replayAttempted = false
+            }
 
             // 5) Feed the observation back, wrapped in an envelope marked as untrusted DATA
             // (prompt-injection defense: file/shell/MCP output must never be obeyed as instructions).
-            let raw = result.success ? result.output : (result.error ?? result.output)
+            let raw = Self.failureAwareRaw(result)
             let body = Self.toolObservationBody(raw: raw, metadata: result.metadata,
                                                 maxBytes: maxObservationBytes)
             let observation = Self.toolOutputEnvelope(tool: tool, success: result.success, body: body)
@@ -530,9 +567,11 @@ public struct HeadlessAgentLoop: Sendable {
         }
         reconcile(&cp)
         let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
-        let specs = tools.toolSpecs()
+        // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard).
+        let turnTools = Self.conversationalToolset(tools, intent: cp.intent)
+        let specs = turnTools.toolSpecs()
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096,
-                                     systemPrompt: Self.nativeSystemPrompt(tools: tools, projectRoot: scopedContext.projectRoot,
+                                     systemPrompt: Self.nativeSystemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot,
                                                                            planMode: planMode, shellEnabled: scopedContext.shell.enabled,
                                                                            skillsXML: skillsXML,
                                                                            readableRoots: scopedContext.externalReadRoots),
@@ -543,6 +582,8 @@ public struct HeadlessAgentLoop: Sendable {
         var consecutiveGathering = 0
         var lastSynthesisNudge = -100
         var verificationNudges = 0         // verify-before-done: re-nudge up to a bound, then finish honestly
+        var lastVerify: VerificationReplay? = nil   // last PASSING build/test of this run — re-verify replay candidate
+        var replayAttempted = false                 // one deterministic replay per fresh candidate, never a loop
         var recoveryAttempted = false      // stuck-recovery: one hard reset before giving up
         var recoveryMark = 0               // trajectory length at recovery — judge only actions since
 
@@ -628,10 +669,24 @@ public struct HeadlessAgentLoop: Sendable {
                 cp.messages.append(ChatMessage(role: .assistant, content: text))
                 // VERIFY-BEFORE-DONE (R7, native path): same symbolic gate — an unbuilt/untested code
                 // change finishes as an honest failure after the nudge budget, never a laundered success.
-                switch verifyBeforeDone(canRunCommands: scopedContext.shell.enabled,
-                                        expectedOutcome: cp.expectedOutcome,
-                                        taskIntent: cp.intent,
-                                        nudges: verificationNudges) {
+                var doneDecision = verifyBeforeDone(canRunCommands: scopedContext.shell.enabled,
+                                                    expectedOutcome: cp.expectedOutcome,
+                                                    taskIntent: cp.intent,
+                                                    nudges: verificationNudges)
+                // SYMBOLIC RE-VERIFY (dogfood 2026-08-06): a done-claim with an unverified source edit
+                // doesn't go back to the model first — if THIS run already produced a passing build/test,
+                // the loop replays that exact approved command and re-judges on the real result. Only
+                // when no replay exists (or it fails) do we spend a nudge asking the model.
+                if case .nudge = doneDecision, let replay = lastVerify, !replayAttempted {
+                    replayAttempted = true
+                    if await replayVerification(replay, cp: &cp, iteration: iteration) {
+                        doneDecision = verifyBeforeDone(canRunCommands: scopedContext.shell.enabled,
+                                                        expectedOutcome: cp.expectedOutcome,
+                                                        taskIntent: cp.intent,
+                                                        nudges: verificationNudges)
+                    }
+                }
+                switch doneDecision {
                 case .nudge(let why):
                     verificationNudges += 1
                     cp.messages.append(ChatMessage(role: .user, content: CompletionVerifier.steering(reason: why)))
@@ -698,11 +753,15 @@ public struct HeadlessAgentLoop: Sendable {
                 let executionContext = scopedContext.withScopeOverrideApproved(approvedForScope)
                 let result = await tools.execute(name: call.name, arguments: args, context: executionContext)
                 sink.emit(.actionFinished(index: iteration, success: result.success, output: result.output, error: result.error))
+                let observed = tools.effectObservation(name: call.name, arguments: args, result: result)
                 recorder.record(tool: call.name, argsFingerprint: TrajectoryAnalyzer.fingerprint(args), success: result.success,
-                                 failureDetail: result.success ? nil : String((result.error ?? result.output).prefix(1500)),
-                                 effectObservation: tools.effectObservation(name: call.name, arguments: args,
-                                                                            result: result))
-                let raw = result.success ? result.output : (result.error ?? result.output)
+                                 failureDetail: result.success ? nil : String(Self.failureAwareRaw(result).prefix(1500)),
+                                 effectObservation: observed)
+                if let cand = Self.replayCandidate(tool: call.name, args: args, context: executionContext,
+                                                   succeeded: result.success, observed: observed) {
+                    lastVerify = cand; replayAttempted = false
+                }
+                let raw = Self.failureAwareRaw(result)
                 let body = Self.toolObservationBody(raw: raw, metadata: result.metadata,
                                                     maxBytes: maxObservationBytes)
                 cp.messages.append(ChatMessage.toolResult(

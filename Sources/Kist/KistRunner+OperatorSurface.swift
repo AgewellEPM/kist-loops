@@ -157,6 +157,54 @@ extension KistRunner {
         return report.allPassed ? 0 : 1
     }
 
+    /// Run the GOLDEN eval suite against the live agent, detect regression vs the baseline, persist the
+    /// result. Returns 1 on a regression (so it can gate a deploy), 0 otherwise. Roadmap #1: "replay a
+    /// task set → score → gate on a score drop" — the cure for 'one day works, one day not'.
+    static func runEvalSuite(_ opts: KistOptions, registry: ProviderRegistry, root: String,
+                             tools: ToolRegistry, context: ToolContext,
+                             providerId: String, model: String?) async -> Int32 {
+        let trace = TraceRecorder(traceId: TraceID.make())
+        let runner = EvalRunner(maxIterations: opts.maxIterations)
+        let cases = EvalGoldenSuite.cases(projectRoot: root)
+        note("running golden eval suite · \(cases.count) case(s) on \(providerId) …")
+        let report = await runner.run(cases, agent: { prompt in
+            let trajectory = TrajectoryRecorder()
+            let loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
+                                tools: tools, checkpoints: LoopCheckpointStore(), maxIterations: opts.maxIterations,
+                                budget: opts.makeBudget(), interactor: AutoApproveInteractor(), approvalTools: [],
+                                planMode: opts.planMode, extendedThinking: opts.extendedThinking,
+                                toolMode: ToolMode(rawValue: opts.toolMode) ?? .auto,
+                                roles: RoleBindings(default: ProviderBinding(providerId: providerId, model: model)),
+                                delegationDepth: 0, sinkOverride: TerminalEventSink(),
+                                recorder: trajectory, traceRecorder: trace, traceRole: "eval-suite")
+            let outcome = await loop.run(goal: prompt)
+            return EvalRunner.RunOutcome(output: outcome.summary, trajectory: trajectory.snapshot())
+        })
+        note(report.render())
+
+        let history = EvalHistoryStore(projectRoot: root)
+        let baseline = history.baseline(suiteVersion: EvalGoldenSuite.version)
+        let summary = EvalHistoryStore.summarize(report, suiteVersion: EvalGoldenSuite.version,
+                                                 at: Date().timeIntervalSince1970, build: KistBuildInfo.productVersion)
+        let reg = EvalRegression.compare(current: summary, baseline: baseline)
+        history.record(summary)   // record AFTER comparing so this run doesn't become its own baseline
+
+        func pct(_ r: Double) -> String { "\(Int((r * 100).rounded()))%" }
+        if !reg.hadBaseline {
+            note("eval · baseline recorded for suite v\(EvalGoldenSuite.version) · \(pct(summary.passRate)) (\(report.passed)/\(report.total))")
+        } else if reg.isRegression {
+            var msg = "⨯ EVAL REGRESSION vs last run · \(pct(baseline!.passRate)) → \(pct(summary.passRate))"
+            if !reg.regressedCases.isEmpty { msg += " · broke: \(reg.regressedCases.joined(separator: ", "))" }
+            note(msg)
+        } else {
+            var msg = "✓ no eval regression · \(pct(summary.passRate)) (\(report.passed)/\(report.total))"
+            if !reg.fixedCases.isEmpty { msg += " · fixed: \(reg.fixedCases.joined(separator: ", "))" }
+            note(msg)
+        }
+        printUsageDelta(from: [], to: await trace.all(), label: "eval-suite usage", projectRoot: root)
+        return reg.isRegression ? 1 : 0
+    }
+
     static func printUsageDelta(from before: [AgentSpan], to after: [AgentSpan],
                                         label: String, projectRoot: String? = nil) {
         let oldIds = Set(before.map(\.id))

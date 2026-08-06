@@ -334,4 +334,31 @@ final class CompletionVerifierTests: XCTestCase {
             XCTAssertFalse(CommandClassifier.isBuildOrTest(fp), "structured trivial must NOT verify: \(fp)")
         }
     }
+
+    // EXTERNAL-ACTION carve-out (dogfood 2026-08-06, win98 round): a script the agent wrote for
+    // ANOTHER system (guest VM BAT/VBS) verifies by EXECUTING there — grounded vm-tool evidence —
+    // not by a host build/test that cannot exist for it. kist had vm_type + vm_ocr proof of
+    // "HELLO FROM KIST" on the VM screen and still failed on a build demand nothing could satisfy.
+    func testExternalActionScriptVerifiesByExternalExecution() {
+        let wroteScript = ActionRecord(
+            tool: "write_file", argsFingerprint: "path=runhello.bat", success: true,
+            effectObservation: ToolEffectCatalog.observe(tool: "write_file", arguments: ["path": "runhello.bat"]))
+        let ranInGuest = ActionRecord(
+            tool: "perslis__vm_type", argsFingerprint: "text=RUNHELLO.BAT", success: true,
+            effectObservation: ToolEffectObservation(progress: .externalState))
+
+        // Guest execution AFTER the write → accept: the external run IS the verification.
+        XCTAssertTrue(v.check(trajectory: [wroteScript, ranInGuest], canRunCommands: true,
+                              expectedOutcome: .externalAction, taskIntent: .desktop).isAccept)
+
+        // External evidence only BEFORE the last write → still unverified (the final edit never ran).
+        XCTAssertFalse(v.check(trajectory: [ranInGuest, wroteScript], canRunCommands: true,
+                               expectedOutcome: .externalAction, taskIntent: .desktop).isAccept)
+
+        // A non-external turn with the same shape keeps the strict build/test demand.
+        guard case .needsVerification(let reason) = v.check(
+            trajectory: [wroteScript, ranInGuest], canRunCommands: true
+        ) else { return XCTFail("non-external turns must still demand a build/test after a source edit") }
+        XCTAssertTrue(reason.contains("build"), reason)
+    }
 }

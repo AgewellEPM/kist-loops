@@ -255,7 +255,14 @@ public struct StatusDashboard: Sendable, Equatable {
             out += "\n" + header("→", "Next", Cat.next, color) + "\n"
             out += wrappedLine(next, firstPrefix: "→ ", continuationPrefix: "  ",
                                firstRenderedPrefix: c(Cat.next, "→ ", color))
-            out += "\n" + rule + "\n"
+            // HONEST affordance (Luke 2026-08-06: "why is next/continue never working, i cant select that
+            // ever"). The arrow made this look like a menu to arrow/click through — but it's TYPE-to-run.
+            // Typing "next" or "continue" already advances the board (taskSelectedByUser); say so plainly.
+            // Routed through wrappedLine so it honors the dashboard width (StatusDashboardTests pin this).
+            out += wrappedLine("type  next  or  continue  to run this — no cursor to select",
+                               firstPrefix: "⌨ ", continuationPrefix: "  ",
+                               firstRenderedPrefix: c("2", "⌨ ", color))
+            out += rule + "\n"
         }
         return out
     }
@@ -338,7 +345,14 @@ public struct StatusDashboard: Sendable, Equatable {
             out += "\n" + header("→", "Next", Cat.next, color) + "\n"
             out += wrappedLine(next, firstPrefix: "→ ", continuationPrefix: "  ",
                                firstRenderedPrefix: c(Cat.next, "→ ", color))
-            out += "\n" + rule + "\n"
+            // HONEST affordance (Luke 2026-08-06: "why is next/continue never working, i cant select that
+            // ever"). The arrow made this look like a menu to arrow/click through — but it's TYPE-to-run.
+            // Typing "next" or "continue" already advances the board (taskSelectedByUser); say so plainly.
+            // Routed through wrappedLine so it honors the dashboard width (StatusDashboardTests pin this).
+            out += wrappedLine("type  next  or  continue  to run this — no cursor to select",
+                               firstPrefix: "⌨ ", continuationPrefix: "  ",
+                               firstRenderedPrefix: c("2", "⌨ ", color))
+            out += rule + "\n"
         }
         return out
     }

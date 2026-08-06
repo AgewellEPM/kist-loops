@@ -95,6 +95,17 @@ public struct CompletionVerifier: Sendable {
         }
         if verified { return .accept }
 
+        // EXTERNAL-ACTION turns (dogfood 2026-08-06): the "source" the agent wrote is a script destined
+        // for another system — a guest VM's BAT/VBS, an automation payload — and there is no host
+        // build/test for it. Its execution IN that system is its verification: accept when a successful
+        // external-state action was recorded AFTER the last source change (grounded tool evidence, not a
+        // model claim; the win98 round had vm_type/vm_ocr proof of the app running and still failed on a
+        // build demand nothing could satisfy). Build/answer/mutation turns keep the strict demand below.
+        if expectedOutcome == .externalAction,
+           after.contains(where: { $0.success && $0.observedEffects.progress == .externalState }) {
+            return .accept
+        }
+
         // Shell-off used to silently ACCEPT source changes because the verifier could not execute. That is
         // precisely an unverified result: disclose it rather than upgrading absence of evidence to success.
         guard canRunCommands else {
@@ -606,6 +617,16 @@ public enum CommandClassifier {
             return rawArgs.contains {
                 isRelativeProjectPath($0)
                     && sourceExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
+            }
+        case "cobc":
+            // Compiling a COBOL source IS the build (2026-08-06 dogfood: a correct payroll app
+            // compiled clean with `cobc -x -o PAYROLL PAYROLL.CBL` after the final edit and was
+            // still reported "unverified" — the exact nasm lesson below, one compiler later).
+            // A bare version/help query (no source input) is not a build.
+            let cobolExtensions: Set<String> = ["cbl", "cob", "cobol", "cpy"]
+            return rawArgs.contains {
+                isRelativeProjectPath($0)
+                    && cobolExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
             }
         case "nasm", "yasm", "as", "ml", "ml64", "tasm", "wasm":
             // Assembling a source file IS the build for a DOS/asm project (2026-08-04 dogfood: a

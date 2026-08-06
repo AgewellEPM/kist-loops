@@ -64,7 +64,7 @@ public struct RunCommandTool: AgentTool {
 
         if let exe = arguments["executable"] as? String, !exe.isEmpty {
             // STRUCTURED MODE — resolve the binary, gate on the RESOLVED path, no shell.
-            guard let resolved = Self.resolveExecutable(exe, env: Self.scrubbedEnvironment()) else {
+            guard let resolved = Self.resolveExecutable(exe, env: Self.scrubbedEnvironment(), cwd: cwd) else {
                 return .failure("executable not found or not executable: \(exe)")
             }
             let exeArgs = (arguments["args"] as? [String]) ?? []
@@ -81,7 +81,7 @@ public struct RunCommandTool: AgentTool {
             // typed `swift build` / `git status` as a raw command: without this, the no-approval refusal
             // ("raw shell requires interactive approval") kills every such cycle and burns the budget.
             if let (exe, exeArgs) = Self.promoteRawToStructured(command) {
-                guard let resolved = Self.resolveExecutable(exe, env: Self.scrubbedEnvironment()) else {
+                guard let resolved = Self.resolveExecutable(exe, env: Self.scrubbedEnvironment(), cwd: cwd) else {
                     return .failure("executable not found or not executable: \(exe)")
                 }
                 if let reason = await context.shell.binaryRefusalReason(resolvedPath: resolved, args: exeArgs) {
@@ -240,9 +240,13 @@ public struct RunCommandTool: AgentTool {
 
     /// Resolve an executable name to an absolute, canonicalized, executable path.
     /// Absolute paths are canonicalized directly; bare names are looked up on the
-    /// (scrubbed) PATH. Returns nil if nothing executable is found. Names containing a
-    /// relative "/" are rejected (ambiguous; use an absolute path or a bare name).
-    static func resolveExecutable(_ exe: String, env: [String: String]) -> String? {
+    /// (scrubbed) PATH; relative-with-slash names (`./payroll_report`, `build/tool`) resolve
+    /// against `cwd` when provided (the tool call's CONFINED cwd). Returns nil if nothing
+    /// executable is found. Resolving relative names adds NO capability — the same binary was
+    /// always reachable by absolute path, and the deny gate fires on the RESOLVED path — it
+    /// just unblocks the natural compile-then-`./run` loop (dogfood find 2026-08-06: the agent
+    /// built a COBOL binary it then "couldn't" run, burning the whole iteration budget).
+    static func resolveExecutable(_ exe: String, env: [String: String], cwd: String? = nil) -> String? {
         func canonicalExecutable(_ path: String) -> String? {
             guard let real = ToolContext.canonicalize(path) else { return nil }
             var isDir: ObjCBool = false
@@ -251,7 +255,10 @@ public struct RunCommandTool: AgentTool {
             return real
         }
         if exe.hasPrefix("/") { return canonicalExecutable(exe) }
-        if exe.contains("/") { return nil }   // reject relative-with-slash
+        if exe.contains("/") {   // cwd-relative — resolve against the confined cwd, else reject
+            guard let cwd, !cwd.isEmpty else { return nil }
+            return canonicalExecutable((cwd as NSString).appendingPathComponent(exe))
+        }
         let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         for dir in path.split(separator: ":") {
             if let resolved = canonicalExecutable(String(dir) + "/" + exe) { return resolved }

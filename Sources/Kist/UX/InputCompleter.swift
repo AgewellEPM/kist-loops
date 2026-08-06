@@ -35,7 +35,13 @@ enum InputCompleter {
         "/mode", "/cortex", "/memory", "/remember", "/watch", "/play", "/auto", "/autopilot",
         "/doctor", "/providers-doctor", "/probe-providers", "/tools", "/capabilities", "/contract",
         "/think", "/thinking", "/role", "/team-roles", "/mcp-status", "/a2a", "/status",
-        "/export-chat", "/transcript", "/review", "/dag", "/help"
+        "/export-chat", "/transcript", "/review", "/dag", "/help",
+        "/dashboard", "/kanban", "/kist-dashboard", "/fallout-dashboard", "/pipboy", "/pip-boy",
+        "/fix", "/repair", "/build", "/dig", "/effort", "/ultra",
+        "/ballbusting", "/ballbust", "/ball-busting", "/roast",
+        "/scorecard", "/models", "/model-scorecard", "/trackrecord",
+        "/eval", "/eval-suite", "/regression-suite", "/bench",
+        "/audit", "/security", "/security-audit", "/vuln", "/sast"
     ]
 
     static let roleWords = [

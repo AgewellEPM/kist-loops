@@ -118,10 +118,16 @@ struct ConversationRouter {
 
     static let systemPrompt = """
     You route a developer's request to the cheapest capability that fits. Reply with EXACTLY ONE word:
-      chat   — a question, discussion, or tiny edit. Handle inline.
+      chat   — a question, discussion, or tiny edit. Handle inline. This INCLUDES questions about OUR OWN
+               codebase/config/state answered by reading local files: "why does our X do Y", "is this
+               hardcoded", "what's in our repo", "deep dive our code and find Z". Reading our own code is
+               NOT research.
       build  — a single, focused coding task in one area. Handle inline.
       plan   — a multi-step build in one codebase area that benefits from an up-front typed plan.
-      research — evidence-first fact finding, current-state research, or source-backed comparison.
+      research — evidence-first fact finding about the OUTSIDE WORLD: current events, external docs/APIs,
+                 competitor/market facts, prior art, or a WEB-sourced comparison. It runs a web-search +
+                 estate-sweep pipeline. Do NOT pick research for a question about OUR OWN code/config/state
+                 — that is `chat` (read the local code), never a web search.
       council — strategy analysis, roadmap work, or a decision that needs multiple minds to disagree
                 before producing a task board.
       fleet  — a LARGE build that naturally splits into SEVERAL INDEPENDENT parts touching SEPARATE

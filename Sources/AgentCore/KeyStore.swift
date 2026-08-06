@@ -81,7 +81,10 @@ public struct KeychainKeyStore: KeyStore {
 public struct FileKeyStore: KeyStore {
     private let path: String
     public init(path: String? = nil) {
-        self.path = path ?? (ProcessInfo.processInfo.environment["HOME"].map { $0 + "/.config/agentcore/keys.json" } ?? "")
+        // $HOME wins (respects sudo/CI overrides); NSHomeDirectory() keeps key lookups working when
+        // HOME is unset instead of silently degrading to an empty path that never resolves a key.
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        self.path = path ?? home + "/.config/agentcore/keys.json"
     }
 
     /// Read the owner-only secret file on EACH lookup (not cached at init). A long-running kist session

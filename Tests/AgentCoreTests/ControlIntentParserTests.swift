@@ -3,7 +3,7 @@ import XCTest
 
 final class ControlIntentParserTests: XCTestCase {
     let known = ["deepseek": "deepseek", "gemini": "gemini", "mimo": "mimo", "openai": "openai",
-                 "claude": "anthropic", "anthropic": "anthropic"]
+                 "claude": "anthropic", "anthropic": "anthropic", "grok": "grok"]
 
     private func parse(_ s: String) -> ControlIntentParser.Intent? {
         ControlIntentParser.parse(s, knownProviders: known)
@@ -31,11 +31,62 @@ final class ControlIntentParserTests: XCTestCase {
         XCTAssertTrue(i!.isControlOnly)
     }
 
+    // Luke 2026-08-05: "use deepseek to code, grok to review, gemini to plan" — a full THREE-role team in
+    // one breath, "X to VERB" form. Every role must bind to the named vendor; control-only (no task left).
+    func testLukeThreeRoleTeam() {
+        let i = parse("use deepseek to code, grok to review, gemini to plan")
+        XCTAssertEqual(roles(i)[.coder], "deepseek", "code → coder")
+        XCTAssertEqual(roles(i)[.critic], "grok", "review → critic")
+        XCTAssertEqual(roles(i)[.planner], "gemini", "plan → planner")
+        XCTAssertTrue(i!.isControlOnly, "no task follows — pure team assignment")
+    }
+
+    // Luke 2026-08-06 (live routing fail): "can u review this as deepseek then" printed "routed to mimo
+    // (staying on current model)" — the "as PROVIDER" form (provider AFTER "as") switched nothing.
+    func testAsProviderSwitchesModel() {
+        XCTAssertEqual(model(parse("can u review this as deepseek then")), "deepseek")
+        XCTAssertEqual(parse("can u review this as deepseek then")?.residualTask.contains("review"), true)
+        XCTAssertEqual(model(parse("as gemini what do you think")), "gemini")
+        XCTAssertEqual(model(parse("answer as claude")), "anthropic")
+        XCTAssertEqual(model(parse("just do it as grok")), "grok")   // "just" not adjacent to "as"
+    }
+
+    // GUARD: mentioning a model in a QUOTE/COMPARISON must NOT switch — the random-switch flakiness Luke hates.
+    func testAsProviderDoesNotFireOnQuotationOrComparison() {
+        XCTAssertNil(model(parse("as claude said we should refactor")))          // attribution verb
+        XCTAssertNil(model(parse("the result is the same as gemini")))           // "same as" comparison
+        XCTAssertNil(model(parse("just as deepseek does")))                      // comparison + attribution
+        XCTAssertNil(model(parse("keep it exactly as gemini")))                  // "exactly as" comparison
+        XCTAssertNil(model(parse("not as gemini")))                              // "not as" negation (adjacent)
+        XCTAssertNil(model(parse("is it as good as claude")))                    // "as X as" comparative
+        XCTAssertNil(parse("is it like claude code terminal"))                   // "like" is never a switch
+    }
+
     func testHaveGeminiReviewThis() {
         let i = parse("Have Gemini review this")
         XCTAssertEqual(roles(i)[.critic], "gemini")
         XCTAssertEqual(i?.residualTask, "review this")     // the task survives
         XCTAssertFalse(i!.isControlOnly)
+    }
+
+    // MARK: Imperative directive with a NON-role verb → model switch (the 2026-08-05 "have claude assess" bug)
+
+    func testHaveClaudeAssessSwitchesToClaude() {
+        // Luke's exact failing case: "have claude assess now" silently stayed on MiMo instead of Claude.
+        let i = parse("have claude assess now")
+        XCTAssertEqual(model(i), "anthropic", "an imperative 'have <model> <task>' must switch the model")
+        XCTAssertEqual(i?.residualTask, "assess now", "the task survives; only the directive is consumed")
+    }
+
+    func testOtherImperativeDirectivesSwitch() {
+        XCTAssertEqual(model(parse("make claude do this")), "anthropic")
+        XCTAssertEqual(model(parse("get deepseek on it")), "deepseek")
+        XCTAssertEqual(model(parse("let gemini handle this")), "gemini")
+    }
+
+    func testDescriptiveMentionsStillDoNotSwitch() {
+        XCTAssertNil(model(parse("built with gemini last year")), "'with' is descriptive, never a switch")
+        XCTAssertNil(model(parse("my own claude code setup")), "a bare mention is never a switch")
     }
 
     func testMakeMiMoCodeIt() {
