@@ -1144,4 +1144,8 @@ public struct HeadlessAgentLoop: Sendable {
     /// knowledge-gap recovery at a tool's real "list capabilities" sibling (only ones that actually exist).
     public var toolNames: [String] { tools.all().map { $0.name } }
 
+    /// Whether run_command may actually execute this turn — needed to apply the same execution-grounding
+    /// verifier the great loop uses (GreatLoopVerifier) to the interactive turn-end scorecard (P6 fix).
+    public var shellEnabled: Bool { context.shell.enabled }
+
 }

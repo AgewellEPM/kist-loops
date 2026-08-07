@@ -288,7 +288,22 @@ extension KistREPL {
             let toolFails = trajectory.filter { !$0.success }.count
             let failureRate = trajectory.isEmpty ? 0 : Double(toolFails) / Double(trajectory.count)
             let grounded = GroundedReviewValidator.audit(clean, projectRoot: projectRoot).isGrounded
-            let verified = success && grounded
+            // P6 (two-gate consistency): the interactive scorecard was WEAKER than the great-loop done-gate —
+            // `grounded` is only GroundedReviewValidator (a textual file-path check that doesn't even flag
+            // bare filenames), missing EXECUTION grounding. So a "done" turn that mutated code but never ran a
+            // real build/test — or gamed the verifier — could be logged verified=true and poison the model
+            // scorecard / interactive policy learning. AND in the SAME GreatLoopVerifier the great loop
+            // already trusts at KistRunner+GreatLoop.swift:219. Only computed when the turn otherwise counts
+            // as verified (a success we might over-credit) — a failure is unverified regardless, so we skip
+            // the git-diff cost.
+            var verified = success && grounded
+            if verified {
+                let strongVerdict = GreatLoopVerifier.verify(
+                    trajectory: trajectory, canRunCommands: loop.shellEnabled,
+                    changedFiles: KistREPL.workingTreeChangedFiles(projectRoot: projectRoot),
+                    diff: KistREPL.workingTreeDiff(projectRoot: projectRoot))
+                verified = strongVerdict.isVerified
+            }
             CaptainLearningStore(projectRoot: projectRoot).record(CaptainLearningSample(
                 taskSignature: EffortController.signature(for: goalText),
                 taskTags: CaptainLearningSample.inferTaskTags(from: goalText),
