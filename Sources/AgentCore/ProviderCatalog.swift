@@ -129,6 +129,7 @@ public enum ProviderCatalog {
     public static let all: [any ChatProvider] =
         openAICompatible + [AnthropicProvider(), GeminiProvider(), WatsonXProvider(), OllamaProvider()]
         + [CLIChatProvider.claudeCode(), CLIChatProvider.codexCLI()].filter { $0.isInstalled() }
+        + [OllamaProvider.cobol()]   // offline COBOL specialist (kist -p cobol); NOT in the default rotation
 }
 
 /// Thread-safe per-provider retry tally. Lock-guarded so a `let` reference to it keeps `ProviderRegistry`

@@ -45,6 +45,7 @@ public enum UsageCost {
         "minimax": ProviderTokenPrice(inputPerMillionUSD: 0.30, outputPerMillionUSD: 1.10),
         "mlx": ProviderTokenPrice(inputPerMillionUSD: 0.0, outputPerMillionUSD: 0.0),           // local = free
         "ollama": ProviderTokenPrice(inputPerMillionUSD: 0.0, outputPerMillionUSD: 0.0),        // local = free
+        "cobol": ProviderTokenPrice(inputPerMillionUSD: 0.0, outputPerMillionUSD: 0.0),         // local COBOL specialist = free
     ]
 
     public static func summarize(spans: [AgentSpan],

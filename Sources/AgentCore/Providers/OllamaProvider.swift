@@ -8,21 +8,49 @@ import FoundationNetworking   // Linux: URLSession lives here
 /// emits NDJSON (newline-delimited JSON objects), NOT SSE: each line is a full
 /// JSON object like `{"message":{"role":"assistant","content":"..."},"done":false}`.
 public struct OllamaProvider: ChatProvider {
-    public let id = "ollama"
-    public let name = "Ollama (local)"
+    public let id: String
+    public let name: String
     public let iconName = "desktopcomputer"
     /// Local server — needs no key.
     public let requiresAPIKey = false
     /// Kept for parity with the keyed providers; unused (no auth header sent).
     public let keyAccount = "ollama_api_key"
-    public let defaultModel = "llama3.1"
-    public let availableModels: [AIModel] = [
-        AIModel(id: "llama3.1", name: "Llama 3.1", displayName: "Llama 3.1", isLocal: true),
-        AIModel(id: "deepseek-coder:6.7b", name: "DeepSeek Coder 6.7B", displayName: "DeepSeek Coder 6.7B", isLocal: true),
-        AIModel(id: "qwen2.5-coder", name: "Qwen2.5 Coder", displayName: "Qwen2.5 Coder", isLocal: true),
-    ]
+    public let defaultModel: String
+    public let availableModels: [AIModel]
 
-    public init() {}
+    /// Default construction is the generic local Ollama provider (id "ollama"). The identity is
+    /// parameterizable so a SPECIALIST local model can be a first-class provider over the same
+    /// NDJSON transport — e.g. `.cobol()` exposes the offline `cobol-jeeves` COBOL model as
+    /// `-p cobol` without a second copy of the stream lifecycle.
+    public init(id: String = "ollama",
+                name: String = "Ollama (local)",
+                defaultModel: String = "llama3.1",
+                availableModels: [AIModel] = [
+                    AIModel(id: "llama3.1", name: "Llama 3.1", displayName: "Llama 3.1", isLocal: true),
+                    AIModel(id: "deepseek-coder:6.7b", name: "DeepSeek Coder 6.7B", displayName: "DeepSeek Coder 6.7B", isLocal: true),
+                    AIModel(id: "qwen2.5-coder", name: "Qwen2.5 Coder", displayName: "Qwen2.5 Coder", isLocal: true),
+                ]) {
+        self.id = id
+        self.name = name
+        self.defaultModel = defaultModel
+        self.availableModels = availableModels
+    }
+
+    /// The offline COBOL specialist: the locally fine-tuned `cobol-jeeves` model served by Ollama.
+    /// First-class so `kist -p cobol` just works with no network. NOT in the default rotation (it
+    /// only knows COBOL); pick it explicitly.
+    public static func cobol() -> OllamaProvider {
+        OllamaProvider(
+            id: "cobol",
+            name: "COBOL (offline · cobol-jeeves)",
+            defaultModel: "cobol-jeeves-ft:latest",
+            availableModels: [
+                AIModel(id: "cobol-jeeves-ft:latest", name: "cobol-jeeves (fine-tuned)",
+                        displayName: "COBOL Jeeves · fine-tuned", isLocal: true),
+                AIModel(id: "cobol-jeeves:latest", name: "cobol-jeeves (base)",
+                        displayName: "COBOL Jeeves · base", isLocal: true),
+            ])
+    }
 
     /// Endpoint — `http://localhost:11434/api/chat`, overridable via `OLLAMA_HOST`
     /// (e.g. `OLLAMA_HOST=http://192.168.1.5:11434`).
