@@ -26,6 +26,12 @@ final class KistREPL {
     /// `/dive` — a LOCAL, repo-scoped multi-model read of OUR OWN code (no web, no cross-repo estate sweep).
     /// Grounds a dossier in the actual files under the project root, then fans it to every reachable model.
     var dive: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
+    /// `/evolve <brief>` — on-demand, transparent proof of the closed evolution loop: author a self__ tool,
+    /// gate + symbolic-veto + independent-adversary it, activate only on surviving all. Prints the artifacts.
+    var evolve: ((_ brief: String) async -> Int32)? = nil
+    /// `/ablation` — run the COLD-vs-WARM ablation oracle: is the accumulated state actually compounding on
+    /// held-out work? Reports an un-fakeable advantage that can be flat or negative.
+    var ablation: (() async -> Int32)? = nil
     /// Forge a specialist from a plain-English role description (AgentForge), bounded by the loop's tool
     /// ceiling, validated, and saved to the registry. nil = forging unavailable in this mode.
     var forge: ((_ description: String, _ roles: RoleBindings) async -> Void)? = nil
@@ -402,6 +408,14 @@ final class KistREPL {
                         _ = store.completeAndAdvance(id: task.id, sessionStartedAt: sessionStart)
                     }
                 }
+                continue
+            }
+
+            // NATURAL-LANGUAGE SANDBOX CONTROL: "run it headless" / "run it in a small window at the
+            // top of my screen" drive the isolated macOS-guest sandbox (~/bin/vmsandbox) directly —
+            // deterministic device command, no LLM turn. Conservative parser; see SandboxIntent.
+            if let sandbox = SandboxIntent.parse(input) {
+                SandboxIntent.execute(sandbox)
                 continue
             }
 

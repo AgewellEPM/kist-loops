@@ -1153,6 +1153,26 @@ extension KistREPL {
                         await dive(diveGoal, roleSelection.bindings)
                     }
                     return .handled
+                case "grow", "evolve-tool", "growtool":
+                    // On-demand, transparent proof of the closed evolution loop: author a self__ tool →
+                    // gate → symbolic veto → INDEPENDENT adversary → activate only on surviving all. Prints
+                    // the authored script + verdict + activation. Standing autonomy is separate + flag-off.
+                    // (Named /grow because /evolve is already the org board-meeting command.)
+                    let brief = args.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !brief.isEmpty else {
+                        print("usage: /grow <capability the tool should provide> — kist authors a sandboxed self__ tool, has an INDEPENDENT model try to break it, activates only if it survives")
+                        return .handled
+                    }
+                    guard let evolve else { print("\u{001B}[31m/grow isn't available here\u{001B}[0m"); return .handled }
+                    _ = await evolve(brief)
+                    return .handled
+                case "ablation", "flywheel":
+                    // Run the COLD-vs-WARM ablation ORACLE: is the accumulated state (self__ tools + recall)
+                    // actually compounding on held-out work? Real turns × 2 arms; the reading can be flat or
+                    // negative (that's the oracle being honest, not a failure).
+                    guard let ablation else { print("\u{001B}[31m/ablation isn't available here\u{001B}[0m"); return .handled }
+                    _ = await ablation()
+                    return .handled
                 case "competitive", "compete", "competitor", "vs":
                     // Point Kist at a competitor/URL/product and get a deep, cited R&D cross-comparison
                     // of OUR project vs theirs. Rides the /research evidence pipeline (web + our own

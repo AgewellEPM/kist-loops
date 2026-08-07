@@ -790,6 +790,21 @@ enum KistRunner {
                             ? "a grounded code read has no deterministic execution oracle"
                             : "the dive was interrupted before completion"))
                 }
+                repl.evolve = { brief in
+                    // On-demand, transparent self-evolution proof. Manual only — the autonomous caller
+                    // (standing autonomy) is separate and flag-gated OFF.
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
+                    return await runEvolve(opts, brief: brief, registry: registry, root: root,
+                                           providerId: providerId, model: model)
+                }
+                repl.ablation = {
+                    // Run the COLD-vs-WARM ablation oracle (real turns × 2 arms).
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
+                    return await runAblation(opts, registry: registry, root: root, tools: tools,
+                                             context: context, providerId: providerId, model: model)
+                }
                 repl.forge = { description, roles in
                     // AgentForge: generate a specialist bounded by the loop's tool ceiling, validate, save.
                     let forge = AgentForge(providers: registry, roles: roles)
