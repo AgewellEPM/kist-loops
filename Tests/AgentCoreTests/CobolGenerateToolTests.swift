@@ -15,6 +15,23 @@ final class CobolGenerateToolTests: XCTestCase {
         XCTAssertTrue(tool.parameters.contains { $0.name == "existing" && !$0.required })
     }
 
+    func testHasOptionalPathParam() {
+        let tool = CobolGenerateTool(providers: ProviderRegistry(providers: ProviderCatalog.all,
+                                                                 keyStore: NullKeyStoreForCobolTool()))
+        XCTAssertTrue(tool.parameters.contains { $0.name == "path" && !$0.required },
+                      "an optional path lets the tool PERSIST the COBOL so the artifact can't be fabricated")
+    }
+
+    // Source pin: the path-write path goes through the confined-root resolver + honors it.
+    func testPathWriteIsConfined() throws {
+        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/Tools/CobolGenerateTool.swift"),
+                             encoding: .utf8)
+        XCTAssertTrue(src.contains("context.resolvedPath(rawPath"),
+                      "path writes must go through the confined-root resolver (no escape)")
+    }
+
     func testMissingRequestFailsClearly() async throws {
         let tool = CobolGenerateTool(providers: ProviderRegistry(providers: ProviderCatalog.all,
                                                                  keyStore: NullKeyStoreForCobolTool()))

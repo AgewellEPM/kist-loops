@@ -23,6 +23,9 @@ public struct CobolGenerateTool: AgentTool {
         ToolParameter(name: "existing", type: "string",
                       description: "Optional existing COBOL source to MODIFY instead of writing from scratch.",
                       required: false),
+        ToolParameter(name: "path", type: "string",
+                      description: "Optional project-relative path (e.g. 'payroll.cbl'). If given, the generated COBOL is WRITTEN to that file (confined to the project root) so the artifact is real — then just compile it with cobc. Recommended.",
+                      required: false),
     ]
 
     private let providers: ProviderRegistry
@@ -53,6 +56,22 @@ public struct CobolGenerateTool: AgentTool {
             let cobol = Self.stripCodeFences(text).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cobol.isEmpty else {
                 return .failure("cobol_generate: the offline model returned no source — is Ollama running and `cobol-jeeves-ft` pulled?")
+            }
+            // If a path was given, PERSIST the source (confined to the project root) so the artifact is
+            // real and can't be fabricated downstream — the caller then only has to `cobc` it. Reuses the
+            // same ConfinedRoot boundary the file tools use (no escape, no symlink follow).
+            if let rawPath = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawPath.isEmpty {
+                do {
+                    let abs = try context.resolvedPath(rawPath, mustExist: false)
+                    try (cobol + "\n").write(toFile: abs, atomically: true, encoding: .utf8)
+                    let lines = cobol.split(separator: "\n", omittingEmptySubsequences: false).count
+                    return ToolResult(success: true,
+                                      output: "wrote \(lines) lines of COBOL to \(rawPath) — now compile it with `cobc -x -o <bin> \(rawPath)` and run it.\n\n" + cobol,
+                                      metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true"])
+                } catch {
+                    return .failure("cobol_generate produced COBOL but could not write it to \(rawPath): \(error)")
+                }
             }
             return ToolResult(success: true, output: cobol,
                               metadata: ["provider": "cobol", "offline": "true"])
