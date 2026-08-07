@@ -230,6 +230,21 @@ public enum PromptCompiler {
             "don't change any files", "do not change anything", "don't change anything",
             "no file changes", "without editing files", "without changing files", "read-only",
         ])
+        // LEGACY/VM RUNTIME contract (dogfood 2026-08-06): "create and run X in the Win98 VM / DOS
+        // environment and capture proof" is EXTERNAL-ACTION work — the deliverable is observable
+        // behavior in the guest, proven by vm evidence; no host build/test can verify it. Must precede
+        // the build-directive check ("create…" would otherwise claim it), but stays narrow: it needs
+        // BOTH a guest-runtime noun AND a run-there verb, so "fix the win98 driver code" stays build.
+        let namesGuestRuntime = containsAny(lower, [
+            "in the vm", "in a vm", "win98 vm", "windows 98 vm", "in win98", "in windows 98",
+            "ms-dos prompt", "dos environment", "the guest", "in the emulator",
+            "inside the windows environment", "inside windows", "in the windows environment",
+        ])
+        let asksToRunThere = containsAny(lower, [
+            "run it", "run there", "execute it", "launch it", "get it running", "ran in", "runs in",
+            "running inside", "capture proof", "prove it ran", "proof it ran", "proof that it ran",
+        ])
+        if !explicitlyReadOnly, namesGuestRuntime, asksToRunThere { return .desktop }
         // A defect noun does not turn an explicit repair command into a read-only review. This check must
         // precede both desktop nouns and the broad "bug"/"regression" review cues so requests such as
         // "fix the desktop app crash" remain build work instead of becoming an answer-only desktop turn.

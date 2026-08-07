@@ -13,6 +13,63 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.40", date: "2026-08-06",
+                headline: "Choose your default by COST or by POWER (Luke request)",
+                changes: [
+                    "New selection policy for how the DEFAULT model is picked when nothing is pinned: `--by-power` (strongest — the default, claude-cli/codex-cli/gemini lead) or `--by-cost` (cheapest per-token). Persist it with config `\"selectBy\":\"cost\"` or the REPL commands `/power` · `/economy` (`/select cost|power`); an explicit `-p/--provider` or `/model` always overrides",
+                    "Cost ranking uses the existing price book: local models and flat-rate subscription CLIs (claude-cli/codex-cli) are $0 marginal; among paid APIs the cheapest wins (mimo < deepseek < gemini < openai). Ties break toward the stronger model, so 'cheapest' is never gratuitously the weakest; an unpriced vendor sorts as expensive so cost-mode never silently prefers something it can't price",
+                    "Only the AUTO-DEFAULT changes — teams (/council, /ultra, /role) and explicit pins are untouched. Pinned by ProviderSelectionPolicyTests + ProviderPickByPolicyTests (parse, cost-ordering, power-vs-cost pick, config merge-write preserves other fields)",
+                ]),
+        Release(version: "0.17.39", date: "2026-08-06",
+                headline: "Strongest model leads the default — claude-cli/codex-cli, not gemini (dogfood \"why only gemini\")",
+                changes: [
+                    "Dogfood find (Luke: \"why was it stuck only on gemini\"): one-shot + /build run on ONE provider, and that default was gemini because subscription CLIs (claude-cli/codex-cli) were EXCLUDED from the default pool (requiresAPIKey == false), so the two strongest providers could never lead and gemini — the top KEYED cloud — always won",
+                    "Fix (Luke's call: strongest leads, team stays opt-in): the single-model default now also considers subscription CLIs that pass the bounded, non-billable isLocallyAvailable() probe (binary on a trusted PATH + auth/login status OK — never sends a prompt), ranked together with keyed cloud. claude-cli (100) / codex-cli (95) outrank gemini (85), so an authed Max/Codex subscription now leads. Local models (ollama/mlx) stay last-resort",
+                    "Teams remain explicit: /council + --council-execute auto-distribute a real team (planner/coder/critic on different models), /ultra runs the review roster, /role · /code pin roles. Pinned by KistRunnerSafetyTests (source + ranking)",
+                ]),
+        Release(version: "0.17.38", date: "2026-08-06",
+                headline: "/council-execute stops false-blocking on its own transcript (dogfood team-mode fix)",
+                changes: [
+                    "Dogfood find: `--council-execute` assembled a real team (planner=gemini, worker/coder=deepseek, critic=grok) then the captain REFUSED at the simulation gate — 'Security lab sandbox · critical risk · 77% < 82%' — for a benign COBOL report tweak. Cause: the builder brief embeds the ENTIRE council markdown transcript into the objective, and the risk classifier keyword-scanned that blob, so an incidental 'auth/safety/exploit' word (plus an org-store domain mislabel) flipped the whole build to CRITICAL, which is above the user-request advisory downgrade",
+                    "Fix: the domain + simulation safety gates now classify risk on the USER'S original goal, not the council transcript (new riskObjective threaded through runPlanExecute; council-execute passes the user goal). Critical work the USER actually describes still blocks; the gate's evidence/simulation is unchanged",
+                    "Pinned in CouncilExecuteRiskObjectiveTests: benign goal is sub-critical, the transcript-embedding string still trips critical (proving the bug), and a source pin that the hand-off threads riskObjective",
+                ]),
+        Release(version: "0.17.37", date: "2026-08-06",
+                headline: "VM run-and-prove goals are EXTERNAL-ACTION turns + failure-gate doctrine reconciled (dogfood round 3 fix #3)",
+                changes: [
+                    "Dogfood find (round 3, attempt 7): full proof flow succeeded — app ran in the VM, OCR'd TWICE — but the goal had classified as a BUILD turn ('create…' wins the intent), so none of the external-evidence rules applied and one benign no-op edit failure mid-run sank the turn as 'the last mutation failed'",
+                    "Root fix: 'create and run X in the Win98 VM / DOS environment and capture proof' now classifies as a DESKTOP/EXTERNAL-ACTION contract (needs BOTH a guest-runtime noun AND a run-there verb — 'fix the win98 driver code' and host builds like the COBOL round stay build). Pinned in PromptCompilerTests with all four shapes",
+                    "Failure gates reconciled with the anti-laundering pin: a failed final attempt is excused ONLY on external-action turns where the work was already delivered by an earlier successful mutation AND external proof followed the failure. A later PASSING BUILD/TEST deliberately cannot excuse — the gate suite's planted-always-green-test attack (resume-boundary pin) caught my first draft allowing exactly that, and the pin won",
+                    "Net effect for VM rounds: the trajectory that actually happened (write ✓ → guest run ✓ → OCR proof ✓ → surplus no-op edit ✗) now verifies; every build-turn protection is unchanged",
+                ]),
+        Release(version: "0.17.36", date: "2026-08-06",
+                headline: "perslis vm dos-exec --expect counts as verification (dogfood round 3 fix #2)",
+                changes: [
+                    "Dogfood find (round 3, attempt 6): the model FOUND the deterministic dos-exec path and planned the exact right command — but `perslis vm dos-exec … --expect` classified as a non-verifying command, so verify-before-done could never be satisfied by the very tool built to satisfy it",
+                    "Fix: `perslis vm dos-exec` WITH `--expect` classifies as a verification (it exits 0 only when OCR proves the expected text on the guest screen — fail-closed, grounded). Without --expect it stays non-verifying; other perslis verbs unchanged. This also makes it replayable by the symbolic re-verify",
+                    "Pinned in CompletionVerifierTests (with/without --expect + foreign-verb shapes)",
+                ]),
+        Release(version: "0.17.35", date: "2026-08-06",
+                headline: "External proof outranks a failed speculative step — DOS round stops sinking on gate 1 (dogfood round 3 fix)",
+                changes: [
+                    "Dogfood find (round 3, attempt 4): the DOS app RAN — two MS-DOS Prompt windows with 'HELLO FROM KIST' on screen, OCR proof captured TWICE — and the turn still failed 'the last mutation failed' because one mid-run host command (a maybe-mutating run_command) had errored and nothing after it classified as a mutation",
+                    "Fix: on an EXTERNAL-ACTION turn, successful external-state evidence recorded AFTER the failed step outranks it — at BOTH failure gates (last-mutation-failed and last-source-mutation-failed; the per-site pin caught the second one). Non-external turns keep both strict gates; a failure with no later external proof still sinks",
+                    "Pinned in CompletionVerifierTests: accept-with-later-proof, fail-when-failure-is-last, and the strict non-external shape",
+                    "(Perslis side, shipped separately: new deterministic `perslis vm dos-exec --qmp --line --capture --expect` — opens the DOS prompt, types, enters, captures, OCR-verifies in ONE fail-closed call; win98_run_command refusals now point at it. Release 5459e9bc, doctor passed)",
+                ]),
+        Release(version: "0.17.34", date: "2026-08-06",
+                headline: "Self-evolution: a failed run now classifies WHY and routes the fix instead of giving up",
+                changes: [
+                    "A failed turn no longer assumes every failure is a code bug. It CLASSIFIES the real tool errors (visible since 0.17.29) into taskBug / knowledgeGap / toolLimit / blocked, and steers the self-heal toward the right recovery — knowledgeGap → discover the tool's real capabilities and RETRY (this is exactly what the perslis 'unknown Windows 98 run command → search: win98_run_commands' run needed); toolLimit → extend the capability; blocked → surface the authority; taskBug → repair. Prints the verdict live (`self-evolution · knowledgeGap → discoverAndRetry · <tool>`)",
+                    "Never-blend-repos is mechanical: only a NATIVE kist tool is an auto-evolve target; a foreign MCP tool (perslis__…) only ever gets a capability SPEC handed to its owner. A ledger loop-guard refuses to repeat a resolved evolution or churn the binary (rate-capped per window)",
+                    "The auto-evolve-and-ship half is built + fully tested but NOT yet auto-running (labeled PROTOTYPE): the AdversarialPromoteGate encodes the promote rule — a self-written capability ships ONLY if the regression gate is green AND an INDEPENDENT adversary can't break it (never self-certify). ~32 tests across FailureClassifier/Router/Ownership/Ledger/Discovery/PromoteGate/Engine, all pinned to Luke's real screenshot failures",
+                ]),
+        Release(version: "0.17.33", date: "2026-08-06",
+                headline: "cobc is a build — COBOL work can finally verify (dogfood round 1 fix #4)",
+                changes: [
+                    "Dogfood find: attempt 5 ran CLEAN — zero tool errors, compiled with cobc, ran the binary — and STILL failed 'unverified': the command classifier didn't know cobc, so no COBOL task could ever satisfy verify-before-done (and the re-verify replay had nothing to capture). Exact same lesson as nasm on 2026-08-04, one compiler later",
+                    "`cobc` with a project COBOL source (.cbl/.cob/.cobol/.cpy) now classifies as a build; --version/no-source/foreign-path invocations still don't. Pinned in CompletionVerifierTests (5 shapes incl. the literal dogfood command line)",
+                ]),
         Release(version: "0.17.32", date: "2026-08-06",
                 headline: "One-shot iteration budget 12 → 40 — real tasks stop dying at the ceiling (dogfood fix)",
                 changes: [

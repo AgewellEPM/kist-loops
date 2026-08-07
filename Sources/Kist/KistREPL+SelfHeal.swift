@@ -199,7 +199,27 @@ extension KistREPL {
                   Self.shouldAutoSuperviseFailure(goal: goal)
             else { return failure }
 
-            let objective = Self.supervisorRepairObjective(for: failure.capsule)
+            var objective = Self.supervisorRepairObjective(for: failure.capsule)
+            // SELF-EVOLUTION: classify WHY this failed and steer the repair toward the RIGHT recovery instead
+            // of assuming every failure is a code bug (which is why "unknown Windows 98 run command" gave up —
+            // no file to repair). knowledgeGap → discover+retry; toolLimit → extend (kist auto / foreign spec,
+            // never blend repos); blocked → surface authority; taskBug → repair. The loop-guard (ledger) stops
+            // a self-evolution from repeating or churning the binary.
+            let evo = SelfEvolutionEngine.decide(
+                signals: FailureSignals.from(turnEvidenceSnapshot()),
+                availableTools: loop.toolNames,
+                ledgerHistory: SelfEvolutionLedger(projectRoot: projectRoot).load(),
+                now: Date().timeIntervalSince1970)
+            let culprit = evo.culpritTool.map { " · \($0)" } ?? ""
+            let skip = evo.skipped.map { " · \u{001B}[33mSKIPPED: \($0)\u{001B}[0m" } ?? ""
+            print("\u{001B}[36mself-evolution\u{001B}[0m · \(evo.category.rawValue) → \(evo.kind.rawValue)\(culprit)\(skip)")
+            objective = "\(objective)\n\n[self-evolution — \(evo.category.rawValue) → \(evo.kind.rawValue)]\n\(evo.brief)"
+            // Record the risky (extendTool) attempts so the ledger loop-guard can refuse a repeat next time.
+            if evo.kind == .extendTool, evo.skipped == nil, let sig = evo.signature {
+                SelfEvolutionLedger(projectRoot: projectRoot).record(SelfEvolutionAttempt(
+                    tool: evo.culpritTool ?? "?", category: evo.category.rawValue,
+                    signature: sig, outcome: "attempted", atEpoch: Date().timeIntervalSince1970))
+            }
             let report = Self.handleSelfHealCommand("self-heal run \(objective)",
                                                     projectRoot: projectRoot,
                                                     trajectory: turnEvidenceSnapshot())

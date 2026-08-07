@@ -168,4 +168,25 @@ final class PromptCompilerTests: XCTestCase {
             XCTAssertEqual(brief.expectedOutcome, .mutation, request)
         }
     }
+
+    // LEGACY/VM RUNTIME goals (dogfood 2026-08-06): "create and run it in the guest + capture proof"
+    // is an EXTERNAL-ACTION contract; host build/repo work on legacy code stays build.
+    func testGuestRuntimeRunGoalsClassifyExternalAction() {
+        for request in [
+            "create and run a SIMPLE DOS APP, get it into the DOS environment perslis provides (the Win98 VM's MS-DOS Prompt is fine), RUN it there, and capture proof it ran",
+            "create and run a SIMPLE WINDOWS APP, get it actually running inside the Windows environment, and capture proof that it ran",
+        ] {
+            let brief = PromptCompiler.compile(request)
+            XCTAssertEqual(brief.intent, .desktop, request)
+            XCTAssertEqual(brief.expectedOutcome, .externalAction, request)
+        }
+        for request in [
+            "Build a small COBOL application compiled with GnuCOBOL (cobc) and RUN to prove real output",
+            "fix the win98 driver code in the vm sources",
+        ] {
+            let brief = PromptCompiler.compile(request)
+            XCTAssertEqual(brief.intent, .build, request)
+            XCTAssertEqual(brief.expectedOutcome, .mutation, request)
+        }
+    }
 }

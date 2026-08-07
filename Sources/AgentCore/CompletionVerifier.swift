@@ -33,10 +33,29 @@ public struct CompletionVerifier: Sendable {
                       taskIntent: TaskBrief.Intent? = nil) -> Verdict {
         // A failed final mutation attempt is not completion, even for a doc/config artifact that would not
         // otherwise require a build. A later successful mutation can recover from an earlier failed try.
-        if let lastMutation = trajectory.last(where: { $0.observedEffects.mutation != .none }),
-           !lastMutation.success {
-            return .needsVerification(reason:
-                "the last mutation failed — failed work cannot be accepted as complete")
+        // EXTERNAL-ACTION exception (dogfood 2026-08-06, round 3): a failed maybe-mutating command followed
+        // by SUCCESSFUL external-state evidence is not a failed deliverable — the DOS app run had OCR proof
+        // of "HELLO FROM KIST" captured AFTER a failed host command, and the turn still sank on this gate.
+        // Grounded external evidence recorded after the failure outranks the speculative failed step.
+        if let lastMutationIndex = trajectory.lastIndex(where: { $0.observedEffects.mutation != .none }),
+           !trajectory[lastMutationIndex].success {
+            // EXTERNAL-ACTION excuse only (dogfood 2026-08-06): the failed final attempt is excused
+            // when the work was already DELIVERED by an earlier successful mutation AND successful
+            // external-state proof followed the failure — evidence in the deliverable's own domain
+            // (the app observably ran in the guest). A later PASSING BUILD/TEST deliberately does
+            // NOT excuse: a planted always-green test would launder a failed change (the
+            // resume-boundary anti-laundering pin encodes that attack).
+            let deliveredBefore = trajectory[..<lastMutationIndex].contains {
+                $0.success && $0.observedEffects.mutation != .none
+            }
+            let externallyProvenAfter = expectedOutcome == .externalAction
+                && trajectory[(lastMutationIndex + 1)...].contains {
+                    $0.success && $0.observedEffects.progress == .externalState
+                }
+            if !(deliveredBefore && externallyProvenAfter) {
+                return .needsVerification(reason:
+                    "the last mutation failed — failed work cannot be accepted as complete")
+            }
         }
 
         // A build/fleet contract promises a state change. A zero-tool or read-only run must not fall
@@ -79,7 +98,18 @@ public struct CompletionVerifier: Sendable {
         }
         // A later doc/config mutation does not erase a failed source change. Conversely, a later successful
         // source mutation supersedes an earlier failed attempt and may be verified normally.
+        // Same EXTERNAL-ONLY excuse as gate 1 (sibling site — the per-site pin caught this one):
+        // delivered-before AND external proof after. A later passing build/test deliberately cannot
+        // excuse (planted-test laundering); a trivial later command cannot excuse anything.
         guard trajectory[lastSourceMutation].success else {
+            let deliveredBefore = trajectory[..<lastSourceMutation].contains {
+                $0.success && $0.observedEffects.mutation != .none
+            }
+            let externallyProvenAfter = expectedOutcome == .externalAction
+                && trajectory[(lastSourceMutation + 1)...].contains {
+                    $0.success && $0.observedEffects.progress == .externalState
+                }
+            if deliveredBefore && externallyProvenAfter { return .accept }
             return .needsVerification(reason:
                 "the last source mutation failed — a later command cannot make an unsuccessful edit complete")
         }
@@ -618,6 +648,13 @@ public enum CommandClassifier {
                 isRelativeProjectPath($0)
                     && sourceExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
             }
+        case "perslis":
+            // `perslis vm dos-exec … --expect <text>` IS a verification: it opens the guest DOS
+            // prompt, runs the line, captures the screen, OCRs it, and exits 0 ONLY when the
+            // expected text is proven on screen (fail-closed; dogfood 2026-08-06 round 3 — the
+            // agent ran exactly this and the verifier still demanded "a build/test"). Without
+            // --expect it proves nothing and stays non-verifying.
+            return firstArg == "vm" && args.contains("dos-exec") && args.contains("--expect")
         case "cobc":
             // Compiling a COBOL source IS the build (2026-08-06 dogfood: a correct payroll app
             // compiled clean with `cobc -x -o PAYROLL PAYROLL.CBL` after the final edit and was

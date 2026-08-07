@@ -1140,4 +1140,8 @@ public struct HeadlessAgentLoop: Sendable {
         ToolContractBook.render(tools: tools, disabled: ToolContractBook.disabledMap(shellEnabled: context.shell.enabled))
     }
 
+    /// The names of every tool callable this turn — used by self-evolution's CapabilityDiscovery to point a
+    /// knowledge-gap recovery at a tool's real "list capabilities" sibling (only ones that actually exist).
+    public var toolNames: [String] { tools.all().map { $0.name } }
+
 }

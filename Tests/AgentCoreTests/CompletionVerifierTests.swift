@@ -329,6 +329,52 @@ final class CompletionVerifierTests: XCTestCase {
         }
     }
 
+    // Doctrine pin (both failure gates): a later PASSING build/test deliberately does NOT excuse
+    // a failed final edit on a build/mutation turn — a planted always-green test would launder a
+    // failed change. Only external proof (external-action turns, delivered-before) excuses.
+    func testFailedLastEditNotExcusedByLaterPassingBuildOnBuildTurns() {
+        let wrote = ActionRecord(
+            tool: "write_file", argsFingerprint: "path=Sources/App/main.swift", success: true,
+            effectObservation: ToolEffectCatalog.observe(tool: "write_file",
+                                                         arguments: ["path": "Sources/App/main.swift"]))
+        let failedEdit = ActionRecord(
+            tool: "edit_file", argsFingerprint: "path=Sources/App/main.swift", success: false,
+            effectObservation: ToolEffectCatalog.observe(tool: "edit_file",
+                                                         arguments: ["path": "Sources/App/main.swift"]))
+        XCTAssertFalse(v.check(trajectory: [wrote, cmd("make"), failedEdit, cmd("make")],
+                               canRunCommands: true).isAccept,
+                       "a later green build must not launder a failed edit (planted-test attack)")
+        XCTAssertFalse(v.check(trajectory: [wrote, cmd("make"), failedEdit, cmd("ls -la")],
+                               canRunCommands: true).isAccept,
+                       "a trivial later command cannot excuse a failed edit")
+        XCTAssertFalse(v.check(trajectory: [wrote, cmd("make"), failedEdit],
+                               canRunCommands: true).isAccept,
+                       "a failed final edit with nothing after it still sinks the turn")
+    }
+
+    // perslis vm dos-exec --expect = a verification (dogfood 2026-08-06 round 3): it exits 0
+    // only when OCR proves the expected text on the guest screen — that IS the test.
+    func testPerslisDosExecWithExpectClassifiesAsVerification() {
+        XCTAssertTrue(CommandClassifier.isBuildOrTest(
+            #"perslis vm dos-exec --qmp /tmp/legacy-win98.sock --line C:\HELLO.BAT --capture out.png --expect HELLO"#))
+        XCTAssertFalse(CommandClassifier.isBuildOrTest(
+            #"perslis vm dos-exec --qmp /tmp/x.sock --line DIR --capture out.png"#),
+            "without --expect it proves nothing")
+        XCTAssertFalse(CommandClassifier.isBuildOrTest("perslis doctor"),
+                       "other perslis verbs are not builds/tests")
+    }
+
+    // cobc = a build (dogfood 2026-08-06 — the nasm lesson, one compiler later): a clean
+    // `cobc -x -o PAYROLL PAYROLL.CBL` after the final edit must satisfy verify-before-done.
+    func testCobcCompileClassifiesAsBuild() {
+        XCTAssertTrue(CommandClassifier.isBuildOrTest("cobc -x -o PAYROLL PAYROLL.CBL"))
+        XCTAssertTrue(CommandClassifier.isBuildOrTest("cobc -x -o payroll_report payroll_report.cbl"))
+        XCTAssertFalse(CommandClassifier.isBuildOrTest("cobc --version"), "introspection is not a build")
+        XCTAssertFalse(CommandClassifier.isBuildOrTest("cobc"), "compiling nothing proves nothing")
+        XCTAssertFalse(CommandClassifier.isBuildOrTest("cobc -x -o out /etc/passwd"),
+                       "non-project non-source input is not a build")
+    }
+
     func testClassifierRejectsStructuredTrivialFingerprints() {
         for fp in [#"args=["swift"]&executable=which"#, #"args=["-la"]&executable=ls"#, #"executable=pwd"#] {
             XCTAssertFalse(CommandClassifier.isBuildOrTest(fp), "structured trivial must NOT verify: \(fp)")
@@ -360,5 +406,33 @@ final class CompletionVerifierTests: XCTestCase {
             trajectory: [wroteScript, ranInGuest], canRunCommands: true
         ) else { return XCTFail("non-external turns must still demand a build/test after a source edit") }
         XCTAssertTrue(reason.contains("build"), reason)
+    }
+
+    // Gate-1 external-action exception (dogfood 2026-08-06, round 3): a FAILED maybe-mutating
+    // command followed by successful external-state proof must not sink an external-action turn —
+    // the DOS run had OCR proof of the app running AFTER a failed host command and still failed.
+    func testFailedSpeculativeMutationOutrankedByLaterExternalProof() {
+        let wroteScript = ActionRecord(
+            tool: "write_file", argsFingerprint: "path=hello.bat", success: true,
+            effectObservation: ToolEffectCatalog.observe(tool: "write_file", arguments: ["path": "hello.bat"]))
+        let failedCommand = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=perslis vm dos-exec --qmp /tmp/x.sock",
+            success: false,
+            effectObservation: ToolEffectObservation(mutation: .unknownTarget, mutationEvidence: .mayMutate))
+        let ranInGuest = ActionRecord(
+            tool: "perslis__vm_type", argsFingerprint: "text=HELLO.BAT", success: true,
+            effectObservation: ToolEffectObservation(progress: .externalState))
+
+        // External proof AFTER the failed speculative step → accept.
+        XCTAssertTrue(v.check(trajectory: [wroteScript, failedCommand, ranInGuest], canRunCommands: true,
+                              expectedOutcome: .externalAction, taskIntent: .desktop).isAccept)
+
+        // No later external proof → the failed last mutation still sinks the turn.
+        XCTAssertFalse(v.check(trajectory: [wroteScript, ranInGuest, failedCommand], canRunCommands: true,
+                               expectedOutcome: .externalAction, taskIntent: .desktop).isAccept)
+
+        // Non-external turns keep the strict gate regardless of external evidence.
+        XCTAssertFalse(v.check(trajectory: [wroteScript, failedCommand, ranInGuest],
+                               canRunCommands: true).isAccept)
     }
 }

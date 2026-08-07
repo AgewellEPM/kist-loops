@@ -204,7 +204,10 @@ enum KistRunner {
         // is below) so a chronically-failing provider isn't silently made the default (the MiMo trap).
         let sessionVerdicts: [String: ModelVerdict] = (opts.noMemory ? nil : ToolContext.canonicalize(opts.project))
             .map { CaptainLearningStore(projectRoot: $0).modelVerdicts() } ?? [:]
-        guard let providerId = resolveProvider(opts, registry, configProvider: config.provider, verdicts: sessionVerdicts) else { return 2 }
+        // Selection policy: explicit flag > config > power (default). Only steers the auto-default pick.
+        let selectionPolicy = opts.selectBy ?? config.selectBy ?? .power
+        guard let providerId = resolveProvider(opts, registry, configProvider: config.provider,
+                                               verdicts: sessionVerdicts, policy: selectionPolicy) else { return 2 }
         guard let root = ToolContext.canonicalize(opts.project) else {
             err("error: project path does not exist: \(opts.project)"); return 2
         }
@@ -1207,7 +1210,8 @@ enum KistRunner {
         note("council · handing builder brief to plan→execute")
         return await runPlanExecute(opts, goal: builderGoal, registry: registry, root: root,
                                     tools: tools, context: context, providerId: providerId,
-                                    model: model, rolesOverride: roles, budgetOverride: runBudget)
+                                    model: model, rolesOverride: roles, budgetOverride: runBudget,
+                                    riskObjective: goal)   // classify risk on the USER's goal, not the council transcript
     }
 
     /// "Dig in deep" — the WIDE council: every reachable model answers the SAME question, synthesized into
@@ -1472,7 +1476,14 @@ enum KistRunner {
                                        root: String, tools: ToolRegistry, context: ToolContext,
                                        providerId: String, model: String?,
                                        rolesOverride: RoleBindings? = nil,
-                                       budgetOverride: BudgetLedger? = nil) async -> Int32 {
+                                       budgetOverride: BudgetLedger? = nil,
+                                       // The string the SAFETY gates keyword-classify for risk. Defaults to the
+                                       // executed goal, but council-execute passes the USER'S ORIGINAL goal here
+                                       // (dogfood 2026-08-06: the builder brief embeds the whole council markdown
+                                       // transcript, so an incidental "auth"/"safety"/"exploit" word — or an
+                                       // org-store domain mislabel — flipped a COBOL report tweak to CRITICAL and
+                                       // hard-blocked a user-requested build. Risk must reflect what the USER asked).
+                                       riskObjective: String? = nil) async -> Int32 {
         guard let roles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
         let memory = opts.noMemory ? nil : ProjectMemory(root: root)
         let memNote = (memory?.hasContent ?? false) ? " · memory \(memory!.recentEpisodes(limit: 100).count) runs" : ""
@@ -1480,8 +1491,9 @@ enum KistRunner {
         // CAPTAIN SAFETY GATES (preserved across the origin/main merge): both must accept before any side
         // effect. Pinned by KistRunnerSafetyTests. Fail-closed. c7 splice: --no-memory is threaded to the
         // simulation gate so it suppresses the .kist disk write while still computing + enforcing the verdict.
+        let gateObjective = riskObjective ?? goal
         let domainPreflight = CaptainDomainLearningEnforcer.preflight(mode: .planExecute,
-                                                                      objective: goal,
+                                                                      objective: gateObjective,
                                                                       projectRoot: root,
                                                                       evidenceMode: opts.noMemory ? .redacted : .full)
         for line in domainPreflight.terminalLines { note(line) }
@@ -1493,7 +1505,7 @@ enum KistRunner {
         // council-execute) — the human already decided, so a sub-threshold estimate is advisory,
         // not a veto. Critical-risk signals and failed evidence writes still hard-block.
         let planPreflight = CaptainSimulationEnforcer.preflight(mode: .planExecute,
-                                                                objective: goal,
+                                                                objective: gateObjective,
                                                                 projectRoot: root,
                                                                 evidenceMode: opts.noMemory ? .redacted : .full,
                                                                 noMemory: opts.noMemory,
@@ -1555,22 +1567,55 @@ enum KistRunner {
 
     // MARK: - Helpers
 
-    /// Explicit flag > config > first configured cloud provider > first local. Nil after an error.
+    /// Explicit flag > config > strongest-or-cheapest available (per selection policy) > first local.
+    /// Nil after an error.
     private static func resolveProvider(_ opts: KistOptions, _ registry: ProviderRegistry, configProvider: String?,
-                                        verdicts: [String: ModelVerdict] = [:]) -> String? {
+                                        verdicts: [String: ModelVerdict] = [:],
+                                        policy: ProviderSelectionPolicy = .power) -> String? {
         if let pid = opts.providerId ?? configProvider {
             guard registry.provider(id: pid) != nil else { err("error: unknown provider '\(pid)'. Try --list-providers."); return nil }
-            return pid   // explicit user choice always wins — the scorecard never overrides it
+            return pid   // explicit user choice always wins — the scorecard/policy never override it
         }
-        // Pick the STRONGEST keyed cloud provider, not whatever sorts first in the catalog. MiMo is
-        // listed first but 400s on multi-turn tool history, so "first with a key" silently made it the
-        // default and turns died with 0 tool calls. Rank by ModelEscalator strength — now ALSO adjusted by
-        // the per-model scorecard, so a chronically-failing provider isn't silently chosen as the default.
+        // Pick the STRONGEST AVAILABLE provider, not whatever sorts first in the catalog. Two kinds are
+        // eligible for the single-model default (Luke 2026-08-06 — "strongest leads", team stays opt-in):
+        //   • keyed cloud: requiresAPIKey && a key is present (gemini/deepseek/grok/openai/…). MiMo sorts
+        //     first in the catalog but 400s on multi-turn tool history, so "first with a key" silently made
+        //     it the default and turns died with 0 tool calls — hence rank, not order.
+        //   • subscription CLI (claude-cli/codex-cli): requiresAPIKey == false but auth lives in the CLI.
+        //     Previously EXCLUDED from the default entirely, so the two STRONGEST providers could never lead
+        //     and gemini always won. Now included WHEN `isLocallyAvailable()` passes — a bounded, non-billable
+        //     local probe (binary on a trusted PATH + `auth/login status` succeeds; never sends a prompt).
+        // Rank by ModelEscalator strength (claude-cli/codex-cli outrank the cloud APIs), scorecard-adjusted so
+        // a chronically-failing provider isn't silently chosen. Local models (ollama/mlx, no auth) stay the
+        // last-resort fallback below, never chosen over a keyed/subscription provider.
+        let subscriptionReady = registry.providers.filter { p in
+            !p.requiresAPIKey && (p as? CLIChatProvider)?.isLocallyAvailable() == true
+        }
         let keyedCloud = registry.providers.filter { $0.requiresAPIKey && registry.hasKey(for: $0) }
-        if let best = keyedCloud.max(by: { ModelEscalator.rank($0.id, verdicts: verdicts) < ModelEscalator.rank($1.id, verdicts: verdicts) }) { return best.id }
+        let eligible = subscriptionReady + keyedCloud
+        if let best = pickByPolicy(eligible, policy: policy, verdicts: verdicts) { return best.id }
         if let local = registry.providers.first(where: { !$0.requiresAPIKey }) { return local.id }
         err("error: no provider has a key. Set one (e.g. export OPENAI_API_KEY=…) or use --provider. See --list-providers.")
         return nil
+    }
+
+    /// Pick the default from `eligible` under the selection policy. `.power` → strongest (rank desc).
+    /// `.cost` → cheapest marginal $/token (asc), ties broken toward the stronger model so "cheapest"
+    /// is never gratuitously the weakest. Pure/testable.
+    static func pickByPolicy(_ eligible: [any ChatProvider], policy: ProviderSelectionPolicy,
+                             verdicts: [String: ModelVerdict]) -> (any ChatProvider)? {
+        switch policy {
+        case .power:
+            return eligible.max { ModelEscalator.rank($0.id, verdicts: verdicts) < ModelEscalator.rank($1.id, verdicts: verdicts) }
+        case .cost:
+            return eligible.min { a, b in
+                let ca = ProviderCostRank.marginalPerMillion(a.id)
+                let cb = ProviderCostRank.marginalPerMillion(b.id)
+                if ca != cb { return ca < cb }
+                // Equal cost (e.g. two flat-rate/local $0 providers) → prefer the stronger one.
+                return ModelEscalator.rank(a.id, verdicts: verdicts) > ModelEscalator.rank(b.id, verdicts: verdicts)
+            }
+        }
     }
 
     /// Interactive startup picker for a bare `kist` REPL. It is deliberately TTY-only so piped

@@ -67,6 +67,25 @@ final class KistRunnerSafetyTests: XCTestCase {
                        "the old first-with-key default (which made MiMo the silent default) must be gone")
     }
 
+    // Dogfood 2026-08-06 ("why only gemini"): the single-model default must ALSO consider available
+    // subscription CLIs (claude-cli/codex-cli), which outrank the keyed-cloud APIs — otherwise gemini
+    // always wins because the CLIs (requiresAPIKey == false) were excluded from the pool entirely.
+    // Luke's call: strongest leads, team stays opt-in (/council, /ultra, /role).
+    func testDefaultProviderConsidersAvailableSubscriptionCLIs() throws {
+        let source = try runnerSource()
+        XCTAssertTrue(source.contains("isLocallyAvailable()"),
+                      "resolveProvider must include subscription CLIs that pass the bounded availability probe")
+        XCTAssertTrue(source.contains("let eligible = subscriptionReady + keyedCloud"),
+                      "the default pool must be subscription-ready CLIs UNION keyed cloud, ranked together")
+    }
+
+    // The ranking that makes 'strongest leads' true: claude-cli/codex-cli outrank the cloud APIs.
+    func testSubscriptionCLIsOutrankKeyedCloudInEscalator() {
+        XCTAssertGreaterThan(ModelEscalator.rank("claude-cli"), ModelEscalator.rank("gemini"))
+        XCTAssertGreaterThan(ModelEscalator.rank("codex-cli"), ModelEscalator.rank("gemini"))
+        XCTAssertGreaterThan(ModelEscalator.rank("gemini"), ModelEscalator.rank("deepseek"))
+    }
+
     // BUG 3 regression: self-heal repair specialists that inherit the model must be escalated to the
     // strongest available provider (not the weak session default). Pin the wiring on real source.
     func testSelfHealRepairSpecialistsEscalateToStrongestModel() throws {

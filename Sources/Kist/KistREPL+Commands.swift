@@ -94,6 +94,26 @@ extension KistREPL {
                 case "usage", "cost", "tokens":
                     await printSessionUsage()
                     return .handled
+                case "select", "power", "economy", "budget":
+                    // Choose how the DEFAULT model is picked when nothing is pinned: by POWER (strongest)
+                    // or by COST (cheapest). Persists to config so it sticks; explicit /model still wins.
+                    // `/power` and `/economy` are direct shortcuts; `/select cost|power` is the general form.
+                    let requested: ProviderSelectionPolicy?
+                    switch name.lowercased() {
+                    case "power":   requested = .power
+                    case "economy", "budget": requested = .cost
+                    default:        requested = ProviderSelectionPolicy(loose: args.trimmingCharacters(in: .whitespaces))
+                    }
+                    guard let policy = requested else {
+                        print("usage: /select cost | /select power   (or the shortcuts /power · /economy) — chooses how the DEFAULT model is picked; explicit /model always wins")
+                        return .handled
+                    }
+                    let saved = KistConfig.writeSelectBy(policy)
+                    print("\u{001B}[36m◇ default selection: \(policy.label)\u{001B}[0m"
+                        + (saved ? " · saved (applies to new default picks + next launch)"
+                                 : " · \u{001B}[31mcouldn't save to config\u{001B}[0m — set it with --by-\(policy.rawValue)"))
+                    print("\u{001B}[2m  power = strongest (claude-cli/codex-cli/gemini lead) · cost = cheapest per-token (local/flat-rate subs + cheap APIs lead). This session stays on \(Self.render(roleSelection.fallback)); switch now with /model.\u{001B}[0m")
+                    return .handled
                 case "autonomy", "activity", "pulse":
                     // What the AI actually spent its time doing this session — Thinking / Researching /
                     // Coding / Running / Delegating — so you can see WHY a turn took what it took.

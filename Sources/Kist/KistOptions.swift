@@ -6,6 +6,9 @@ struct KistOptions {
     var goal: String?
     var providerId: String?
     var model: String?
+    /// Default-model selection policy: .power (strongest, default) or .cost (cheapest). Overridden by
+    /// an explicit -p/--provider. Set via --by-cost/--by-power or config "selectBy"/the /cost·/power REPL cmds.
+    var selectBy: ProviderSelectionPolicy?
     var project: String
     // 40, not 12 (dogfood 2026-08-06): every real build task (write→compile→run→fix→verify) died at
     // the 12-step ceiling with ~$1.30 spent and nothing verified, across 6 consecutive runs. The loop's
@@ -176,6 +179,8 @@ struct KistOptions {
             case "--resume":                o.resumeId = next()
             case "--resume-last":           o.resumeLast = true
             case "--provider", "-p":        o.providerId = next()
+            case "--by-cost", "--cost":     o.selectBy = .cost
+            case "--by-power", "--power":   o.selectBy = .power
             case "--model", "-m":           o.model = next()
             case "--project", "-C":         if let v = next() { o.project = v }
             case "--max-iterations":        if let v = next(), let n = Int(v) { o.maxIterations = n }
@@ -367,6 +372,9 @@ struct KistOptions {
     OPTIONS:
       -p, --provider <id>           Provider id (default: first configured cloud provider, else local).
       -m, --model <id>              Model id (default: the provider's default).
+          --by-cost / --by-power    Pick the DEFAULT model by cost (cheapest) or power (strongest,
+                                    default). Persist with config "selectBy" or the /power · /economy
+                                    REPL commands. An explicit -p/--provider always overrides.
       -C, --project <path>          Project root the agent is confined to (default: current dir).
           --max-iterations <n>      Max plan→act steps (default: 40).
           --allow-shell             Enable the run_command tool (OFF by default).
