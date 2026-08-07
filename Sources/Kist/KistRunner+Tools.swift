@@ -19,7 +19,11 @@ extension KistRunner {
         if opts.fast { return opts.noMemory ? [] : [CortexTool()] }
         var extraTools: [any AgentTool] = [ReadSpreadsheetTool(), QueryDataTool(), MediaClipTool(),
                                            SecurityAuditTool(), GovernanceReportTool(), WorkflowTool(),
-                                           ManageTasksTool(), BrowserTool(allowedHosts: fetchAllowedHosts)]
+                                           ManageTasksTool(), BrowserTool(allowedHosts: fetchAllowedHosts),
+                                           // Offline COBOL specialist: a strong agent DRIVES a COBOL build and
+                                           // calls this to generate the actual COBOL via the local cobol-jeeves
+                                           // model (it writes COBOL but can't drive the agent loop — see the tool).
+                                           CobolGenerateTool(providers: registry)]
         // Agent-writable personal memory (the Cortex): the MODEL remembers durable preferences,
         // project facts, and journals its work across sessions — Claude-style memory, more personal.
         if !opts.noMemory { extraTools.append(CortexTool()) }
@@ -130,6 +134,14 @@ extension KistRunner {
         base.append(PentestTool())                                    // authorized security testing (allowlist + approval + audit; REPL-only, not headless/mcp)
         base.append(contentsOf: extraTools)                            // media/data understanding tools
         base.append(contentsOf: mcpTools.map { $0 as any AgentTool })
+        // Self-authored (self__) tools — capabilities kist GREW for itself via the closed evolution loop,
+        // loaded at runtime with no recompile. Every one runs mandatorily-sandboxed via ScriptTool. Fail-soft:
+        // a malformed manifest is skipped, never blocks startup. Only the promote path ever writes here.
+        let selfAuthored = SelfAuthoredToolStore(projectRoot: projectRoot).load()
+        if !selfAuthored.isEmpty {
+            note("self-evolved · \(selfAuthored.count) self__ tool(s) loaded · \(selfAuthored.map { $0.name }.joined(separator: ", "))")
+            base.append(contentsOf: selfAuthored.map { $0 as any AgentTool })
+        }
         let code = await body(ToolRegistry(base))
         await mcp.shutdownAll()
         return code
