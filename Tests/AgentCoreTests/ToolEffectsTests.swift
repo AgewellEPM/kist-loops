@@ -482,4 +482,18 @@ final class ToolEffectsTests: XCTestCase {
         XCTAssertEqual(decoded.mutationEvidence, .mayMutate)
         XCTAssertFalse(decoded.confirmsMutation, "legacy observations without evidence must fail closed")
     }
+
+    // cobol_generate is a HYBRID (2026-08-07): WITH a path it writes a .cbl (source mutation -> the
+    // driving agent must then cobc it, per verify-before-done); WITHOUT a path it just returns COBOL
+    // text (no artifact, no mutation). Closes the fabricate-the-build gap the first E2E exposed.
+    func testCobolGeneratePathIsSourceMutationTextIsNot() {
+        let wrote = ToolEffectCatalog.observe(tool: "cobol_generate",
+                                              arguments: ["path": "payroll.cbl"],
+                                              outcomeMetadata: ["changed": "true"])
+        XCTAssertEqual(wrote.mutation, .source, "a written .cbl is a source mutation")
+        XCTAssertTrue(wrote.confirmsMutation, "changed:true confirms the write")
+        let textOnly = ToolEffectCatalog.observe(tool: "cobol_generate",
+                                                 arguments: ["request": "hello"])
+        XCTAssertEqual(textOnly.mutation, .none, "a path-less call only returns text - not a mutation")
+    }
 }

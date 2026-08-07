@@ -158,6 +158,11 @@ public enum ToolEffectCatalog {
                 classified = ToolEffectObservation(mutation: .nonSource)
             } else if tool == "notebook_edit" {
                 classified = ToolEffectObservation(mutation: .source)
+            } else if tool == "cobol_generate" {
+                // Only a mutation when it wrote a file (path present). A path-less call just returns
+                // COBOL text — no artifact, no mutation. When present, classify by the .cbl extension.
+                let paths = stringValues(["path"], in: arguments)
+                classified = paths.isEmpty ? .none : mutationObservation(paths: paths)
             } else if tool == "apply_patch" {
                 classified = mutationObservation(paths: patchPaths(arguments["patch"] as? String ?? ""))
             } else { // move_file
@@ -308,6 +313,9 @@ public enum ToolEffectCatalog {
     private static let confirmedChangeTools: Set<String> = [
         "write_file", "edit_file", "apply_patch", "notebook_edit", "move_file",
         "make_dir", "create_directory",
+        // cobol_generate WITH a `path` writes a .cbl (source); handled arg-aware in observe() so a
+        // path-write is a real mutation (→ verify-before-done demands a cobc), but a text-only call is not.
+        "cobol_generate",
     ]
     private static let mediaArtifactTools: Set<String> = [
         "generate_image", "edit_image", "generate_audio", "generate_video", "extract_clip",

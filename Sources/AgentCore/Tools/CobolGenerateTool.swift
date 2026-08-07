@@ -66,9 +66,12 @@ public struct CobolGenerateTool: AgentTool {
                     let abs = try context.resolvedPath(rawPath, mustExist: false)
                     try (cobol + "\n").write(toFile: abs, atomically: true, encoding: .utf8)
                     let lines = cobol.split(separator: "\n", omittingEmptySubsequences: false).count
+                    // `changed:true` is the effect-catalog's mutation-confirmation signal — a written .cbl
+                    // is a SOURCE mutation, so verify-before-done will (correctly) require a real `cobc`
+                    // after this before "done" is accepted (closes the fabricate-the-build gap).
                     return ToolResult(success: true,
                                       output: "wrote \(lines) lines of COBOL to \(rawPath) — now compile it with `cobc -x -o <bin> \(rawPath)` and run it.\n\n" + cobol,
-                                      metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true"])
+                                      metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true", "changed": "true"])
                 } catch {
                     return .failure("cobol_generate produced COBOL but could not write it to \(rawPath): \(error)")
                 }
