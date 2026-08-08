@@ -916,23 +916,39 @@ final class DeploymentProvenanceTests: XCTestCase {
             "#!/bin/sh\n# cache saturation candidate\n",
             to: candidate,
             executable: true)
+        // 2026-08-08: at the cap, publication now EVICTS the oldest and SUCCEEDS (it used to wedge —
+        // once 64 accumulated every real deploy died here, freezing all promotions for hours).
         result = try publish()
-        XCTAssertNotEqual(
-            result.status,
-            0,
-            "publication exceeded the bounded 64-artifact retention cache")
-        result = try retainedHash(publishedHash)
         XCTAssertEqual(
             result.status,
             0,
-            "a rejected saturated publication damaged retained evidence: \(result.stderr)")
+            "at the 64-artifact cap, publication must evict the oldest and succeed, not wedge: \(result.stderr)")
+        let saturationHash = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(saturationHash.count, 64)
+        // the freshly published artifact is retained…
+        result = try retainedHash(saturationHash)
+        XCTAssertEqual(result.status, 0, "the just-published artifact must survive eviction: \(result.stderr)")
+        // …and the cache stayed bounded at ≤ 64 (something old was dropped).
+        let boundedCount = try FileManager.default
+            .contentsOfDirectory(atPath: retainedDirectory.path)
+            .filter { $0.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil }
+            .count
+        XCTAssertLessThanOrEqual(boundedCount, 64, "the retention cache must stay bounded after eviction")
+        // Tolerant cleanup — one filler may already have been evicted.
         for filler in fillers {
-            try FileManager.default.removeItem(at: filler)
+            try? FileManager.default.removeItem(at: filler)
         }
+        // Re-publish the pilot so `retained` (publishedHash) exists for the hardlink checks below,
+        // regardless of whether it was the one evicted above.
         try write(
             "#!/bin/sh\n# exact unsigned candidate\n",
             to: candidate,
             executable: true)
+        result = try publish()
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(
+            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            publishedHash)
 
         let hardlink = retainedDirectory.appendingPathComponent("retained-alias")
         try FileManager.default.linkItem(at: retained, to: hardlink)
