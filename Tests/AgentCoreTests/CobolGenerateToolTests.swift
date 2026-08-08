@@ -15,6 +15,29 @@ final class CobolGenerateToolTests: XCTestCase {
         XCTAssertTrue(tool.parameters.contains { $0.name == "existing" && !$0.required })
     }
 
+    // Phase 1 (self-verify): an `expect` param + a bounded self-heal loop that compiles/runs and
+    // REFUSES to succeed on broken or wrong COBOL. Live behavior is proven by E2E; here we pin the
+    // contract + the flow on source so it can't silently regress to "return text and hope".
+    func testHasOptionalExpectParam() {
+        let tool = CobolGenerateTool(providers: ProviderRegistry(providers: ProviderCatalog.all,
+                                                                 keyStore: NullKeyStoreForCobolTool()))
+        XCTAssertTrue(tool.parameters.contains { $0.name == "expect" && !$0.required })
+        XCTAssertEqual(CobolGenerateTool.maxAttempts, 2, "one self-heal round, bounded cost")
+    }
+
+    func testSelfVerifyFlowCompilesAndRunsViaSpawn() throws {
+        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/Tools/CobolGenerateTool.swift"),
+                             encoding: .utf8)
+        XCTAssertTrue(src.contains("RunCommandTool.resolveExecutable(\"cobc\""), "must compile with cobc")
+        XCTAssertTrue(src.contains("RunCommandTool.spawnAndCollect("), "must spawn confined (reuse, no bespoke Process)")
+        XCTAssertTrue(src.contains("ran.contains(expect)"), "with expect it must RUN and check the output")
+        XCTAssertTrue(src.contains("LOGICALLY WRONG") && src.contains("does not compile"),
+                      "must FAIL (not launder) on a bad compile or wrong output")
+        XCTAssertTrue(src.contains("cobc not found"), "cobc-absent must fail-soft, not crash")
+    }
+
     func testHasOptionalPathParam() {
         let tool = CobolGenerateTool(providers: ProviderRegistry(providers: ProviderCatalog.all,
                                                                  keyStore: NullKeyStoreForCobolTool()))

@@ -11,11 +11,12 @@ import Foundation
 /// specialist does the one thing it's great at — offline, no key, no cost.
 public struct CobolGenerateTool: AgentTool {
     public let name = "cobol_generate"
-    public let description = "Generate GnuCOBOL-compatible COBOL source from a plain-English request "
-        + "using the LOCAL, OFFLINE cobol-jeeves specialist model. Returns COBOL source only. Use this "
-        + "for ALL COBOL codegen (writing or modifying a program) instead of writing COBOL yourself — "
-        + "it is a fine-tuned COBOL expert. Then write the result to a .cbl file and compile with `cobc "
-        + "-x`. Offline, no key, no cost."
+    public let description = "Generate GnuCOBOL COBOL from a plain-English request using the LOCAL, "
+        + "OFFLINE cobol-jeeves specialist. Use this for ALL COBOL codegen instead of writing COBOL "
+        + "yourself. With a `path` it WRITES + COMPILES the file (cobc) and returns only on a clean "
+        + "build; add `expect` (a substring of the program's stdout, e.g. '120') to also RUN it and "
+        + "verify the output — the tool self-heals once and REFUSES to succeed on broken or wrong "
+        + "COBOL. Offline, no key, no cost."
     public let parameters = [
         ToolParameter(name: "request", type: "string",
                       description: "What COBOL to write, in plain English (e.g. 'read employees.dat, a CSV of name,hours,rate, and print each employee's gross pay with 1.5x overtime past 40 hours').",
@@ -24,9 +25,16 @@ public struct CobolGenerateTool: AgentTool {
                       description: "Optional existing COBOL source to MODIFY instead of writing from scratch.",
                       required: false),
         ToolParameter(name: "path", type: "string",
-                      description: "Optional project-relative path (e.g. 'payroll.cbl'). If given, the generated COBOL is WRITTEN to that file (confined to the project root) so the artifact is real — then just compile it with cobc. Recommended.",
+                      description: "Optional project-relative path (e.g. 'payroll.cbl'). If given, the generated COBOL is WRITTEN to that file (confined to the project root) AND compiled with cobc — so the artifact is real and proven to build. Recommended.",
+                      required: false),
+        ToolParameter(name: "expect", type: "string",
+                      description: "Optional expected substring of the program's stdout (e.g. '120'). If given (with a path), the tool COMPILES + RUNS the program and only succeeds when the output contains this — self-healing once if the compile fails or the logic is wrong. Use it to guarantee the generated COBOL is actually correct.",
                       required: false),
     ]
+
+    /// Total model attempts (1 self-heal). The 7B specialist writes compilable COBOL but its logic can
+    /// be wrong; one feedback round catches most syntax/simple-logic misses without unbounded cost.
+    static let maxAttempts = 2
 
     private let providers: ProviderRegistry
     public init(providers: ProviderRegistry) { self.providers = providers }
@@ -37,51 +45,108 @@ public struct CobolGenerateTool: AgentTool {
             return .failure("cobol_generate needs a 'request' describing what COBOL to write")
         }
         let existing = (arguments["existing"] as? String) ?? ""
-        let system = "You are an expert GnuCOBOL programmer. Output ONLY valid, complete, compilable "
-            + "COBOL source — no prose, no explanation, no markdown code fences. Target `cobc -x`. "
-            + "Include the IDENTIFICATION / DATA / PROCEDURE divisions as needed and end with STOP RUN."
-        let user = existing.isEmpty
-            ? "Write COBOL for: \(request)"
-            : "Modify this COBOL as requested; output the FULL updated source only.\n\nRequest: \(request)\n\nExisting source:\n\(existing)"
+        let rawPath = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let expect = (arguments["expect"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        do {
-            // allowFallback:false — MUST stay on the offline COBOL specialist. The whole point is a
-            // local, no-cost COBOL expert; silently falling back to a cloud model would defeat it (and
-            // spend money/keys the caller didn't ask for).
-            let (text, _) = try await providers.completeWithUsage(
-                providerId: "cobol", model: nil,
-                messages: [ChatMessage(role: .user, content: user)],
-                settings: ModelSettings(temperature: 0.2, maxTokens: 2048, systemPrompt: system),
-                allowFallback: false)
-            let cobol = Self.stripCodeFences(text).trimmingCharacters(in: .whitespacesAndNewlines)
+        // FEEDBACK-DRIVEN generation: on a compile error or wrong output we regenerate ONCE with the
+        // failure described, so the specialist self-corrects instead of shipping broken/wrong COBOL.
+        var feedback = ""
+        var lastCobol = ""
+        var lastDetail = ""
+        for attempt in 1...Self.maxAttempts {
+            let cobol: String
+            do {
+                cobol = try await generate(request: request, existing: existing, feedback: feedback)
+            } catch {
+                return .failure("cobol_generate failed — the offline cobol model is unavailable "
+                    + "(start Ollama and `ollama pull cobol-jeeves-ft`): \(error)")
+            }
             guard !cobol.isEmpty else {
                 return .failure("cobol_generate: the offline model returned no source — is Ollama running and `cobol-jeeves-ft` pulled?")
             }
-            // If a path was given, PERSIST the source (confined to the project root) so the artifact is
-            // real and can't be fabricated downstream — the caller then only has to `cobc` it. Reuses the
-            // same ConfinedRoot boundary the file tools use (no escape, no symlink follow).
-            if let rawPath = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !rawPath.isEmpty {
-                do {
-                    let abs = try context.resolvedPath(rawPath, mustExist: false)
-                    try (cobol + "\n").write(toFile: abs, atomically: true, encoding: .utf8)
-                    let lines = cobol.split(separator: "\n", omittingEmptySubsequences: false).count
-                    // `changed:true` is the effect-catalog's mutation-confirmation signal — a written .cbl
-                    // is a SOURCE mutation, so verify-before-done will (correctly) require a real `cobc`
-                    // after this before "done" is accepted (closes the fabricate-the-build gap).
-                    return ToolResult(success: true,
-                                      output: "wrote \(lines) lines of COBOL to \(rawPath) — now compile it with `cobc -x -o <bin> \(rawPath)` and run it.\n\n" + cobol,
-                                      metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true", "changed": "true"])
-                } catch {
-                    return .failure("cobol_generate produced COBOL but could not write it to \(rawPath): \(error)")
-                }
+            lastCobol = cobol
+
+            // No path ⇒ pure codegen (no artifact, no verification). Return the source.
+            guard !rawPath.isEmpty else {
+                return ToolResult(success: true, output: cobol,
+                                  metadata: ["provider": "cobol", "offline": "true"])
             }
-            return ToolResult(success: true, output: cobol,
-                              metadata: ["provider": "cobol", "offline": "true"])
-        } catch {
-            return .failure("cobol_generate failed — the offline cobol model is unavailable "
-                + "(start Ollama and `ollama pull cobol-jeeves-ft`): \(error)")
+
+            // Persist to the confined path (same ConfinedRoot boundary the file tools use).
+            let abs: String
+            do { abs = try context.resolvedPath(rawPath, mustExist: false) }
+            catch { return .failure("cobol_generate produced COBOL but could not resolve \(rawPath): \(error)") }
+            do { try (cobol + "\n").write(toFile: abs, atomically: true, encoding: .utf8) }
+            catch { return .failure("cobol_generate produced COBOL but could not write it to \(rawPath): \(error)") }
+            let lines = cobol.split(separator: "\n", omittingEmptySubsequences: false).count
+
+            // SELF-VERIFY: compile it. cobc absent ⇒ fail-soft (can't verify here; the file is real).
+            let env = RunCommandTool.scrubbedEnvironment()
+            guard let cobc = RunCommandTool.resolveExecutable("cobc", env: env, cwd: context.projectRoot) else {
+                return ToolResult(success: true,
+                                  output: "wrote \(lines) lines of COBOL to \(rawPath). (cobc not found — compile it yourself to verify.)\n\n" + cobol,
+                                  metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true", "changed": "true"])
+            }
+            let stem = ((rawPath as NSString).lastPathComponent as NSString).deletingPathExtension
+            let binName = stem.isEmpty ? "a.out" : stem
+            let compile = await RunCommandTool.spawnAndCollect(
+                launchPath: cobc, launchArgs: ["-x", "-o", binName, rawPath],
+                cwd: context.projectRoot, timeout: 60)
+            if !compile.success {
+                lastDetail = "compile failed: " + (compile.error ?? compile.output)
+                feedback = "The previous COBOL FAILED to compile with `cobc -x`. Fix it. Compiler output:\n"
+                    + String((compile.error ?? compile.output).prefix(1500))
+                if attempt < Self.maxAttempts { continue }
+                return .failure("cobol_generate: the generated COBOL does not compile after \(attempt) attempts.\n\(lastDetail)\n\n(last source written to \(rawPath))")
+            }
+
+            // Compiled. If no `expect`, that's a real, grounded success — the source builds.
+            guard !expect.isEmpty else {
+                return ToolResult(success: true,
+                                  output: "wrote \(lines) lines of COBOL to \(rawPath) and it COMPILED clean with cobc.\n\n" + cobol,
+                                  metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true", "changed": "true", "compiled": "true"])
+            }
+
+            // RUN it and check the output contains the expected text.
+            guard let binAbs = RunCommandTool.resolveExecutable("./" + binName, env: env, cwd: context.projectRoot) else {
+                return .failure("cobol_generate compiled \(rawPath) but the binary \(binName) is missing — cannot verify output")
+            }
+            let run = await RunCommandTool.spawnAndCollect(
+                launchPath: binAbs, launchArgs: [], cwd: context.projectRoot, timeout: 30)
+            let ran = run.output
+            if ran.contains(expect) {
+                return ToolResult(success: true,
+                                  output: "wrote \(lines) lines to \(rawPath), COMPILED, and RAN — output contains \"\(expect)\" ✓\n\nprogram output:\n\(ran)\n\nsource:\n\(cobol)",
+                                  metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true", "changed": "true", "compiled": "true", "ran": "true", "expect_met": "true"])
+            }
+            lastDetail = "compiled + ran, but output \"\(ran.prefix(120))\" does not contain expected \"\(expect)\""
+            feedback = "The previous COBOL compiled and RAN but produced the WRONG output. It printed:\n"
+                + String(ran.prefix(500)) + "\nExpected the output to contain: \(expect)\nFix the LOGIC so it does."
+            if attempt < Self.maxAttempts { continue }
+            return .failure("cobol_generate: after \(attempt) attempts the program compiles+runs but is LOGICALLY WRONG — \(lastDetail). Not claiming success on wrong output. (last source at \(rawPath))")
         }
+        // Unreachable in practice (the loop returns), but keep the compiler happy + honest.
+        return .failure("cobol_generate exhausted its attempts. Last detail: \(lastDetail.isEmpty ? "no source produced" : lastDetail)\n\(lastCobol)")
+    }
+
+    /// One model call to the OFFLINE cobol provider. `allowFallback:false` keeps it local (never a
+    /// cloud model). `feedback` (compiler error / wrong-output note) is appended so it self-corrects.
+    private func generate(request: String, existing: String, feedback: String) async throws -> String {
+        let system = "You are an expert GnuCOBOL programmer. Output ONLY valid, complete, compilable "
+            + "COBOL source — no prose, no explanation, no markdown code fences. Write a STANDALONE "
+            + "EXECUTABLE program for `cobc -x`: NO LINKAGE SECTION, NO `USING` clause on PROCEDURE "
+            + "DIVISION, NO GOBACK — compute everything in WORKING-STORAGE and end with STOP RUN. "
+            + "Include the IDENTIFICATION / DATA / PROCEDURE divisions as needed."
+        var user = existing.isEmpty
+            ? "Write COBOL for: \(request)"
+            : "Modify this COBOL as requested; output the FULL updated source only.\n\nRequest: \(request)\n\nExisting source:\n\(existing)"
+        if !feedback.isEmpty { user += "\n\n" + feedback }
+        let (text, _) = try await providers.completeWithUsage(
+            providerId: "cobol", model: nil,
+            messages: [ChatMessage(role: .user, content: user)],
+            settings: ModelSettings(temperature: 0.2, maxTokens: 2048, systemPrompt: system),
+            allowFallback: false)
+        return Self.stripCodeFences(text).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The model is told not to, but small models still sometimes wrap output in ``` fences — strip a
