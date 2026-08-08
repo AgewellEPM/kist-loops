@@ -178,7 +178,7 @@ try:
         digest.update(block); total+=len(block)
     if total!=before.st_size or fp(os.fstat(sfd))!=identity or fp(os.lstat(source))!=identity:
         raise SystemExit(1)
-    target=digest.hexdigest(); count=0; retained_bytes=0; removed=False
+    target=digest.hexdigest(); count=0; retained_bytes=0; removed=False; retained_meta=[]
     for name in os.listdir(dfd):
         if name==temp: continue
         if re.fullmatch(r"\.unsigned-kist\.[0-9a-f]{32}",name):
@@ -195,10 +195,28 @@ try:
                     or retained.st_size>512*1024*1024):
                 raise SystemExit(1)
             count+=1; retained_bytes+=retained.st_size
+            retained_meta.append((retained.st_mtime_ns,name,retained.st_size))
         else:
             raise SystemExit(1)
+    # AUTO-EVICT oldest-first instead of wedging every deploy at the cap (2026-08-08: with no
+    # eviction, once 64 SHA artifacts accumulated EVERY deploy died here). These are build-time
+    # provenance evidence, not the deployed binary (rollback uses the v3 release archives), so
+    # dropping the oldest to make room for the one being published is safe. Same fail-closed
+    # security posture: re-stat under the dir fd with O_NOFOLLOW and re-check the exact identity
+    # before unlink — never widen what we delete.
+    retained_meta.sort()  # oldest mtime first
+    idx=0
+    while (count+1>MAX_RETAINED or retained_bytes+before.st_size>MAX_RETAINED_BYTES) and idx<len(retained_meta):
+        _,victim,vsize=retained_meta[idx]; idx+=1
+        if victim==target: continue
+        vst=os.stat(victim,dir_fd=dfd,follow_symlinks=False)
+        if (not stat.S_ISREG(vst.st_mode) or vst.st_uid!=uid or vst.st_nlink!=1
+                or vst.st_mode&0o022 or vst.st_size!=vsize):
+            raise SystemExit(1)
+        os.unlink(victim,dir_fd=dfd); removed=True
+        count-=1; retained_bytes-=vsize
     if removed: os.fsync(dfd)
-    if count>=MAX_RETAINED or retained_bytes+before.st_size>MAX_RETAINED_BYTES:
+    if count+1>MAX_RETAINED or retained_bytes+before.st_size>MAX_RETAINED_BYTES:
         raise SystemExit(1)
     os.fchmod(out,0o755); os.fsync(out)
     if (dfp(os.fstat(dfd))!=did

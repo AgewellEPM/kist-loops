@@ -255,6 +255,19 @@ final class DeploymentProvenanceTests: XCTestCase {
             "the deployment gate must never rewrite tracked source to stamp itself")
     }
 
+    // The unsigned-artifact provenance cache must AUTO-EVICT the oldest at its cap, not wedge every
+    // deploy (2026-08-08: at 64 retained artifacts, publish_unsigned_artifact failed and froze ALL
+    // deploys for hours). Pin the eviction + that it stays fail-closed (re-stat before unlink).
+    func testProvenanceCacheAutoEvictsAtCap() throws {
+        let s = try source("scripts/kist-rebuild")
+        XCTAssertTrue(s.contains("AUTO-EVICT oldest-first"),
+                      "the provenance cache must evict, not fail, at the retention cap")
+        XCTAssertTrue(s.contains("retained_meta.sort()") && s.contains("os.unlink(victim,dir_fd=dfd)"),
+                      "eviction must drop the OLDEST (sorted by mtime) under the dir fd")
+        XCTAssertTrue(s.contains("vst.st_size!=vsize"),
+                      "eviction must re-stat + verify identity before unlink (fail-closed)")
+    }
+
     func testCaptainWrapperSourcesSecretsAndPreservesExplicitAuthority() throws {
         let root = try temporaryDirectory(named: "wrapper")
         let home = root.appendingPathComponent("home", isDirectory: true)
