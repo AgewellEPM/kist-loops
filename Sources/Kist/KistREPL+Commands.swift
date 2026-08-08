@@ -1169,9 +1169,11 @@ extension KistREPL {
                 case "ablation", "flywheel":
                     // Run the COLD-vs-WARM ablation ORACLE: is the accumulated state (self__ tools + recall)
                     // actually compounding on held-out work? Real turns × 2 arms; the reading can be flat or
-                    // negative (that's the oracle being honest, not a failure).
+                    // negative (that's the oracle being honest, not a failure). `/ablation capability` uses
+                    // the capability-exercising corpus (where an advantage can actually appear); default golden.
                     guard let ablation else { print("\u{001B}[31m/ablation isn't available here\u{001B}[0m"); return .handled }
-                    _ = await ablation()
+                    let corpus = args.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("cap") ? "capability" : "golden"
+                    _ = await ablation(corpus)
                     return .handled
                 case "competitive", "compete", "competitor", "vs":
                     // Point Kist at a competitor/URL/product and get a deep, cited R&D cross-comparison

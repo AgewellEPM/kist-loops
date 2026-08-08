@@ -28,11 +28,25 @@ public enum EvalGoldenSuite {
     /// {name, prompt, assertions:[{contains:"…"} | {toolCalled:"…"} | "healthy" | "noToolFailures" | {maxSteps:n}]}).
     /// Malformed custom files are ignored (fail-soft) — the built-ins always run.
     public static func cases(projectRoot: String) -> [EvalCase] {
-        builtIn + loadCustom(projectRoot: projectRoot)
+        builtIn + loadCustom(projectRoot: projectRoot, file: "suite.json")
     }
 
-    static func loadCustom(projectRoot: String) -> [EvalCase] {
-        let path = projectRoot + "/.kist/eval/suite.json"
+    /// The CAPABILITY-exercising held-out corpus for the ablation oracle (P0.5). Distinct from the golden
+    /// regression suite: these are tasks where ACCUMULATED state (a `self__` tool, a recalled winning
+    /// approach) can help — the surface on which a WARM-vs-COLD advantage can actually appear. The golden
+    /// suite is basic-behavior checks (both arms pass 100% ⇒ +0%); this is where compounding shows up.
+    /// Empty built-in on purpose: it's seeded from `.kist/eval/capability-suite.json` and, later, grown by
+    /// the flywheel (a promoted skill deposits a capability case). Honest note: with only a trivial accumulated
+    /// tool the advantage may still read ~0 — the corpus is the right SURFACE; a non-zero number needs
+    /// non-trivial accumulated capability + the read-back wires (P1/P2).
+    public static let capabilityBuiltIn: [EvalCase] = []
+
+    public static func capabilityCases(projectRoot: String) -> [EvalCase] {
+        capabilityBuiltIn + loadCustom(projectRoot: projectRoot, file: "capability-suite.json")
+    }
+
+    static func loadCustom(projectRoot: String, file: String) -> [EvalCase] {
+        let path = projectRoot + "/.kist/eval/" + file
         guard let data = FileManager.default.contents(atPath: path),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
         return raw.compactMap { obj -> EvalCase? in

@@ -31,7 +31,7 @@ final class KistREPL {
     var evolve: ((_ brief: String) async -> Int32)? = nil
     /// `/ablation` — run the COLD-vs-WARM ablation oracle: is the accumulated state actually compounding on
     /// held-out work? Reports an un-fakeable advantage that can be flat or negative.
-    var ablation: (() async -> Int32)? = nil
+    var ablation: ((_ corpus: String) async -> Int32)? = nil
     /// Forge a specialist from a plain-English role description (AgentForge), bounded by the loop's tool
     /// ceiling, validated, and saved to the registry. nil = forging unavailable in this mode.
     var forge: ((_ description: String, _ roles: RoleBindings) async -> Void)? = nil

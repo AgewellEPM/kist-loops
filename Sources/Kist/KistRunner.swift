@@ -798,12 +798,12 @@ enum KistRunner {
                     return await runEvolve(opts, brief: brief, registry: registry, root: root,
                                            providerId: providerId, model: model)
                 }
-                repl.ablation = {
-                    // Run the COLD-vs-WARM ablation oracle (real turns × 2 arms).
+                repl.ablation = { corpus in
+                    // Run the COLD-vs-WARM ablation oracle (real turns × 2 arms) on the named corpus.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
                     return await runAblation(opts, registry: registry, root: root, tools: tools,
-                                             context: context, providerId: providerId, model: model)
+                                             context: context, providerId: providerId, model: model, corpus: corpus)
                 }
                 repl.forge = { description, roles in
                     // AgentForge: generate a specialist bounded by the loop's tool ceiling, validate, save.

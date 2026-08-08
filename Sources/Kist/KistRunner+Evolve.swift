@@ -8,14 +8,23 @@ extension KistRunner {
     /// the oracle telling the truth, not a failure. Costs real turns (2 arms × N cases).
     static func runAblation(_ opts: KistOptions, registry: ProviderRegistry, root: String,
                             tools: ToolRegistry, context: ToolContext,
-                            providerId: String, model: String?) async -> Int32 {
+                            providerId: String, model: String?, corpus: String = "golden") async -> Int32 {
         let color = KistREPL.stdoutColorEnabled(projectRoot: root)
         func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
-        let cases = EvalGoldenSuite.cases(projectRoot: root)
-        guard !cases.isEmpty else { print(c("31", "ablation · no golden held-out cases")); return 1 }
+        // P0.5: the CAPABILITY corpus is where a WARM advantage can actually appear (the golden suite is
+        // basic-behavior checks that both arms pass 100% → +0%). `/ablation capability` measures compounding.
+        let isCapability = corpus.lowercased().hasPrefix("cap")
+        let cases = isCapability ? EvalGoldenSuite.capabilityCases(projectRoot: root)
+                                 : EvalGoldenSuite.cases(projectRoot: root)
+        let corpusTag = isCapability ? "capability-v\(EvalGoldenSuite.version)" : "golden-v\(EvalGoldenSuite.version)"
+        guard !cases.isEmpty else {
+            print(c("31", "ablation · no \(isCapability ? "capability" : "golden") held-out cases")
+                  + (isCapability ? c("2", " — seed .kist/eval/capability-suite.json with tasks that exercise accumulated capability") : ""))
+            return 1
+        }
         // The WARM accumulated state we toggle: self__ tools + the recall tool (semantic memory read-back).
         let warmOnly = tools.all().filter { $0.name.hasPrefix("self__") || $0.name == "recall" }.map { $0.name }
-        print(c("36;1", "🔬 ablation") + c("2", " · COLD (no \(warmOnly.isEmpty ? "accumulated state" : warmOnly.joined(separator: "/"))) vs WARM · \(cases.count) held-out case(s) · \(providerId)"))
+        print(c("36;1", "🔬 ablation") + c("2", " · \(corpusTag) · COLD (no \(warmOnly.isEmpty ? "accumulated state" : warmOnly.joined(separator: "/"))) vs WARM · \(cases.count) held-out case(s) · \(providerId)"))
         if warmOnly.isEmpty {
             print(c("33", "│ ⚠ WARM has no accumulated state yet (no self__ tools, no recall) — expect ≈0 advantage. That's honest: nothing has compounded yet."))
         }
@@ -43,7 +52,7 @@ extension KistRunner {
         // accumulatedFrom = [] : the golden suite did NOT feed the warm state (memory/self__ came from real
         // use), so the held-out corpus is disjoint by construction. The guard still enforces it.
         let result = await AblationRunner.run(
-            heldOut: cases, accumulatedFrom: [], corpusHash: "golden-v\(EvalGoldenSuite.version)",
+            heldOut: cases, accumulatedFrom: [], corpusHash: corpusTag,
             epoch: Date().timeIntervalSince1970,
             cold: armAgent(cold: true), warm: armAgent(cold: false), maxIterations: opts.maxIterations)
 
@@ -51,14 +60,17 @@ extension KistRunner {
             print(c("31", "└ ablation · REFUSED (contaminated corpus or malformed) — no reading recorded")); return 1
         }
         AblationHistoryStore(projectRoot: root).record(r)
-        let history = AblationHistoryStore(projectRoot: root).load()
-        let slope = AblationHarness.advantageSlope(history)
+        // Slope is only meaningful WITHIN one corpus — comparing a golden reading to a capability reading as
+        // a "trend" is apples-to-oranges (a rising line that isn't real is the growth-hack we reject). Filter
+        // to the SAME corpus before fitting.
+        let sameCorpus = AblationHistoryStore(projectRoot: root).load().filter { $0.corpusHash == corpusTag }
+        let slope = AblationHarness.advantageSlope(sameCorpus)
         func pct(_ x: Double) -> String { "\(Int((x * 100).rounded()))%" }
         let advColor = r.advantage > 1e-9 ? "32" : (r.negativeTransfer ? "31" : "33")
         print(c("36", "│ COLD ") + pct(r.coldSuccess) + c("2", "  vs  ") + c("36", "WARM ") + pct(r.warmSuccess) + c("2", "  (n=\(r.n))"))
         print(c(advColor, "│ advantage · \(r.advantage >= 0 ? "+" : "")\(pct(r.advantage))") + c("2", r.negativeTransfer ? " · ⚠ NEGATIVE TRANSFER (warm did worse — the state hurt here)" : (r.advantage <= 1e-9 ? " · flat (nothing compounded on this corpus yet)" : " · warm state helped on unseen work")))
-        if history.count >= 2 {
-            print(c("2", "│ flywheel slope over \(history.count) readings: \(slope > 1e-6 ? "↑ accelerating" : (slope < -1e-6 ? "↓ decaying" : "→ flat"))"))
+        if sameCorpus.count >= 2 {
+            print(c("2", "│ flywheel slope over \(sameCorpus.count) \(corpusTag) readings: \(slope > 1e-6 ? "↑ accelerating" : (slope < -1e-6 ? "↓ decaying" : "→ flat"))"))
         }
         print(c("2", "└ recorded · .kist/self-evolution/ablation.jsonl · the honest curve (it can go down)"))
         return 0
