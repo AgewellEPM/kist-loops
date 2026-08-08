@@ -22,7 +22,7 @@ final class CobolGenerateToolTests: XCTestCase {
         let tool = CobolGenerateTool(providers: ProviderRegistry(providers: ProviderCatalog.all,
                                                                  keyStore: NullKeyStoreForCobolTool()))
         XCTAssertTrue(tool.parameters.contains { $0.name == "expect" && !$0.required })
-        XCTAssertEqual(CobolGenerateTool.maxAttempts, 2, "one self-heal round, bounded cost")
+        XCTAssertEqual(CobolGenerateTool.maxAttempts, 3, "original + two self-heals, bounded cost")
     }
 
     func testSelfVerifyFlowCompilesAndRunsViaSpawn() throws {

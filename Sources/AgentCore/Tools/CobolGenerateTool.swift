@@ -32,9 +32,10 @@ public struct CobolGenerateTool: AgentTool {
                       required: false),
     ]
 
-    /// Total model attempts (1 self-heal). The 7B specialist writes compilable COBOL but its logic can
-    /// be wrong; one feedback round catches most syntax/simple-logic misses without unbounded cost.
-    static let maxAttempts = 2
+    /// Total model attempts. The 7B specialist writes compilable COBOL but its logic can be wrong (short
+    /// PIC widths truncate strings, factorial off-by-one, etc.); a couple feedback rounds catch most
+    /// misses without unbounded cost. 3 = original + 2 self-heals.
+    static let maxAttempts = 3
 
     private let providers: ProviderRegistry
     public init(providers: ProviderRegistry) { self.providers = providers }
@@ -120,8 +121,18 @@ public struct CobolGenerateTool: AgentTool {
                                   metadata: ["provider": "cobol", "offline": "true", "path": rawPath, "wrote": "true", "changed": "true", "compiled": "true", "ran": "true", "expect_met": "true"])
             }
             lastDetail = "compiled + ran, but output \"\(ran.prefix(120))\" does not contain expected \"\(expect)\""
+            // Diagnostic feedback: name the LIKELY GnuCOBOL cause so the small model can actually fix it.
+            let gotOut = ran.trimmingCharacters(in: .whitespacesAndNewlines)
+            var hint = "Fix the LOGIC so the output contains it."
+            if expect.contains(gotOut) && !gotOut.isEmpty {
+                hint = "The output looks TRUNCATED (a prefix of the expected text) — a PIC X(n) field is "
+                    + "too NARROW; widen it to at least \(expect.count) characters, or DISPLAY the literal directly."
+            } else if gotOut.contains(where: { $0 == "0" }) && expect.first(where: { $0.isNumber }) != nil
+                        && gotOut.hasPrefix("0") {
+                hint = "The number shows LEADING ZEROS — DISPLAY it through an edited PIC like Z(9)9 instead of a raw 9(n)."
+            }
             feedback = "The previous COBOL compiled and RAN but produced the WRONG output. It printed:\n"
-                + String(ran.prefix(500)) + "\nExpected the output to contain: \(expect)\nFix the LOGIC so it does."
+                + String(ran.prefix(500)) + "\nExpected the output to contain: \(expect)\n" + hint
             if attempt < Self.maxAttempts { continue }
             return .failure("cobol_generate: after \(attempt) attempts the program compiles+runs but is LOGICALLY WRONG — \(lastDetail). Not claiming success on wrong output. (last source at \(rawPath))")
         }
@@ -132,11 +143,21 @@ public struct CobolGenerateTool: AgentTool {
     /// One model call to the OFFLINE cobol provider. `allowFallback:false` keeps it local (never a
     /// cloud model). `feedback` (compiler error / wrong-output note) is appended so it self-corrects.
     private func generate(request: String, existing: String, feedback: String) async throws -> String {
+        // Curated GnuCOBOL guidance — steers the small specialist away from the bugs it actually makes
+        // (dogfood 2026-08-08): the USING-clause non-executable, PIC-width string truncation, and
+        // leading-zero numeric display. This "grounding" targets real observed failures.
         let system = "You are an expert GnuCOBOL programmer. Output ONLY valid, complete, compilable "
-            + "COBOL source — no prose, no explanation, no markdown code fences. Write a STANDALONE "
-            + "EXECUTABLE program for `cobc -x`: NO LINKAGE SECTION, NO `USING` clause on PROCEDURE "
-            + "DIVISION, NO GOBACK — compute everything in WORKING-STORAGE and end with STOP RUN. "
-            + "Include the IDENTIFICATION / DATA / PROCEDURE divisions as needed."
+            + "COBOL source — no prose, no explanation, no markdown code fences. Rules:\n"
+            + "• Write a STANDALONE EXECUTABLE for `cobc -x`: NO LINKAGE SECTION, NO `USING` clause on "
+            + "PROCEDURE DIVISION, NO GOBACK. Compute in WORKING-STORAGE, end with STOP RUN.\n"
+            + "• Size PIC clauses to fit: an alphanumeric field must be PIC X(n) with n ≥ the LONGEST "
+            + "text it will hold (too-short X(n) SILENTLY TRUNCATES). Prefer DISPLAYing string literals "
+            + "directly when possible.\n"
+            + "• For numbers: do ALL arithmetic in a PLAIN numeric field (PIC 9(n) or S9(n), wide enough "
+            + "for the result). To DISPLAY without leading zeros, declare a SEPARATE edited field (PIC "
+            + "Z(9)9), MOVE the numeric result INTO it, and DISPLAY that field. NEVER use an edited "
+            + "(Z/comma/$) field in COMPUTE/MULTIPLY/ADD — it is not numeric.\n"
+            + "• Include the IDENTIFICATION / DATA / PROCEDURE divisions as needed."
         var user = existing.isEmpty
             ? "Write COBOL for: \(request)"
             : "Modify this COBOL as requested; output the FULL updated source only.\n\nRequest: \(request)\n\nExisting source:\n\(existing)"
