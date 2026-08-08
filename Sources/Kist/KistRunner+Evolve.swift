@@ -30,23 +30,16 @@ extension KistRunner {
         }
         let trace = TraceRecorder(traceId: TraceID.make())
 
+        // COLD arm strips the accumulated state (self__ tools + recall tool); WARM keeps everything. Neither
+        // arm uses P1 injection here — this is the PROGRAM metric (is kist compounding overall), NOT the
+        // per-wire metric. `/ablation recall` isolates the injection A/B (see runRecallAblation).
         func armAgent(cold: Bool) -> EvalRunner.Agent {
             let armTools: ToolRegistry = cold
                 ? ToolRegistry(tools.all().filter { !$0.name.hasPrefix("self__") && $0.name != "recall" })
                 : tools
-            return { prompt in
-                let trajectory = TrajectoryRecorder()
-                let loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
-                                    tools: armTools, checkpoints: LoopCheckpointStore(), maxIterations: opts.maxIterations,
-                                    budget: opts.makeBudget(), interactor: AutoApproveInteractor(), approvalTools: [],
-                                    planMode: opts.planMode, extendedThinking: opts.extendedThinking,
-                                    toolMode: ToolMode(rawValue: opts.toolMode) ?? .auto,
-                                    roles: RoleBindings(default: ProviderBinding(providerId: providerId, model: model)),
-                                    delegationDepth: 0, sinkOverride: TerminalEventSink(),
-                                    recorder: trajectory, traceRecorder: trace, traceRole: cold ? "ablation-cold" : "ablation-warm")
-                let outcome = await loop.run(goal: prompt)
-                return EvalRunner.RunOutcome(output: outcome.summary, trajectory: trajectory.snapshot())
-            }
+            return ablationArm(registry: registry, context: context, providerId: providerId, model: model,
+                               opts: opts, tools: armTools, trace: trace,
+                               roleLabel: cold ? "ablation-cold" : "ablation-warm", inject: nil)
         }
 
         // accumulatedFrom = [] : the golden suite did NOT feed the warm state (memory/self__ came from real
@@ -73,6 +66,106 @@ extension KistRunner {
             print(c("2", "│ flywheel slope over \(sameCorpus.count) \(corpusTag) readings: \(slope > 1e-6 ? "↑ accelerating" : (slope < -1e-6 ? "↓ decaying" : "→ flat"))"))
         }
         print(c("2", "└ recorded · .kist/self-evolution/ablation.jsonl · the honest curve (it can go down)"))
+        return 0
+    }
+
+    /// One ablation arm: a fresh loop over `tools`, optionally with P1 recall injection (`inject`). The
+    /// injection hook is the ONLY thing that differs between the two arms of the recall A/B, so the
+    /// advantage it produces is causally the injection (not the toolset).
+    private static func ablationArm(registry: ProviderRegistry, context: ToolContext,
+                                    providerId: String, model: String?, opts: KistOptions,
+                                    tools: ToolRegistry, trace: TraceRecorder, roleLabel: String,
+                                    inject: (@Sendable (_ q: String) async -> String)?) -> EvalRunner.Agent {
+        return { prompt in
+            let trajectory = TrajectoryRecorder()
+            var loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
+                                tools: tools, checkpoints: LoopCheckpointStore(), maxIterations: opts.maxIterations,
+                                budget: opts.makeBudget(), interactor: AutoApproveInteractor(), approvalTools: [],
+                                planMode: opts.planMode, extendedThinking: opts.extendedThinking,
+                                toolMode: ToolMode(rawValue: opts.toolMode) ?? .auto,
+                                roles: RoleBindings(default: ProviderBinding(providerId: providerId, model: model)),
+                                delegationDepth: 0, sinkOverride: TerminalEventSink(),
+                                recorder: trajectory, traceRecorder: trace, traceRole: roleLabel)
+            loop.recallLessons = inject   // P1: injection-ON arm sets this; injection-OFF arm leaves it nil
+            let outcome = await loop.run(goal: prompt)
+            return EvalRunner.RunOutcome(output: outcome.summary, trajectory: trajectory.snapshot())
+        }
+    }
+
+    /// `/ablation recall` — P1's ISOLATED oracle. Cold-vs-warm confounds three variables (self__ tools, the
+    /// recall TOOL, the P1 injection); this instead holds the toolset CONSTANT (both arms full) and toggles
+    /// ONLY the injection. advantage = injection-ON − injection-OFF = the marginal value of auto-surfacing a
+    /// verified lesson vs leaving the model to call `recall` itself. It can legitimately read FLAT (PLATEAUED:
+    /// the model already gets the lesson via the tool, or doesn't need it) — that's an honest per-wire result,
+    /// not a failure. REFUSES up-front on the conditions that would make the reading a FALSE flat.
+    static func runRecallAblation(_ opts: KistOptions, registry: ProviderRegistry, root: String,
+                                  tools: ToolRegistry, context: ToolContext,
+                                  providerId: String, model: String?) async -> Int32 {
+        let color = KistREPL.stdoutColorEnabled(projectRoot: root)
+        func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
+
+        let cases = EvalGoldenSuite.recallCases(projectRoot: root)
+        guard !cases.isEmpty else {
+            print(c("31", "recall-ablation · no recall-corpus cases")
+                  + c("2", " — seed .kist/eval/recall-suite.json with memory-dependent tasks (answerable only from a recalled lesson)"))
+            return 1
+        }
+        // PRECONDITION 1 — an embedder must be configured, else recallBlock is inert (→) "" for every case and
+        // the A/B reads a FALSE flat. Refuse rather than report a meaningless +0%.
+        guard let embedder = Self.makeEmbedder(registry: registry) else {
+            print(c("31", "recall-ablation · REFUSED — no embedder configured")
+                  + c("2", " (set a Gemini key or KIST_EMBEDDER=ollama). Without it recall is inert; a +0% here would be a FALSE flat, not an honest one."))
+            return 2
+        }
+        let semantic = SemanticMemoryService(embedder: embedder,
+                                             store: FileBackedVectorStore(path: root + "/.kist/memory/vectors.json"))
+        // PRECONDITION 2 — at least one case must ACTUALLY recall a verified auto-lesson (non-empty block).
+        // If none do, the injection is inert for this corpus and the reading would be a FALSE flat. This also
+        // proves the injection is live before we spend 2×N real turns.
+        var injectableCase: String? = nil
+        for cse in cases where injectableCase == nil {
+            if !(await semantic.recallBlock(for: cse.prompt)).isEmpty { injectableCase = cse.name }
+        }
+        guard let proven = injectableCase else {
+            print(c("31", "recall-ablation · REFUSED — no verified auto-lesson matches any recall-corpus case")
+                  + c("2", " — accumulate a verified win first (its lesson is deposited as kind=auto-lesson), so recall has something real to surface. Injection would be inert here → a FALSE flat."))
+            return 3
+        }
+
+        let corpusTag = "recall-ab-v\(EvalGoldenSuite.version)"
+        print(c("36;1", "🔬 recall-ablation") + c("2", " · \(corpusTag) · injection-OFF vs injection-ON · toolset held constant · \(cases.count) case(s) · \(providerId)"))
+        print(c("2", "│ live: case ‘\(proven)’ recalls a verified lesson (injection is not inert)"))
+        let trace = TraceRecorder(traceId: TraceID.make())
+        let inject: @Sendable (_ q: String) async -> String = { q in await semantic.recallBlock(for: q) }
+
+        // advantage = warm(ON) − cold(OFF). Both arms full `tools`; ONLY `inject` differs.
+        let result = await AblationRunner.run(
+            heldOut: cases, accumulatedFrom: [], corpusHash: corpusTag,
+            epoch: Date().timeIntervalSince1970,
+            cold: ablationArm(registry: registry, context: context, providerId: providerId, model: model,
+                              opts: opts, tools: tools, trace: trace, roleLabel: "recall-inject-off", inject: nil),
+            warm: ablationArm(registry: registry, context: context, providerId: providerId, model: model,
+                              opts: opts, tools: tools, trace: trace, roleLabel: "recall-inject-on", inject: inject),
+            maxIterations: opts.maxIterations)
+
+        guard let r = result else {
+            print(c("31", "└ recall-ablation · REFUSED (contaminated corpus or malformed) — no reading recorded")); return 1
+        }
+        AblationHistoryStore(projectRoot: root).record(r)
+        let sameCorpus = AblationHistoryStore(projectRoot: root).load().filter { $0.corpusHash == corpusTag }
+        let slope = AblationHarness.advantageSlope(sameCorpus)
+        func pct(_ x: Double) -> String { "\(Int((x * 100).rounded()))%" }
+        let advColor = r.advantage > 1e-9 ? "32" : (r.negativeTransfer ? "31" : "33")
+        print(c("36", "│ OFF ") + pct(r.coldSuccess) + c("2", "  vs  ") + c("36", "ON ") + pct(r.warmSuccess) + c("2", "  (n=\(r.n))"))
+        let verdict = r.advantage > 1e-9
+            ? " · injection helped (auto-surfacing the lesson beat leaving it to the recall tool)"
+            : (r.negativeTransfer ? " · ⚠ NEGATIVE (the injected block hurt here)"
+                                  : " · PLATEAUED (the model already gets the lesson via the recall tool, or doesn’t need it) — honest, not a failure")
+        print(c(advColor, "│ P1 advantage · \(r.advantage >= 0 ? "+" : "")\(pct(r.advantage))") + c("2", verdict))
+        if sameCorpus.count >= 2 {
+            print(c("2", "│ slope over \(sameCorpus.count) \(corpusTag) readings: \(slope > 1e-6 ? "↑" : (slope < -1e-6 ? "↓" : "→ flat"))"))
+        }
+        print(c("2", "└ recorded · .kist/self-evolution/ablation.jsonl · P1 isolated (injection-ON − injection-OFF)"))
         return 0
     }
 }

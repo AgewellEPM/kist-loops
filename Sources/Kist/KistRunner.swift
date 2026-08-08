@@ -326,7 +326,25 @@ enum KistRunner {
                     TurnInputQueue.shared.addOnChange { sink.refreshLiveStatus() }
                     return sink
                 }
-                let loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
+                // P1 / Roadmap #3 — ONE embedder-gated semantic-memory service (fail-soft; nil under
+                // --no-memory or no embedder) shared by the verified-win DEPOSIT (rememberLesson, below) and
+                // the P1 recall→plan READ-BACK injection. Same store the `recall` tool reads.
+                let semanticMemory: SemanticMemoryService? = opts.noMemory
+                    ? nil
+                    : Self.makeEmbedder(registry: registry).map {
+                        SemanticMemoryService(embedder: $0,
+                                              store: FileBackedVectorStore(path: root + "/.kist/memory/vectors.json"))
+                      }
+                // P1 injection is OFF by default (zero per-turn cost, no behavior change) until `/ablation
+                // recall` proves the wire compounds (advantage>0); opt in with KIST_RECALL_INJECT=1. When on,
+                // each turn's system prompt gains an ADVISORY block of recalled VERIFIED lessons for the goal.
+                let recallInject: (@Sendable (_ q: String) async -> String)?
+                if ProcessInfo.processInfo.environment["KIST_RECALL_INJECT"] == "1", let s = semanticMemory {
+                    recallInject = { q in await s.recallBlock(for: q) }
+                } else {
+                    recallInject = nil
+                }
+                var loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
                                     tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
                                     budget: opts.makeBudget(),
                                     interactor: terminalInteractor, approvalTools: opts.yolo ? [] : sensitiveTools,
@@ -335,6 +353,7 @@ enum KistRunner {
                                     showReasoning: opts.extendedThinking,   // --think → watch the reasoning inline
                                     sinkOverride: makeReplSink(showReasoning: opts.extendedThinking),
                                     recorder: recorder, traceRecorder: traceRecorder)
+                loop.recallLessons = recallInject   // P1: nil unless KIST_RECALL_INJECT=1 (default off)
                 // CONVERSATIONAL ESCALATION: reach the fleet / plan-DAG from inside the chat, plus an
                 // auto-router that PROPOSES (never silently spends) when a plain message looks like a big build.
                 var repl = KistREPL(loop: loop, commands: KistCommands.load(projectRoot: root))
@@ -491,7 +510,7 @@ enum KistRunner {
                 // binding drives the conversational turn AND the spawn-tool default; roles drive the team.
                 repl.loopFactory = { defaultBinding, roles, planMode, showReasoning, extendedThinking in
                     // R2a: same shared constructor as the initial loop (typed-input render + hook).
-                    return makeLoop(registry: registry, providerId: defaultBinding.providerId, model: defaultBinding.model,
+                    var l = makeLoop(registry: registry, providerId: defaultBinding.providerId, model: defaultBinding.model,
                              context: context,
                              tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
                                     budget: opts.makeBudget(),
@@ -501,6 +520,8 @@ enum KistRunner {
                              sinkOverride: makeReplSink(showReasoning: showReasoning),
                              recorder: recorder,
                              traceRecorder: traceRecorder)
+                    l.recallLessons = recallInject   // P1: carry the (flag-gated) read-back across /model & /roles rebuilds
+                    return l
                 }
                 repl.recorder = recorder
                 repl.traceRecorder = traceRecorder
@@ -534,11 +555,8 @@ enum KistRunner {
                 // Roadmap #3 — auto-capture verified wins into SEMANTIC (vector) memory so a future session
                 // can recall them. Same store the `recall` tool reads (`.kist/memory/vectors.json`), so what
                 // gets auto-saved is auto-findable. Gated on an embedder (local Ollama / Gemini); fail-soft.
-                if !opts.noMemory, let embedder = Self.makeEmbedder(registry: registry) {
-                    let semantic = SemanticMemoryService(
-                        embedder: embedder,
-                        store: FileBackedVectorStore(path: root + "/.kist/memory/vectors.json"))
-                    repl.rememberLesson = { text in try? await semantic.remember(text, metadata: ["kind": "auto-lesson"]) }
+                if let semanticMemory {   // reuse the ONE hoisted service (deposit side of the same store)
+                    repl.rememberLesson = { text in try? await semanticMemory.remember(text, metadata: ["kind": "auto-lesson"]) }
                 }
                 repl.providerAliases = providerAliases
                 repl.providerLabels = registry.providers
@@ -799,9 +817,14 @@ enum KistRunner {
                                            providerId: providerId, model: model)
                 }
                 repl.ablation = { corpus in
-                    // Run the COLD-vs-WARM ablation oracle (real turns × 2 arms) on the named corpus.
+                    // Run the ablation oracle (real turns × 2 arms). `recall` → P1's ISOLATED injection A/B
+                    // (toolset held constant); otherwise the COLD-vs-WARM program metric on the named corpus.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
+                    if corpus.lowercased().hasPrefix("recall") {
+                        return await runRecallAblation(opts, registry: registry, root: root, tools: tools,
+                                                       context: context, providerId: providerId, model: model)
+                    }
                     return await runAblation(opts, registry: registry, root: root, tools: tools,
                                              context: context, providerId: providerId, model: model, corpus: corpus)
                 }

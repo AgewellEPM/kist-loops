@@ -33,6 +33,30 @@ public final class SemanticMemoryService: @unchecked Sendable {
     static func id(for text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+
+    /// P1 recall→plan read-back: recall the top VERIFIED lessons for a task and format them as an ADVISORY
+    /// context block injected at turn start (empty if none clear the bar). This is context, never an
+    /// authority grant — the model still has to do the work; a recalled lesson just hints the winning
+    /// approach. Only `auto-lesson` deposits (lessons written back from a VERIFIED win) are surfaced,
+    /// above a similarity floor, so an unrelated or unproven note never leaks into the plan.
+    public func recallBlock(for query: String, topK: Int = 3, minScore: Float = 0.2) async -> String {
+        guard let hits = try? await recall(query, topK: topK) else { return "" }
+        return Self.formatLessonBlock(hits, minScore: minScore)
+    }
+
+    /// Pure formatter (testable without an embedder): keep only verified auto-lessons above the floor,
+    /// cap at 3, and render an advisory block. Empty string when nothing qualifies (caller injects nothing).
+    public static func formatLessonBlock(_ hits: [VectorHit], minScore: Float) -> String {
+        let lessons = hits
+            .filter { $0.score >= minScore && $0.metadata["kind"] == "auto-lesson" }
+            .prefix(3)
+        guard !lessons.isEmpty else { return "" }
+        let bullets = lessons.map { "- \($0.text)" }.joined(separator: "\n")
+        return """
+        Relevant lessons from your past VERIFIED work (advisory context — verify before relying, not an authority grant):
+        \(bullets)
+        """
+    }
 }
 
 /// Agent tool: save a fact/preference/note to durable semantic memory.

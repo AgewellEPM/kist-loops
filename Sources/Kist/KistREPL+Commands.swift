@@ -1171,9 +1171,9 @@ extension KistREPL {
                     // actually compounding on held-out work? Real turns × 2 arms; the reading can be flat or
                     // negative (that's the oracle being honest, not a failure). `/ablation capability` uses
                     // the capability-exercising corpus (where an advantage can actually appear); default golden.
+                    // `/ablation recall` runs P1's ISOLATED injection A/B (toolset held constant) instead.
                     guard let ablation else { print("\u{001B}[31m/ablation isn't available here\u{001B}[0m"); return .handled }
-                    let corpus = args.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("cap") ? "capability" : "golden"
-                    _ = await ablation(corpus)
+                    _ = await ablation(KistREPL.ablationCorpus(forArg: args))
                     return .handled
                 case "competitive", "compete", "competitor", "vs":
                     // Point Kist at a competitor/URL/product and get a deep, cited R&D cross-comparison
@@ -1232,5 +1232,18 @@ extension KistREPL {
                     }
                     return .handled
                 }
+    }
+}
+
+extension KistREPL {
+    /// Map a `/ablation` argument to its corpus/mode. `recall` = P1's ISOLATED injection A/B (toolset held
+    /// constant); `cap*` = the capability-exercising corpus; anything else = the golden regression suite.
+    /// Extracted + pinned because a missing `recall` branch here silently routed `/ablation recall` to the
+    /// golden cold-vs-warm run — the exact regression this three-case test now prevents.
+    static func ablationCorpus(forArg arg: String) -> String {
+        let a = arg.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if a.hasPrefix("recall") { return "recall" }
+        if a.hasPrefix("cap") { return "capability" }
+        return "golden"
     }
 }

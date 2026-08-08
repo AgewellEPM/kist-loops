@@ -79,6 +79,14 @@ public struct HeadlessAgentLoop: Sendable {
     /// so a local model halts at its real turn boundary. nil = none (provider/server-side stops apply).
     let modelProfiles: LocalModelProfileStore?
 
+    /// P1 recall→plan read-back: an optional per-turn hook that, given the turn's goal, returns an
+    /// ADVISORY block of recalled VERIFIED lessons to append to the system prompt (empty ⇒ nothing
+    /// injected). Set by the runtime on a WARM loop (interactive REPL + the injection-ON ablation arm);
+    /// left nil on a COLD/injection-OFF loop. It's the single toggle that isolates P1's contribution:
+    /// injection-ON vs injection-OFF with the toolset held constant. Not in `init` (a post-construction
+    /// var) so the ablation can build two otherwise-identical loops that differ ONLY in this hook.
+    public var recallLessons: (@Sendable (_ query: String) async -> String)? = nil
+
     /// Tools that never modify state — the only ones permitted while plan mode is ON.
     /// An ALLOWLIST (not a denylist) so unknown/MCP tools are blocked by default in plan mode.
     public static let readOnlyTools: Set<String> = ["read_file", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search"]
@@ -281,6 +289,15 @@ public struct HeadlessAgentLoop: Sendable {
         case downgrade(LoopCheckpoint)
     }
 
+    /// P1: the advisory recall block for THIS turn's goal, as a system-prompt SUFFIX (empty ⇒ no-op).
+    /// Appended to BOTH the text and native system prompts so the read-back is protocol-agnostic, and
+    /// rebuilt per turn (no accumulation). No-op unless a WARM loop set `recallLessons`.
+    private func recalledLessonsSuffix(goal: String) async -> String {
+        guard let recallLessons else { return "" }
+        let block = await recallLessons(goal)
+        return block.isEmpty ? "" : "\n\n" + block
+    }
+
     /// Text-protocol ReAct loop — the universal fallback (model emits JSON actions as text).
     /// `iterationLimitOverride` lets a native→text downgrade impose the RUN's original ceiling instead of
     /// granting the text path a fresh per-invocation budget (see the downgrade site in `drive`).
@@ -308,6 +325,7 @@ public struct HeadlessAgentLoop: Sendable {
         if ModelTier.of(providerId: providerId, model: tierModel) == .weak {
             system = Self.weakModelTextPrimer(tools: turnTools, shellEnabled: scopedContext.shell.enabled) + "\n\n" + system
         }
+        system += await recalledLessonsSuffix(goal: cp.goal)   // P1 recall→plan read-back (no-op unless warm)
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096, systemPrompt: system, disableThinking: !extendedThinking)
         let profileStopsApplied = applyModelProfileStops(&settings)
         var parseFailures = 0
@@ -570,11 +588,13 @@ public struct HeadlessAgentLoop: Sendable {
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard).
         let turnTools = Self.conversationalToolset(tools, intent: cp.intent)
         let specs = turnTools.toolSpecs()
+        var nativeSystem = Self.nativeSystemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot,
+                                                   planMode: planMode, shellEnabled: scopedContext.shell.enabled,
+                                                   skillsXML: skillsXML,
+                                                   readableRoots: scopedContext.externalReadRoots)
+        nativeSystem += await recalledLessonsSuffix(goal: cp.goal)   // P1 recall→plan read-back (no-op unless warm)
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096,
-                                     systemPrompt: Self.nativeSystemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot,
-                                                                           planMode: planMode, shellEnabled: scopedContext.shell.enabled,
-                                                                           skillsXML: skillsXML,
-                                                                           readableRoots: scopedContext.externalReadRoots),
+                                     systemPrompt: nativeSystem,
                                      disableThinking: !extendedThinking)
         let profileStopsApplied = applyModelProfileStops(&settings)
         var consecutiveFailures = 0
