@@ -180,7 +180,8 @@ extension KistRunner {
 
     static func runEvolve(_ opts: KistOptions, brief: String,
                           registry: ProviderRegistry, root: String,
-                          providerId: String, model: String?) async -> Int32 {
+                          providerId: String, model: String?,
+                          semantic: SemanticMemoryService? = nil) async -> Int32 {
         func line(_ s: String) { print(s) }
         let color = KistREPL.stdoutColorEnabled(projectRoot: root)
         func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
@@ -262,15 +263,35 @@ extension KistRunner {
             let smoke = await ScriptTool.runContained(interpreter: manifest.interpreter,
                                                       scriptPath: (home as NSString).appendingPathComponent(manifest.scriptFile),
                                                       args: cli)
+            let smokeOk = smoke.output.contains(manifest.testExpectSubstring)
             line(c("32", "└ ACTIVATED ") + tool + c("2", " → \(home)"))
-            line(c("2", "  smoke: \(manifest.testArgs) ⇒ ") + (smoke.output.contains(manifest.testExpectSubstring)
+            line(c("2", "  smoke: \(manifest.testArgs) ⇒ ") + (smokeOk
                  ? c("32", "‘\(smoke.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).prefix(80))’ ✓ (sandboxed)")
                  : c("31", "‘\(smoke.output.prefix(80))’ ✗ expected \(manifest.testExpectSubstring)")))
+            // P2 triangle close: on a GROUNDED promotion (smoke actually produced the expected output) deposit
+            // a recallable "winning approach" auto-lesson so the P1 recall→plan wire surfaces "you grew self__X
+            // for exactly this" on a future similar task. GROUNDED-only: gated on smokeOk (NOT result.promoted
+            // alone) so a promoted-but-smoke-failed tool never deposits a lesson claiming it works. kind MUST be
+            // "auto-lesson" (SemanticMemory.formatLessonBlock filters on it). Deterministic text ⇒ SHA256 upsert
+            // dedup on re-promotion. Fail-soft (try?) + embedder-gated (nil semantic ⇒ no-op), like rememberLesson.
+            if smokeOk, let semantic {
+                let lesson = Self.promotionLesson(tool: tool, brief: brief, description: manifest.description)
+                try? await semantic.remember(lesson, metadata: ["kind": "auto-lesson", "tool": tool])
+            }
             line(c("2", "  callable next session as \(tool); relaunch to pick it up."))
             return 0
         } catch {
             line(c("31", "└ activation write failed: \(error)"))
             return 1
         }
+    }
+
+    /// P2 triangle close: the deterministic "winning approach" lesson deposited on a GROUNDED promotion.
+    /// Pure + testable. NO timestamps/smoke-snippets — same (tool, brief, description) ⇒ same text ⇒ same
+    /// SHA256 id ⇒ upsert-dedup on re-promotion (never a duplicate). Names the tool IN the body (that's
+    /// what the future model reads via recall) and states the callable-NEXT-session contract honestly.
+    static func promotionLesson(tool: String, brief: String, description: String) -> String {
+        let goal = brief.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)
+        return "SOLVED: \(goal) — authored + adversary-proven `\(tool)` (\(description)). Callable next session as \(tool)."
     }
 }

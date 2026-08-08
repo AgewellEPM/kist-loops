@@ -344,6 +344,9 @@ enum KistRunner {
                 } else {
                     recallInject = nil
                 }
+                // P2 task-targeted self__ surfacing — OFF by default (advertisement-only, fail-open; only
+                // trims schema bloat once the self__ population is large). Opt in with KIST_SURFACE_SELFTOOLS=1.
+                let surfaceSelfTools = ProcessInfo.processInfo.environment["KIST_SURFACE_SELFTOOLS"] == "1"
                 var loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
                                     tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
                                     budget: opts.makeBudget(),
@@ -354,6 +357,7 @@ enum KistRunner {
                                     sinkOverride: makeReplSink(showReasoning: opts.extendedThinking),
                                     recorder: recorder, traceRecorder: traceRecorder)
                 loop.recallLessons = recallInject   // P1: nil unless KIST_RECALL_INJECT=1 (default off)
+                loop.filterSelfToolsByRelevance = surfaceSelfTools   // P2: off unless KIST_SURFACE_SELFTOOLS=1
                 // CONVERSATIONAL ESCALATION: reach the fleet / plan-DAG from inside the chat, plus an
                 // auto-router that PROPOSES (never silently spends) when a plain message looks like a big build.
                 var repl = KistREPL(loop: loop, commands: KistCommands.load(projectRoot: root))
@@ -521,6 +525,7 @@ enum KistRunner {
                              recorder: recorder,
                              traceRecorder: traceRecorder)
                     l.recallLessons = recallInject   // P1: carry the (flag-gated) read-back across /model & /roles rebuilds
+                    l.filterSelfToolsByRelevance = surfaceSelfTools   // P2: carry the (flag-gated) surfacing filter too
                     return l
                 }
                 repl.recorder = recorder
@@ -814,7 +819,8 @@ enum KistRunner {
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
                     return await runEvolve(opts, brief: brief, registry: registry, root: root,
-                                           providerId: providerId, model: model)
+                                           providerId: providerId, model: model,
+                                           semantic: semanticMemory)   // P2: grounded auto-lesson deposit on promote
                 }
                 repl.ablation = { corpus in
                     // Run the ablation oracle (real turns × 2 arms). `recall` → P1's ISOLATED injection A/B

@@ -87,6 +87,14 @@ public struct HeadlessAgentLoop: Sendable {
     /// var) so the ablation can build two otherwise-identical loops that differ ONLY in this hook.
     public var recallLessons: (@Sendable (_ query: String) async -> String)? = nil
 
+    /// P2 — task-targeted self__ surfacing. When true, each turn ADVERTISES only the self-authored tools whose
+    /// manifest matches the goal (trims schema bloat as the self__ population grows). ADVERTISEMENT-ONLY and
+    /// FAIL-OPEN: execution (full `tools`), steering validToolNames, and `toolNames` (self-evolution's tool
+    /// universe) all stay on the FULL registry, so a filtered-out tool is never unreachable and the engine
+    /// never re-authors an existing capability. Post-construction toggle (mirrors `recallLessons`) so the
+    /// ablation can build two identical loops differing only in this bit. Default OFF.
+    public var filterSelfToolsByRelevance: Bool = false
+
     /// Tools that never modify state — the only ones permitted while plan mode is ON.
     /// An ALLOWLIST (not a denylist) so unknown/MCP tools are blocked by default in plan mode.
     public static let readOnlyTools: Set<String> = ["read_file", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search"]
@@ -298,6 +306,20 @@ public struct HeadlessAgentLoop: Sendable {
         return block.isEmpty ? "" : "\n\n" + block
     }
 
+    /// P2 filter application (advertisement-only, fail-open). Returns `registry` UNCHANGED unless the toggle is
+    /// on AND a positive relevance match lets us drop some self__ tools. Only `.selfAuthored` names are ever in
+    /// scope — native/foreign tools are mechanically untouchable here (namespace guard). Applied at BOTH the
+    /// text and native seams; a match-miss (or nil manifests) surfaces everything.
+    func surfaceRelevantSelfTools(_ registry: ToolRegistry, goal: String) -> ToolRegistry {
+        guard filterSelfToolsByRelevance else { return registry }
+        let all = registry.all()
+        let selfManifests = all.compactMap { ($0 as? ScriptTool)?.manifest }
+        guard !selfManifests.isEmpty,
+              let keep = SelfToolRelevance.relevant(goal: goal, manifests: selfManifests) else { return registry }
+        let kept = all.filter { ToolOwnershipResolver.owner(of: $0.name) != .selfAuthored || keep.contains($0.name) }
+        return kept.count == all.count ? registry : ToolRegistry(kept)
+    }
+
     /// Text-protocol ReAct loop — the universal fallback (model emits JSON actions as text).
     /// `iterationLimitOverride` lets a native→text downgrade impose the RUN's original ceiling instead of
     /// granting the text path a fresh per-invocation budget (see the downgrade site in `drive`).
@@ -314,7 +336,7 @@ public struct HeadlessAgentLoop: Sendable {
         let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard) —
         // applies to BOTH the standard prompt and the weak-model primer below (MiMo takes the weak path).
-        let turnTools = Self.conversationalToolset(tools, intent: cp.intent)
+        let turnTools = surfaceRelevantSelfTools(Self.conversationalToolset(tools, intent: cp.intent), goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
         var system = Self.systemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot, planMode: planMode,
                                        shellEnabled: scopedContext.shell.enabled, skillsXML: skillsXML,
                                        readableRoots: scopedContext.externalReadRoots)
@@ -586,7 +608,7 @@ public struct HeadlessAgentLoop: Sendable {
         reconcile(&cp)
         let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard).
-        let turnTools = Self.conversationalToolset(tools, intent: cp.intent)
+        let turnTools = surfaceRelevantSelfTools(Self.conversationalToolset(tools, intent: cp.intent), goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
         let specs = turnTools.toolSpecs()
         var nativeSystem = Self.nativeSystemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot,
                                                    planMode: planMode, shellEnabled: scopedContext.shell.enabled,
