@@ -20,6 +20,11 @@ public struct SelfEvolutionLedger {
     public let maxAttemptsPerWindow: Int
     public let windowSeconds: Double
 
+    /// The one source of truth for which `SelfEvolutionAttempt.outcome` values RESOLVE a signature (promoted =
+    /// done; rejected = the adversarial gate said no; spec-handed-off = another repo's job). Shared with
+    /// `CapabilityNominator` so a new terminal outcome can't silently diverge between the two (review #15).
+    public static let terminalOutcomes: Set<String> = ["promoted", "rejected", "spec-handed-off"]
+
     public init(projectRoot: String, maxAttemptsPerWindow: Int = 3, windowSeconds: Double = 3600) {
         self.path = (projectRoot as NSString).appendingPathComponent(".kist/self-evolution.jsonl")
         self.maxAttemptsPerWindow = maxAttemptsPerWindow
@@ -47,7 +52,7 @@ public struct SelfEvolutionLedger {
         // Already resolved for this exact wall → never repeat (promoted = done; rejected = the adversarial
         // gate already said no; spec-handed-off = it's the other repo's job now).
         if let prior = history.last(where: { $0.signature == signature }),
-           ["promoted", "rejected", "spec-handed-off"].contains(prior.outcome) {
+           terminalOutcomes.contains(prior.outcome) {
             return (false, "already ‘\(prior.outcome)’ for this failure — not repeating")
         }
         // Rate cap: never let self-evolution churn the binary.

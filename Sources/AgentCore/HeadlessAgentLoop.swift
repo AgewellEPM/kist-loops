@@ -88,11 +88,15 @@ public struct HeadlessAgentLoop: Sendable {
     public var recallLessons: (@Sendable (_ query: String) async -> String)? = nil
 
     /// P2 — task-targeted self__ surfacing. When true, each turn ADVERTISES only the self-authored tools whose
-    /// manifest matches the goal (trims schema bloat as the self__ population grows). ADVERTISEMENT-ONLY and
-    /// FAIL-OPEN: execution (full `tools`), steering validToolNames, and `toolNames` (self-evolution's tool
-    /// universe) all stay on the FULL registry, so a filtered-out tool is never unreachable and the engine
-    /// never re-authors an existing capability. Post-construction toggle (mirrors `recallLessons`) so the
-    /// ablation can build two identical loops differing only in this bit. Default OFF.
+    /// manifest lexically matches the goal (trims schema bloat as the self__ population grows). ADVERTISEMENT-
+    /// ONLY: EXECUTION always runs against the full `tools`, and `toolNames` (self-evolution's tool universe)
+    /// stays full, so a filtered-out tool is never unreachable and the engine never re-authors an existing one.
+    /// Native-mode steering advertises the SAME filtered set as the schema it can actually call (review #6);
+    /// text-mode steering may still name the full set (harmless — text execution accepts any real tool). The
+    /// matcher itself is fail-open (a token-less tool is always surfaced; a no-match surfaces all) but the trim
+    /// is LEXICAL, so a semantically-relevant tool whose words don't overlap the goal CAN be trimmed — which is
+    /// why this is advertisement-only + OFF by default until the ablation proves it. Post-construction toggle
+    /// (mirrors `recallLessons`) so the ablation can build two identical loops differing only in this bit.
     public var filterSelfToolsByRelevance: Bool = false
 
     /// Tools that never modify state — the only ones permitted while plan mode is ON.
@@ -316,7 +320,11 @@ public struct HeadlessAgentLoop: Sendable {
         let selfManifests = all.compactMap { ($0 as? ScriptTool)?.manifest }
         guard !selfManifests.isEmpty,
               let keep = SelfToolRelevance.relevant(goal: goal, manifests: selfManifests) else { return registry }
-        let kept = all.filter { ToolOwnershipResolver.owner(of: $0.name) != .selfAuthored || keep.contains($0.name) }
+        // In scope for trimming = ONLY actual self-authored ScriptTools (they have a manifest and were the
+        // input to `relevant`). A `self__`-prefixed FOREIGN tool (e.g. an MCP server literally named `self`)
+        // is NOT a ScriptTool, has no manifest, and must never be trimmed — review #5. `is ScriptTool` is the
+        // precise scope gate; a prefix-only ownership check would wrongly catch that foreign tool.
+        let kept = all.filter { !($0 is ScriptTool) || keep.contains($0.name) }
         return kept.count == all.count ? registry : ToolRegistry(kept)
     }
 
@@ -634,7 +642,10 @@ public struct HeadlessAgentLoop: Sendable {
             if consecutiveFailures >= replanThreshold && replansUsed < maxReplans {
                 replansUsed += 1
                 consecutiveFailures = 0
-                let tv = Self.validToolNames(tools, shellEnabled: scopedContext.shell.enabled)
+                // Native mode: the model can ONLY call functions present in the schema (`specs` = turnTools).
+                // Steering must advertise the SAME set, or it lists "valid" tools the model cannot emit a
+                // tool_call for — review #6. Use turnTools (the advertised+P2-filtered set), not full `tools`.
+                let tv = Self.validToolNames(turnTools, shellEnabled: scopedContext.shell.enabled)
                 let structured = replansUsed >= 2   // escalate to explicit re-plan once the soft nudge failed
                 sink.emit(.replanStarted(reason: structured
                     ? "structured re-plan (native failures continued)"
@@ -825,7 +836,7 @@ public struct HeadlessAgentLoop: Sendable {
                 lastSynthesisNudge = iteration; consecutiveGathering = 0
                 cp.messages.append(ChatMessage(role: .user,
                                                content: Self.synthesisSteering(
-                                                validTools: Self.validToolNames(tools,
+                                                validTools: Self.validToolNames(turnTools,   // review #6: native schema = turnTools
                                                                                shellEnabled: scopedContext.shell.enabled))))
             }
             cp.iteration = iteration; persist(&cp)

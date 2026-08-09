@@ -61,13 +61,19 @@ public struct SelfAuthoredToolStore {
 /// script hardcoded to echo the test's expected output); this gate proves the tool runs + passes its own
 /// test at all, which is necessary but — like the field's benchmark gate — not sufficient alone.
 public struct ScriptCandidateGate: CandidateGate {
-    public let manifest: SelfAuthoredManifest
-    public let scriptPath: String
-    public init(manifest: SelfAuthoredManifest, scriptPath: String) {
-        self.manifest = manifest; self.scriptPath = scriptPath
-    }
+    public init() {}
 
     public func verify(_ candidate: CapabilityCandidate) async -> (passed: Bool, reason: String) {
+        // Load whatever the author just wrote into the candidate workdir (manifest.json + script).
+        guard let (manifest, scriptPath) = SelfAuthoredManifest.loadFrom(workdir: candidate.workdir) else {
+            return (false, "candidate manifest/script missing in \(candidate.workdir)")
+        }
+        // An EMPTY expected-substring makes the check below vacuously true (`contains("")` == true), so a tool
+        // with no real assertion would launder through the gate. Refuse it up-front — a self__ tool MUST carry a
+        // non-empty expectation it can be proven against (review #1).
+        guard !manifest.testExpectSubstring.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (false, "manifest.testExpectSubstring is empty — an unprovable tool, refused")
+        }
         // Run the author's acceptance test through the exact contained execution path used at call time.
         let cli = ScriptTool.cliArgs(from: manifest.testArgs, manifest: manifest)
         let r = await ScriptTool.runContained(interpreter: manifest.interpreter, scriptPath: scriptPath, args: cli)

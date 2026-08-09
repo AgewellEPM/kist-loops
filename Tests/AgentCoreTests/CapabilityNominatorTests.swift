@@ -2,7 +2,7 @@ import XCTest
 @testable import AgentCore
 
 /// P2 — the deterministic capability nominator: a RECURRING, unresolved failure signature gets queued for a
-/// future curriculum; a resolved one never is; the queue is idempotent.
+/// future curriculum; a resolved one never is; nomination is PASSIVE (not rate-capped); the queue upserts.
 final class CapabilityNominatorTests: XCTestCase {
 
     private func att(_ sig: String, _ outcome: String, _ epoch: Double, tool: String = "self__x", cat: String = "toolLimit") -> SelfEvolutionAttempt {
@@ -24,37 +24,53 @@ final class CapabilityNominatorTests: XCTestCase {
         XCTAssertTrue(noms.isEmpty, "a single occurrence is not a recurring wall")
     }
 
-    func testResolvedSignatureNeverReNominated() {
+    func testResolvedByLatestRowNeverReNominated() {
         for terminal in ["promoted", "rejected", "spec-handed-off"] {
             let history = [att("s|a", "attempted", 100), att("s|a", "attempted", 150), att("s|a", terminal, 200)]
             XCTAssertTrue(CapabilityNominator.nominate(history: history, now: 10_000).isEmpty,
-                          "a ‘\(terminal)’ signature is settled — never re-nominate it")
+                          "a signature whose LATEST row is ‘\(terminal)’ is settled — never re-nominate it")
         }
     }
 
-    func testBlockedCountsAsRecurrenceButAttemptedDrivesIt() {
-        // attempted + blocked are both non-terminal recurrence signals.
-        let history = [att("s|a", "attempted", 100), att("s|a", "blocked", 150)]
+    func testRecurAfterTerminalReNominates() {
+        // review #15 semantics: resolved is decided by the LATEST row. A wall that recurs AFTER a terminal
+        // outcome (latest row non-terminal) is NOT settled and may re-nominate.
+        let history = [att("s|a", "rejected", 100), att("s|a", "attempted", 200), att("s|a", "attempted", 300)]
         let noms = CapabilityNominator.nominate(history: history, now: 10_000)
-        XCTAssertEqual(noms.first?.recurrence, 2, "attempted and blocked both count toward recurrence")
+        XCTAssertEqual(noms.first?.signature, "s|a", "recurred after the terminal row → eligible again")
+        XCTAssertEqual(noms.first?.recurrence, 2, "recurrence counts the two non-terminal rows")
     }
 
-    func testGlobalRateCapDefersTheBatch() {
-        // 3 recent attempts across signatures hit the global cap (default 3/hr) → decideShouldAttempt says no →
-        // nomination DEFERS (queues for next pass), it does not drop the recurring signature.
+    func testBlockedCountsAsRecurrence() {
+        let history = [att("s|a", "attempted", 100), att("s|a", "blocked", 150)]
+        XCTAssertEqual(CapabilityNominator.nominate(history: history, now: 10_000).first?.recurrence, 2,
+                       "attempted and blocked are both non-terminal recurrence signals")
+    }
+
+    func testNominationIsNotRateCapped() {
+        // review #8: nomination is a PASSIVE observation; a saturated window (many recent attempts) must NOT
+        // suppress recording a genuinely recurring wall. The anti-churn cap lives at ACTUATION, not here.
         let now = 1000.0
-        let history = [att("s|a", "attempted", 990), att("s|a", "attempted", 995),
-                       att("other|b", "attempted", 998)]   // 3 within the window
-        let noms = CapabilityNominator.nominate(history: history, now: now, windowSeconds: 3600)
-        XCTAssertTrue(noms.isEmpty, "at the global rate cap the batch defers rather than churning")
+        let history = [att("other|b", "attempted", 990), att("other|c", "attempted", 995),
+                       att("other|d", "attempted", 998),
+                       att("self__zip|x", "attempted", 700), att("self__zip|x", "attempted", 800)]
+        let noms = CapabilityNominator.nominate(history: history, now: now)
+        XCTAssertTrue(noms.contains { $0.signature == "self__zip|x" && $0.recurrence == 2 },
+                      "the recurring wall is still nominated despite a saturated window")
     }
 
-    func testQueueIsIdempotentBySignature() {
+    func testQueueUpsertsRecurrenceBySignature() {
+        // review #11: a signature that recurs FURTHER updates its stored recurrence instead of being frozen.
         let root = (NSTemporaryDirectory() as NSString).appendingPathComponent("kist-nom-\(UUID().uuidString)")
         let store = CapabilityNominationStore(projectRoot: root)
-        let n = CapabilityNomination(signature: "s|a", tool: "self__x", category: "toolLimit", recurrence: 2, atEpoch: 1)
-        XCTAssertEqual(store.enqueueNew([n]).count, 1, "first enqueue writes it")
-        XCTAssertEqual(store.enqueueNew([n]).count, 0, "re-enqueuing the same signature is a no-op (idempotent)")
-        XCTAssertEqual(store.load().count, 1, "no duplicate rows for one signature")
+        func nom(_ r: Int) -> CapabilityNomination {
+            CapabilityNomination(signature: "s|a", tool: "self__x", category: "toolLimit", recurrence: r, atEpoch: 1)
+        }
+        XCTAssertEqual(store.enqueue([nom(2)]).count, 1, "first enqueue writes it")
+        XCTAssertEqual(store.enqueue([nom(2)]).count, 0, "equal recurrence is a no-op (no new info)")
+        XCTAssertEqual(store.enqueue([nom(9)]).count, 1, "higher recurrence UPDATES the record")
+        let loaded = store.load()
+        XCTAssertEqual(loaded.count, 1, "still one row per signature (no duplicates)")
+        XCTAssertEqual(loaded.first?.recurrence, 9, "the stored recurrence reflects the worst the wall got, not the first")
     }
 }

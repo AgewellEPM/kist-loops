@@ -29,10 +29,18 @@ public enum SelfToolRelevance {
             .filter { $0.count >= 3 && !stopwords.contains($0) })
     }
 
-    /// The set of self__ tool NAMES relevant to `goal`, or nil meaning "don't filter — surface all".
-    /// Returns nil (fail-open) when: the population is small enough that trimming isn't worth it
-    /// (`<= surfaceAllBelow`), the goal has no usable tokens, or NOTHING matched. Returns a non-empty set only
-    /// on a positive token overlap between the goal and a tool's (name + description + contract + params).
+    /// The set of self__ tool NAMES to KEEP for `goal`, or nil meaning "don't filter — surface all".
+    ///
+    /// Fail-open policy (honest — review #2/#3): returns nil (surface all) when the population is small
+    /// (`<= surfaceAllBelow`), the goal has no usable tokens, or NO tool lexically matched. When SOME tool
+    /// matched, returns the keep-set = matched tools PLUS every tool whose haystack is EMPTY (a token-less
+    /// tool can never be positively matched, so hiding it would be pure loss — it is always surfaced).
+    ///
+    /// The honest limit this does NOT paper over: matching is LEXICAL. A tool whose words don't overlap the
+    /// goal's words (e.g. goal "make an id" vs a tool described only as "generate a unique identifier") CAN be
+    /// trimmed from advertisement. That is why this is ADVERTISEMENT-ONLY (execution, steering, `toolNames`,
+    /// and the P1 recall wire all still see the tool) and OFF by default until the ablation proves the trim
+    /// helps more than it costs. It is not a claim that the right tool is always advertised.
     public static func relevant(goal: String,
                                 manifests: [SelfAuthoredManifest],
                                 surfaceAllBelow: Int = 3) -> Set<String>? {
@@ -40,16 +48,26 @@ public enum SelfToolRelevance {
         let g = tokens(goal)
         guard !g.isEmpty else { return nil }                          // unknown/empty goal — surface all
         var kept = Set<String>()
+        var anyMatched = false
         for m in manifests {
-            if !g.isDisjoint(with: haystack(m)) { kept.insert(m.name) }
+            let hay = haystack(m)
+            if hay.isEmpty {
+                kept.insert(m.name)                                   // #2: token-less tool — always surface
+            } else if !g.isDisjoint(with: hay) {
+                kept.insert(m.name); anyMatched = true
+            }
         }
-        return kept.isEmpty ? nil : kept                              // no match — fail-open, surface all
+        // No POSITIVE match ⇒ fail open entirely (surfacing only the degenerate tools would wrongly hide the
+        // non-matching ones). Only trim when at least one tool actually matched the goal.
+        return anyMatched ? kept : nil
     }
 
-    /// The searchable token set for one tool: its name (with the self__ prefix split off so `self__add` yields
-    /// `add`), description, contract, and every parameter name + description.
+    /// The searchable token set for one tool: its name (self__ prefix dropped AND snake_case split so
+    /// `self__do_thing` yields `thing`, not the glued `do_thing` — review #4), description, contract, and
+    /// every parameter name + description.
     static func haystack(_ m: SelfAuthoredManifest) -> Set<String> {
-        var parts = [m.name.replacingOccurrences(of: "self__", with: " "), m.description, m.contract]
+        let name = m.name.replacingOccurrences(of: "self__", with: " ").replacingOccurrences(of: "_", with: " ")
+        var parts = [name, m.description, m.contract]
         for p in m.parameters { parts.append(p.name); parts.append(p.description) }
         return tokens(parts.joined(separator: " "))
     }

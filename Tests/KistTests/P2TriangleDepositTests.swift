@@ -27,26 +27,17 @@ final class P2TriangleDepositTests: XCTestCase {
     // Anti-laundering pin (source-level, multi-site discipline): the deposit MUST live inside the smoke gate.
     // If a refactor moves it out to fire on `result.promoted` alone, a promoted-but-smoke-FAILED tool would
     // deposit a lesson claiming it works — exactly the ungrounded-win this whole loop rejects.
-    func testDepositIsGatedOnGroundedSmoke() throws {
-        let src = try String(contentsOfFile: Self.evolveSourcePath, encoding: .utf8)
-        // The remember(...) with kind=auto-lesson deposit appears only within the `if smokeOk, let semantic {` block.
-        guard let depositRange = src.range(of: #"if smokeOk, let semantic {"#) else {
-            return XCTFail("the smoke-gated deposit block is gone — grounding invariant unpinned")
-        }
-        let afterGate = String(src[depositRange.lowerBound...].prefix(400))
-        XCTAssertTrue(afterGate.contains(#""kind": "auto-lesson""#),
-                      "the auto-lesson deposit must sit INSIDE `if smokeOk, let semantic` — grounded-only")
-        // And it must NOT be reachable from result.promoted without the smoke check.
-        XCTAssertFalse(src.contains(#"if result.promoted { try? await semantic"#),
-                       "deposit must never fire on promotion alone (ungrounded)")
-    }
-
-    private static var evolveSourcePath: String {
-        // Tests run from the package root; resolve the source relative to this test file's module dir.
-        let here = URL(fileURLWithPath: #filePath)   // .../Tests/KistTests/P2TriangleDepositTests.swift
-        return here.deletingLastPathComponent()      // Tests/KistTests
-            .deletingLastPathComponent()             // Tests
-            .deletingLastPathComponent()             // package root
-            .appendingPathComponent("Sources/Kist/KistRunner+Evolve.swift").path
+    // review #14: the OLD test asserted a single hyper-specific source string (`if result.promoted { try?...`)
+    // that any real refactor sailed past. The grounding decision is now a PURE predicate — test its BEHAVIOR.
+    // Both activation (rollback) and the lesson deposit are gated on this exact function.
+    func testGroundedSmokePassIsTheRealGate() {
+        XCTAssertTrue(KistRunner.groundedSmokePass(output: "the result is 20", expect: "20"),
+                      "expected substring present in output → grounded")
+        XCTAssertFalse(KistRunner.groundedSmokePass(output: "the result is 19", expect: "20"),
+                       "wrong output → not grounded → deposit withheld + activation rolled back")
+        XCTAssertFalse(KistRunner.groundedSmokePass(output: "literally anything", expect: ""),
+                       "review #1: empty expect is UNPROVABLE — contains(\"\")==true must NOT launder it as grounded")
+        XCTAssertFalse(KistRunner.groundedSmokePass(output: "", expect: "20"),
+                       "no output → not grounded")
     }
 }

@@ -17,6 +17,28 @@ final class SelfToolRelevanceTests: XCTestCase {
          man("self__jsonfmt", "Pretty-prints a JSON document", "Given --file, prints formatted JSON.")]
     }
 
+    func testTokenlessToolIsAlwaysSurfaced() {
+        // review #2: a tool whose ENTIRE haystack tokenizes to nothing (name/desc/contract all stopwords or
+        // <3 chars) can never be positively matched, so it must be surfaced whenever we DO trim — never hidden.
+        let degenerate = man("self__use", "use it", "use")   // 'use'/'it' → empty haystack
+        let ms = four + [degenerate]                          // 5 tools, >surfaceAllBelow
+        let keep = SelfToolRelevance.relevant(goal: "add two numbers", manifests: ms)
+        XCTAssertNotNil(keep, "self__add matched, so the set trims")
+        XCTAssertTrue(keep!.contains("self__use"), "the token-less tool must ALWAYS be surfaced (fail-open per tool)")
+        XCTAssertTrue(keep!.contains("self__add"), "the matched tool is kept")
+        XCTAssertFalse(keep!.contains("self__zipdir"), "a real non-matching tool is still trimmed")
+    }
+
+    func testSnakeCaseToolNameSplitsIntoMatchableTokens() {
+        // review #4: a multi-word snake_case name must contribute its WORDS, not one glued token.
+        let snake = man("self__do_thing", "handles it", "does the work")   // name is the only real signal
+        let ms = four + [snake]
+        let keep = SelfToolRelevance.relevant(goal: "do the thing please", manifests: ms)
+        XCTAssertNotNil(keep)
+        XCTAssertTrue(keep!.contains("self__do_thing"), "'thing' from the goal must overlap the split name token")
+        XCTAssertFalse(keep!.contains("self__zipdir"), "an unrelated tool is trimmed")
+    }
+
     func testPositiveMatchKeepsOnlyRelevant() {
         let keep = SelfToolRelevance.relevant(goal: "add two numbers together", manifests: four)
         XCTAssertEqual(keep, ["self__add"], "only the summing tool overlaps 'add' — the rest are dropped from advertisement")

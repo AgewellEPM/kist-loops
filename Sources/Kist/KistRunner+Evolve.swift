@@ -263,18 +263,27 @@ extension KistRunner {
             let smoke = await ScriptTool.runContained(interpreter: manifest.interpreter,
                                                       scriptPath: (home as NSString).appendingPathComponent(manifest.scriptFile),
                                                       args: cli)
-            let smokeOk = smoke.output.contains(manifest.testExpectSubstring)
+            // GROUNDED gate: the smoke run must actually produce the expected output. `expect` must be
+            // NON-EMPTY — `contains("")` is vacuously true, so an empty-expect tool is UNGROUNDED and refused
+            // (review #1). This one boolean now governs BOTH activation and the lesson deposit.
+            let smokeOk = Self.groundedSmokePass(output: smoke.output, expect: manifest.testExpectSubstring)
+            if !smokeOk {
+                // review #7: a promoted-but-smoke-FAILED (or ungrounded empty-expect) tool must NOT be left on
+                // disk to load + advertise next session. Roll the activation back and fail.
+                try? FileManager.default.removeItem(atPath: home)
+                let why = manifest.testExpectSubstring.isEmpty
+                    ? "empty expect — ungrounded, refused" : "did not produce ‘\(manifest.testExpectSubstring)’"
+                line(c("31", "└ ACTIVATION ROLLED BACK ") + tool + c("2", " — smoke \(why): ‘\(smoke.output.prefix(80))’"))
+                return 1
+            }
             line(c("32", "└ ACTIVATED ") + tool + c("2", " → \(home)"))
-            line(c("2", "  smoke: \(manifest.testArgs) ⇒ ") + (smokeOk
-                 ? c("32", "‘\(smoke.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).prefix(80))’ ✓ (sandboxed)")
-                 : c("31", "‘\(smoke.output.prefix(80))’ ✗ expected \(manifest.testExpectSubstring)")))
-            // P2 triangle close: on a GROUNDED promotion (smoke actually produced the expected output) deposit
-            // a recallable "winning approach" auto-lesson so the P1 recall→plan wire surfaces "you grew self__X
-            // for exactly this" on a future similar task. GROUNDED-only: gated on smokeOk (NOT result.promoted
-            // alone) so a promoted-but-smoke-failed tool never deposits a lesson claiming it works. kind MUST be
-            // "auto-lesson" (SemanticMemory.formatLessonBlock filters on it). Deterministic text ⇒ SHA256 upsert
-            // dedup on re-promotion. Fail-soft (try?) + embedder-gated (nil semantic ⇒ no-op), like rememberLesson.
-            if smokeOk, let semantic {
+            line(c("2", "  smoke: \(manifest.testArgs) ⇒ ")
+                 + c("32", "‘\(smoke.output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).prefix(80))’ ✓ (sandboxed)"))
+            // P2 triangle close: on a GROUNDED promotion deposit a recallable "winning approach" auto-lesson so
+            // the P1 recall→plan wire surfaces "you grew self__X for exactly this" on a future similar task.
+            // kind MUST be "auto-lesson" (SemanticMemory.formatLessonBlock filters on it). Deterministic text ⇒
+            // SHA256 upsert dedup. Fail-soft (try?) + embedder-gated (nil semantic ⇒ no-op), like rememberLesson.
+            if let semantic {
                 let lesson = Self.promotionLesson(tool: tool, brief: brief, description: manifest.description)
                 try? await semantic.remember(lesson, metadata: ["kind": "auto-lesson", "tool": tool])
             }
@@ -286,12 +295,22 @@ extension KistRunner {
         }
     }
 
+    /// The GROUNDED-promotion predicate (pure + directly testable — review #1/#14). A smoke run is grounded
+    /// ONLY when `expect` is non-empty AND the output actually contains it. The non-empty check is the fix for
+    /// `String.contains("")` being vacuously true — an empty-expect tool can never be "proven", so it's refused.
+    static func groundedSmokePass(output: String, expect: String) -> Bool {
+        !expect.isEmpty && output.contains(expect)
+    }
+
     /// P2 triangle close: the deterministic "winning approach" lesson deposited on a GROUNDED promotion.
     /// Pure + testable. NO timestamps/smoke-snippets — same (tool, brief, description) ⇒ same text ⇒ same
     /// SHA256 id ⇒ upsert-dedup on re-promotion (never a duplicate). Names the tool IN the body (that's
     /// what the future model reads via recall) and states the callable-NEXT-session contract honestly.
+    /// BOTH free-text fields are length-bounded (review #13): `description` is author-LLM text and otherwise
+    /// unvalidated, so an unbounded blob would bloat every future recall injection.
     static func promotionLesson(tool: String, brief: String, description: String) -> String {
         let goal = brief.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)
-        return "SOLVED: \(goal) — authored + adversary-proven `\(tool)` (\(description)). Callable next session as \(tool)."
+        let desc = description.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)
+        return "SOLVED: \(goal) — authored + adversary-proven `\(tool)` (\(desc)). Callable next session as \(tool)."
     }
 }
