@@ -382,7 +382,10 @@ def walk(fd,prefix,target_fd=None):
         if rel==".kist/runs":
             if stat.S_ISDIR(st.st_mode): continue
             raise RuntimeError("run telemetry has an invalid type")
-        if not prefix and name in {".build",".build-local","DerivedData"}:
+        if name in {".build",".build-local","DerivedData"}:
+            # Build output at ANY depth is a regenerable artifact, never source — skip it (and never
+            # descend, so a nested SwiftPM `.build/debug` symlink can't choke the source hasher). Was
+            # `not prefix and …` (root-only), which let e.g. mcp-server/.build/debug fail the snapshot.
             if stat.S_ISDIR(st.st_mode): continue
             raise RuntimeError("build output has an invalid type")
         if stat.S_ISDIR(st.st_mode):
@@ -409,7 +412,7 @@ def walk(fd,prefix,target_fd=None):
             if st.st_size>MAX_FILE or total>MAX_TOTAL or paths>MAX_PATHS: raise RuntimeError("aggregate bound")
             entries.append((rb,b"F",stat.S_IMODE(st.st_mode),
                             read_file(fd,name,identity,st.st_size,target_fd)))
-        else: raise RuntimeError("source symlink/special")
+        else: raise RuntimeError(f"source symlink/special: {rel}")
     if fp(os.fstat(fd))!=initial: raise RuntimeError("directory changed")
     for name,identity in observed:
         if fp(os.stat(name,dir_fd=fd,follow_symlinks=False))!=identity: raise RuntimeError("name changed")
