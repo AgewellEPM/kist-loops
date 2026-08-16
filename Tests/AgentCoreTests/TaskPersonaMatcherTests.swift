@@ -90,4 +90,47 @@ final class TaskPersonaMatcherTests: XCTestCase {
         XCTAssertTrue(display.contains("acting as:"))
         XCTAssertTrue(display.contains("consulting:"))
     }
+
+    // MARK: dynamic-advisor A1 — new creative/generative personas + regulated-domain disclaimer discipline
+
+    func testJokeAskSelectsComedian() {
+        let matches = TaskPersonaMatcher(registry: nil)
+            .matches(for: "write me a joke about debugging at 3am", limit: 2)
+        XCTAssertEqual(matches.first?.specialist.name, "comedian")
+    }
+
+    func testMarketingCopyAskSelectsCopywriter() {
+        let matches = TaskPersonaMatcher(registry: nil)
+            .matches(for: "write marketing copy and a headline for our landing page", limit: 2)
+        XCTAssertEqual(matches.first?.specialist.name, "copywriter")
+    }
+
+    func testMusicLicensingAskSelectsAdvisorAndDisclaims() {
+        let matches = TaskPersonaMatcher(registry: nil)
+            .matches(for: "I want to clear a sample and get a sync license for this song", limit: 2)
+        XCTAssertEqual(matches.first?.specialist.name, "music-licensing-advisor")
+        let ctx = TaskPersonaMatcher.promptContext(matches: matches)!.lowercased()
+        XCTAssertTrue(ctx.contains("not legal advice"),
+                      "the music-licensing advisor is regulated — its advisory context must disclaim")
+    }
+
+    /// SAFETY MULTI-SITE INVARIANT: every REGULATED-domain persona MUST carry an explicit
+    /// "not professional advice / consult a licensed professional" disclaimer in its systemPrompt. Named per
+    /// persona so a bare one fails with the site. (Luke's vulnerable-user domain — non-negotiable.)
+    func testAllRegulatedPersonasCarryADisclaimer() {
+        let byName = Dictionary(uniqueKeysWithValues: BuiltinSpecialists.all.map { ($0.name, $0) })
+        let regulated: [(String, [String])] = [
+            ("legal-research-analyst",   ["not legal advice", "licensed attorney"]),
+            ("real-estate-law-advisor",  ["licensed attorney"]),
+            ("financial-advisor",        ["avoid guarantees", "qualified review", "educational"]),
+            ("medical-researcher",       ["never present research as a diagnosis", "clinician"]),
+            ("music-licensing-advisor",  ["not legal advice", "licensed music attorney"]),
+        ]
+        for (name, phrases) in regulated {
+            guard let def = byName[name] else { XCTFail("regulated persona missing from catalog: \(name)"); continue }
+            let prompt = def.systemPrompt.lowercased()
+            XCTAssertTrue(phrases.contains { prompt.contains($0) },
+                          "\(name) must carry a not-professional-advice disclaimer (looked for one of: \(phrases))")
+        }
+    }
 }
