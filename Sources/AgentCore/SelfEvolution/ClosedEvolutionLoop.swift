@@ -7,12 +7,15 @@ import Foundation
 ///
 /// The soundness ceiling is honest and enforced in the ordering below:
 ///   1. author (NEURAL, injected)                — writes a candidate + its own tests in a sandbox
-///   2. regression/integrity gate (P2, SYMBOLIC) — CIIntegrityGuard (no test-gaming) + real build/test
-///   3. symbolic contradiction veto (P3)         — jeeves-floor; a veto the author cannot argue with
-///   4. independent adversary (P4)               — a DIFFERENT provider must fail to break it
+///   2. regression/integrity gate (SYMBOLIC)     — CIIntegrityGuard (no test-gaming) + real build/test
+///   3. symbolic contradiction veto              — jeeves-floor; a veto the author cannot argue with
+///   4. independent adversary                    — a DIFFERENT provider must fail to break it
 ///   5. promote gate (AdversarialPromoteGate)    — ships only if 2+4 both hold
-/// Every "reject" is safe by construction (a filter has no laundering surface). Only step 5 ships, and it
-/// ships ONLY into the `self__` runtime namespace — never a user-facing path unattended.
+///   6. monotonic held-out invariant (P3)        — a previously-passing held-out case may NEVER regress
+/// Every "reject" is safe by construction (a filter has no laundering surface). Only a change that survives
+/// ALL of these ships, and it ships ONLY into its kind's RESERVED namespace — never a user-facing path
+/// unattended. P3 GENERALIZED this spine: it once promoted only `self__` tools; the SAME sequence now
+/// promotes any `SelfChangeKind` (tool / prompt / routerPolicy), each confined to its own namespace.
 public enum EvolutionOutcome: String, Sendable, Equatable, Codable {
     case promoted              // survived every gate — register into the self__ namespace
     case notApplicable         // not an auto-evolvable extendTool (foreign → spec; other kinds → their path)
@@ -20,8 +23,9 @@ public enum EvolutionOutcome: String, Sendable, Equatable, Codable {
     case authorFailed          // the author produced no candidate
     case rejectedSameProvider  // FAIL-CLOSED: adversary shares the author's provider ⇒ self-certification
     case rejectedGate          // CIIntegrityGuard / build-test (P2) rejected it
-    case rejectedVeto          // jeeves-floor symbolic contradiction (P3)
+    case rejectedVeto          // jeeves-floor symbolic contradiction (P3-veto)
     case rejectedAdversary     // independent adversary broke it, or promote gate held (P4)
+    case rejectedRegression    // P3: applying the change regressed a previously-passing held-out case (hard reject)
 }
 
 public struct EvolutionResult: Sendable, Equatable {
@@ -31,15 +35,20 @@ public struct EvolutionResult: Sendable, Equatable {
     public var promoted: Bool { outcome == .promoted }
 }
 
-/// A candidate capability the author produced in a sandbox. NOT yet callable.
+/// A candidate self-change the author produced in a sandbox. NOT yet promoted. `kind` (P3) generalizes this
+/// beyond tools: the SAME struct now carries a prompt or router-policy change, each confined to its own
+/// reserved namespace (`kind.identityPrefix`). `toolName` is the candidate's IDENTITY (name for a tool;
+/// label for a prompt/router change) and MUST start with that prefix.
 public struct CapabilityCandidate: Sendable, Equatable {
-    public let toolName: String        // MUST be in the self__ namespace
-    public let workdir: String         // sandbox path holding the source + tests
+    public let toolName: String        // the candidate's identity — MUST start with kind.identityPrefix
+    public let workdir: String         // sandbox path holding the proposed artifact + its tests/eval
     public let contract: String        // NL behavior contract — the input to the symbolic veto (P3)
     public let authorProvider: String  // which provider wrote it — enforced ≠ adversary provider (P4)
-    public init(toolName: String, workdir: String, contract: String, authorProvider: String) {
+    public let kind: SelfChangeKind    // P3: which kind of self-change this is (defaults to .tool)
+    public init(toolName: String, workdir: String, contract: String, authorProvider: String,
+                kind: SelfChangeKind = .tool) {
         self.toolName = toolName; self.workdir = workdir; self.contract = contract
-        self.authorProvider = authorProvider
+        self.authorProvider = authorProvider; self.kind = kind
     }
 }
 
@@ -80,6 +89,7 @@ public struct ClosedEvolutionLoop: Sendable {
         gate: CandidateGate,
         veto: SymbolicVeto,
         adversary: CapabilityAdversary,
+        regression: RegressionInvariant? = nil,
         promoteMinConfidence: Double = 0.6
     ) async -> EvolutionResult {
 
@@ -105,10 +115,12 @@ public struct ClosedEvolutionLoop: Sendable {
             return EvolutionResult(outcome: .authorFailed, toolName: decision.culpritTool,
                                    reason: "author produced no candidate")
         }
-        // A self-authored tool MUST land in the self__ namespace — mechanical boundary on what evolution creates.
-        guard cand.toolName.hasPrefix(kistSelfAuthoredPrefix) else {
+        // P3 — kind-aware namespace boundary: a promoted change MUST land in its kind's RESERVED namespace
+        // (self__ for a tool, selfprompt__ / selfrouter__ for the other kinds). This is the mechanical limit
+        // on what evolution can register, generalized from the old tool-only self__ check.
+        guard cand.toolName.hasPrefix(cand.kind.identityPrefix) else {
             return EvolutionResult(outcome: .rejectedGate, toolName: cand.toolName,
-                                   reason: "candidate ‘\(cand.toolName)’ is outside the self__ namespace")
+                                   reason: "candidate ‘\(cand.toolName)’ is outside the \(cand.kind.rawValue) namespace ‘\(cand.kind.identityPrefix)’")
         }
 
         // P4 PRECONDITION — provider-distinctness, FAIL-CLOSED. If author and adversary share a provider the
@@ -139,7 +151,20 @@ public struct ClosedEvolutionLoop: Sendable {
             return EvolutionResult(outcome: .rejectedAdversary, toolName: cand.toolName, reason: decisionGate.reason)
         }
 
-        // Survived everything → promote into the self__ runtime namespace (activation at the callsite).
+        // P3 — MONOTONIC held-out invariant (anti-gaming, HARD reject). Even after passing the gate + adversary,
+        // a change that regresses a previously-passing held-out case at frozen difficulty is refused — no
+        // adversary confidence can override it. Skipped when no regression organ is injected (tool path
+        // unchanged until wired). This is where a "looks better but quietly breaks things" change dies.
+        if let regression {
+            let before = await regression.baselinePassing()
+            let after = await regression.passingWith(cand)
+            let inv = HeldOutInvariant.notRegressed(before: before, after: after)
+            guard inv.ok else {
+                return EvolutionResult(outcome: .rejectedRegression, toolName: cand.toolName, reason: inv.reason)
+            }
+        }
+
+        // Survived everything → promote into the change's reserved runtime namespace (activation at the callsite).
         return EvolutionResult(outcome: .promoted, toolName: cand.toolName,
                                reason: "survived gate + symbolic veto + independent adversary (\(av.confidence))")
     }
@@ -153,7 +178,7 @@ public struct ClosedEvolutionLoop: Sendable {
     public static func ledgerOutcome(for outcome: EvolutionOutcome) -> String? {
         switch outcome {
         case .promoted: return "promoted"
-        case .rejectedGate, .rejectedVeto, .rejectedAdversary, .rejectedSameProvider, .authorFailed: return "rejected"
+        case .rejectedGate, .rejectedVeto, .rejectedAdversary, .rejectedSameProvider, .rejectedRegression, .authorFailed: return "rejected"
         case .notApplicable, .skippedByLedger: return nil
         }
     }

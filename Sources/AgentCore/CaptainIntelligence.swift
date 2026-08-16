@@ -370,6 +370,14 @@ public enum ModelAssignmentEngine {
         let id = candidate.binding.providerId.lowercased()
         let model = (candidate.binding.model ?? "").lowercased()
         let caps = candidate.capabilities
+        // CONFIDENCE-WEIGHTED PRIOR (router audit 2026-08-15, fix #1: "let evidence DRIVE, not just nudge").
+        // The hardcoded model-NAME preference in the switch below is a COLD-START PRIOR, not a permanent thumb on
+        // the scale — it FADES as measured evidence for THIS candidate accumulates, so a proven model wins on its
+        // record and a name-favored model with a poor record loses its artificial edge. (Before this, `scoreBoost`
+        // was `max(0, …)` and 0 until promoted, so a bad record could never overcome a name prior — evidence could
+        // only reward, never demote.) With no evidence the prior holds in FULL ⇒ routing is identical to before
+        // until the scorecard has something to say. See `namePriorWeight(samples:)`.
+        let namePrior = namePriorWeight(samples: learningEvidence?.samples ?? 0)
         var score: Double = candidate.keyed ? 40 : 0
         if id == defaultProvider.lowercased() { score += 4 }
         if let avoid, id == avoid.lowercased() { score -= 8 }
@@ -384,16 +392,16 @@ public enum ModelAssignmentEngine {
 
         switch role {
         case .planner:
-            score += preference(id, ["openai": 12, "gemini": 11, "mimo": 10, "deepseek": 9, "anthropic": 8])
+            score += preference(id, ["openai": 12, "gemini": 11, "mimo": 10, "deepseek": 9, "anthropic": 8]) * namePrior
             if caps.reasoning { score += 8 }
         case .worker:
-            score += preference(id, ["deepseek": 11, "mimo": 10, "qwen": 9, "gemini": 8, "ollama": 6, "mlx": 6])
-            if profile.prefersResearch { score += preference(id, ["gemini": 10, "openai": 8, "perplexity": 14]) }
+            score += preference(id, ["deepseek": 11, "mimo": 10, "qwen": 9, "gemini": 8, "ollama": 6, "mlx": 6]) * namePrior
+            if profile.prefersResearch { score += preference(id, ["gemini": 10, "openai": 8, "perplexity": 14]) * namePrior }
         case .coder:
-            score += preference(id, ["deepseek": 14, "mimo": 13, "qwen": 10, "openai": 9, "anthropic": 8, "mlx": 7])
+            score += preference(id, ["deepseek": 14, "mimo": 13, "qwen": 10, "openai": 9, "anthropic": 8, "mlx": 7]) * namePrior
             if caps.codeExecution { score += 8 }
         case .critic:
-            score += preference(id, ["gemini": 13, "openai": 12, "anthropic": 11, "deepseek": 8, "mimo": 7])
+            score += preference(id, ["gemini": 13, "openai": 12, "anthropic": 11, "deepseek": 8, "mimo": 7]) * namePrior
             if caps.reasoning { score += 7 }
         }
         return score
@@ -402,5 +410,15 @@ public enum ModelAssignmentEngine {
     private static func preference(_ id: String, _ table: [String: Double]) -> Double {
         for (needle, value) in table where id.contains(needle) { return value }
         return 0
+    }
+
+    /// Confidence weight on the model-NAME preference prior: 1.0 at cold start (no samples ⇒ the prior fully
+    /// holds and routing is unchanged from before the scorecard existed), decaying toward 0 as measured evidence
+    /// accumulates so the EARNED signal (`scoreBoost`) takes over. `samples/(samples+K)` shrinkage with K=8 ⇒
+    /// half weight by ~8 runs, ~20% by ~32. Clamped to [0,1]; negative input is treated as cold start. Internal
+    /// so the decay curve + the cold-start fail-safe are unit-testable directly.
+    static func namePriorWeight(samples: Int) -> Double {
+        let s = Double(max(0, samples))
+        return 1.0 - s / (s + 8.0)
     }
 }

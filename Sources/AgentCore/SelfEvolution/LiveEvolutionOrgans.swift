@@ -76,18 +76,18 @@ public struct LiveCapabilityAdversary: CapabilityAdversary {
     let registry: ProviderRegistry
     public let provider: String     // MUST differ from the author's provider (enforced by the loop, fail-closed)
     let model: String?
-    let manifest: SelfAuthoredManifest
-    let scriptPath: String
 
-    public init(registry: ProviderRegistry, provider: String, model: String?,
-                manifest: SelfAuthoredManifest, scriptPath: String) {
+    public init(registry: ProviderRegistry, provider: String, model: String?) {
         self.registry = registry; self.provider = provider; self.model = model
-        self.manifest = manifest; self.scriptPath = scriptPath
     }
 
     struct Attack: Codable { let breakingArgs: [String: String]?; let expectContains: String?; let confidence: Double? }
 
     public func attack(_ candidate: CapabilityCandidate) async -> AdversaryVerdict {
+        // Attack whatever the author produced (loaded from the candidate workdir).
+        guard let (manifest, scriptPath) = SelfAuthoredManifest.loadFrom(workdir: candidate.workdir) else {
+            return AdversaryVerdict(survived: false, attackFound: "candidate manifest/script missing", confidence: 0.9)
+        }
         let prompt = Self.prompt(manifest: manifest)
         guard let raw = try? await registry.complete(providerId: provider, model: model,
                                                      messages: [ChatMessage(role: .user, content: prompt)]),

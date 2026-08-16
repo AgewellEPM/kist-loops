@@ -37,6 +37,20 @@ public struct SelfAuthoredManifest: Codable, Sendable, Equatable {
 /// REFUSES to run (fail-closed). The gates prove a tool WORKS; this is what keeps a working-but-harmful
 /// script from doing damage — the adversary hunts contract violations, not malice, so containment is the
 /// only safety layer and it cannot be optional.
+extension SelfAuthoredManifest {
+    /// Load a candidate's manifest + resolved script path from its workdir (where the author wrote
+    /// `manifest.json` + the script). Used by the gate and adversary so they operate on whatever the author
+    /// just produced, not a pre-baked manifest.
+    public static func loadFrom(workdir: String) -> (manifest: SelfAuthoredManifest, scriptPath: String)? {
+        let manifestPath = (workdir as NSString).appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+              let manifest = try? JSONDecoder().decode(SelfAuthoredManifest.self, from: data) else { return nil }
+        let scriptPath = (workdir as NSString).appendingPathComponent(manifest.scriptFile)
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return nil }
+        return (manifest, scriptPath)
+    }
+}
+
 public struct ScriptTool: AgentTool {
     public let manifest: SelfAuthoredManifest
     public let homeDir: String           // where the script lives
@@ -57,7 +71,7 @@ public struct ScriptTool: AgentTool {
 
     /// Serialize tool args to CLI args as `--name value` pairs, in the manifest's declared order (stable,
     /// so the script can parse positionally or by flag). Only declared params are passed.
-    static func cliArgs(from arguments: [String: Any], manifest: SelfAuthoredManifest) -> [String] {
+    public static func cliArgs(from arguments: [String: Any], manifest: SelfAuthoredManifest) -> [String] {
         var out: [String] = []
         for p in manifest.parameters {
             guard let v = arguments[p.name] else { continue }

@@ -62,6 +62,31 @@ extension KistRunner {
         let advColor = r.advantage > 1e-9 ? "32" : (r.negativeTransfer ? "31" : "33")
         print(c("36", "│ COLD ") + pct(r.coldSuccess) + c("2", "  vs  ") + c("36", "WARM ") + pct(r.warmSuccess) + c("2", "  (n=\(r.n))"))
         print(c(advColor, "│ advantage · \(r.advantage >= 0 ? "+" : "")\(pct(r.advantage))") + c("2", r.negativeTransfer ? " · ⚠ NEGATIVE TRANSFER (warm did worse — the state hurt here)" : (r.advantage <= 1e-9 ? " · flat (nothing compounded on this corpus yet)" : " · warm state helped on unseen work")))
+
+        // P1 — ANTI-GOODHART TEETH (live). A positive fixed-corpus advantage is only trustworthy if it SURVIVES
+        // the surface moving. Until now `runMovingTarget`/`advantageIsReal` ran ONLY in unit tests, so a
+        // memorized (spec-gamed) advantage read as real in production. Probe ONLY when there's a positive
+        // advantage to validate (a flat/negative reading has nothing to game). The perturbation seed is
+        // reproducible (derived from the corpus, NOT a clock), so the round replays exactly.
+        if r.advantage > 1e-9 {
+            print(c("2", "│ probing whether that advantage is REAL — perturbing the corpus surface (co-evolving moving target) and re-measuring…"))
+            let seed = FNV1a.seed("ablation-moving-target", corpusTag, String(cases.count))
+            let mt = await AblationRunner.runMovingTarget(
+                base: cases, accumulatedFrom: [], epoch: r.epoch,
+                cold: armAgent(cold: true), warm: armAgent(cold: false),
+                seed: seed, maxIterations: opts.maxIterations)
+            switch MovingTargetVerdict.judge(mt) {
+            case .real(let mAdv, let d):
+                print(c("32", "│ ✅ advantage is REAL · +\(pct(mAdv)) on the MOVED surface (gaming Δ \(pct(d))) — competence, not memorization"))
+            case .gamed(let d):
+                print(c("31", "│ ⛔ advantage is GAMED · it EVAPORATES when the surface moves (Δ \(pct(d))) — spec-gaming signature; a promote gate must VETO this, don't trust the +\(pct(r.advantage))"))
+            case .evaporated:
+                print(c("33", "│ ⚠ advantage does NOT hold on the moved surface (drops to ~0) — not reproducible; treat as no real compounding"))
+            case .inconclusive(let why):
+                print(c("33", "│ ⚠ moving-target inconclusive · \(why) — advantage unvalidated"))
+            }
+        }
+
         if sameCorpus.count >= 2 {
             print(c("2", "│ flywheel slope over \(sameCorpus.count) \(corpusTag) readings: \(slope > 1e-6 ? "↑ accelerating" : (slope < -1e-6 ? "↓ decaying" : "→ flat"))"))
         }
@@ -180,6 +205,7 @@ extension KistRunner {
 
     static func runEvolve(_ opts: KistOptions, brief: String,
                           registry: ProviderRegistry, root: String,
+                          tools: ToolRegistry, context: ToolContext,
                           providerId: String, model: String?,
                           semantic: SemanticMemoryService? = nil) async -> Int32 {
         func line(_ s: String) { print(s) }
@@ -218,8 +244,35 @@ extension KistRunner {
         let veto = JeevesFloorVeto()
         let adversary = LiveCapabilityAdversary(registry: registry, provider: adversaryProvider, model: model)
 
+        // P3 — arm the monotonic held-out regression guard. `ClosedEvolutionLoop` ALREADY enforces
+        // HeldOutInvariant as a HARD reject (no adversary confidence overrides it); it was simply never handed
+        // an organ on this path, so the strongest anti-gaming gate was dead here. We measure the CAPABILITY
+        // corpus (the golden suite is 100%/100% — no signal) cold vs with-candidate. Empty corpus ⇒ nil ⇒
+        // additive no-op (the guard can never manufacture a false reject when there's nothing to protect).
+        let capabilityCases = EvalGoldenSuite.capabilityCases(projectRoot: root)
+        let regressionTrace = TraceRecorder(traceId: TraceID.make())
+        let regression: RegressionInvariant? = capabilityCases.isEmpty ? nil :
+            CapabilityRegressionOrgan(cases: capabilityCases) { cases, extra in
+                // Two IDENTICAL arms except for the candidate tool, so a dropped case is caused by the
+                // candidate, not the surface. Baseline arm = warm toolset; candidate arm = warm + this self__ tool.
+                let arm: ToolRegistry
+                if let extra { arm = ToolRegistry(tools.all() + [extra as any AgentTool]) }
+                else { arm = tools }
+                let agent = Self.ablationArm(registry: registry, context: context, providerId: providerId,
+                                             model: model, opts: opts, tools: arm, trace: regressionTrace,
+                                             roleLabel: extra == nil ? "regress-base" : "regress-candidate", inject: nil)
+                let report = await EvalRunner(maxIterations: opts.maxIterations).run(cases, agent: agent, judge: nil)
+                return Set(report.results.filter { $0.passed }.map { $0.name })
+            }
+        if regression != nil {
+            line(c("2", "│ 🛡️  held-out regression guard ARMED · \(capabilityCases.count) capability case(s) · rejects a REPRODUCIBLE candidate-caused break of a previously-passing case (a new tool no case exercises reads as no-signal — that class is the adversary's job)"))
+        } else {
+            line(c("2", "│ ⚠ held-out regression guard OFF · no capability cases (seed .kist/eval/capability-suite.json to arm P3)"))
+        }
+
         line(c("2", "│ ✍️  authoring candidate…"))
-        let result = await ClosedEvolutionLoop.run(decision: decision, author: author, gate: gate, veto: veto, adversary: adversary)
+        let result = await ClosedEvolutionLoop.run(decision: decision, author: author, gate: gate, veto: veto,
+                                                   adversary: adversary, regression: regression)
 
         // ── ARTIFACTS: show what was actually produced + judged ─────────────────────────────────────────
         if let tool = result.toolName {

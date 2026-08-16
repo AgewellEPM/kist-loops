@@ -267,4 +267,68 @@ final class CaptainIntelligenceTests: XCTestCase {
         XCTAssertTrue(assigned[0].assignment.capabilityTags.contains("learning"))
         XCTAssertTrue(assigned[0].assignment.reason.contains("promoted"))
     }
+
+    /// PINS THE FIX ITSELF — `preference(...) * namePrior` on EVERY role branch. The scalar curve
+    /// `namePriorWeight(samples:)` is pinned in ModelAssignmentPriorTests, but the MULTIPLIER at the role
+    /// branches was a mutation-survivor (dropping `* namePrior` on any single branch left the suite green),
+    /// which would silently reinstate the audited bug: name-bias that evidence can never demote. For each role a
+    /// name-FAVORED but capability-weaker model wins at COLD start (prior full), then LOSES to a
+    /// capability-stronger challenger once the favored model carries enough UNPROMOTED evidence (successRate
+    /// 1/3 < 0.67 ⇒ scoreBoost stays 0, so ONLY the decayed prior can cause the flip). One named assertion per
+    /// branch (multi-site-invariant discipline). (Router-audit review 2026-08-15.)
+    func testNamePriorMultiplierIsLiveOnEveryRoleBranch() {
+        // (role, favored provider present in THAT role's preference table, a challenger capability that scores in
+        //  that role's branch). Challenger id "challenger" matches no preference table ⇒ its only edge is capability.
+        let coding = "write Swift code"
+        let scenarios: [(role: AgentRole, favored: String, favModel: String,
+                         challengerCaps: ModelCapabilities, intent: String, tags: [String])] = [
+            (.coder,   "deepseek", "deepseek-v4-pro", ModelCapabilities(nativeTools: true, codeExecution: true),   coding, ["coding"]), // coder branch: codeExecution +8
+            (.critic,  "gemini",   "gemini-2.5-pro",  ModelCapabilities(nativeTools: true, reasoning: true),       coding, ["coding"]), // critic branch: reasoning +7
+            (.planner, "openai",   "gpt-5",           ModelCapabilities(nativeTools: true, reasoning: true),       coding, ["coding"]), // planner branch: reasoning +8
+            // worker DELEGATES to .coder unless prefersResearch (CaptainIntelligence.swift:233), so the .worker
+            // branch is only reachable via a RESEARCH task. Favored "deepseek" is in the worker table (11) only;
+            // a contextWindow challenger (+9) pins the worker branch's `* namePrior`.
+            (.worker,  "deepseek", "deepseek-v4-pro", ModelCapabilities(nativeTools: true, contextWindowTokens: 900_000),
+             "research and compare external market docs and web sources", ["research"]),
+        ]
+        // fallback default is a THIRD provider so neither favored nor challenger picks up the +4 default bonus.
+        let fallback = RoleBindings(default: ProviderBinding(providerId: "fallbackonly", model: "fb"))
+
+        for s in scenarios {
+            let task = FleetSubtask(title: "task", intent: s.intent,
+                                    scopeGlobs: ["Sources/*"], acceptanceCriterion: "done")
+            let snapshot = ProjectSnapshot(
+                repo: "/repo", trackedFileCount: 20, directorySnapshot: "Sources",
+                knownDirectories: ["", "Sources"], manifests: ["Package.swift"],
+                testEntrypoints: ["swift test"], languages: ["Swift"], changedFiles: [],
+                providers: [
+                    .init(binding: ProviderBinding(providerId: s.favored, model: s.favModel),
+                          displayName: s.favored,
+                          capabilities: ModelCapabilities(nativeTools: true),   // in the name table, capability-minimal
+                          keyed: true),
+                    .init(binding: ProviderBinding(providerId: "challenger", model: "challenger-1"),
+                          displayName: "Challenger",
+                          capabilities: s.challengerCaps,                        // no table entry, a real capability edge
+                          keyed: true),
+                ])
+
+            // COLD start: no evidence ⇒ namePrior 1.0 ⇒ the favored model's full preference wins.
+            let cold = ModelAssignmentEngine.assign(subtasks: [task], snapshot: snapshot, defaultRoles: fallback)
+            XCTAssertEqual(cold[0].roles.binding(for: s.role).providerId, s.favored,
+                           "\(s.role): name-favored model must win at cold start (prior full)")
+
+            // 60 UNPROMOTED samples on the favored model (1/3 success ⇒ not promoted ⇒ scoreBoost 0). The name
+            // prior decays to ~0.12, dropping its preference (11–14) below the challenger's capability edge (7–8).
+            let samples = (0..<60).map { idx in
+                CaptainLearningSample(taskSignature: "mapper", taskTags: s.tags, language: "Swift",
+                                      role: s.role.rawValue, providerId: s.favored, model: s.favModel,
+                                      source: .benchmark, success: idx % 3 == 0, atEpoch: Double(idx))
+            }
+            let learning = ModelAssignmentLearningContext(summaries: CaptainLearningStore.summarize(samples))
+            let decayed = ModelAssignmentEngine.assign(subtasks: [task], snapshot: snapshot,
+                                                       defaultRoles: fallback, learning: learning)
+            XCTAssertEqual(decayed[0].roles.binding(for: s.role).providerId, "challenger",
+                           "\(s.role): once unpromoted evidence decays the name prior, the capability-stronger challenger must win — FAILS if `* namePrior` is dropped from the .\(s.role) branch")
+        }
+    }
 }

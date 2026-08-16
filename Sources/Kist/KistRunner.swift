@@ -819,6 +819,7 @@ enum KistRunner {
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
                     return await runEvolve(opts, brief: brief, registry: registry, root: root,
+                                           tools: tools, context: context,   // P3: held-out regression guard
                                            providerId: providerId, model: model,
                                            semantic: semanticMemory)   // P2: grounded auto-lesson deposit on promote
                 }

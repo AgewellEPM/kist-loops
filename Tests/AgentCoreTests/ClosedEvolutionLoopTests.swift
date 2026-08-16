@@ -23,6 +23,14 @@ final class ClosedEvolutionLoopTests: XCTestCase {
         let provider: String; let verdict: AdversaryVerdict
         func attack(_ c: CapabilityCandidate) async -> AdversaryVerdict { verdict }
     }
+    /// Fake held-out regression organ (P3): canned before/after passing sets, so the loop's monotonic
+    /// invariant can be pinned without live models. The real organ (CapabilityRegressionOrgan) runs the
+    /// capability corpus; here we prove only that the LOOP hard-rejects a regression an organ reports.
+    struct Regress: RegressionInvariant {
+        let before: Set<String>; let after: Set<String>
+        func baselinePassing() async -> Set<String> { before }
+        func passingWith(_ c: CapabilityCandidate) async -> Set<String> { after }
+    }
 
     private func candidate(name: String = "self__do_thing", author: String = "deepseek") -> CapabilityCandidate {
         CapabilityCandidate(toolName: name, workdir: "/tmp/x", contract: "does X under Y", authorProvider: author)
@@ -36,8 +44,10 @@ final class ClosedEvolutionLoopTests: XCTestCase {
     private func run(author: Author, gate: Gate = Gate(ok: true, why: "green"),
                      veto: Veto = Veto(vetoed: false),
                      adversary: Adversary = Adversary(provider: "gemini", verdict: AdversaryVerdict(survived: true, confidence: 0.9)),
+                     regression: Regress? = nil,
                      decision d: SelfEvolutionDecision? = nil) async -> EvolutionResult {
-        await ClosedEvolutionLoop.run(decision: d ?? decision(), author: author, gate: gate, veto: veto, adversary: adversary)
+        await ClosedEvolutionLoop.run(decision: d ?? decision(), author: author, gate: gate, veto: veto,
+                                      adversary: adversary, regression: regression)
     }
 
     // MARK: the ONE happy path
@@ -106,5 +116,51 @@ final class ClosedEvolutionLoopTests: XCTestCase {
     func testNonExtendKindNotApplicable() async {
         let r = await run(author: Author(cand: candidate()), decision: decision(kind: .discoverAndRetry))
         XCTAssertEqual(r.outcome, .notApplicable)
+    }
+
+    // MARK: P3 — held-out regression guard (the wire runEvolve now arms)
+
+    /// A candidate that survives gate + veto + adversary but DROPS a previously-passing held-out case is a
+    /// HARD reject — no adversary confidence overrides it. This is the exact "looks better, quietly breaks
+    /// things" ship the guard exists to stop; before P3 was wired, the live /evolve path never ran this.
+    func testHeldOutRegressionRejectsEvenAfterAdversaryPasses() async {
+        let r = await run(author: Author(cand: candidate()),
+                          adversary: Adversary(provider: "gemini", verdict: AdversaryVerdict(survived: true, confidence: 1.0)),
+                          regression: Regress(before: ["cap_a", "cap_b"], after: ["cap_a"]))
+        XCTAssertEqual(r.outcome, .rejectedRegression, "dropping cap_b must hard-reject despite a confident adversary pass")
+        // The reason must NAME the regressed case (matches the reason-assertion convention of the sibling
+        // reject tests) — so a bug that flipped before.subtracting(after) → after.subtracting(before) can't
+        // stay green with a wrong/empty reason.
+        XCTAssertTrue(r.reason.contains("cap_b"), "reject reason must name the regressed case: \(r.reason)")
+    }
+
+    /// Multi-case regression: dropping 2 of 3 previously-passing cases still hard-rejects and names them.
+    func testHeldOutMultiCaseRegressionRejects() async {
+        let r = await run(author: Author(cand: candidate()),
+                          regression: Regress(before: ["cap_a", "cap_b", "cap_c"], after: ["cap_a"]))
+        XCTAssertEqual(r.outcome, .rejectedRegression)
+        XCTAssertTrue(r.reason.contains("cap_b") && r.reason.contains("cap_c"), "reason must name both regressed cases: \(r.reason)")
+    }
+
+    /// No regression (the candidate ADDS a capability, drops none) ⇒ the guard is silent and the change ships.
+    func testNoHeldOutRegressionPromotes() async {
+        let r = await run(author: Author(cand: candidate()),
+                          regression: Regress(before: ["cap_a", "cap_b"], after: ["cap_a", "cap_b", "cap_c"]))
+        XCTAssertEqual(r.outcome, .promoted)
+    }
+
+    /// Adding capability from an EMPTY baseline is never a regression ⇒ promotes.
+    func testEmptyBaselineNonEmptyAfterPromotes() async {
+        let r = await run(author: Author(cand: candidate()),
+                          regression: Regress(before: [], after: ["cap_a"]))
+        XCTAssertEqual(r.outcome, .promoted)
+    }
+
+    /// ADDITIVE / FAIL-SAFE: an empty held-out corpus (equal empty sets) can NEVER manufacture a false
+    /// reject — the exact guarantee behind arming this on the live path by default.
+    func testEmptyHeldOutIsAdditiveNoOp() async {
+        let r = await run(author: Author(cand: candidate()),
+                          regression: Regress(before: [], after: []))
+        XCTAssertEqual(r.outcome, .promoted)
     }
 }
