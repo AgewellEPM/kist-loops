@@ -624,10 +624,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         try XCTUnwrap(report.checks.first { $0.title == title }, file: file, line: line)
     }
 
-    func testRecordTurnWritesCapsuleAndKnowledgeDebt() {
-        // Kist-meta knowledge debt (Claude Code/Cursor/…) is only seeded inside a real Kist project now
-        // (the DashboardResearchPlanner fix stopped fabricating it on every unrelated project). Use a
-        // kist-named root so this test still exercises debt-seeding.
+    func testRecordTurnWritesCapsuleWithoutPromotingDashboardHintsToDebt() {
         let base = tempRoot()
         let root = base + "/kist-loops"
         try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
@@ -652,7 +649,8 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertEqual(capsule.taskTitle, "Captain Intelligence Layer")
         XCTAssertEqual(capsule.status, .pass)
         XCTAssertEqual(store.latestCapsule()?.id, capsule.id)
-        XCTAssertTrue(store.openKnowledgeDebt().contains { $0.topic == "Study Claude Code's fleet scheduling" })
+        XCTAssertTrue(store.openKnowledgeDebt().isEmpty,
+                      "render-time suggestions must not become permanent unresolved work")
         XCTAssertTrue(store.renderLatestReflection().contains("WHAT WE LEARNED"))
     }
 

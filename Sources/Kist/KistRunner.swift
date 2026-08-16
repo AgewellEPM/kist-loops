@@ -76,7 +76,7 @@ enum KistRunner {
         var registry = makeRegistry()
         let checkpoints = LoopCheckpointStore()
         let config = KistConfig.load()
-        let model = opts.model ?? config.model       // flags > config > provider default
+        var model = opts.model ?? config.model       // flags > config > provider default (goal pin may override below)
         let toolMode = ToolMode(rawValue: opts.toolMode) ?? .auto
         let fetchAllowedHosts = opts.fetchAllowedHosts.isEmpty ? config.fetchAllowedHosts : opts.fetchAllowedHosts
 
@@ -172,8 +172,11 @@ enum KistRunner {
             guard let root = ToolContext.canonicalize(cp.projectRoot) else {
                 err("error: the run's project path no longer exists: \(cp.projectRoot)"); return 2
             }
+            let auditRunID = "cli-" + UUID().uuidString.lowercased()
+            let auditLog = AuditLog.forRun(root: root, runID: auditRunID)
             let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
-                                      externalReadRoots: opts.allowReadPaths)
+                                      auditLog: auditLog, externalReadRoots: opts.allowReadPaths)
+            note("tool audit · \(auditLog.path)")
             note("kist · resuming \(cp.title) · \(cp.providerId) · iter \(cp.iteration)")
             // Resume with the SAME full tool set as a fresh run (previously it lost cortex/browse/tasks/etc.).
             let resumeExtraTools = Self.buildExtraTools(root: root, fetchAllowedHosts: fetchAllowedHosts, opts: opts, registry: registry)
@@ -206,15 +209,24 @@ enum KistRunner {
             .map { CaptainLearningStore(projectRoot: $0).modelVerdicts() } ?? [:]
         // Selection policy: explicit flag > config > power (default). Only steers the auto-default pick.
         let selectionPolicy = opts.selectBy ?? config.selectBy ?? .power
-        guard let providerId = resolveProvider(opts, registry, configProvider: config.provider,
-                                               verdicts: sessionVerdicts, policy: selectionPolicy) else { return 2 }
+        // NL pin: a one-shot goal that OPENS with "use <model>…" pins the provider, exactly as the
+        // REPL honors it per-turn. Flags still outrank it; prose merely mentioning a model does not match.
+        let goalPin = (opts.providerId == nil)
+            ? opts.goal.flatMap { Self.oneShotModelPin(goal: $0, knownProviders: providerAliases(for: registry)) }
+            : nil
+        if let goalPin { note("router · goal pin honored: \(goalPin.providerId)") }
+        guard let providerId = goalPin?.providerId
+            ?? resolveProvider(opts, registry, configProvider: config.provider,
+                               verdicts: sessionVerdicts, policy: selectionPolicy) else { return 2 }
+        if let pinnedModel = goalPin?.model { model = pinnedModel }
         guard let root = ToolContext.canonicalize(opts.project) else {
             err("error: project path does not exist: \(opts.project)"); return 2
         }
+        let auditRunID = "cli-" + UUID().uuidString.lowercased()
+        let auditLog = AuditLog.forRun(root: root, runID: auditRunID)
         let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
-                                  externalReadRoots: opts.allowReadPaths)
-        let chosen = registry.provider(id: providerId)
-
+                                  auditLog: auditLog, externalReadRoots: opts.allowReadPaths)
+        note("tool audit · \(auditLog.path)")
         // Full tool set (media/data/memory/vision + agent-writable Cortex). Extracted so the
         // --resume path gets the SAME tools (it previously ran with only the headless set).
         let extraTools = Self.buildExtraTools(root: root, fetchAllowedHosts: fetchAllowedHosts, opts: opts, registry: registry)
@@ -244,6 +256,12 @@ enum KistRunner {
                 let autoRouting = AutoModelRouter.routingEnabled(
                     pickedInteractively: pick != nil, cliProvider: opts.providerId != nil,
                     configProvider: config.provider != nil, configAutoRouting: config.autoRouting)
+                // Cross-process live-failure ledger (~/.kist/runtime/provider-cooldowns.json), shared by
+                // every REPL lane that picks a provider: auto-router tiers, Captain assignments, the media
+                // reroute, and failed-turn substitution. The one-shot lanes already consult it (0.17.58);
+                // before this the REPL neither read nor fed it, so a rate-limited gemini stayed "ready"
+                // and every media turn walked into the same wall (2026-08-14 screenshot).
+                let liveCooldowns = ProviderCooldownStore()
                 // Candidate models for the heuristic router: every configured/local provider's default
                 // model, tagged with capabilities. Vision engine (gemini) ordered first for the vision tier.
                 let preferredVision = registry.provider(id: "gemini").flatMap { registry.hasKey(for: $0) ? "gemini" : nil }
@@ -360,7 +378,8 @@ enum KistRunner {
                 loop.filterSelfToolsByRelevance = surfaceSelfTools   // P2: off unless KIST_SURFACE_SELFTOOLS=1
                 // CONVERSATIONAL ESCALATION: reach the fleet / plan-DAG from inside the chat, plus an
                 // auto-router that PROPOSES (never silently spends) when a plain message looks like a big build.
-                var repl = KistREPL(loop: loop, commands: KistCommands.load(projectRoot: root))
+                let specialistRegistry = registry
+                let repl = KistREPL(loop: loop, commands: KistCommands.load(projectRoot: root))
                 repl.defaultAgents = opts.agents
                 repl.autoApproveClipboardVision = opts.auto
                 repl.pinnedBarEnabled = opts.pinnedBar   // R2b: bottom-glued input bar (default on for TTYs)
@@ -383,15 +402,22 @@ enum KistRunner {
                     let learning = opts.noMemory ? nil : CaptainLearningStore(projectRoot: root).assignmentContext()
                     repl.autoRoute = { text, _, current in
                         // No keyed providers to reason over ⇒ the standalone heuristic (one-provider setups).
-                        guard !snapshot.providers.isEmpty else { return autoRouter.route(text, hasMedia: false, current: current) }
+                        guard !snapshot.providers.isEmpty else {
+                            return autoRouter.route(text, hasMedia: false, current: current,
+                                                    avoid: liveCooldowns.coolingDown)
+                        }
                         // Fall back to the CURRENT model (not the startup default): "stay" must mean stay on
                         // whatever we're on now, or a no-signal turn route-flips back after any switch (Codex HIGH).
                         let a = ModelAssignmentEngine.assignInteractive(turn: text, snapshot: snapshot,
                                                                         fallback: current, learning: learning)
-                        return AutoModelRouter.captainDecision(a, fallback: current)
+                        return AutoModelRouter.captainDecision(a, fallback: current,
+                                                               avoid: liveCooldowns.coolingDown)
                     }
                 } else {
-                    repl.autoRoute = { text, hasMedia, current in autoRouter.route(text, hasMedia: hasMedia, current: current) }
+                    repl.autoRoute = { text, hasMedia, current in
+                        autoRouter.route(text, hasMedia: hasMedia, current: current,
+                                         avoid: liveCooldowns.coolingDown)
+                    }
                 }
                 repl.addModelFlow = { _ = await AddModelFlow.run() }
                 repl.importModelFlow = { url in await ImportModelWizard.run(url: url) }
@@ -456,8 +482,8 @@ enum KistRunner {
                         // (mlx/ollama) are excluded — they outrank mimo but may point at a dead endpoint, so
                         // escalating to them would route a repair to a server that isn't running (Codex P2).
                         let subscriptionHitters: Set<String> = ["claude-cli", "codex-cli"]
-                        let available = registry.providers
-                            .filter { ($0.requiresAPIKey && registry.hasKey(for: $0)) || subscriptionHitters.contains($0.id) }
+                        let available = specialistRegistry.providers
+                            .filter { ($0.requiresAPIKey && specialistRegistry.hasKey(for: $0)) || subscriptionHitters.contains($0.id) }
                             .map { $0.id }
                         let shVerdicts: [String: ModelVerdict] = opts.noMemory
                             ? [:] : CaptainLearningStore(projectRoot: root).modelVerdicts()
@@ -466,7 +492,7 @@ enum KistRunner {
                         if strong != providerId { repairRoleDefault = ProviderBinding(providerId: strong) }
                     }
                     let spawner = SpecialistSpawner(
-                        providers: registry, baseTools: tools, context: context,
+                        providers: specialistRegistry, baseTools: tools, context: context,
                         sink: TerminalEventSink(showReasoning: false), interactor: terminalInteractor,
                         aliasTable: [:], roleDefault: repairRoleDefault,
                         defaultMaxIterations: opts.maxIterations, extendedThinking: opts.extendedThinking)
@@ -580,13 +606,21 @@ enum KistRunner {
                 repl.providerSupportsVision = { binding in
                     registry.capabilities(providerId: binding.providerId, model: binding.model).vision
                 }
-                repl.visionProviderId = {
-                    if let g = registry.provider(id: "gemini"), registry.hasKey(for: g),
-                       g.availableModels.contains(where: { $0.isVision }) { return "gemini" }
-                    return registry.providers.first {
-                        registry.hasKey(for: $0) && $0.availableModels.contains { $0.isVision }
-                    }?.id
+                repl.visionProviderCandidates = {
+                    let keyedVision = registry.providers
+                        .filter { registry.hasKey(for: $0) && $0.availableModels.contains { $0.isVision } }
+                        .map(\.id)
+                    // Gemini first (video/audio engine), then every other keyed vision provider as the
+                    // fallback lane the media reroute walks when the preferred engine is rate-limited.
+                    return keyedVision.filter { $0.lowercased() == "gemini" }
+                         + keyedVision.filter { $0.lowercased() != "gemini" }
                 }()
+                repl.visionProviderId = repl.visionProviderCandidates.first
+                // The REPL both CONSULTS the ledger (media reroute, substitution, auto-route tiers skip
+                // cooling providers) and FEEDS it (a transient live failure benches the provider for
+                // every kist process — the one-shot lanes previously wrote it alone).
+                repl.providerCoolingDown = liveCooldowns.coolingDown
+                repl.recordProviderCooldown = { liveCooldowns.record($0) }
                 // Files-API uploader for big/long media (video, >20MB), only when a Gemini key exists.
                 if let geminiKey = registry.apiKey(forProviderId: "gemini") {
                     let filesClient = GeminiFilesClient(apiKey: geminiKey)
@@ -625,8 +659,10 @@ enum KistRunner {
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
                               + " — fleet run stopped\u{001B}[0m")
                     }) {
-                        await runFleet(o, registry: registry, root: root, tools: tools,
-                                       providerId: providerId, model: model, rolesOverride: roles)
+                        await runBuilderCompatibility(o, goal: g, registry: registry, root: root,
+                                                      tools: tools, context: context, checkpoints: checkpoints,
+                                                      toolMode: toolMode, providerId: providerId, model: model,
+                                                      rolesOverride: roles)
                     }
                     let verification: HeavyRouteResult.Verification
                     if interrupted.value != nil {
@@ -664,8 +700,10 @@ enum KistRunner {
                     guard strong != providerId else { return nil }
                     return RoleBindings(default: ProviderBinding(providerId: strong))
                 }
-                repl.planExecute = { g, roles in
+                func runPlanExecuteRoute(_ missionID: PlanExecuteMissionID?, _ g: String,
+                                         _ roles: RoleBindings) async -> HeavyRouteResult {
                     var o = opts; o.goal = g; o.planExecute = true
+                    o.planExecuteResumeID = missionID
                     // R1: ESC works on the plan-execute plane too — previously this plane was a
                     // dead zone (no watcher, no cancellation checks), exactly where big requests
                     // auto-escalate. The watcher cancels the runner task; PlanExecuteLoop and
@@ -681,9 +719,10 @@ enum KistRunner {
                         print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
                               + " — plan run stopped\u{001B}[0m")
                     }) {
-                        await runPlanExecute(o, goal: g, registry: registry, root: root, tools: tools,
-                                             context: context, providerId: providerId, model: model,
-                                             rolesOverride: roles)
+                        await runBuilderCompatibility(o, goal: g, registry: registry, root: root,
+                                                      tools: tools, context: context, checkpoints: checkpoints,
+                                                      toolMode: toolMode, providerId: providerId, model: model,
+                                                      rolesOverride: roles)
                     }
                     let verification: HeavyRouteResult.Verification
                     if interrupted.value != nil {
@@ -698,6 +737,12 @@ enum KistRunner {
                     return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
                                             review: .handledInternally("plan→execute owns its planner/coder/critic loop"),
                                             verification: verification)
+                }
+                repl.planExecute = { g, roles in
+                    await runPlanExecuteRoute(nil, g, roles)
+                }
+                repl.resumePlanExecute = { missionID, g, roles in
+                    await runPlanExecuteRoute(missionID, g, roles)
                 }
                 repl.council = { g, roles, execute in
                     // R1 sibling: council (and its execute=true hand-off into runPlanExecute) gets
@@ -871,10 +916,22 @@ enum KistRunner {
                 return await runEval(opts, goal: opts.goal ?? "", registry: registry, root: root,
                                      tools: tools, context: context, providerId: providerId, model: model)
             }
+            if opts.cobolo {
+                return await runBuilderCompatibility(opts, goal: goal, registry: registry, root: root,
+                                                     tools: tools, context: context, checkpoints: checkpoints,
+                                                     toolMode: toolMode, providerId: providerId, model: model)
+            }
+            if opts.mission {
+                return await runBuilderCompatibility(opts, goal: goal, registry: registry, root: root,
+                                                     tools: tools, context: context, checkpoints: checkpoints,
+                                                     toolMode: toolMode, providerId: providerId, model: model)
+            }
             if opts.research {
-                return await runResearch(opts, goal: goal, registry: registry, root: root,
-                                         tools: tools, context: context,
-                                         providerId: providerId, model: model)
+                let status = await runResearch(opts, goal: goal, registry: registry, root: root,
+                                               tools: tools, context: context,
+                                               providerId: providerId, model: model)
+                if opts.autonomyReceipts { emitReadOnlyAutonomyReceipt(status: status) }
+                return status
             }
             // Council: deep research -> model conference -> decision -> visible kanban board.
             if opts.digDeep {
@@ -888,8 +945,9 @@ enum KistRunner {
             }
             // Fleet: split the goal into disjoint subtasks, run a supervised heterogeneous fleet.
             if opts.fleet {
-                return await runFleet(opts, registry: registry, root: root, tools: tools,
-                                      providerId: providerId, model: model)
+                return await runBuilderCompatibility(opts, goal: goal, registry: registry, root: root,
+                                                     tools: tools, context: context, checkpoints: checkpoints,
+                                                     toolMode: toolMode, providerId: providerId, model: model)
             }
             // Evolution lab: improve Mythos itself through isolated, benchmarked candidate branches.
             if opts.evolve {
@@ -898,62 +956,34 @@ enum KistRunner {
             }
             // Plan→execute: planner emits a typed DAG, approve (unless --yolo), then build it.
             if opts.planExecute {
-                return await runPlanExecute(opts, goal: goal, registry: registry, root: root, tools: tools,
-                                            context: context, providerId: providerId, model: model)
+                if builderRunRequired(for: opts, goal: goal) {
+                    return await runBuilderCompatibility(opts, goal: goal, registry: registry, root: root,
+                                                         tools: tools, context: context, checkpoints: checkpoints,
+                                                         toolMode: toolMode, providerId: providerId, model: model)
+                }
+                return await runReadOnlyOneShot(opts, goal: goal, registry: registry, root: root,
+                                                tools: tools, context: context, checkpoints: checkpoints,
+                                                fetchAllowedHosts: fetchAllowedHosts,
+                                                toolMode: toolMode, providerId: providerId, model: model)
             }
             // Great-loop: the long-horizon runner — self-assess effort per cycle, learn from history, and
             // keep working across cycles until done-and-verified or a SAFETY CAP stops it.
             if opts.greatLoop {
-                guard let roles = resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
-                return await runGreatLoop(opts, goal: goal, registry: registry, root: root, tools: tools,
-                                          context: context, checkpoints: checkpoints, toolMode: toolMode,
-                                          roles: roles, providerId: providerId, model: model)
+                return await runBuilderCompatibility(opts, goal: goal, registry: registry, root: root,
+                                                     tools: tools, context: context, checkpoints: checkpoints,
+                                                     toolMode: toolMode, providerId: providerId, model: model)
             }
-            // One-shot (non-interactive; safe by default: shell denied + project confinement).
-            guard let roles = resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
-            note("kist · \(chosen?.name ?? providerId)\(model.map { " (\($0))" } ?? "") · \(root)\(opts.planMode ? " · plan" : "")\(roles.isHeterogeneous ? " · team" : "")")
-            let recorder = TrajectoryRecorder()
-            let traceRecorder = TraceRecorder(traceId: TraceID.make())
-            let runReplay = RunReplayStore(projectRoot: root, provider: providerId, model: model)
-            let proofStore = TurnProofStore(replayStore: runReplay)
-            let lessonStore = opts.noMemory ? nil : LessonStore()
-            proofStore.startTurn(goal: goal)
-            let loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
-                                tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
-                                budget: opts.makeBudget(),
-                                planMode: opts.planMode, extendedThinking: opts.extendedThinking, toolMode: toolMode, roles: roles,
-                                delegationDepth: opts.delegationDepth,
-                                showReasoning: opts.extendedThinking,   // --think → watch the reasoning inline
-                                sinkOverride: TerminalEventSink(showReasoning: opts.extendedThinking, style: .calm, proofStore: proofStore),
-                                recorder: recorder,
-                                traceRecorder: traceRecorder)
-            let memoryContext = Self.sessionMemory(root: root, opts: opts)   // cortex + project memory
-            // --fast strips the advisory brief (persona/lessons/review) — keep just memory + the goal,
-            // the biggest per-call token lever when you just want a quick dev turn.
-            let personaContext = opts.fast ? nil : TaskPersonaMatcher.promptContext(
-                matches: TaskPersonaMatcher(projectRoot: root).matches(for: goal, limit: 3))
-            let reviewContext = opts.fast ? nil : ReviewContext.renderIfNeeded(request: goal, projectRoot: root)
-            let compiledGoal = PromptCompiler.compiledPrompt(goal, mode: opts.planMode ? .plan : .inline,
-                                                             projectContext: briefContext(memoryContext: memoryContext, roles: roles,
-                                                                                          lessons: opts.fast ? nil : lessonStore?.primer(forGoal: goal),
-                                                                                          specialists: personaContext,
-                                                                                          reviewTargets: reviewContext))
-            let outcome = await loop.run(goal: compiledGoal)
-            // --ship: the build ran hands-free in the autopilot sandbox above; now the council of minds
-            // reviews the ACTUAL result (diff) and returns GO/NO-GO. Deploy stays a deliberate, confirmed step.
-            if opts.ship { await runShipReview(goal: goal, registry: registry, roles: roles, root: root) }
-            // Self-monitor: surface reliability issues and learn obstacles (advisory, retrieval-only).
-            recordRuntimeLessons(goal: goal, success: outcome.success, recorder: recorder,
-                                 lessonStore: lessonStore, maxIterations: opts.maxIterations,
-                                 mode: opts.planMode ? .plan : .inline)
-            Self.autoJournalRun(goal: goal, success: outcome.success, root: root, enabled: !opts.noMemory)
-            print(KistREPL.renderSimpleSummary(projectRoot: root, spans: await traceRecorder.all(), trajectory: recorder.snapshot()))
-            let grounding = GroundedReviewValidator.audit(outcome.summary, projectRoot: root)
-            if !grounding.isGrounded { print(grounding.render(color: TerminalCapabilities.stdoutIsInteractive)) }
-            printUsageDelta(from: [], to: await traceRecorder.all(), label: "usage", projectRoot: root)
-            note("replay · kist --replay \(runReplay.manifest.runID)")
-            if !outcome.success { note("paused — resume with: kist --resume \(outcome.checkpointId)") }
-            return outcome.success ? 0 : 1
+            if !builderRunRequired(for: opts, goal: goal) {
+                return await runReadOnlyOneShot(opts, goal: goal, registry: registry, root: root,
+                                                tools: tools, context: context, checkpoints: checkpoints,
+                                                fetchAllowedHosts: fetchAllowedHosts,
+                                                toolMode: toolMode, providerId: providerId, model: model)
+            }
+            // Mutation-capable one-shots use the durable execution -> deterministic verification ->
+            // independent review coordinator. Answer/evidence work returned through the read-only path.
+            return await runBuilderCompatibility(opts, goal: goal, registry: registry, root: root,
+                                                 tools: tools, context: context, checkpoints: checkpoints,
+                                                 toolMode: toolMode, providerId: providerId, model: model)
         }
     }
 
@@ -1053,11 +1083,14 @@ enum KistRunner {
 
     // MARK: - Council (agent conference -> kanban -> optional builder handoff)
 
-    private static func runResearch(_ opts: KistOptions, goal: String,
+    static func runResearch(_ opts: KistOptions, goal: String,
                                     registry: ProviderRegistry, root: String,
                                     tools: ToolRegistry, context: ToolContext,
                                     providerId: String, model: String?,
-                                    rolesOverride: RoleBindings? = nil) async -> Int32 {
+                                    rolesOverride: RoleBindings? = nil,
+                                    runCouncilAfterResearch: Bool = true,
+                                    capture: ResearchPipelineCaptureBox? = nil,
+                                    requirePEEL: Bool = false) async -> Int32 {
         note("kist · research · \(root)")
         // LIVE PROGRESS (Luke 2026-08-02): research used to go dead-silent between blocking tool calls
         // (only terse note() lines), unlike the build path's live "thinking" display. Show a Codex-style
@@ -1077,7 +1110,7 @@ enum KistRunner {
             }
             return r
         }
-        note(dim("▤ research · web search → repo context → estate sweep → synthesize"))
+    note(dim("▤ research · named URL fetch → web search → repo context → estate sweep → synthesize"))
 
         let start = await researchStep("🔎", "start research run") {
             await tools.execute(name: "research_run",
@@ -1086,19 +1119,90 @@ enum KistRunner {
         guard start.success, let runID = start.metadata["run_id"] else {
             err("research · failed to start: \(start.error ?? start.output)")
             return 1
-        }
-        note(dim("│   run \(runID)"))
+    }
+    note(dim("│   run \(runID)"))
 
-        _ = await researchStep("🌐", "web search") {
+    let requiredURLs = ResearchRunTool.canonicalGoalURLs(in: goal)
+    for url in requiredURLs {
+        let fetched = await researchStep("🔗", "fetch primary URL") {
+            await tools.execute(name: "research_run",
+                                arguments: ["action": "fetch", "run_id": runID,
+                                            "url": url,
+                                            "max_bytes": ResearchEvidencePolicy.primaryFetchByteLimit],
+                                context: context)
+        }
+        guard usablePrimaryResearchEvidence(fetched) else {
+            let why = fetched.error ?? fetched.output
+            err("research · incomplete: required URL fetch produced no usable evidence (\(url)): \(why)")
+            return 1
+        }
+    }
+
+    let webEvidence = await researchStep("🌐", "web search") {
             await tools.execute(name: "research_run",
                                 arguments: ["action": "search", "run_id": runID,
                                             "query": goal, "limit": 5], context: context)
         }
 
-        _ = await researchStep("📂", "repo context") {
+        if requirePEEL {
+            let alreadyRequired = Set(requiredURLs)
+            let candidates = ResearchEvidencePolicy.rankedPrimarySourceURLs(
+                searchOutput: webEvidence.output, goal: goal)
+            var verified = ResearchEvidencePolicy.verifiedPrimarySources(
+                in: ResearchRunStore.loadEvidence(projectRoot: root, runID: runID))
+            var relevant = ResearchEvidencePolicy.firstRelevantPrimarySource(
+                goal: goal, in: verified)
+            if relevant == nil {
+                for candidate in candidates where !alreadyRequired.contains(candidate) {
+                    let fetched = await researchStep("🔗", "fetch discovered primary source") {
+                        await tools.execute(
+                            name: "research_run",
+                            arguments: [
+                                "action": "fetch", "run_id": runID, "url": candidate,
+                                "max_bytes": ResearchEvidencePolicy.primaryFetchByteLimit,
+                            ],
+                            context: context)
+                    }
+                    if usablePrimaryResearchEvidence(fetched) {
+                        verified = ResearchEvidencePolicy.verifiedPrimarySources(
+                            in: ResearchRunStore.loadEvidence(projectRoot: root, runID: runID))
+                        relevant = ResearchEvidencePolicy.firstRelevantPrimarySource(
+                            goal: goal, in: verified)
+                        if relevant != nil { break }
+                    }
+                }
+            }
+            guard relevant != nil else {
+                err("research · incomplete: no fetched, digest-bound primary source was relevant to the original goal")
+                return 1
+            }
+        }
+
+        let repoEvidence = await researchStep("📂", "repo context") {
             await tools.execute(name: "research_run",
                                 arguments: ["action": "context", "run_id": runID,
                                             "query": goal, "limit": 8], context: context)
+        }
+        if repoEvidence.success {
+            for contextID in ResearchEvidencePolicy.contextChunkIDs(
+                searchOutput: repoEvidence.output, limit: 3) {
+                let exact = await researchStep("📄", "load exact repo evidence") {
+                    await tools.execute(name: "research_run", arguments: [
+                        "action": "context", "run_id": runID,
+                        "context_id": contextID, "max_chars": 24_000,
+                    ], context: context)
+                }
+                if requirePEEL && !exact.success {
+                    err("research · incomplete: advertised repo chunk could not be retrieved exactly (\(contextID))")
+                    return 1
+                }
+            }
+        }
+    guard !requiredURLs.isEmpty
+            || usablePrimaryResearchEvidence(webEvidence)
+            || usablePrimaryResearchEvidence(repoEvidence) else {
+        err("research · incomplete: named URL fetch, web search, and repo context produced no usable evidence")
+        return 1
         }
 
         // DEEP ESTATE SWEEP (Luke 2026-07-31): on TOP of the web + current-repo evidence, sweep our OWN
@@ -1115,6 +1219,87 @@ enum KistRunner {
             note(dim("│   \(estate.metadata["files"] ?? "0") system file(s) recorded"))
         }
 
+        let evidencePath = ".kist/research-runs/\(runID)/evidence.jsonl"
+        let verifiedPrimary = ResearchEvidencePolicy.verifiedPrimarySources(
+            in: ResearchRunStore.loadEvidence(projectRoot: root, runID: runID))
+            .first { ResearchEvidencePolicy.symbolicPEEL(goal: goal, primary: $0) != nil }
+        let peelReceipt: PEELEvidenceReceipt
+        if tools.all().contains(where: { $0.name == "jeeves_research" }) {
+            let peelQuery = verifiedPrimary.map {
+                ResearchEvidencePolicy.peelQuery(goal: goal, primary: $0)
+            } ?? goal
+            let peel = await researchStep("◫", "symbolic PEEL proof gate") {
+                var arguments: [String: Any] = ["query": peelQuery]
+                if let primary = verifiedPrimary {
+                    arguments["research_goal"] = goal
+                    arguments["primary_evidence_id"] = primary.evidenceID
+                    arguments["primary_url"] = primary.url
+                    arguments["primary_status"] = primary.httpStatus
+                    arguments["primary_digest"] = primary.contentSHA256
+                    arguments["primary_evidence_text"] = primary.text
+                }
+                return await tools.execute(
+                    name: "jeeves_research", arguments: arguments, context: context)
+            }
+            if peel.success {
+                do {
+                    if requirePEEL {
+                        guard let primary = verifiedPrimary else {
+                            throw ToolError.execution("symbolic PEEL has no verified primary evidence binding")
+                        }
+                        guard peel.metadata["grounded"] == "true",
+                              ResearchEvidencePolicy.peelIsRelevant(
+                                goal: goal, output: peel.output, primary: primary) else {
+                            throw ToolError.execution(
+                                "symbolic PEEL output is not relevant to the goal and fetched primary evidence")
+                        }
+                    }
+                    let boundOutput = verifiedPrimary.map {
+                        ResearchEvidencePolicy.bindPEELOutput(peel.output, primary: $0)
+                    } ?? peel.output
+                    let digest = PEELEvidenceReceipt.contentDigest(boundOutput)
+                    var metadata = peel.metadata
+                    metadata["digest"] = digest
+                    metadata["research_run_id"] = runID
+                    if let primary = verifiedPrimary {
+                        metadata["primary_evidence_id"] = primary.evidenceID
+                        metadata["primary_url"] = primary.url
+                        metadata["primary_content_sha256"] = primary.contentSHA256
+                        metadata["relevance"] = "passed"
+                    }
+                    let store = try ResearchRunStore.open(projectRoot: root, runID: runID)
+                    let item = try store.appendEvidence(
+                        kind: "symbolic_peel", title: "Symbolic PEEL contradiction/proof gate",
+                        text: boundOutput, path: evidencePath, metadata: metadata
+                    )
+                    peelReceipt = PEELEvidenceReceipt(
+                        researchRunID: runID, status: .passed, evidenceID: item.id,
+                        locator: evidencePath, digest: digest,
+                        summary: "grounded symbolic evidence committed as \(item.id)"
+                            + (verifiedPrimary.map { " and bound to \($0.evidenceID)" } ?? "")
+                    )
+                } catch {
+                    peelReceipt = PEELEvidenceReceipt(
+                        researchRunID: runID,
+                        status: requirePEEL ? .blockedRequired : .failed,
+                        summary: "symbolic evidence could not be committed: \(error.localizedDescription)"
+                    )
+                }
+            } else {
+                peelReceipt = PEELEvidenceReceipt(
+                    researchRunID: runID,
+                    status: requirePEEL ? .blockedRequired : .failed,
+                    summary: peel.error ?? peel.output
+                )
+            }
+        } else {
+            peelReceipt = PEELEvidenceReceipt(
+                researchRunID: runID,
+                status: requirePEEL ? .blockedRequired : .skippedUnavailable,
+                summary: "jeeves_research is not registered in the authorized tool set"
+            )
+        }
+
         let synth = await researchStep("📝", "synthesize dossier") {
             await tools.execute(name: "research_run",
                                 arguments: ["action": "synthesize", "run_id": runID], context: context)
@@ -1125,11 +1310,30 @@ enum KistRunner {
         }
         if let report = synth.metadata["report"] { note(dim("│   dossier saved · \(report)")) }
         let dossier = synth.output
+        let manifestPath = ".kist/research-runs/\(runID)/manifest.json"
+        let reportPath = ".kist/research-runs/\(runID)/report.md"
+        if let reportedPath = synth.metadata["report"],
+           reportedPath != reportPath && reportedPath != root + "/" + reportPath {
+            err("research · report lineage mismatch for run \(runID): \(reportedPath)")
+            return 1
+        }
+        capture?.set(ResearchPipelineCapture(
+            runID: runID, manifestPath: manifestPath, evidencePath: evidencePath,
+            reportPath: reportPath, dossier: dossier,
+            dossierDigest: PEELEvidenceReceipt.contentDigest(dossier),
+            peelReceipt: peelReceipt
+        ))
+        guard !requirePEEL || peelReceipt.satisfiesRequiredGate else {
+            err("research · blocked: required symbolic PEEL evidence did not pass (\(peelReceipt.status.rawValue))")
+            return 1
+        }
+        guard runCouncilAfterResearch else { return 0 }
 
         return await runCouncil(opts, goal: goal, execute: opts.councilExecute,
                                 registry: registry, root: root, tools: tools, context: context,
                                 providerId: providerId, model: model, rolesOverride: rolesOverride,
-                                researchDossier: dossier, researchRunID: runID)
+                                researchDossier: dossier, researchRunID: runID,
+                                seedBoard: opts.councilExecute)
     }
 
     /// `/dive` — a MULTI-AGENT deep-dive of OUR OWN CURRENT repo. `/research` is the wrong tool for "what
@@ -1204,13 +1408,15 @@ enum KistRunner {
                                     providerId: providerId, model: model, rolesOverride: rolesOverride)
     }
 
-    private static func runCouncil(_ opts: KistOptions, goal: String, execute: Bool,
+    static func runCouncil(_ opts: KistOptions, goal: String, execute: Bool,
                                    registry: ProviderRegistry, root: String,
                                    tools: ToolRegistry, context: ToolContext,
                                    providerId: String, model: String?,
                                    rolesOverride: RoleBindings? = nil,
                                    researchDossier: String? = nil,
-                                   researchRunID: String? = nil) async -> Int32 {
+                                   researchRunID: String? = nil,
+                                   seedBoard: Bool = true,
+                                   capture: CouncilPipelineCaptureBox? = nil) async -> Int32 {
         guard let requestedRoles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
         let roles = autoCouncilRoles(requestedRoles, registry: registry)
         let memory = opts.noMemory ? nil : ProjectMemory(root: root)
@@ -1231,7 +1437,8 @@ enum KistRunner {
                                      researchDossier: researchDossier,
                                      recorder: recorder,
                                      progress: progress,
-                                     budget: runBudget).run(goal: goal)
+                                     budget: runBudget,
+                                     requireStructuredCriticVerdict: true).run(goal: goal)
         let path: String
         do {
             path = try writeCouncilArtifact(result.markdown, goal: goal, root: root)
@@ -1239,13 +1446,29 @@ enum KistRunner {
             err("council · failed to write artifact: \(error)")
             return 1
         }
+        capture?.set(CouncilPipelineCapture(result: result, artifactPath: path))
+
+        if let criticFailure = requiredCouncilCriticFailure(result) {
+            note("council · incomplete artifact saved · \(path)")
+            err("council · incomplete: \(criticFailure)")
+            memory?.recordEpisode(Episode(goal: "council: \(goal)", success: false,
+                                          summary: criticFailure, at: Date()))
+            for line in await recorder.summary().terminalLines() { note(line) }
+            return 1
+        }
 
         note("council · board saved · \(path)")
         // Legible primitive, not a wall of prose (#6/#7): mind gists → decision → next tasks → test plan.
         // The full board stays in the saved artifact (the proof drawer, #8).
         print(CouncilCard.render(result, artifactPath: path, color: TerminalCapabilities.stdoutIsInteractive))
-        let projectPlan = seedCouncilProjectBoard(goal: goal, finalPlan: result.finalPlan, artifactPath: path, root: root)
-        note("task board seeded · \(projectPlan.tasks.count) tasks · show with /goals")
+        let projectPlan = seedCouncilProjectBoard(goal: goal, finalPlan: result.finalPlan,
+                                                  artifactPath: path, root: root,
+                                                  persist: seedBoard)
+        if seedBoard {
+            note("task board seeded · \(projectPlan.tasks.count) tasks · show with /goals")
+        } else {
+            note("research synthesis complete · task board unchanged")
+        }
         memory?.recordEpisode(Episode(goal: "council: \(goal)", success: true,
                                       summary: String(result.finalPlan.prefix(800)), at: Date()))
         for line in await recorder.summary().terminalLines() { note(line) }
@@ -1253,10 +1476,15 @@ enum KistRunner {
         guard execute else { return 0 }
         let builderGoal = result.builderBrief + "\n\nCouncil artifact path: \(path)\nShared task board: .kist/plan.json. Use the tasks tool to start, update, block, and complete tasks."
         note("council · handing builder brief to plan→execute")
-        return await runPlanExecute(opts, goal: builderGoal, registry: registry, root: root,
-                                    tools: tools, context: context, providerId: providerId,
-                                    model: model, rolesOverride: roles, budgetOverride: runBudget,
-                                    riskObjective: goal)   // classify risk on the USER's goal, not the council transcript
+        var builderOptions = opts
+        builderOptions.goal = builderGoal
+        builderOptions.planExecute = true
+        return await runBuilderCompatibility(builderOptions, goal: builderGoal, registry: registry,
+                                             root: root, tools: tools, context: context,
+                                             checkpoints: nil, toolMode: .auto,
+                                             providerId: providerId, model: model,
+                                             rolesOverride: roles, budgetOverride: runBudget,
+                                             riskObjective: goal)
     }
 
     /// "Dig in deep" — the WIDE council: every reachable model answers the SAME question, synthesized into
@@ -1289,9 +1517,12 @@ enum KistRunner {
     }
 
     @discardableResult
-    static func seedCouncilProjectBoard(goal: String, finalPlan: String, artifactPath: String, root: String) -> Plan {
+    static func seedCouncilProjectBoard(goal: String, finalPlan: String, artifactPath: String,
+                                        root: String, persist: Bool = true) -> Plan {
         let projectPlan = CouncilBoardCompiler.compile(goal: goal, finalPlan: finalPlan, artifactPath: artifactPath)
-        PlanStore(projectRoot: root).replace(title: projectPlan.title, tasks: projectPlan.tasks)
+        if persist {
+            PlanStore(projectRoot: root).replace(title: projectPlan.title, tasks: projectPlan.tasks)
+        }
         return projectPlan
     }
 
@@ -1367,7 +1598,7 @@ enum KistRunner {
     /// Decompose the goal → disjoint subtasks → launch one agent per subtask in its own worktree →
     /// supervise to a forge-proof signoff → join the signed in-lease branches onto a fresh integration
     /// branch (NEVER main). Running this IS the explicit arming; it is bounded and confined.
-    private static func runFleet(_ opts: KistOptions, registry: ProviderRegistry, root: String,
+    static func runFleet(_ opts: KistOptions, registry: ProviderRegistry, root: String,
                                  tools: ToolRegistry, providerId: String, model: String?,
                                  rolesOverride: RoleBindings? = nil) async -> Int32 {
         guard GitIsolation.isGitRepo(root) else {
@@ -1517,26 +1748,46 @@ enum KistRunner {
 
     /// Run a plan→execute: the planner emits a typed DAG, you approve it (unless --yolo), then the team
     /// builds it. Shared by the `--plan-execute` one-shot and the REPL's `/plan-execute` escalation.
-    private static func runPlanExecute(_ opts: KistOptions, goal: String, registry: ProviderRegistry,
+    static func runPlanExecute(_ opts: KistOptions, goal: String, registry: ProviderRegistry,
                                        root: String, tools: ToolRegistry, context: ToolContext,
                                        providerId: String, model: String?,
                                        rolesOverride: RoleBindings? = nil,
                                        budgetOverride: BudgetLedger? = nil,
+                                       launchMode: PlanExecuteLaunchMode = .fresh,
+                                       freshMissionInstanceID: PlanExecuteMissionID? = nil,
                                        // The string the SAFETY gates keyword-classify for risk. Defaults to the
                                        // executed goal, but council-execute passes the USER'S ORIGINAL goal here
                                        // (dogfood 2026-08-06: the builder brief embeds the whole council markdown
                                        // transcript, so an incidental "auth"/"safety"/"exploit" word — or an
                                        // org-store domain mislabel — flipped a COBOL report tweak to CRITICAL and
                                        // hard-blocked a user-requested build. Risk must reflect what the USER asked).
-                                       riskObjective: String? = nil) async -> Int32 {
+                                       riskObjective: String? = nil,
+                                       checkpointGoal: String? = nil,
+                                       hostOwnedFinalReview: Bool = false,
+                                       functionalObjective: String? = nil,
+                                       canonicalFunctionalObjective: String? = nil,
+                                       hostContractID: String? = nil,
+                                       memoryRoot: String? = nil,
+                                       persistMemoryEpisode: Bool = true,
+                                       outcomeCapture: (@Sendable (PlanOutcome) -> Void)? = nil) async -> Int32 {
         guard let roles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
-        let memory = opts.noMemory ? nil : ProjectMemory(root: root)
+        // A Builder adapter executes inside a sealed transaction root. Read planning memory from the
+        // caller-owned host root, but do not let the nested loop append an episode before the outer
+        // Builder receipt is accepted; that hidden `.mythos` write would be undeclared output.
+        let memoryReadRoot = memoryRoot ?? root
+        let memory = opts.noMemory || !persistMemoryEpisode
+            ? nil
+            : ProjectMemory(root: memoryReadRoot)
         let memNote = (memory?.hasContent ?? false) ? " · memory \(memory!.recentEpisodes(limit: 100).count) runs" : ""
         note("kist · plan→execute · \(roles.summary) · \(root)\(roles.isHeterogeneous ? " · team" : "")\(opts.budgetTokens.map { " · budget \($0)" } ?? "")\(memNote)")
         // CAPTAIN SAFETY GATES (preserved across the origin/main merge): both must accept before any side
         // effect. Pinned by KistRunnerSafetyTests. Fail-closed. c7 splice: --no-memory is threaded to the
         // simulation gate so it suppresses the .kist disk write while still computing + enforcing the verdict.
-        let gateObjective = riskObjective ?? goal
+        let gateObjective = canonicalPlanExecuteRiskObjective(goal: goal,
+                                                              riskObjective: riskObjective)
+        // Route and requested effect are orthogonal. Freeze the contract from the canonical raw request
+        // BEFORE cortex/council/builder context is wrapped around the planner goal below.
+        let completionContract = PlanExecuteCompletionContract.derive(canonicalRequest: gateObjective)
         let domainPreflight = CaptainDomainLearningEnforcer.preflight(mode: .planExecute,
                                                                       objective: gateObjective,
                                                                       projectRoot: root,
@@ -1572,16 +1823,38 @@ enum KistRunner {
         let planSink = TerminalEventSink(style: .calm, proofStore: proofStore,
                                          typedInput: { TurnInputQueue.shared.preview() })
         TurnInputQueue.shared.addOnChange { planSink.refreshLiveStatus() }
+        // Fold cortex (who Luke is + this project) into the planner's goal so plan→execute (and
+        // --council-execute, which routes here) plans WITH your preferences, not just ProjectMemory.
+        let sessionContext = Self.sessionMemory(root: memoryReadRoot, opts: opts)
+        func withSessionContext(_ objective: String) -> String {
+            sessionContext.map {
+                "MEMORY — what kist knows about you & this project:\n\($0)\n\n---\nGOAL:\n\(objective)"
+            } ?? objective
+        }
+        let planGoal = withSessionContext(goal)
+        let functionalPlanGoal = functionalObjective.map(withSessionContext)
+        let canonicalFunctionalPlanGoal = canonicalFunctionalObjective
+            ?? PlanExecuteCompletionContract.functionalObjective(from: checkpointGoal ?? goal)
         let pxl = PlanExecuteLoop(providers: registry, roles: roles, tools: tools, context: context,
                                   sink: planSink,
                                   interactor: opts.yolo ? AutoApproveInteractor() : terminalInteractor(for: opts),
-                                  requireApproval: !opts.yolo, recorder: recorder, budget: budget, memory: memory)
-        // Fold cortex (who Luke is + this project) into the planner's goal so plan→execute (and
-        // --council-execute, which routes here) plans WITH your preferences, not just ProjectMemory.
-        let planGoal = Self.sessionMemory(root: root, opts: opts).map {
-            "MEMORY — what kist knows about you & this project:\n\($0)\n\n---\nGOAL:\n\(goal)"
-        } ?? goal
-        let pOut = await pxl.run(goal: planGoal)
+                                  requireApproval: !opts.yolo, recorder: recorder, budget: budget, memory: memory,
+                                  launchMode: launchMode,
+                                  freshMissionInstanceID: freshMissionInstanceID,
+                                  completionContract: completionContract,
+                                  hostOwnedFinalReview: hostOwnedFinalReview,
+                                  functionalObjective: functionalPlanGoal,
+                                  canonicalFunctionalObjective: canonicalFunctionalPlanGoal,
+                                  hostContractID: hostContractID)
+        let missionToken = pxl.missionInstanceID.rawValue
+        note("plan-execute mission · \(missionToken)")
+        if let quotedGoal = planExecuteResumeGoalArgument(checkpointGoal ?? goal) {
+            note("resume · kist --plan-execute-resume \(missionToken) \(quotedGoal)")
+        } else {
+            note("resume · kist --plan-execute-resume \(missionToken) <same-goal>")
+        }
+        let pOut = await pxl.run(goal: planGoal, checkpointGoal: checkpointGoal ?? goal)
+        outcomeCapture?(pOut)
         for line in await recorder.summary().terminalLines() { note(line) }
         note(pOut.success ? "✓ \(pOut.message)" : "✗ \(pOut.message)")
         note("replay · kist --replay \(runReplay.manifest.runID)")
@@ -1599,6 +1872,24 @@ enum KistRunner {
             }
         }
         return pOut.success ? 0 : 1
+    }
+
+    /// Render a terminal-safe, exact POSIX shell argument when the goal has no control characters.
+    /// Control-bearing goals still expose the exact mission token and resume syntax without terminal injection.
+    static func planExecuteResumeGoalArgument(_ goal: String) -> String? {
+        guard goal.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value != 127 }) else {
+            return nil
+        }
+        return "'" + goal.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    /// PlanExecute may receive a compiled TaskBrief as its execution goal. Generated constraints
+    /// are useful instructions for the model but are not user-requested effects, so the safety gate
+    /// must recover and classify the brief's typed original request.
+    static func canonicalPlanExecuteRiskObjective(goal: String,
+                                                  riskObjective: String?) -> String {
+        let gateObjective = riskObjective ?? goal
+        return PromptCompiler.originalRequest(fromCompiledPrompt: gateObjective) ?? gateObjective
     }
 
     /// Terminal autopilot policy:
@@ -1638,7 +1929,16 @@ enum KistRunner {
         }
         let keyedCloud = registry.providers.filter { $0.requiresAPIKey && registry.hasKey(for: $0) }
         let eligible = subscriptionReady + keyedCloud
-        if let best = pickByPolicy(eligible, policy: policy, verdicts: verdicts) { return best.id }
+        // Cross-process live-failure memory: a provider that just rate-limited another kist
+        // process sits out its cooldown instead of being re-picked by every new one-shot.
+        // Fail-open: if EVERYTHING is cooling down, the full eligible set still competes.
+        let cooldowns = ProviderCooldownStore()
+        let warm = eligible.filter { !cooldowns.coolingDown($0.id) }
+        if warm.count < eligible.count {
+            let benched = eligible.map(\.id).filter(cooldowns.coolingDown).sorted().joined(separator: ", ")
+            note("router · cooling down (recent live failures): \(benched)")
+        }
+        if let best = pickByPolicy(warm.isEmpty ? eligible : warm, policy: policy, verdicts: verdicts) { return best.id }
         if let local = registry.providers.first(where: { !$0.requiresAPIKey }) { return local.id }
         err("error: no provider has a key. Set one (e.g. export OPENAI_API_KEY=…) or use --provider. See --list-providers.")
         return nil

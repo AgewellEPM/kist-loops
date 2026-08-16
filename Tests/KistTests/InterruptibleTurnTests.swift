@@ -29,6 +29,16 @@ final class InterruptibleTurnTests: XCTestCase {
         XCTAssertEqual(box.value, [1, 2, 3, 4])
     }
 
+    func testControlCMapsToHardCancelAndIsNotCollected() {
+        var bytes: [UInt8?] = [0x03]
+        var collected: [UInt8] = []
+        let action = InterruptibleTurn.scanOnce(
+            readByte: { bytes.isEmpty ? nil : bytes.removeFirst() },
+            collect: { collected.append($0) })
+        XCTAssertEqual(action, .cancel)
+        XCTAssertTrue(collected.isEmpty, "ETX must cancel rather than enter the type-ahead queue")
+    }
+
     // StdinArbiter (Codex BLOCKER fix): an interactor read must pause the esc watcher and restore the
     // pre-watch mode around it. With no watcher registered, withStdin is a plain passthrough.
     func testArbiterPassthroughWithoutWatcher() {

@@ -5,7 +5,7 @@ import Foundation
 /// Keep this value as an honest Semantic Version: `kist-rebuild` binds the exact
 /// release binary and its reported version into the deployment manifest.
 enum KistBuildInfo {
-    static let productVersion = "0.17.51"
+    static let productVersion = "0.17.59"
     static let versionText = "kist \(productVersion)"
     static let startupLabel = "v\(productVersion)"
 

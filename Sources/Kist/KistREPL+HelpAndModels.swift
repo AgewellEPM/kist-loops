@@ -48,6 +48,8 @@ extension KistREPL {
           /build [goal]     BUILD IT — fire the plan→execute worker (real code + build/tests). No
                             args = build the plan just proposed (stop researching, start building).
           /plan-execute <g> build it as a typed plan-DAG (your team: planner→coder→critic)  [alias /pe]
+          /plan-execute --resume <id> <same goal>
+                            resume exactly one PlanExecute mission (64 lowercase hex; no latest lookup)
           /council [--execute] <g>
                             ask researcher/architect/coder/critic/UX/memory minds, save a kanban board,
                             and optionally hand the builder brief to plan-execute  [alias /consult]

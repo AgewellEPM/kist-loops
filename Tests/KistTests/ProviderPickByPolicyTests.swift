@@ -42,20 +42,40 @@ final class ProviderPickByPolicyTests: XCTestCase {
         let dir = NSTemporaryDirectory() + "selectby-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        setenv("XDG_CONFIG_HOME", dir, 1)
-        defer { unsetenv("XDG_CONFIG_HOME") }
 
         // Seed a config with a hand-set provider; writing selectBy must NOT clobber it.
-        let p = KistConfig.path()
+        let p = dir + "/config.json"
         try FileManager.default.createDirectory(atPath: (p as NSString).deletingLastPathComponent,
                                                 withIntermediateDirectories: true)
         try #"{"provider":"deepseek","model":"deepseek-v4-pro"}"#.write(toFile: p, atomically: true, encoding: .utf8)
 
-        XCTAssertTrue(KistConfig.writeSelectBy(.cost))
-        let reloaded = KistConfig.load()
+        XCTAssertTrue(KistConfig.writeSelectBy(.cost, atPath: p))
+        let reloaded = KistConfig.parseData(try Data(contentsOf: URL(fileURLWithPath: p)))
         XCTAssertEqual(reloaded.selectBy, .cost)
         XCTAssertEqual(reloaded.provider, "deepseek", "writing selectBy must preserve the pinned provider")
         XCTAssertEqual(reloaded.model, "deepseek-v4-pro")
+    }
+
+    func testWriteSelectByCASRemergesAnInterleavedPolicyEdit() throws {
+        let dir = NSTemporaryDirectory() + "selectby-cas-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let p = dir + "/config.json"
+        try #"{"provider":"deepseek","fetchAllowedHosts":["old.example"]}"#
+            .write(toFile: p, atomically: true, encoding: .utf8)
+
+        var editCount = 0
+        XCTAssertTrue(KistConfig.writeSelectBy(.cost, atPath: p) {
+            editCount += 1
+            try? #"{"provider":"openai","fetchAllowedHosts":["restricted.example"]}"#
+                .write(toFile: p, atomically: true, encoding: .utf8)
+        })
+
+        let reloaded = KistConfig.parseData(try Data(contentsOf: URL(fileURLWithPath: p)))
+        XCTAssertEqual(editCount, 1)
+        XCTAssertEqual(reloaded.selectBy, .cost)
+        XCTAssertEqual(reloaded.provider, "openai")
+        XCTAssertEqual(reloaded.fetchAllowedHosts, ["restricted.example"])
     }
 }
 

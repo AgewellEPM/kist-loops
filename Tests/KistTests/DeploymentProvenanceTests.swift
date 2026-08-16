@@ -736,13 +736,25 @@ final class DeploymentProvenanceTests: XCTestCase {
 
         let nestedAlternateBuild = repo.appendingPathComponent(
             "Sources/Kist/.build-local/Hidden.swift")
-        try write("// nested source remains bound\n", to: nestedAlternateBuild)
-        XCTAssertNotEqual(
+        try write("// nested generated cache is excluded\n", to: nestedAlternateBuild)
+        XCTAssertEqual(
             try sourceState(of: repo),
             initial,
-            "the alternate build exclusion must apply only at the repository root")
+            "known build-output directories must be excluded at any depth")
         try FileManager.default.removeItem(
             at: nestedAlternateBuild.deletingLastPathComponent())
+        XCTAssertEqual(try sourceState(of: repo), initial)
+
+        let nestedBuildCache = nestedAlternateBuild.deletingLastPathComponent()
+        try write("not a nested build directory\n", to: nestedBuildCache)
+        let wrongNestedBuildCacheType = try run(
+            rebuild,
+            arguments: ["--print-source-state", repo.path])
+        XCTAssertNotEqual(
+            wrongNestedBuildCacheType.status,
+            0,
+            "a nested regular file must not masquerade as an excluded build directory")
+        try FileManager.default.removeItem(at: nestedBuildCache)
         XCTAssertEqual(try sourceState(of: repo), initial)
 
         try write("// root near-miss remains bound\n", to: alternateBuildNearMiss)

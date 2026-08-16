@@ -22,6 +22,81 @@ extension KistREPL {
         }
     }
 
+    /// Simulation's own gate task is control-plane remediation, not a new product build. Sending
+    /// it through plan→execute re-enters the unchanged preflight and can recurse forever.
+    static func isSimulationRemediationTask(_ task: PlanTask) -> Bool {
+        task.kind == .plan
+            && task.owner?.lowercased() == "captain"
+            && task.title.lowercased().contains("simulation gate")
+    }
+
+    /// Execute a seeded simulation gate directly and record a stable state marker. A changed marker
+    /// is monotonic evidence progress; the same marker twice is a bounded, actionable stop rather
+    /// than another trip through plan→execute.
+    static func runSimulationRemediationTask(_ task: PlanTask,
+                                             projectRoot: String,
+                                             trajectory: [ActionRecord] = []) -> String {
+        let store = PlanStore(projectRoot: projectRoot)
+        let current = store.load().tasks.first(where: { $0.id == task.id }) ?? task
+        let objective = simulationRemediationObjective(current)
+        let report = handleSimulationCommand("run \(objective)",
+                                             projectRoot: projectRoot,
+                                             trajectory: trajectory)
+        let hasExecutableEvidence = !report.text.contains("No executable sandbox trial was run")
+        let marker = simulationGateStateMarker(report,
+                                               hasExecutableEvidence: hasExecutableEvidence)
+        let markerPrefix = "simulation-gate-state:v1:"
+        let previous = current.evidence.last { $0.hasPrefix(markerPrefix) }
+        let routeReceipt = "simulation-direct-route:v1:task=\(current.id):origin=captain-simulation"
+
+        if previous == marker {
+            let failure = "Repeated simulation produced identical gate evidence. Add a safe project-local "
+                + "verification entrypoint (for example Package.swift + swift test, a test.sh, package.json, "
+                + "Cargo.toml, or go.mod), attach independent sandbox evidence, or narrow/change the objective. "
+                + "This task will not re-enter plan→execute unchanged."
+            _ = store.update(id: current.id, status: .blocked, detail: failure)
+            return report.text + "\n\n"
+                + "simulation remediation cutoff · task [\(current.id)] blocked\n" + failure
+        }
+
+        _ = store.update(id: current.id, status: .inProgress)
+        var evidence = [routeReceipt, marker]
+        if !report.path.isEmpty { evidence.append(report.path) }
+        _ = store.update(id: current.id, appendEvidence: evidence)
+
+        if report.passesGate && hasExecutableEvidence {
+            _ = store.completeAndAdvance(id: current.id)
+            return report.text + "\n\n"
+                + "simulation remediation advanced · task [\(current.id)] completed with executable evidence"
+        }
+
+        return report.text + "\n\n"
+            + "simulation remediation pending · task [\(current.id)] recorded new gate evidence; "
+            + "create or attach a safe verification entrypoint before retrying"
+    }
+
+    private static func simulationRemediationObjective(_ task: PlanTask) -> String {
+        let title = task.boardTitle
+        if let delimiter = title.range(of: "--") {
+            let objective = title[delimiter.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !objective.isEmpty { return objective }
+        }
+        return title
+    }
+
+    private static func simulationGateStateMarker(_ report: CaptainSimulationGateReport,
+                                                  hasExecutableEvidence: Bool) -> String {
+        [
+            "simulation-gate-state:v1:domain=\(report.domainTitle)",
+            "strategy=\(report.recommendedStrategy)",
+            "success=\(report.estimatedSuccess)",
+            "risk=\(report.failureRisk)",
+            "threshold=\(report.acceptanceThreshold)",
+            "executable=\(hasExecutableEvidence)",
+            "accepted=\(report.passesGate)",
+        ].joined(separator: "|")
+    }
+
     static func handleTasks(_ args: String, projectRoot: String,
                             sessionStartedAt: Date? = nil) -> String {
         let store = PlanStore(projectRoot: projectRoot)

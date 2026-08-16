@@ -33,12 +33,19 @@ struct AutoModelRouter: Equatable {
     /// not the STARTUP fallback — else toggling `/model auto` after a `/model` switch route-flips back to the
     /// launch provider on the next no-signal turn (Codex MED, 2026-07-03). Defaults to the startup fallback,
     /// so existing callers and behaviour are unchanged.
-    func route(_ text: String, hasMedia: Bool, current: ProviderBinding? = nil) -> Decision {
+    /// `avoid` is the live-cooldown gate (ProviderCooldownStore.coolingDown): a provider another
+    /// kist process just watched rate-limit is skipped WITHIN each tier, failing open to the tier's
+    /// preferred candidate when everything qualifying is cooling — reduce eagerness, never block.
+    func route(_ text: String, hasMedia: Bool, current: ProviderBinding? = nil,
+               avoid: (String) -> Bool = { _ in false }) -> Decision {
         let stayTarget = current ?? fallback
-        if hasMedia, let v = candidates.first(where: { $0.vision }) {
-            return Decision(binding: v.binding, tier: .vision, reason: "vision")
+        if hasMedia {
+            let vision = candidates.filter(\.vision)
+            if let v = vision.first(where: { !avoid($0.binding.providerId) }) ?? vision.first {
+                return Decision(binding: v.binding, tier: .vision, reason: "vision")
+            }
         }
-        if Self.looksLikeReasoning(text), let r = bestReasoning() {
+        if Self.looksLikeReasoning(text), let r = bestReasoning(avoid: avoid) {
             return Decision(binding: r.binding, tier: .reasoning, reason: "reasoning")
         }
         // Ordinary turns STAY on the current/Captain model (the stay target) rather than flipping to
@@ -50,12 +57,16 @@ struct AutoModelRouter: Equatable {
     }
 
     /// Strongest = explicit reasoning flag first, then the largest context window; else widest context.
-    private func bestReasoning() -> Candidate? {
+    /// Cooling providers are skipped unless that would empty the tier (fail-open).
+    private func bestReasoning(avoid: (String) -> Bool = { _ in false }) -> Candidate? {
         let reasoners = candidates.filter { $0.reasoning }
-        if let best = reasoners.max(by: { $0.contextTokens < $1.contextTokens }) { return best }
+        let warmReasoners = reasoners.filter { !avoid($0.binding.providerId) }
+        if let best = (warmReasoners.isEmpty ? reasoners : warmReasoners)
+            .max(by: { $0.contextTokens < $1.contextTokens }) { return best }
         // No declared reasoner: prefer a clearly NON-fast model, by widest context.
         let heavy = candidates.filter { !$0.fast }
-        return heavy.max(by: { $0.contextTokens < $1.contextTokens })
+        let warmHeavy = heavy.filter { !avoid($0.binding.providerId) }
+        return (warmHeavy.isEmpty ? heavy : warmHeavy).max(by: { $0.contextTokens < $1.contextTokens })
     }
 
     /// Architecture / algorithm / systems / math language → wants the strongest model. Curated to
@@ -78,9 +89,12 @@ struct AutoModelRouter: Equatable {
     /// picked a confident, DIFFERENT model. Otherwise STAY on the current model — no churn on ordinary
     /// turns, and the streamed "thinking" display is preserved. Pure/deterministic so the policy is tested
     /// directly (the empty-tags default 'coding' is NOT a signal — `wantsCoding` is the explicit keyword).
-    static func captainDecision(_ a: InteractiveAssignment, fallback: ProviderBinding) -> Decision {
+    static func captainDecision(_ a: InteractiveAssignment, fallback: ProviderBinding,
+                                avoid: (String) -> Bool = { _ in false }) -> Decision {
         let signal = a.wantsReasoning || a.prefersResearch || a.wantsCoding
-        if signal, a.binding != fallback, a.confidence >= 0.5 {
+        // A Captain pick that is currently cooling down (live rate limit another process observed)
+        // is not confident enough to switch to — stay put rather than walk into the wall.
+        if signal, a.binding != fallback, a.confidence >= 0.5, !avoid(a.binding.providerId) {
             return Decision(binding: a.binding, tier: .reasoning, reason: "captain · \(a.reason)")
         }
         return Decision(binding: fallback, tier: .fast, reason: "staying on current model")

@@ -17,11 +17,50 @@ final class KistREPLTests: XCTestCase {
     func testRealSlashCommandsStillParse() {
         for cmd in ["/help", "/exit", "/model", "/fleet-status", "/tasks", "/clear", "/role gemini",
                     "/research audit provenance", "/deepdive audit provenance",
-                    "/fleet --agents 3 build it", "/cockpit"] {
+                    "/fleet --agents 3 build it",
+                    "/pe --resume \(String(repeating: "a", count: 64)) same goal", "/cockpit"] {
             XCTAssertTrue(KistREPL.isSlashCommand(cmd), "\(cmd) should be a command")
         }
         XCTAssertFalse(KistREPL.isSlashCommand("hello world"))        // no leading slash
         XCTAssertFalse(KistREPL.isSlashCommand(""))
+    }
+
+    func testPlanExecuteResumeDispatchUsesExactTypedMissionAndPreservesFreshRoute() throws {
+        let source = kistREPLFamilySource()
+        let start = try XCTUnwrap(source.range(of: #"case "plan-execute", "pe", "dag":"#))
+        let tail = source[start.lowerBound...]
+        let end = try XCTUnwrap(tail.range(of:
+            "\n                case \"build\", \"implement\", \"buildit\", \"ship-it\", \"makeit\":"))
+        let command = String(tail[..<end.lowerBound])
+
+        XCTAssertTrue(command.contains(#"fields.first == "--resume""#))
+        XCTAssertTrue(command.contains("guard fields.count == 3"))
+        XCTAssertTrue(command.contains("PlanExecuteMissionID(rawValue: String(fields[1]))"))
+        XCTAssertTrue(command.contains("guard !goal.isEmpty"))
+        XCTAssertTrue(command.contains("await resumePlanExecute(missionID, goal, roleSelection.bindings)"))
+        XCTAssertTrue(command.contains("await planExecute(args, roleSelection.bindings)"),
+                      "the ordinary /pe path must remain explicitly fresh")
+        XCTAssertFalse(command.contains("resumeLast"))
+        XCTAssertFalse(command.contains("resumeId"))
+        XCTAssertFalse(command.contains("latest"))
+    }
+
+    func testWutangCommandArmsYoloAndAutopilot() throws {
+        let source = kistREPLFamilySource()
+        let start = try XCTUnwrap(source.range(of: #"case "wu-tang", "wutang", "wu", "odb":"#))
+        let tail = source[start.lowerBound...]
+        let end = try XCTUnwrap(tail.range(of: #"\n                case "persona", "personality":"#,
+                                           options: .regularExpression))
+        let command = String(tail[..<end.lowerBound])
+
+        XCTAssertTrue(command.contains("perm.set(.bypass)"),
+                      "/wutang must switch the permission tier to guards-off")
+        XCTAssertTrue(command.contains("perm.confirmBypass()"),
+                      "/wutang is explicit operator consent; it must not wait for a second y/N prompt")
+        XCTAssertTrue(command.contains("loop = perm.arm(loop)"),
+                      "/wutang must apply the bypass tier to the already-held loop immediately")
+        XCTAssertTrue(command.contains("await setAutopilot(true)"),
+                      "/wutang must latch terminal autopilot so approval prompts do not stall")
     }
 
     func testResearchSlashCommandKeepsEvidencePipelineAndNoEstateBypass() throws {

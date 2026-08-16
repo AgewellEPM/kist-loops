@@ -24,6 +24,9 @@ struct ConversationRouter {
 
     /// Propose an escalation, or nil to just handle the message inline (chat/build).
     func propose(_ input: String, resolvedIntent: TaskBrief.Intent? = nil) async -> Proposal? {
+        // Pasted dashboard labels often contain "Research" and competitor names. A question about Kist's
+        // own queues/config/source must stay local even when those quoted labels would fool the model.
+        if Self.isLocalSystemInspection(input) { return nil }
         let intent = resolvedIntent ?? PromptCompiler.inferIntent(input)
         // Semantic intent belongs to PromptCompiler. This router chooses only a compatible execution
         // escalation; it may not reinterpret an answer/review request as a build or research run.
@@ -74,10 +77,26 @@ struct ConversationRouter {
     /// never an escalation, and not worth a classifier call.
     static func isObviouslyChat(_ input: String) -> Bool {
         let t = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if isLocalSystemInspection(t) { return true }
         if t.count >= 40 && (hasBuildIntent(t) || hasResearchIntent(t)) { return false }
         return t.count < 40 || t.hasSuffix("?")
             || t.hasPrefix("what") || t.hasPrefix("why") || t.hasPrefix("how do")
             || t.hasPrefix("explain") || t.hasPrefix("tell me") || t.hasPrefix("can you explain")
+    }
+
+    static func isLocalSystemInspection(_ input: String) -> Bool {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let namesLocalSystem = [
+            "kist", ".kist", "the captain", "captain/orchestration", "orchestration loop",
+            "this system", "your system", "your code", "your source", "our code", "our repo",
+            "build queue", "research queue"
+        ].contains { text.contains($0) }
+        let asksToInspectOrRepair = [
+            "why", "how does", "what is", "where", "hardcod", "same for every", "analy",
+            "assess", "audit", "inspect", "trace", "findout", "find out", "fix it", "fix this",
+            "need to fix"
+        ].contains { text.contains($0) }
+        return namesLocalSystem && asksToInspectOrRepair
     }
 
     private static func hasBuildIntent(_ text: String) -> Bool {

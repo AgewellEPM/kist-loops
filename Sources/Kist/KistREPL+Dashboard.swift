@@ -70,15 +70,6 @@ extension KistREPL {
         let learning = OrganizationalLearningStore(projectRoot: projectRoot)
         let debts = learning.openKnowledgeDebt(limit: 8)
         let latestCapsule = learning.latestCapsule()
-        let persistedResearch = debts.map { debt -> StatusDashboard.ResearchItem in
-            .init(title: debt.topic,
-                  priority: debt.priority == .high ? .high : .medium,
-                  reason: debt.reason,
-                  visit: debt.visit,
-                  impact: debt.impact,
-                  estimatedLearning: debt.estimatedLearning,
-                  expectedBenefit: debt.expectedBenefit)
-        }
         let persistedKnowledge = debts.map { debt -> StatusDashboard.KnowledgeDebt in
             .init(need: "Need to research", topic: debt.topic,
                   impact: debt.expectedBenefit.first ?? debt.reason,
@@ -102,7 +93,7 @@ extension KistREPL {
         return StatusDashboard(minds: minds,
                                tasks: Array(tasks),
                                learned: latestCapsule?.learned ?? [],
-                               research: Self.mergeResearch(insights.research + persistedResearch),
+                               research: Self.mergeResearch(insights.research),
                                knowledgeDebt: Self.mergeKnowledgeDebt(insights.knowledgeDebt + persistedKnowledge),
                                questions: insights.questions,
                                futureEvolution: latestCapsule.map {

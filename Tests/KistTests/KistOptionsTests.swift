@@ -121,6 +121,83 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertFalse(KistOptions.parse(["--plan", "x"]).planExecute)        // --plan != --plan-execute
     }
 
+    func testHeadlessFlagIsExplicitAndDefaultsOff() {
+        let explicit = KistOptions.parse(["--headless", "build the thing"])
+        XCTAssertTrue(explicit.headless)
+        XCTAssertEqual(explicit.goal, "build the thing")
+        XCTAssertFalse(KistOptions.parse(["build the thing"]).headless)
+        XCTAssertTrue(KistOptions.helpText.contains("--headless"))
+        XCTAssertTrue(KistOptions.helpText.contains("sealed"))
+    }
+
+    func testHeadlessConflictsWithEveryOtherBuilderRouteRegardlessOfFlagOrder() {
+        let conflictingArguments = [
+            ["--plan-execute"],
+            ["--fleet"],
+            ["--mission"],
+            ["--loop"],
+            ["--cobolo", "--cobol-target", "program.cbl", "--cobol-expect", "OK"],
+        ]
+        for otherRoute in conflictingArguments {
+            for arguments in [
+                ["--headless"] + otherRoute + ["build it"],
+                otherRoute + ["--headless", "build it"],
+            ] {
+                let options = KistOptions.parse(arguments)
+                XCTAssertTrue(
+                    options.optionErrors.contains { $0.hasPrefix("--headless conflicts with ") },
+                    "route flags must fail closed before runtime activation: \(arguments)")
+            }
+        }
+    }
+
+    func testPlanExecuteResumeRequiresCanonicalMissionIDAndRejectsHeadlessResume() {
+        let missionID = String(repeating: "a", count: 64)
+        let valid = KistOptions.parse(["--plan-execute-resume", missionID, "same", "goal"])
+        XCTAssertTrue(valid.planExecute)
+        XCTAssertEqual(valid.planExecuteResumeID?.rawValue, missionID)
+        XCTAssertEqual(valid.goal, "same goal")
+        XCTAssertNil(valid.resumeId)
+        XCTAssertFalse(valid.resumeLast)
+        XCTAssertNil(KistOptions.parse(["--plan-execute", "fresh goal"]).planExecuteResumeID)
+
+        for invalidID in [
+            String(repeating: "a", count: 63),
+            String(repeating: "a", count: 65),
+            String(repeating: "A", count: 64),
+            String(repeating: "g", count: 64),
+        ] {
+            let invalid = KistOptions.parse(["--plan-execute-resume", invalidID, "same goal"])
+            XCTAssertNil(invalid.planExecuteResumeID, "accepted invalid mission ID: \(invalidID)")
+            XCTAssertFalse(invalid.optionErrors.isEmpty, "invalid mission ID must fail closed")
+        }
+
+        let missingID = KistOptions.parse(["--plan-execute-resume"])
+        XCTAssertNil(missingID.planExecuteResumeID)
+        XCTAssertFalse(missingID.optionErrors.isEmpty)
+
+        let missingGoal = KistOptions.parse(["--plan-execute-resume", missionID])
+        XCTAssertNil(missingGoal.goal)
+        XCTAssertTrue(missingGoal.optionErrors.contains { $0.lowercased().contains("goal") },
+                      "resume requires the same nonempty goal as an independent identity check")
+
+        let conflicts = [
+            ["--resume", "headless-id", "--plan-execute", "goal"],
+            ["--plan-execute", "--resume", "headless-id", "goal"],
+            ["--resume-last", "--plan-execute", "goal"],
+            ["--plan-execute", "--resume-last", "goal"],
+            ["--resume", "headless-id", "--plan-execute-resume", missionID, "goal"],
+            ["--plan-execute-resume", missionID, "--resume-last", "goal"],
+        ]
+        for arguments in conflicts {
+            let parsed = KistOptions.parse(arguments)
+            XCTAssertFalse(parsed.optionErrors.isEmpty,
+                           "Headless and PlanExecute resume namespaces must conflict: \(arguments)")
+        }
+
+        XCTAssertTrue(KistOptions.helpText.contains("--plan-execute-resume <mission-id>"))
+    }
+
     func testCouncilFlags() {
         let council = KistOptions.parse(["--council", "research", "then", "decide"])
         XCTAssertTrue(council.council)
@@ -275,6 +352,26 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(KistOptions.parse(["-h"]).showHelp)
         XCTAssertFalse(KistOptions.helpText.isEmpty)
         XCTAssertTrue(KistOptions.helpText.contains("--plan"))   // help documents plan mode
+    }
+
+    func testOptionErrorsExitBeforeRuntimeActivationAndRunnerDispatch() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/Kist/main.swift"),
+            encoding: .utf8)
+        let optionErrorGate = try XCTUnwrap(source.range(of: "guard opts.optionErrors.isEmpty else"))
+        let activeMarker = try XCTUnwrap(source.range(of: #"setenv("KIST_ACTIVE""#))
+        let runnerDispatch = try XCTUnwrap(source.range(of: "KistRunner.run"))
+        let gatedBody = String(source[optionErrorGate.lowerBound..<activeMarker.lowerBound])
+
+        XCTAssertTrue(gatedBody.contains("exit(2)"),
+                      "invalid options must terminate with usage error before runtime activation")
+        XCTAssertLessThan(optionErrorGate.lowerBound, activeMarker.lowerBound)
+        XCTAssertLessThan(optionErrorGate.lowerBound, runnerDispatch.lowerBound)
+        XCTAssertLessThan(activeMarker.lowerBound, runnerDispatch.lowerBound)
     }
 
     func testUnknownFlagsBecomePartOfGoal() {

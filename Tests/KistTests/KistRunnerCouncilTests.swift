@@ -83,6 +83,25 @@ final class KistRunnerCouncilTests: XCTestCase {
         XCTAssertTrue(reloaded.render().contains("TEST: swift test --filter ForcedSynthesisTests"))
         XCTAssertTrue(reloaded.tasks.allSatisfy { $0.link == artifact })
     }
+
+    func testResearchCouncilCanCompileWithoutReplacingProjectBoard() throws {
+        let root = NSTemporaryDirectory() + "research-board-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let store = PlanStore(projectRoot: root)
+        store.replace(title: "Existing", tasks: [PlanTask(id: 1, title: "ACTION: keep current work")])
+
+        let preview = KistRunner.seedCouncilProjectBoard(
+            goal: "research only",
+            finalPlan: "Decision:\n- Collect evidence before proposing work.",
+            artifactPath: root + "/research.md",
+            root: root,
+            persist: false)
+
+        XCTAssertFalse(preview.tasks.isEmpty)
+        XCTAssertEqual(store.load().title, "Existing")
+        XCTAssertEqual(store.load().tasks.map(\.title), ["ACTION: keep current work"])
+    }
 }
 
 private struct CouncilCatalogNullKeys: KeyStore {

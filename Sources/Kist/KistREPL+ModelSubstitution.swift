@@ -40,8 +40,11 @@ extension KistREPL {
             return "provider/protocol failure"
         }
 
+        // "ratelimited" (one word) is how AIProviderError.rateLimited renders in a turn summary
+        // ("provider 'gemini' error: rateLimited") — without it the EXACT live failure string was
+        // classified as non-transient and no lane ever substituted or cooled the provider down.
         let transientProviderFailures = [
-            "429", "rate limit", "rate-limited", "over quota", "quota exceeded",
+            "429", "rate limit", "rate-limited", "ratelimited", "over quota", "quota exceeded",
             "overloaded", "500", "502", "503", "server error", "internal error",
             "service unavailable"
         ]
@@ -101,6 +104,47 @@ extension KistREPL {
             return candidate
         }
         return nil
+    }
+
+    /// True when a failed turn's summary shows a LIVE provider failure that clears with time
+    /// (rate limit / outage / connectivity) — the only reasons that cool a provider down
+    /// cross-process. Protocol failures and refusals are the model's fault, not the wire's,
+    /// and stay with the scorecard.
+    static func transientProviderFailure(summary: String) -> Bool {
+        let reason = modelSubstitutionReason(success: false, summary: summary)
+        return reason == "provider/transient failure" || reason == "provider/connectivity failure"
+    }
+
+    /// Media-turn provider pick: first vision candidate NOT in live cooldown; fail-open to the
+    /// preferred engine when everything vision-capable is cooling (the cooldown store may only
+    /// reduce eagerness, never block the last resort). Gemini-only attachments (video/audio,
+    /// Files-API refs) restrict the pool to gemini.
+    static func chooseVisionProvider(candidates: [String], mustUseGemini: Bool,
+                                     coolingDown: (String) -> Bool) -> String? {
+        let pool = mustUseGemini ? candidates.filter { $0.lowercased() == "gemini" } : candidates
+        return pool.first { !coolingDown($0) } ?? pool.first
+    }
+
+    struct MediaSubstitutionDecision: Equatable {
+        var replacement: String
+        var reason: String
+    }
+
+    /// Substitution for a FAILED media turn — parity with the text-turn lane (same failure
+    /// classification + safe-replay gate), but the replacement must come from the VISION lane
+    /// and never be the provider that just failed or one already cooling down.
+    static func mediaSubstitutionDecision(success: Bool, summary: String,
+                                          trajectory: [ActionRecord],
+                                          failedProviderId: String,
+                                          candidates: [String], mustUseGemini: Bool,
+                                          coolingDown: (String) -> Bool) -> MediaSubstitutionDecision? {
+        guard let reason = modelSubstitutionReason(success: success, summary: summary) else { return nil }
+        guard trajectorySafeToReplayForModelSubstitution(trajectory) else { return nil }
+        let pool = mustUseGemini ? candidates.filter { $0.lowercased() == "gemini" } : candidates
+        guard let next = pool.first(where: {
+            $0.lowercased() != failedProviderId.lowercased() && !coolingDown($0)
+        }) else { return nil }
+        return MediaSubstitutionDecision(replacement: next, reason: reason)
     }
 
     private static func looksLikeHardSafetyStop(_ lower: String) -> Bool {

@@ -21,6 +21,13 @@ struct CaptainFailureCapsule: Codable, Equatable, Sendable {
         case documentExport = "document-export"
         case toolRuntime = "tool-runtime"
         case sandboxAuthorization = "sandbox-authorization"
+        case schemaRefusal = "schema-refusal"
+        case authorization = "authorization"
+        case toolchain = "toolchain"
+        case infrastructure = "infrastructure"
+        case codeOrTest = "code-or-test"
+        case uncertainMutation = "uncertain-mutation"
+        case staleVerification = "stale-verification"
         case plannerExecution = "planner-execution"
         case unknown = "unknown"
     }
@@ -638,6 +645,7 @@ struct CaptainFailureAnalysis: Sendable {
         }
         let lower = ([summary] + proofFailures).joined(separator: "\n").lowercased()
         let failedTools = trajectory.filter { !$0.success }
+        let typedVerdict = FailureClassifier.classify(FailureSignals.from(trajectory))
         var evidence = [
             "summary: \(summary.singleLineCapped(220))",
             "trajectory: \(trajectory.count) tool step(s), \(failedTools.count) failed",
@@ -724,12 +732,22 @@ struct CaptainFailureAnalysis: Sendable {
                 teachCandidate: "Document export failures are first-class system failures; Captain must diagnose the export path and preserve the user request instead of returning a generic malformed error.")
         }
 
-        if lower.contains("sandbox") || lower.contains("permission") || lower.contains("operation not permitted") {
+        if let typed = typedClassification(verdict: typedVerdict, evidence: evidence) {
+            return typed
+        }
+
+        let structuredDenial = proofFailures.first(where: {
+            let text = $0.lowercased()
+            return text.contains("denied by") || text.contains("permission denied")
+                || text.contains("not authorized") || text.contains("approval required")
+                || text.contains("operation not permitted")
+        })
+        if let structuredDenial {
             return Classification(
                 layer: .sandboxAuthorization,
                 confidence: 82,
                 observed: "Execution was blocked by sandbox or authorization constraints.",
-                evidence: evidence,
+                evidence: evidence + ["structured denial: \(structuredDenial.singleLineCapped(220))"],
                 hypotheses: [
                     .init(rank: 1, title: "Command required OS sandbox but launched without it", confidence: 82,
                           reason: "Failure text names sandbox or permissions.",
@@ -827,6 +845,77 @@ struct CaptainFailureAnalysis: Sendable {
             ],
             verificationPlan: ["Reproduce the failure", "Run the focused regression test"],
             teachCandidate: "Unknown failures must first improve telemetry or produce a reproduction; do not patch from vibes.")
+    }
+
+    private func typedClassification(verdict: FailureClassifier.Verdict,
+                                     evidence: [String]) -> Classification? {
+        let commonEvidence = evidence + [
+            "typed diagnosis: \(verdict.category.rawValue)",
+            "typed receipt evidence: \(verdict.evidence.singleLineCapped(400))",
+        ]
+        let layer: CaptainFailureCapsule.Layer
+        let observed: String
+        let repair: [String]
+        let verification: [String]
+        switch verdict.category {
+        case .staleProof:
+            layer = .staleVerification
+            observed = "A post-verification mutation invalidated earlier deterministic proof."
+            repair = [
+                "Re-run the exact last passed check named in typed receipt evidence against the latest revision.",
+                "Run independent review only after the fresh check passes.",
+                "Do not widen capabilities, add allowed exit codes, skip checks, or weaken tests."
+            ]
+            verification = ["Fresh deterministic check after the invalidating mutation", "Independent review of that exact revision"]
+        case .uncertainMutation:
+            layer = .uncertainMutation
+            observed = "An uncertain mutation effect left the final revision unverified."
+            repair = ["Inspect the effect receipt and fail closed.", "Run fresh deterministic verification without widening authority."]
+            verification = [
+                "Run the focused test for \(verdict.culpritTool ?? "failed tool")",
+                "git diff --check",
+            ]
+        case .authorization:
+            layer = .authorization
+            observed = "A typed tool receipt recorded an actual authorization denial."
+            repair = ["Surface the exact denial reason.", "Do not widen capabilities; preserve authority if the same executable already succeeded."]
+            verification = ["Retry only after explicit operator-approved authority changes"]
+        case .schemaRefusal:
+            layer = .schemaRefusal
+            observed = "A typed tool receipt recorded a schema refusal."
+            repair = ["Correct the malformed call shape only.", "Do not change permissions or accepted exit codes."]
+            verification = ["Replay the corrected call under the unchanged capability envelope"]
+        case .toolchain:
+            layer = .toolchain
+            observed = "The toolchain precondition failed."
+            repair = ["Repair the named toolchain precondition and retry once.", "Do not weaken tests or widen capabilities."]
+            verification = ["Re-run the same deterministic build/test"]
+        case .infrastructure:
+            layer = .infrastructure
+            observed = "Infrastructure failed independently of application correctness."
+            repair = ["Repair the concrete infrastructure condition and use one bounded retry.", "Do not alter test or permission policy."]
+            verification = ["Re-run the same deterministic check after infrastructure recovery"]
+        case .codeOrTest:
+            layer = .codeOrTest
+            observed = "A typed command/check receipt recorded an application code or test failure."
+            repair = ["Fix the concrete code/test failure.", "Keep assertions and expected-exit policy unchanged."]
+            verification = ["Re-run the same build/test and then independent review"]
+        case .taskBug, .knowledgeGap, .toolLimit, .blocked:
+            return nil
+        }
+        return Classification(
+            layer: layer,
+            confidence: Int((verdict.confidence * 100).rounded()),
+            observed: observed,
+            evidence: commonEvidence,
+            hypotheses: [
+                .init(rank: 1, title: observed, confidence: Int((verdict.confidence * 100).rounded()),
+                      reason: verdict.evidence, inspect: ["typed trajectory receipts", "completion verifier ordering"])
+            ],
+            researchTasks: ["Inspect the named typed receipts; do not infer authority from summary prose."],
+            repairPlan: repair,
+            verificationPlan: verification,
+            teachCandidate: "Typed tool/effect receipts outrank summary keywords; never heal verification ordering by widening authority or weakening checks.")
     }
 
     private func seedDiagnosisTasks(for capsule: CaptainFailureCapsule) -> Int {

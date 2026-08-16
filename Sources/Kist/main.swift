@@ -21,15 +21,22 @@ TerminalCapabilities.prime()
 
 let opts = KistOptions.parse(kistRawArguments)
 
-// Mark this process so any CHILD kist (an agent's run_command → `kist …`) detects nesting and refuses
-// self-escalation (computer-use arming / guards-off). parse() above already read the INHERITED value for
-// THIS process's nested-detection; setting it now only affects processes we spawn. (Council 2026-07-03.)
-setenv("KIST_ACTIVE", "1", 1)
-
 if opts.showHelp {
     print(KistOptions.helpText)
     exit(0)
 }
+
+guard opts.optionErrors.isEmpty else {
+    for error in opts.optionErrors {
+        FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+    }
+    exit(2)
+}
+
+// Mark this process so any CHILD kist (an agent's run_command → `kist …`) detects nesting and refuses
+// self-escalation (computer-use arming / guards-off). parse() above already read the INHERITED value for
+// THIS process's nested-detection; setting it now only affects processes we spawn. (Council 2026-07-03.)
+setenv("KIST_ACTIVE", "1", 1)
 
 let code = await KistRunner.run(opts)
 // Don't orphan background jobs (run_command background:true) — terminate any still-running so they

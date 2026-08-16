@@ -304,20 +304,120 @@ final class KistRunnerSafetyTests: XCTestCase {
                        "critical-risk signals (production/billing) hard-block even for an explicit user request")
     }
 
+    func testEmptyProjectLocalProductionReadyCLICanBootstrap() {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let objective = "build a complex production-ready local Swift CLI here with unit tests"
+
+        XCTAssertEqual(CaptainSimulationEnforcer.riskLevel(mode: .planExecute,
+                                                           objective: objective), .high,
+                       "production-ready describes local artifact quality, not a production effect")
+        let result = CaptainSimulationEnforcer.preflight(
+            mode: .planExecute,
+            objective: objective,
+            projectRoot: root,
+            initiator: .userRequest,
+            now: { Date(timeIntervalSince1970: 1_700_002_650) })
+
+        XCTAssertTrue(result.canExecute,
+                      "an explicit project-confined build must be able to create its initial manifest and tests")
+        XCTAssertFalse(result.terminalLines.contains { $0.contains("risk critical") })
+    }
+
+    func testExactReceiptLedgerConversationalRouteReachesLivePlanExecuteBoundary() {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let request = "Build a production-quality Swift CLI called receipt-ledger in this empty directory. It must read newline-delimited JSON purchase records with date, merchant, category, and amount; reject malformed records and negative amounts with line-numbered errors; print deterministic category totals plus a grand total; support both --input PATH and stdin; include XCTest coverage and a concise README. Plan it, implement it, run the real tests, exercise the built binary with valid and invalid fixtures, and keep working until the result has deterministic verification and an independent review. Do not ask me to create files; use the tools and show receipts."
+        let options = KistOptions.parse(["--plan-execute", request])
+        let launch = KistRunner.builderCompatibilityLaunch(for: options, goal: request)
+
+        XCTAssertEqual(launch.adapter, .planExecute)
+        XCTAssertEqual(launch.routeHint.resolve(), .planned)
+        XCTAssertNotEqual(launch.routeHint.risk, .critical,
+                          "an explicit plan-execute route must not be promoted to mission risk")
+        let gateObjective = KistRunner.canonicalPlanExecuteRiskObjective(
+            goal: request,
+            riskObjective: nil)
+
+        XCTAssertEqual(gateObjective, request)
+        XCTAssertEqual(CaptainSimulationEnforcer.riskLevel(mode: .planExecute,
+                                                           objective: gateObjective), .high)
+        let preflight = CaptainSimulationEnforcer.preflight(
+            mode: .planExecute,
+            objective: gateObjective,
+            projectRoot: root,
+            initiator: .userRequest,
+            now: { Date(timeIntervalSince1970: 1_700_002_655) })
+        var executionBoundaryCalls = 0
+        if preflight.canExecute { executionBoundaryCalls += 1 }
+        XCTAssertEqual(executionBoundaryCalls, 1,
+                       "the live conversational route must cross the pre-model safety boundary")
+        XCTAssertTrue(preflight.terminalLines.contains {
+            $0.contains("simulation gate") && $0.contains("plan-execute") && $0.contains("risk high")
+        })
+        XCTAssertFalse(preflight.terminalLines.contains { $0.contains("blocked") })
+        XCTAssertFalse(preflight.terminalLines.contains { $0.contains("risk critical") })
+
+        let compiled = PromptCompiler.compiledPrompt(request,
+                                                     mode: .planExecute,
+                                                     resolvedIntent: .build)
+        XCTAssertEqual(KistRunner.canonicalPlanExecuteRiskObjective(goal: compiled,
+                                                                    riskObjective: nil),
+                       request)
+
+        let mission = KistRunner.builderCompatibilityLaunch(
+            for: KistOptions.parse(["--mission", request]), goal: request)
+        XCTAssertEqual(mission.adapter, .mission)
+        XCTAssertEqual(mission.routeHint.risk, .critical)
+
+        for dangerous in [
+            "deploy the receipt service to production",
+            "delete customer purchase records",
+            "rotate the production API key",
+        ] {
+            let canonical = KistRunner.canonicalPlanExecuteRiskObjective(
+                goal: dangerous,
+                riskObjective: nil)
+            XCTAssertEqual(CaptainSimulationEnforcer.riskLevel(mode: .planExecute,
+                                                               objective: canonical),
+                           .critical,
+                           dangerous)
+        }
+    }
+
+    func testLocalWordingDoesNotDowngradeRealDestructiveProductionEffect() {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let objective = "build a local Swift CLI here that deploys to production and deletes customer credentials"
+
+        XCTAssertEqual(CaptainSimulationEnforcer.riskLevel(mode: .planExecute,
+                                                           objective: objective), .critical)
+        let result = CaptainSimulationEnforcer.preflight(
+            mode: .planExecute,
+            objective: objective,
+            projectRoot: root,
+            initiator: .userRequest,
+            now: { Date(timeIntervalSince1970: 1_700_002_660) })
+        XCTAssertFalse(result.canExecute)
+    }
+
     func testRunnerPassesUserRequestInitiatorToPlanExecuteGate() throws {
         // Source pin: runPlanExecute is only reachable from explicit user commands, so it must
         // declare initiator: .userRequest — losing this line silently restores the hard veto.
         let source = try runnerSource()
-        let planExecuteStart = try XCTUnwrap(source.range(of: "private static func runPlanExecute"))
-        let body = String(source[planExecuteStart.lowerBound...].prefix(4000))
+        let planExecuteStart = try XCTUnwrap(source.range(of: "static func runPlanExecute"))
+        let planExecuteEnd = try XCTUnwrap(
+            source.range(of: "static func planExecuteResumeGoalArgument",
+                         range: planExecuteStart.upperBound..<source.endIndex))
+        let body = String(source[planExecuteStart.lowerBound..<planExecuteEnd.lowerBound])
         XCTAssertTrue(body.contains("initiator: .userRequest"),
                       "runPlanExecute's simulation preflight must pass initiator: .userRequest")
     }
 
     func testRunnerKeepsFleetSimulationPreflightBeforeSideEffects() throws {
         let source = try runnerSource()
-        let fleetStart = try XCTUnwrap(source.range(of: "private static func runFleet"))
-        let planExecuteStart = try XCTUnwrap(source.range(of: "private static func runPlanExecute"))
+        let fleetStart = try XCTUnwrap(source.range(of: "static func runFleet"))
+        let planExecuteStart = try XCTUnwrap(source.range(of: "static func runPlanExecute"))
         let fleetBody = String(source[fleetStart.lowerBound..<planExecuteStart.lowerBound])
 
         assertOrder("CaptainSimulationEnforcer.preflight(mode: .fleet",
@@ -342,8 +442,8 @@ final class KistRunnerSafetyTests: XCTestCase {
 
     func testRunnerKeepsFleetDomainLearningPreflightBeforeSideEffects() throws {
         let source = try runnerSource()
-        let fleetStart = try XCTUnwrap(source.range(of: "private static func runFleet"))
-        let planExecuteStart = try XCTUnwrap(source.range(of: "private static func runPlanExecute"))
+        let fleetStart = try XCTUnwrap(source.range(of: "static func runFleet"))
+        let planExecuteStart = try XCTUnwrap(source.range(of: "static func runPlanExecute"))
         let fleetBody = String(source[fleetStart.lowerBound..<planExecuteStart.lowerBound])
 
         assertOrder("CaptainDomainLearningEnforcer.preflight(mode: .fleet",
@@ -359,7 +459,7 @@ final class KistRunnerSafetyTests: XCTestCase {
 
     func testRunnerKeepsPlanExecuteSimulationPreflightBeforeSideEffects() throws {
         let source = try runnerSource()
-        let planExecuteStart = try XCTUnwrap(source.range(of: "private static func runPlanExecute"))
+        let planExecuteStart = try XCTUnwrap(source.range(of: "static func runPlanExecute"))
         let interactorStart = try XCTUnwrap(source.range(of: "static func terminalInteractor"))
         let planExecuteBody = String(source[planExecuteStart.lowerBound..<interactorStart.lowerBound])
 
@@ -382,7 +482,7 @@ final class KistRunnerSafetyTests: XCTestCase {
 
     func testRunnerKeepsPlanExecuteDomainLearningPreflightBeforeSideEffects() throws {
         let source = try runnerSource()
-        let planExecuteStart = try XCTUnwrap(source.range(of: "private static func runPlanExecute"))
+        let planExecuteStart = try XCTUnwrap(source.range(of: "static func runPlanExecute"))
         let interactorStart = try XCTUnwrap(source.range(of: "static func terminalInteractor"))
         let planExecuteBody = String(source[planExecuteStart.lowerBound..<interactorStart.lowerBound])
 
@@ -395,6 +495,44 @@ final class KistRunnerSafetyTests: XCTestCase {
         assertOrder("CaptainDomainLearningEnforcer.preflight(mode: .planExecute",
                     before: "pxl.run",
                     in: planExecuteBody)
+    }
+
+    func testRunnerPrintsExactPlanExecuteMissionResumeBeforeExecution() throws {
+        let source = try runnerSource()
+        let planExecuteStart = try XCTUnwrap(source.range(of: "static func runPlanExecute"))
+        let interactorStart = try XCTUnwrap(source.range(of: "static func terminalInteractor"))
+        let planExecuteBody = String(source[planExecuteStart.lowerBound..<interactorStart.lowerBound])
+
+        assertOrder("CaptainDomainLearningEnforcer.preflight(mode: .planExecute",
+                    before: "CaptainSimulationEnforcer.preflight(mode: .planExecute",
+                    in: planExecuteBody)
+        assertOrder("CaptainSimulationEnforcer.preflight(mode: .planExecute",
+                    before: "PlanExecuteLoop(",
+                    in: planExecuteBody)
+        assertOrder("PlanExecuteLoop(",
+                    before: "plan-execute mission ·",
+                    in: planExecuteBody)
+        assertOrder("plan-execute mission ·",
+                    before: "resume · kist --plan-execute-resume",
+                    in: planExecuteBody)
+        assertOrder("resume · kist --plan-execute-resume",
+                    before: "pxl.run",
+                    in: planExecuteBody)
+        XCTAssertTrue(planExecuteBody.contains("missionInstanceID.rawValue"))
+        XCTAssertFalse(planExecuteBody.contains("--resume-last"))
+        let compactBody = planExecuteBody.filter { !$0.isWhitespace }
+        XCTAssertTrue(compactBody.contains(
+            "pxl.run(goal:planGoal,checkpointGoal:checkpointGoal??goal)"),
+            "execution may use enriched planGoal, but durable resume identity must use the stable checkpoint goal")
+        XCTAssertFalse(compactBody.contains("checkpointGoal:planGoal"),
+                       "transient session/effort enrichment must not define resume compatibility")
+        XCTAssertTrue(compactBody.contains(
+            "planExecuteResumeGoalArgument(checkpointGoal??goal)"),
+            "the printed resume hint must reproduce the stable checkpoint identity goal")
+        XCTAssertFalse(compactBody.contains("planExecuteResumeGoalArgument(planGoal)"),
+                       "the resume hint must not quote transient session-enriched planGoal")
+        XCTAssertFalse(compactBody.contains("planExecuteResumeGoalArgument(goal)"),
+                       "the resume hint must not bypass an explicit stable checkpoint goal")
     }
 
     func testRiskSignalsUseTokenBoundariesAndDoNotMatchSubstrings() {

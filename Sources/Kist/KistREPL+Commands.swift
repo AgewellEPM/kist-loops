@@ -16,11 +16,19 @@ extension KistREPL {
                 case "exit", "quit", "q": print("bye."); return .exit
                 case "help": printHelp(); return .handled
                 case "wu-tang", "wutang", "wu", "odb":
-                    // 🥷 Easter egg: the gold Wu-Tang "W" rises + the AI takes on ODB — but as a switchable
-                    // MODE (default is professional; /persona off or /persona captain turns it back).
+                    // 🥷 Wu-Tang mode is explicit operator consent for full YOLO in this REPL:
+                    // render the gold W, switch persona, arm bypass permissions now, and latch terminal
+                    // autopilot so follow-up prompts don't stall the run.
                     WuTangEasterEgg.riseAndShow()
                     currentPersona = Persona.apply("wutang", to: &transcript)
+                    perm.set(.bypass)
+                    perm.confirmBypass()
+                    loop = perm.arm(loop)
+                    if let setAutopilot {
+                        await setAutopilot(true)
+                    }
                     print(WuTangEasterEgg.activationHype)
+                    print("\u{001B}[31;1m⚠ WU-TANG YOLO ARMED — bypass permissions + autopilot are ON. /auto off or shift+tab to restore prompts.\u{001B}[0m")
                     return .handled
                 case "persona", "personality":
                     // Personality LAYER — same shell, different voice. captain (default) · minimal · hacker ·
@@ -898,11 +906,37 @@ extension KistREPL {
                     }
                     return .handled
                 case "plan-execute", "pe", "dag":
-                    guard let planExecute else { print("\u{001B}[31m/plan-execute isn't available here\u{001B}[0m"); return .handled }
-                    guard !args.isEmpty else { print("usage: /plan-execute <goal>"); return .handled }
-                    await runHeavyRoute(goal: args, intent: .build, mode: .planExecute,
-                                        execution: "plan-execute", startProof: true) {
-                        await planExecute(args, roleSelection.bindings)
+                    let fields = args.split(maxSplits: 2, omittingEmptySubsequences: true,
+                                            whereSeparator: { $0.isWhitespace })
+                    if fields.first == "--resume" {
+                        guard let resumePlanExecute else {
+                            print("\u{001B}[31m/plan-execute resume isn't available here\u{001B}[0m")
+                            return .handled
+                        }
+                        guard fields.count == 3 else {
+                            print("usage: /plan-execute --resume <64-lowercase-hex-id> <same goal>")
+                            return .handled
+                        }
+                        guard let missionID = PlanExecuteMissionID(rawValue: String(fields[1])) else {
+                            print("\u{001B}[31minvalid PlanExecute mission ID; expected exactly 64 lowercase hex characters\u{001B}[0m")
+                            return .handled
+                        }
+                        let goal = String(fields[2]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !goal.isEmpty else {
+                            print("usage: /plan-execute --resume <64-lowercase-hex-id> <same goal>")
+                            return .handled
+                        }
+                        await runHeavyRoute(goal: goal, intent: .build, mode: .planExecute,
+                                            execution: "plan-execute-resume", startProof: true) {
+                            await resumePlanExecute(missionID, goal, roleSelection.bindings)
+                        }
+                    } else {
+                        guard let planExecute else { print("\u{001B}[31m/plan-execute isn't available here\u{001B}[0m"); return .handled }
+                        guard !args.isEmpty else { print("usage: /plan-execute <goal>"); return .handled }
+                        await runHeavyRoute(goal: args, intent: .build, mode: .planExecute,
+                                            execution: "plan-execute", startProof: true) {
+                            await planExecute(args, roleSelection.bindings)
+                        }
                     }
                     return .handled
                 case "build", "implement", "buildit", "ship-it", "makeit":
@@ -1080,7 +1114,7 @@ extension KistREPL {
                     }
                     style.save(projectRoot: projectRoot)
                     return .handled
-                case "chain", "chains", "automate", "flow":
+        case "chains", "automate", "flow":
                     // The automation center — Zapier × LangGraph for Kist. `/chain` opens the visual
                     // web builder; `/chain list` lists saved chains; `/chain run <name>` runs one here.
                     let store = ChainStore(projectRoot: projectRoot)

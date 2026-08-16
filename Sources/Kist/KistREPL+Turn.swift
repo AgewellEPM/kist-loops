@@ -204,12 +204,26 @@ extension KistREPL {
             // send media to a non-vision model (Codex, 2026-07-03). Single-source-of-truth invariant.
             let activeIsBorrow = activeBinding.providerId == visionProviderId
             let activeHandles = activeIsBorrow || (!mustUseGemini && (providerSupportsVision?(activeBinding) ?? false))
-            let oc: HeadlessAgentLoop.Outcome
+            // The vision lane is cooldown-aware: skip a candidate another kist process just watched
+            // rate-limit, fail-open to the preferred engine when everything vision-capable is cooling.
+            // (Candidates default to [visionProviderId] so minimal wirings keep the old behavior.)
+            let coolingDown = providerCoolingDown ?? { _ in false }
+            let visionCandidates = visionProviderCandidates.isEmpty
+                ? [visionProviderId].compactMap { $0 } : visionProviderCandidates
+            var oc: HeadlessAgentLoop.Outcome
             var turnAuthor = activeBinding
             if activeHandles {
                 oc = await runTurnInterruptible(loop: loop, userInput: compiled, attachments: atts,
                                                 rawRequest: text, resolvedIntent: mediaIntent)
-            } else if let vid = visionProviderId, let loopFactory {
+            } else if let vid = Self.chooseVisionProvider(candidates: visionCandidates,
+                                                          mustUseGemini: mustUseGemini,
+                                                          coolingDown: coolingDown),
+                      let loopFactory {
+                if coolingDown(vid) {
+                    print("\u{001B}[33m↳ \(vid) is cooling down after a recent rate limit, but it's the only vision option — trying anyway\u{001B}[0m")
+                } else if vid != visionCandidates.first {
+                    print("\u{001B}[33m↳ \(visionCandidates.first ?? "?") is cooling down (recent rate limit) — using \(vid) for this media turn\u{001B}[0m")
+                }
                 print("\u{001B}[37m↳ \(activeBinding.providerId) can't see this media — routing this turn to \(vid), back to \(activeBinding.providerId) after\u{001B}[0m")
                 turnAuthor = ProviderBinding(providerId: vid)
                 let visionLoop = perm.arm(loopFactory(turnAuthor, roleSelection.bindings, perm.mode.isPlan, showReasoning, extendedThinking))
@@ -219,6 +233,28 @@ extension KistREPL {
                 print("\u{001B}[31m↳ no vision-capable provider configured (add a Gemini key) — sending text only\u{001B}[0m")
                 oc = await runTurnInterruptible(loop: loop, userInput: compiled,
                                                 rawRequest: text, resolvedIntent: mediaIntent)
+            }
+            // Media parity with the text-turn lane (2026-08-14: a gemini rateLimited media turn died
+            // terminally — the ONLY REPL lane with no substitution). A transient live failure benches
+            // the provider CROSS-PROCESS even when no substitute exists; if another vision candidate
+            // is warm, retry the turn ONCE on it. R2a: never re-run a turn the user stopped.
+            if !oc.success, !lastTurnInterrupted {
+                if Self.transientProviderFailure(summary: oc.summary) {
+                    recordProviderCooldown?(turnAuthor.providerId)
+                }
+                if let loopFactory,
+                   let sub = Self.mediaSubstitutionDecision(success: oc.success, summary: oc.summary,
+                                                            trajectory: recorder?.snapshot() ?? [],
+                                                            failedProviderId: turnAuthor.providerId,
+                                                            candidates: visionCandidates,
+                                                            mustUseGemini: mustUseGemini,
+                                                            coolingDown: coolingDown) {
+                    print("\u{001B}[33m↳ model substitution\u{001B}[0m · \(turnAuthor.providerId) benched for \(sub.reason); retrying this media turn on \(sub.replacement)")
+                    turnAuthor = ProviderBinding(providerId: sub.replacement)
+                    let retryLoop = perm.arm(loopFactory(turnAuthor, roleSelection.bindings, perm.mode.isPlan, showReasoning, extendedThinking))
+                    oc = await runTurnInterruptible(loop: retryLoop, userInput: compiled, attachments: atts,
+                                                    rawRequest: text, resolvedIntent: mediaIntent)
+                }
             }
             rememberHumanTurn(user: text, assistantSummary: oc.summary)
             await runCopilotReview(task: text, answer: oc.summary, allowAdvisory: true,

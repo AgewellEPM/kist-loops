@@ -7,6 +7,22 @@ import AgentCore
 /// or a SAFETY CAP stops it.
 extension KistRunner {
 
+    struct GreatLoopCycleEnvelope: Sendable {
+        let result: CycleResult
+        let progress: [ReasoningProgressReceipt]
+        let evidence: [ReasoningEvidenceReference]
+        let checkpointID: String?
+        let providerEffortRecords: [ProviderEffortRecord]
+    }
+
+    static func providerReasoningEffort(_ thinking: EffortController.Thinking) -> ProviderReasoningEffort {
+        switch thinking {
+        case .none: return .none
+        case .light: return .light
+        case .deep: return .deep
+        }
+    }
+
     /// Threads a cycle's team-review feedback into the next cycle (locked — the runCycle closure is @Sendable).
     final class FeedbackBox: @unchecked Sendable {
         private let lock = NSLock(); private var v = ""
@@ -27,7 +43,8 @@ extension KistRunner {
 
     static func runGreatLoop(_ opts: KistOptions, goal: String, registry: ProviderRegistry, root: String,
                                      tools: ToolRegistry, context: ToolContext, checkpoints: LoopCheckpointStore,
-                                     toolMode: ToolMode, roles: RoleBindings, providerId: String, model: String?) async -> Int32 {
+                                     toolMode: ToolMode, roles: RoleBindings, providerId: String, model: String?,
+                                     budgetOverride: BudgetLedger? = nil) async -> Int32 {
         // LEAN TOOL SET: the full registry can be ~70 tools / ~25k schema chars (~6.5k tokens) — sent on
         // EVERY model call. On a coding loop that's dead weight (media, app-UI-testing, desktop control,
         // pentest, enterprise reporting) that ate ~half a cycle's budget, so cycles couldn't converge.
@@ -73,7 +90,7 @@ extension KistRunner {
         // ONE work cycle: escalate the model when the task is hard, size the budget so it can't starve the
         // loop, run the goal (carrying any prior team-review feedback), then — if not done but progressing and
         // the effort calls for a team — have a SECOND mind review the diff and thread that into the next cycle.
-        let runCycle: @Sendable (String, EffortController.Assessment, Int, Int?) async -> CycleResult = { baseGoal, effort, cycleIndex, budgetRemaining in
+        let runCycle: @Sendable (String, EffortController.Assessment, Int, Int?, String?) async -> GreatLoopCycleEnvelope = { baseGoal, effort, cycleIndex, budgetRemaining, checkpointID in
             let nowEpoch = Date().timeIntervalSince1970
             let cycleProvider = ModelEscalator.pick(tier: effort.modelTier, keyed: keyed, preferred: providerId,
                                                     exclude: erroredProviders.active(now: nowEpoch),
@@ -108,6 +125,7 @@ extension KistRunner {
             // ./ in one cycle, then RE-created it under ./MathKit/ in the next → duplication, never converged).
             // Show the files prior cycles already changed and tell it to CONTINUE, not restart.
             let priorFiles = KistREPL.workingTreeChangedFiles(projectRoot: root)
+            let priorDiff = KistREPL.workingTreeDiff(projectRoot: root)
             if let note = Self.continuityNote(cycleIndex: cycleIndex, changedFiles: priorFiles) {
                 cycleGoal += "\n\n" + note
             }
@@ -116,6 +134,7 @@ extension KistRunner {
             if let primer, !primer.isEmpty { cycleGoal += "\n\n" + primer }
             if let policyHint, !policyHint.isEmpty { cycleGoal += "\n\nLEARNED POLICY — " + policyHint }
             if !fb.isEmpty { cycleGoal += "\n\nPRIOR CYCLE — fix these before finishing:\n" + fb }
+            cycleGoal += "\n\n" + Self.builderEffortContext(effort)
 
             let recorder = TrajectoryRecorder()
             let think = effort.thinking != .none
@@ -128,6 +147,7 @@ extension KistRunner {
             if effort.searchWidth > 1, WorktreeBestOfN.isCleanTree(root) {
                 note("  ⑃ best-of-\(effort.searchWidth) · isolated worktrees")
                 let attemptBudget = perCycle.map { max(20_000, $0 / effort.searchWidth) }
+                let bestOfNGoal = cycleGoal
                 let won = await WorktreeBestOfN.run(root: root, width: effort.searchWidth, nowEpoch: Date().timeIntervalSince1970) { wtPath, _ in
                     let wtCtx = ToolContext(projectRoot: wtPath, shell: context.shell, sandbox: context.sandbox,
                                             externalReadRoots: context.externalReadRoots)
@@ -137,13 +157,13 @@ extension KistRunner {
                                           // --max-cost in --loop: SAFE fixed fair-share USD subdivision per
                                           // attempt (maxCostUSD / (maxCycles × searchWidth)) — the total across
                                           // all cycles×attempts can never exceed the cap (Codex: was ignored here).
-                                          budget: attemptBudget.map { BudgetLedger(maxTokens: $0, maxUSD: opts.maxCostUSD.map { $0 / Double(max(1, caps.maxCycles * effort.searchWidth)) }) },
+                                          budget: budgetOverride ?? attemptBudget.map { BudgetLedger(maxTokens: $0, maxUSD: opts.maxCostUSD.map { $0 / Double(max(1, caps.maxCycles * effort.searchWidth)) }) },
                                           interactor: caps.noDestructive ? NonDestructiveInteractor() : AutoApproveInteractor(),
                                           planMode: false, extendedThinking: think, toolMode: toolMode, roles: roles,
                                           delegationDepth: delegationDepth, showReasoning: false,
                                           sinkOverride: TerminalEventSink(showReasoning: false, style: .calm),
                                           recorder: rec, traceRecorder: traceRecorder)
-                    let oc = await wtLoop.run(goal: cycleGoal)
+                    let oc = await wtLoop.run(goal: bestOfNGoal)
                     let traj = rec.snapshot()
                     let v = GreatLoopVerifier.verify(trajectory: traj, canRunCommands: context.shell.enabled,
                                                      changedFiles: KistREPL.workingTreeChangedFiles(projectRoot: wtPath),
@@ -159,9 +179,49 @@ extension KistRunner {
                     lessons?.record(CycleReflection.lesson(goal: baseGoal, done: true, verdictReason: "verified",
                                                            reviewGist: nil, summary: "best-of-N: a verified independent attempt was applied",
                                                            failureRate: 0, at: Date().timeIntervalSince1970))
-                    return CycleResult(doneAndVerified: true, tokensSpent: UsageCost.summarize(spans: delta).tokens,
-                                       madeProgress: true, signals: EffortController.Signals(),
-                                       summary: "best-of-N verified winner applied")
+                    let changed = KistREPL.workingTreeChangedFiles(projectRoot: root).sorted()
+                    let diff = KistREPL.workingTreeDiff(projectRoot: root)
+                    let digest = Self.builderCompatibilityContractID(
+                        root: root, goal: diff, adapter: .greatLoop
+                    )
+                    let nodeID = "great-loop-cycle-\(cycleIndex)"
+                    var typedProgress = changed.map { path in
+                        ReasoningProgressReceipt(
+                            nodeID: nodeID,
+                            evidence: .artifact(ReasoningArtifactReference(
+                                id: "great-loop-artifact:\(path)", path: path,
+                                revision: digest, nodeID: nodeID
+                            ))
+                        )
+                    }
+                    if typedProgress.isEmpty {
+                        typedProgress.append(ReasoningProgressReceipt(
+                            nodeID: nodeID,
+                            evidence: .workspaceMutation(effectID: digest, paths: [root])
+                        ))
+                    }
+                    let proof = ReasoningEvidenceReference(
+                        id: "great-loop-best-of-n:\(digest)", kind: .check,
+                        nodeID: nodeID, locator: root, digest: digest,
+                        summary: "best-of-N produced and applied a verified winner"
+                    )
+                    typedProgress.append(ReasoningProgressReceipt(
+                        nodeID: nodeID,
+                        evidence: .checkTransition(ReasoningCheckReceipt(
+                            id: "great-loop-verification", name: "Great Loop deterministic verification",
+                            state: .passed, evidenceID: proof.id, nodeID: nodeID
+                        ))
+                    ))
+                    return GreatLoopCycleEnvelope(
+                        result: CycleResult(
+                            doneAndVerified: true,
+                            tokensSpent: UsageCost.summarize(spans: delta).tokens,
+                            madeProgress: true, signals: EffortController.Signals(),
+                            summary: "best-of-N verified winner applied"
+                        ),
+                        progress: typedProgress, evidence: [proof], checkpointID: nil,
+                        providerEffortRecords: []
+                    )
                 }
                 note("  · no best-of-N winner — running a normal in-tree cycle")
             }
@@ -170,7 +230,7 @@ extension KistRunner {
                                 tools: loopTools, checkpoints: checkpoints, maxIterations: effort.iterationBudget,
                                 // --max-cost in --loop: SAFE per-cycle USD fair share (maxCostUSD / maxCycles);
                                 // sum across cycles ≤ the cap (Codex: was ignored here).
-                                budget: perCycle.map { BudgetLedger(maxTokens: $0, maxUSD: opts.maxCostUSD.map { $0 / Double(max(1, caps.maxCycles)) }) },
+                                budget: budgetOverride ?? perCycle.map { BudgetLedger(maxTokens: $0, maxUSD: opts.maxCostUSD.map { $0 / Double(max(1, caps.maxCycles)) }) },
                                 // ENFORCE noDestructive: an unattended --loop (no --yolo) refuses irreversible
                                 // ops (rm -rf/force-push/deploy) while still running build/test/edit.
                                 interactor: caps.noDestructive ? NonDestructiveInteractor() : AutoApproveInteractor(),
@@ -178,7 +238,15 @@ extension KistRunner {
                                 delegationDepth: delegationDepth, showReasoning: false,
                                 sinkOverride: TerminalEventSink(showReasoning: false, style: .calm),
                                 recorder: recorder, traceRecorder: traceRecorder)
-            let outcome = await loop.run(goal: cycleGoal)
+            let outcome: HeadlessAgentLoop.Outcome
+            if let checkpointID,
+               let checkpoint = try? checkpoints.load(id: checkpointID),
+               checkpoint.status != .completed,
+               checkpoint.status != .abandoned {
+                outcome = await loop.resume(from: checkpoint)
+            } else {
+                outcome = await loop.run(goal: cycleGoal)
+            }
             // Fault detection: if the cycle failed because the PROVIDER faulted server-side, mark it so the
             // escalator routes around it (within the cooldown window). PRIMARY signal is the STRUCTURED flag
             // the loop set from the typed error. FALLBACK (only on a FAILED cycle, where the summary IS the
@@ -218,7 +286,52 @@ extension KistRunner {
                                                    changedFiles: workChanged, diff: workDiff)
             let done = outcome.success && grounded && verdict.isVerified
             if outcome.success, !verdict.isVerified { note("  ⨯ done REJECTED by verifier · \(verdict.reason)") }
-            let progressed = trajectory.contains { $0.success }
+            var progressArtifacts = workChanged
+                .filter { !priorFiles.contains($0) }
+                .map { BuilderArtifact(path: $0, kind: "changed-path") }
+            if workDiff != priorDiff, progressArtifacts.isEmpty {
+                progressArtifacts.append(BuilderArtifact(path: root, kind: "working-tree-diff"))
+            }
+            let passingChecks = verdict.isVerified
+                ? [BuilderCheckReceipt(name: "great-loop deterministic verification", passed: true,
+                                       details: verdict.reason)] : []
+            let completedBuilderNodes = done ? ["great-loop-cycle-\(cycleIndex)"] : []
+            let progressed = !progressArtifacts.isEmpty || !passingChecks.isEmpty
+                || !completedBuilderNodes.isEmpty
+            let reasoningNodeID = "great-loop-cycle-\(cycleIndex)"
+            let reasoningDigest = Self.builderCompatibilityContractID(
+                root: root,
+                goal: workDiff + "\u{0}" + verdict.reason,
+                adapter: .greatLoop
+            )
+            let verificationEvidence = ReasoningEvidenceReference(
+                id: "great-loop-verification:\(reasoningDigest)", kind: .check,
+                nodeID: reasoningNodeID, locator: root, digest: reasoningDigest,
+                summary: verdict.reason
+            )
+            var typedProgress = workChanged.map { path in
+                ReasoningProgressReceipt(
+                    nodeID: reasoningNodeID,
+                    evidence: .artifact(ReasoningArtifactReference(
+                        id: "great-loop-artifact:\(path)", path: path,
+                        revision: reasoningDigest, nodeID: reasoningNodeID
+                    ))
+                )
+            }
+            if workDiff != priorDiff, typedProgress.isEmpty {
+                typedProgress.append(ReasoningProgressReceipt(
+                    nodeID: reasoningNodeID,
+                    evidence: .workspaceMutation(effectID: reasoningDigest, paths: [root])
+                ))
+            }
+            typedProgress.append(ReasoningProgressReceipt(
+                nodeID: reasoningNodeID,
+                evidence: .checkTransition(ReasoningCheckReceipt(
+                    id: "great-loop-verification", name: "Great Loop deterministic verification",
+                    state: verdict.isVerified ? .passed : .failed,
+                    evidenceID: verificationEvidence.id, nodeID: reasoningNodeID
+                ))
+            ))
 
             // Thread forward what the NEXT cycle must fix: the verifier's rejection (if any) + a second-mind
             // team review of the diff. Cleared once the goal is genuinely done+verified.
@@ -238,18 +351,30 @@ extension KistRunner {
                 }
                 if progressed, effort.team != .solo,
                    !workDiff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let reviewer = ModelEscalator.pick(tier: .frontier, keyed: keyed, preferred: cycleProvider,
-                                                       exclude: erroredProviders.active(now: nowEpoch),
-                                                       verdicts: historyVerdicts)
-                    note("  ⎇ team review · \(reviewer)")
-                    if let review = try? await registry.complete(
-                        providerId: reviewer, model: nil,
+                    let producingModel = registry.provider(id: cycleProvider)?.resolvedModel(cycleModel)
+                        ?? cycleModel ?? "default"
+                    let producingIdentity = providerModelIdentity(
+                        provider: cycleProvider, model: producingModel)
+                    let selection = producingIdentity.flatMap {
+                        independentReviewerSelection(
+                            preferred: roles.binding(for: .critic),
+                            producingIdentities: Set([$0]), registry: registry)
+                    }
+                    if let selection {
+                        note("  ⎇ team review · \(selection.identity)")
+                        if let review = try? await registry.complete(
+                        providerId: selection.binding.providerId, model: selection.binding.model,
                         messages: [ChatMessage(role: .system, content: Copilot.reviewSystemPrompt),
                                    ChatMessage(role: .user, content: Copilot.reviewPrompt(task: baseGoal, diff: workDiff))],
                         settings: ModelSettings(temperature: 0.0, maxTokens: 700)),
                        !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        reviewText = review
-                        notes.append("Team review of your changes:\n" + review)
+                            reviewText = review
+                            notes.append("Independent team review (\(selection.identity)):\n" + review)
+                        }
+                    } else {
+                        let reason = "Independent team review unavailable: configure another provider:model distinct from \(producingIdentity ?? "the producing worker")"
+                        note("  ⚠ \(reason)")
+                        notes.append(reason)
                     }
                 }
                 feedback.set(notes.joined(separator: "\n\n"))
@@ -281,6 +406,11 @@ extension KistRunner {
                 failedAt: done ? nil : ((outcome.success && !verdict.isVerified) ? "verify" : "act"),
                 loopKinds: report.issues.map { $0.kind.rawValue },
                 wasStuck: !report.healthy, failureRate: failureRate))
+            let actualEffortRecords: [ProviderEffortRecord] = {
+                let checkpointID = outcome.checkpointId
+                guard let checkpoint = try? checkpoints.load(id: checkpointID) else { return [] }
+                return Array((checkpoint.providerEffortRecords ?? []).suffix(1))
+            }()
             // GATED DGM bridge: once a hint proves itself (enough verified wins at a high rate), QUEUE it for
             // human/DGM review — NEVER auto-applied to Mythos's own prompts (the self-modification line).
             if let best = policy?.bestCandidate(forSignature: sig),
@@ -290,16 +420,84 @@ extension KistRunner {
                 note("  ⤴ policy proven (\(best.wins)/\(best.trials)) — queued for review (never auto-applied)")
             }
 
-            return CycleResult(doneAndVerified: done, tokensSpent: UsageCost.summarize(spans: delta).tokens,
-                               madeProgress: progressed,
-                               signals: .init(failureRate: failureRate, iterationsUsed: trajectory.count, isStuck: !report.healthy),
-                               summary: outcome.summary, providerFault: outcome.providerFault)
+            return GreatLoopCycleEnvelope(
+                result: CycleResult(
+                    doneAndVerified: done,
+                    tokensSpent: UsageCost.summarize(spans: delta).tokens,
+                    madeProgress: progressed,
+                    signals: .init(failureRate: failureRate,
+                                   iterationsUsed: trajectory.count,
+                                   isStuck: !report.healthy),
+                    summary: outcome.summary,
+                    providerFault: outcome.providerFault
+                ),
+                progress: typedProgress,
+                evidence: [verificationEvidence],
+                checkpointID: outcome.checkpointId,
+                providerEffortRecords: actualEffortRecords
+            )
         }
 
-        let runner = GreatLoopRunner(goal: goal, caps: caps, memory: memory,
-                                     clock: { Date().timeIntervalSince1970 },
-                                     runCycle: runCycle, emit: { note($0) })
-        let decision = await runner.run()
+        let calibration = memory.calibration(forGoal: goal)
+        let assess: @Sendable (ReasoningControlState) -> EffortController.Assessment = { state in
+            let struggling = state.consecutiveNoProgress > 0
+            return EffortController.assess(
+                goal: goal,
+                signals: .init(
+                    failureRate: struggling ? 1.0 : 0.0,
+                    iterationsUsed: state.cycle,
+                    isStuck: struggling
+                ),
+                calibration: calibration
+            )
+        }
+        let goalFingerprint = builderCompatibilityContractID(
+            root: root, goal: goal, adapter: .greatLoop
+        )
+        let reasoningStore = AtomicReasoningControlStore(projectRoot: root)
+        let runner = ResumableGreatLoopRunner(
+            runID: goalFingerprint + "-reasoning",
+            route: .planned,
+            goalFingerprint: goalFingerprint,
+            caps: caps,
+            store: reasoningStore,
+            effort: { state in Self.providerReasoningEffort(assess(state).thinking) },
+            runCycle: { request in
+                let effort = assess(request.control)
+                note("↻ cycle \(request.control.cycle + 1)/\(caps.maxCycles) · \(effort.rationale)"
+                     + (calibration.samples > 0
+                        ? " · learned±\(calibration.bias) from \(calibration.samples)" : ""))
+                let cycle = await runCycle(
+                    goal, effort, request.control.cycle, request.remainingTokens,
+                    request.control.childCheckpointIDs["great-loop"]
+                )
+                return ResumableGreatLoopCycleResult(
+                    doneAndVerified: cycle.result.doneAndVerified,
+                    tokensSpent: cycle.result.tokensSpent,
+                    progress: cycle.progress,
+                    summary: cycle.result.summary,
+                    evidence: cycle.evidence,
+                    childCheckpointIDs: cycle.checkpointID.map { ["great-loop": $0] } ?? [:],
+                    reasoningSummary: cycle.result.summary,
+                    providerEffortRecords: cycle.providerEffortRecords
+                )
+            }
+        )
+        let decision: GreatLoopDecision
+        do {
+            decision = try await runner.run()
+        } catch {
+            err("great-loop durable state failed: \(error.localizedDescription)")
+            printUsageDelta(from: [], to: await traceRecorder.all(), label: "great-loop usage", projectRoot: root)
+            return 1
+        }
+        switch decision {
+        case .stopDone(let reason): note("✓ great-loop done — \(reason)")
+        case .stopBudget(let reason), .stopDeadline(let reason),
+             .stopCycles(let reason), .stopNoProgress(let reason):
+            note("■ great-loop stopped — \(reason)")
+        case .keepGoing(let reason): note(reason)
+        }
         printUsageDelta(from: [], to: await traceRecorder.all(), label: "great-loop usage", projectRoot: root)
         return decision.succeeded ? 0 : 1
     }

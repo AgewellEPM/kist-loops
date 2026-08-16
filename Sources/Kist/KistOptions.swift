@@ -33,7 +33,11 @@ struct KistOptions {
                                     // of minds reviews the result → GO/NO-GO (deploy stays your call)
     var planMode = false            // start in plan mode: read-only, propose a plan (no edits/commands)
     var extendedThinking = false    // --think: let the model REASON before each action (surfaced + replayed)
+    var headless = false            // --headless: explicitly select the governed direct Builder adapter
     var planExecute = false         // plan→execute: planner emits a typed DAG, approve, then build it
+    var planExecuteResumeID: PlanExecuteMissionID? // exact PlanExecute mission; distinct from Headless --resume
+    var mission = false             // autonomous doctrine: research → simulation/trials → execute/verify → review
+    var autonomyReceipts = false    // emit machine-readable stage/review receipts for the Captain runtime
     var research = false            // --research: evidence run -> council -> task board
     var council = false             // --council/--consult: research -> multi-model council -> task board
     var councilExecute = false      // --council-execute: council first, then hand builder brief to plan→execute
@@ -93,6 +97,10 @@ struct KistOptions {
     var greatLoop = false           // --loop: long-horizon great-loop (self-assess effort, learn, safety-railed)
     var loopHours: Double?          // --loop-hours <h>: wall-clock cap for the great loop
     var maxCycles: Int?             // --max-cycles <n>: outer-loop cycle cap for the great loop
+    var cobolo = false              // --cobolo/--cobol-loop: governed local COBOL builder
+    var cobolTarget: String?        // required project-relative .cbl/.cob promotion target
+    var cobolExpect: String?        // required stdout substring for deterministic replay
+    var cobolMaxRevisions = 3       // --cobol-max-revisions <1...3>: bounded critic-driven revisions
     var maxCostUSD: Double?         // --max-cost <usd>: hard DOLLAR ceiling (priced per provider); either
                                     // cap halts the run (aplus C-series cost governance).
     var noMemory = false            // --no-memory: disable cross-run memory (facts + episode log)
@@ -149,6 +157,7 @@ struct KistOptions {
     static func parse(_ args: [String]) -> KistOptions {
         var o = KistOptions(project: FileManager.default.currentDirectoryPath)
         var positional: [String] = []
+        var sawCobolMaxRevisions = false
         var i = 0
         func next() -> String? { i += 1; return i < args.count ? args[i] : nil }
         while i < args.count {
@@ -176,8 +185,19 @@ struct KistOptions {
                                                 o.optionErrors.append("\(flag) requires <stage> <manifest.json>")
                                             }
             case "--list":                  o.listRuns = true
-            case "--resume":                o.resumeId = next()
-            case "--resume-last":           o.resumeLast = true
+            case "--resume":
+                                            let value = next()
+                                            if o.planExecute {
+                                                o.optionErrors.append("--resume cannot be combined with --plan-execute or --plan-execute-resume")
+                                            } else {
+                                                o.resumeId = value
+                                            }
+            case "--resume-last":
+                                            if o.planExecute {
+                                                o.optionErrors.append("--resume-last cannot be combined with --plan-execute or --plan-execute-resume")
+                                            } else {
+                                                o.resumeLast = true
+                                            }
             case "--provider", "-p":        o.providerId = next()
             case "--by-cost", "--cost":     o.selectBy = .cost
             case "--by-power", "--power":   o.selectBy = .power
@@ -222,7 +242,50 @@ struct KistOptions {
             case "--verify-bundle":         if let v = next() { o.verifyBundle = v }
             case "--plan":                  o.planMode = true
             case "--think", "--thinking":   o.extendedThinking = true
-            case "--plan-execute":          o.planExecute = true
+            case "--headless":              o.headless = true
+            case "--cobolo", "--cobol-loop": o.cobolo = true
+            case "--cobol-target", "--cobolo-target":
+                                            if i + 1 < args.count, !args[i + 1].hasPrefix("-"), let v = next() {
+                                                o.cobolTarget = v
+                                            }
+                                            else { o.optionErrors.append("\(args[i]) requires <project-relative .cbl/.cob path>") }
+            case "--cobol-expect", "--cobolo-expect":
+                                            if i + 1 < args.count, !args[i + 1].hasPrefix("-"), let v = next() {
+                                                o.cobolExpect = v
+                                            }
+                                            else { o.optionErrors.append("\(args[i]) requires <stdout substring>") }
+            case "--cobol-max-revisions":
+                                            sawCobolMaxRevisions = true
+                                            if i + 1 < args.count, !args[i + 1].hasPrefix("-"), let raw = next() {
+                                                if let revisions = Int(raw), (1...3).contains(revisions) {
+                                                    o.cobolMaxRevisions = revisions
+                                                } else {
+                                                    o.optionErrors.append("--cobol-max-revisions requires an integer from 1 through 3")
+                                                }
+                                            } else {
+                                                o.optionErrors.append("--cobol-max-revisions requires an integer from 1 through 3")
+                                            }
+            case "--plan-execute":
+                                            if o.resumeId != nil || o.resumeLast {
+                                                o.optionErrors.append("--plan-execute cannot be combined with Headless --resume or --resume-last")
+                                            } else {
+                                                o.planExecute = true
+                                            }
+            case "--plan-execute-resume":
+                                            if let rawID = next() {
+                                                if o.resumeId != nil || o.resumeLast {
+                                                    o.optionErrors.append("--plan-execute-resume cannot be combined with Headless --resume or --resume-last")
+                                                } else if let missionID = PlanExecuteMissionID(rawValue: rawID) {
+                                                    o.planExecute = true
+                                                    o.planExecuteResumeID = missionID
+                                                } else {
+                                                    o.optionErrors.append("--plan-execute-resume requires exactly 64 lowercase hexadecimal characters")
+                                                }
+                                            } else {
+                                                o.optionErrors.append("--plan-execute-resume requires <mission-id>")
+                                            }
+            case "--mission":               o.mission = true
+            case "--autonomy-receipts":     o.autonomyReceipts = true
             case "--research":              o.research = true
             case "--council", "--consult":  o.council = true
             case "--council-execute", "--council-build", "--consult-execute":
@@ -290,11 +353,44 @@ struct KistOptions {
         } else if !positional.isEmpty {
             o.goal = positional.joined(separator: " ")
         }
+        if o.planExecuteResumeID != nil,
+           o.goal?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            o.optionErrors.append("--plan-execute-resume requires the same nonempty goal")
+        }
+        if o.headless {
+            let conflicts = [
+                (o.planExecute, "--plan-execute"),
+                (o.fleet, "--fleet"),
+                (o.mission, "--mission"),
+                (o.greatLoop, "--loop"),
+                (o.cobolo, "--cobolo"),
+            ].compactMap { enabled, flag in enabled ? flag : nil }
+            if !conflicts.isEmpty {
+                o.optionErrors.append(
+                    "--headless conflicts with " + conflicts.joined(separator: ", "))
+            }
+        }
+        if o.cobolo {
+            if o.cobolTarget?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--cobolo requires --cobol-target <project-relative .cbl/.cob path>")
+            }
+            if o.cobolExpect?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--cobolo requires --cobol-expect <stdout substring>")
+            }
+            if o.mission || o.fleet || o.planExecute || o.greatLoop {
+                o.optionErrors.append("--cobolo/--cobol-loop conflicts with --mission, --fleet, --plan-execute, and --loop")
+            }
+        } else if o.cobolTarget != nil || o.cobolExpect != nil {
+            o.optionErrors.append("--cobol-target and --cobol-expect require --cobolo or --cobol-loop")
+        }
+        if sawCobolMaxRevisions && !o.cobolo {
+            o.optionErrors.append("--cobol-max-revisions requires --cobolo or --cobol-loop")
+        }
         // Autopilot is an UMBRELLA: it implies no-prompt (yolo) + shell + a FORCED OS sandbox.
         // Forced last so it can never be silently un-set by flag order or a future --no-sandbox.
         // Rationale (Luke's policy): everything always runs through a sandbox — autonomy is bought
         // with isolation, not by removing verification. The fleet's captain/signoff gates still apply.
-        if o.ship { o.auto = true }   // --ship builds hands-free in the autopilot sandbox first
+        if o.ship || o.mission || o.cobolo { o.auto = true } // mutation lanes are hands-free only inside the forced sandbox
         if o.auto { o.yolo = true; o.allowShell = true; o.sandbox = true }
         // SECURITY (council-mandated 2026-07-03): a kist spawned BY another kist (an agent's run_command →
         // `kist …`) inherits KIST_ACTIVE. A NESTED instance must not be able to self-escalate to unattended
@@ -317,13 +413,18 @@ struct KistOptions {
 
     USAGE:
       kist "<goal>"                 Run the goal to completion, streaming to the terminal.
+      kist --headless "<goal>"      Force the governed direct Builder adapter for deterministic dogfood.
       kist --resume <id>            Resume a checkpointed run where it left off.
       kist --resume-last            Resume the most recent unfinished run.
+      kist --plan-execute-resume <mission-id> "<same goal>"
+                                    Resume exactly one PlanExecute mission; no latest/goal lookup.
       kist --list                   List resumable runs.
       kist --list-providers         Show providers and which have a key configured.
       kist --gemini-test            Live smoke-test of the Gemini clients (needs a Gemini key).
       kist --ship "<goal>"          Build hands-free in the autopilot sandbox, then the council of
                                     minds reviews the result → GO/NO-GO (deploy stays your call).
+      kist --mission "<goal>"       Autonomous gated mission: research/council → measured simulation
+                                    and trials → verified execution → independent review.
       kist --health                 Show provider/model/router health without spending tokens.
       kist --probe-providers        Full live probe of configured providers; may take 1-2 minutes.
       kist --model-vet hf:<repo>    Fetch live model metadata and hard-reject unsafe downloads.
@@ -336,6 +437,9 @@ struct KistOptions {
       kist --loop "<goal>"          Great-loop: self-assess effort per cycle, learn from history, and keep
                                     working (verify each cycle) until done-and-verified or a safety cap.
                                     Caps: --budget <tok> · --loop-hours <h> · --max-cycles <n>. (long-horizon)
+      kist --cobolo --cobol-target <path.cbl> --cobol-expect <stdout> [--cobol-max-revisions <1...3>] "<goal>"
+                                    Local-only COBOL specialist → sandboxed replay → independent reviews
+                                    → lease-bound conditional promotion. Alias: --cobol-loop.
       kist --research "<goal>"      Evidence run → research dossier → council → task board.
       kist --dig "<question>"       Ask EVERY reachable model the same question, synthesize agree/disagree.
       kist --council "<goal>"       Research → council → decision → visible task board.
@@ -402,8 +506,19 @@ struct KistOptions {
                                     shown inline + saved to the replay). In the REPL, toggle with /think.
           --plan                    Plan mode: read-only; the agent proposes a step-by-step plan
                                     instead of editing. In the REPL, toggle with /plan.
+          --headless                Force the typed direct Builder adapter. The run still uses a sealed
+                                    preflight contract, scoped mutation tools, finite budgets,
+                                    deterministic verification, and independent review.
           --plan-execute            Plan→execute: the planner emits a typed step DAG, you approve
                                     it (unless --yolo), then it runs to completion. (one-shot)
+          --plan-execute-resume <mission-id>
+                                    Resume the exact PlanExecute mission using the supplied same goal.
+                                    The ID is 64 lowercase hex; never selects latest or Headless state.
+          --cobolo                 High-assurance local COBOL builder. Alias: --cobol-loop.
+              --cobol-target <path>    Required project-relative .cbl/.cob target; its parent must exist.
+          --cobol-expect <text>    Required stdout substring; sandbox and exit 0 are also mandatory.
+          --cobol-max-revisions <n>
+                                    Maximum critic-driven candidate revisions (default 3; range 1...3).
           --research                Run an evidence-first research pipeline: web/source discovery,
                                     repo context, durable dossier, council synthesis, task board.
           --council, --consult      Run the AI council as a first-class surface: researcher →
@@ -413,10 +528,11 @@ struct KistOptions {
           --council-execute         Run the council, seed the task board, then hand the council's
                                     builder brief to plan→execute. Alias: --council-build.
           --fleet                   Launch a SUPERVISED parallel fleet: the planner splits the goal
-                                    into DISJOINT-scoped subtasks, one agent runs each in its OWN git
-                                    worktree (heterogeneous — bind roles per vendor), and a foreman
-                                    VERIFIES + forge-proof SIGNS each before joining onto a fresh
-                                    integration branch. NEVER touches main. (one-shot)
+                                    into DISJOINT-scoped subtasks, each runs in an isolated staged
+                                    filesystem workspace (heterogeneous — bind roles per vendor), then
+                                    one aggregate subject is deterministically verified + independently
+                                    reviewed before a journaled global promotion. No Git repo required;
+                                    partial child results never publish. (one-shot)
           --evolve                  Run a DGM-style evolution lab: create isolated candidate
                                     worktrees, ask the role-bound team to improve Mythos itself,
                                     benchmark each candidate, and append results to

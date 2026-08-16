@@ -184,7 +184,18 @@ enum CaptainSimulationEnforcer {
                           objective: String) -> RiskLevel {
         let lower = objective.lowercased()
         if mode == .fleet { return .high }
-        if containsAny(lower, criticalSignals) { return .critical }
+        let criticalHits = criticalSignals.filter { containsSignal(lower, signal: $0) }
+        if !criticalHits.isEmpty {
+            // Risk follows the requested EFFECT, not adjectives in a build brief. A clean, local
+            // software artifact may legitimately be described as "production-ready"; that does not
+            // mean Kist was asked to touch production. Keep this exception deliberately narrow:
+            // every destructive, deployment, credential, payment, privileged, physical, security,
+            // or otherwise external hit still makes the objective critical.
+            let descriptiveOnly = criticalHits.allSatisfy { descriptiveLocalBuildSignals.contains($0) }
+            if !(descriptiveOnly
+                 && isProjectConfinedSoftwareBuild(lower)
+                 && !containsExternalEffectStem(lower)) { return .critical }
+        }
         if containsAny(lower, highSignals) { return .high }
         if containsAny(lower, mediumSignals) { return .medium }
         return .low
@@ -267,6 +278,39 @@ enum CaptainSimulationEnforcer {
         "robot", "factory", "hardware", "actuator", "exploit", "pentest",
         "bug bounty", "vulnerability", "vulnerable", "safety", "customers safe"
     ]
+
+    /// These words describe quality/audience as often as they describe an external effect. They
+    /// are downgraded only when the same objective explicitly confines a software build locally.
+    private static let descriptiveLocalBuildSignals: Set<String> = [
+        "production", "customer", "customers", "safety", "customers safe"
+    ]
+
+    private static func isProjectConfinedSoftwareBuild(_ text: String) -> Bool {
+        let localScope = containsAny(text, [
+            "local", "locally", "in this workspace", "this workspace", "in this folder",
+            "this folder", "in this directory", "this directory", "in this empty directory",
+            "this empty directory", "here", "from scratch"
+        ])
+        let softwareArtifact = containsAny(text, [
+            "cli", "command-line", "command line", "package", "library", "project",
+            "app", "application", "tool", "swift", "python", "typescript", "rust", "go"
+        ])
+        let buildEffect = containsAny(text, highSignals)
+        return localScope && softwareArtifact && buildEffect
+    }
+
+    /// Whole-token matching prevents false positives such as `authentication`, but effect verbs
+    /// legitimately inflect (`deploys`, `deploying`, `deleted`). Match only tightly-scoped stems
+    /// after tokenization so those real actions cannot hide behind grammar.
+    private static func containsExternalEffectStem(_ text: String) -> Bool {
+        let stems = [
+            "deploy", "release", "rollout", "migrat", "delet", "destroy", "truncat",
+            "purg", "nuke", "reset", "overwrit", "eras", "wipe", "decommission",
+            "charg", "refund", "rotat", "revok"
+        ]
+        let tokens = text.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        return tokens.contains { token in stems.contains { token.hasPrefix($0) } }
+    }
 
     private static let highSignals = [
         "build", "implement", "fix", "refactor", "rewrite", "install", "onboard",

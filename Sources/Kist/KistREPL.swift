@@ -16,6 +16,9 @@ final class KistREPL {
     var fleet: ((_ goal: String, _ agents: Int, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Escalate to PLAN→EXECUTE (a typed DAG built by the team) from inside the conversation.
     var planExecute: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
+    /// Resume one exact PLAN→EXECUTE mission. Kept separate so every existing build route stays fresh.
+    var resumePlanExecute: ((_ missionID: PlanExecuteMissionID, _ goal: String,
+                            _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Run an AI council (researcher -> architect -> coder -> critic -> UX -> memory -> final board).
     var council: ((_ goal: String, _ roles: RoleBindings, _ execute: Bool) async -> HeavyRouteResult)? = nil
     /// "Dig in deep" / "consult the minds": ask EVERY reachable model the same question in parallel and
@@ -100,6 +103,16 @@ final class KistREPL {
     /// A configured vision-capable provider to borrow for media turns when the active model can't see
     /// (nil if none is configured). Set by the runner to e.g. "gemini" when its key is present.
     var visionProviderId: String? = nil
+    /// Ordered vision-capable fallback lane for media turns (preferred engine first — normally
+    /// `visionProviderId` at index 0). The media reroute walks this list, skipping providers in live
+    /// cooldown, so one rate-limited vision engine no longer kills every media turn.
+    var visionProviderCandidates: [String] = []
+    /// Cross-process live-failure state (ProviderCooldownStore): is this provider currently cooling
+    /// down after a rate limit/outage another kist process observed? nil = no knowledge (not cooling).
+    var providerCoolingDown: ((String) -> Bool)? = nil
+    /// Bench a provider cross-process after a live transient failure so one-shot lanes and future
+    /// sessions don't walk into the same wall. nil = no-op (tests / minimal wiring).
+    var recordProviderCooldown: ((String) -> Void)? = nil
     /// Autopilot may send clipboard media without a per-paste prompt. Normal REPL still asks once.
     var autoApproveClipboardVision = false
     /// R2b: pin the input bar to the bottom via a scroll region (default on for TTYs; --no-pinned-bar off).
@@ -309,7 +322,12 @@ final class KistREPL {
                     onScreenLeaseBegin: onScreenLeaseBegin,
                     onScreenLeaseEnd: onScreenLeaseEnd,
                     onScreenReleaseBeforeFinish: onScreenReleaseBeforeFinish,
-                    setBracketedPasteMode: setBracketedPasteMode)
+                    setBracketedPasteMode: setBracketedPasteMode,
+                    onInterruptUnavailable: {
+                        if self.stickyTurnsEnabled, promptWasPinned { self.pinnedBar.suspend() }
+                        let warning = "warning: keyboard interrupt unavailable for this turn; provider liveness timeout remains active\n"
+                        FileHandle.standardError.write(Data(warning.utf8))
+                    })
                 session.start()
                 turnSession = session
                 activeInteractionSession = session
@@ -369,6 +387,14 @@ final class KistREPL {
 
             if let task = Self.taskSelectedByUser(input, projectRoot: projectRoot,
                                                   sessionStartedAt: sessionStart) {
+                if Self.isSimulationRemediationTask(task) {
+                    print("\u{001B}[37m↳ running simulation remediation task [\(task.id)] directly · plan→execute bypassed\u{001B}[0m")
+                    print(Self.runSimulationRemediationTask(
+                        task,
+                        projectRoot: projectRoot,
+                        trajectory: recorder?.snapshot() ?? []))
+                    continue
+                }
                 let taskPrompt = Self.executionBrief(for: task, userInput: input)
                 _ = PlanStore(projectRoot: projectRoot).update(id: task.id, status: .inProgress)
                 if let planExecute {
@@ -713,6 +739,12 @@ final class KistREPL {
             var turnAuthor = activeBinding
             var oc = await runTurnInterruptible(loop: loop, userInput: enriched,
                                                 rawRequest: messageText, resolvedIntent: turnIntent)
+            // A transient live failure (rate limit / outage) benches this provider CROSS-PROCESS
+            // even when no substitute exists — one-shot lanes and future sessions must not walk
+            // into the same wall (parity with KistRunner+OneShotResilience, 2026-08-14).
+            if !oc.success, !lastTurnInterrupted, Self.transientProviderFailure(summary: oc.summary) {
+                recordProviderCooldown?(activeBinding.providerId)
+            }
             if let loopFactory,
                !lastTurnInterrupted,   // R2a: never re-run a turn the USER stopped (their queued instruction runs next)
                let substitution = Self.modelSubstitutionDecision(success: oc.success,
@@ -720,7 +752,12 @@ final class KistREPL {
                                                                  trajectory: recorder?.snapshot() ?? [],
                                                                  current: activeBinding,
                                                                  roles: roleSelection.bindings,
-                                                                 providerHasKey: providerHasKey,
+                                                                 // Cooldown-gated: never substitute onto a provider
+                                                                 // another kist process just watched fail live.
+                                                                 providerHasKey: { [providerCoolingDown, providerHasKey] pid in
+                                                                     guard providerCoolingDown?(pid) != true else { return false }
+                                                                     return providerHasKey?(pid) ?? true
+                                                                 },
                                                                  providerModels: providerModels) {
                 print("\u{001B}[33m↳ model substitution\u{001B}[0m · \(Self.render(substitution.current)) benched for \(substitution.reason); trying \(Self.render(substitution.replacement)) for this turn")
                 transcript = transcriptBeforeModelAttempt

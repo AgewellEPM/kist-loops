@@ -91,6 +91,40 @@ final class TasksCommandTests: XCTestCase {
                        "the explicitly resumed/current task must win even while a stale active row remains")
     }
 
+    func testNextSimulationRemediationRoutesDirectlyAndCutsOffIdenticalGate() throws {
+        let dir = NSTemporaryDirectory() + "replplan_\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = PlanStore(projectRoot: dir)
+        store.replace(title: "Simulation remediation", tasks: [
+            PlanTask(id: 1,
+                     title: "PLAN: Simulation gate -- deploy the billing service to production",
+                     kind: .plan,
+                     acceptance: "Executable sandbox evidence changes the gate decision.",
+                     verification: "/simulate run deploy the billing service to production",
+                     owner: "captain")
+        ])
+
+        let firstTask = try XCTUnwrap(KistREPL.taskSelectedByUser("next", projectRoot: dir))
+        XCTAssertTrue(KistREPL.isSimulationRemediationTask(firstTask))
+        let first = KistREPL.runSimulationRemediationTask(firstTask, projectRoot: dir)
+        XCTAssertTrue(first.contains("simulation remediation pending"), first)
+        XCTAssertFalse(first.contains("Execute shared task"), first)
+        XCTAssertEqual(store.load().tasks.first?.status, .inProgress)
+        XCTAssertTrue(store.load().tasks.first?.evidence.contains {
+            $0.hasPrefix("simulation-direct-route:v1:task=1")
+        } ?? false)
+        XCTAssertTrue(store.load().tasks.first?.evidence.contains {
+            $0.hasPrefix("simulation-gate-state:v1:") && $0.contains("executable=false")
+        } ?? false)
+
+        let secondTask = try XCTUnwrap(store.load().tasks.first)
+        let second = KistREPL.runSimulationRemediationTask(secondTask, projectRoot: dir)
+        XCTAssertTrue(second.contains("simulation remediation cutoff"), second)
+        XCTAssertTrue(second.contains("will not re-enter plan→execute unchanged"), second)
+        XCTAssertEqual(store.load().tasks.first?.status, .blocked)
+    }
+
     func testDashboardNextIgnoresStaleActiveEvenAfterMutatingTurn() {
         let dir = NSTemporaryDirectory() + "replplan_\(UUID().uuidString)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)

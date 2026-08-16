@@ -3,7 +3,7 @@ import AgentCore
 @testable import Kist
 
 final class DashboardResearchPlannerTests: XCTestCase {
-    func testKistOrchestrationContextProducesResearchDebtAndQuestions() {
+    func testKistProjectUsesCurrentBoardInsteadOfCannedRoadmap() {
         let plan = Plan(
             title: "Kist Captain",
             tasks: [
@@ -22,14 +22,13 @@ final class DashboardResearchPlannerTests: XCTestCase {
                                                                               argsFingerprint: "a",
                                                                               success: true)])
 
-        XCTAssertTrue(bundle.research.contains { $0.title == "Study Claude Code's fleet scheduling" })
-        XCTAssertTrue(bundle.research.contains { $0.title == "Analyze Cursor background agents" })
-        XCTAssertTrue(bundle.research.contains { $0.title == "Read Apple Foundation Models docs" })
-        XCTAssertTrue(bundle.research.contains { $0.title == "Study DGM self-improvement architecture" })
-        XCTAssertTrue(bundle.knowledgeDebt.contains { $0.topic == "Apple Foundation Models" })
-        XCTAssertTrue(bundle.knowledgeDebt.contains { $0.topic == "DGM evolution architecture" })
-        XCTAssertTrue(bundle.questions.contains { $0.contains("benchmark and live-eval signals") })
-        XCTAssertEqual(bundle.observation?.expectedROI, "High")
+        XCTAssertEqual(bundle.research.map(\.title), ["Research prior art for wire Captain orchestration"])
+        XCTAssertEqual(bundle.knowledgeDebt.map(\.topic), bundle.research.map(\.title))
+        XCTAssertTrue(bundle.questions.contains { $0.contains("wire Captain orchestration") })
+        XCTAssertEqual(bundle.observation?.expectedROI, "Medium")
+        for staleDefault in ["Claude Code", "Cursor", "OpenHands", "Foundation Models", "DGM"] {
+            XCTAssertFalse(bundle.summaryLine?.contains(staleDefault) == true)
+        }
     }
 
     func testExplicitResearchTasksArePromotedIntoQueue() {
@@ -55,7 +54,7 @@ final class DashboardResearchPlannerTests: XCTestCase {
         XCTAssertTrue(bundle.summaryLine?.contains("compare MCP permission models") == true)
     }
 
-    func testPendingResearchDoesNotDisplaceContextSpecificResearch() {
+    func testPendingResearchIsTheContextSpecificResearch() {
         let plan = Plan(
             title: "Kist Captain",
             tasks: [
@@ -74,8 +73,8 @@ final class DashboardResearchPlannerTests: XCTestCase {
                                                     projectRoot: "/tmp/kist-loops",
                                                     trajectory: [])
 
-        XCTAssertEqual(bundle.research.first?.title, "Study Claude Code's fleet scheduling")
-        XCTAssertFalse(bundle.research.prefix(3).contains { $0.title == "Research React clock app examples" })
+        XCTAssertEqual(bundle.research.first?.title, "Research React clock app examples")
+        XCTAssertFalse(bundle.research.contains { $0.title.contains("Claude Code") || $0.title.contains("Cursor") })
     }
 
     // Luke's bug: a NON-Kist project whose task text merely mentions agent/worker/orchestration/mcp used

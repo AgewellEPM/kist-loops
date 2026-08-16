@@ -26,7 +26,10 @@ extension KistRunner {
             let bindings = registry.providers.map { ProviderBinding(providerId: $0.id, model: $0.defaultModel) }
             report = await ProviderHealthChecker.liveProbe(registry, bindings: bindings)
         } else {
-            report = ProviderHealthChecker.catalogReport(registry)
+            // Catalog health must also show LIVE state other kist processes observed: a provider
+            // that just rate-limited is "~ cooling", not "✓ ready" (the 2026-08-13/14 router bug).
+            report = ProviderHealthChecker.catalogReport(registry,
+                                                         coolingDown: ProviderCooldownStore().coolingDown)
         }
         note(report.render())
         if probe, report.rows.contains(where: { $0.state == .staleCatalog }) {

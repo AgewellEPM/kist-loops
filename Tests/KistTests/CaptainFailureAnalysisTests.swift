@@ -524,6 +524,39 @@ final class CaptainFailureAnalysisTests: XCTestCase {
         XCTAssertEqual(clean.status, .verified)
     }
 
+    func testTypedStaleProofOutranksSandboxKeywordsAndForbidsCapabilityWidening() {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let trajectory = [
+            ActionRecord(tool: "edit_file", argsFingerprint: "path=Parser.swift", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .source)),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=swift test", success: true,
+                         effectObservation: CommandClassifier.observe("command=swift test")),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=swift build", success: true,
+                         effectObservation: CommandClassifier.observe("command=swift build")),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=./receipt-ledger invalid.ndjson", success: false,
+                         failureDetail: "exit code 1: malformed record rejected as expected",
+                         effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand)),
+            ActionRecord(tool: "write_file", argsFingerprint: "path=stdin-helper.swift", success: true,
+                         effectObservation: ToolEffectObservation(mutation: .source)),
+            ActionRecord(tool: "run_command", argsFingerprint: "command=swift stdin-helper.swift", success: true,
+                         effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand)),
+        ]
+        let report = CaptainFailureAnalysis(projectRoot: root)
+            .analyze(goal: "build receipt-ledger",
+                     summary: "sandbox authorization blocked Swift compilation; widen permission for helper",
+                     trajectory: trajectory,
+                     seedTasks: false)
+
+        XCTAssertEqual(report.capsule.likelyLayer, .staleVerification)
+        XCTAssertTrue(report.capsule.evidence.contains { $0.contains("stdin-helper.swift") })
+        XCTAssertTrue(report.capsule.evidence.contains { $0.contains("swift build") })
+        let repair = report.capsule.repairPlan.joined(separator: " ").lowercased()
+        XCTAssertTrue(repair.contains("re-run the exact last passed check"), repair)
+        XCTAssertTrue(repair.contains("do not widen capabilities"), repair)
+        XCTAssertTrue(repair.contains("add allowed exit codes"), repair)
+    }
+
     private func tempRoot() -> String {
         let root = NSTemporaryDirectory() + "captain_failure_analysis_\(UUID().uuidString)"
         try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)

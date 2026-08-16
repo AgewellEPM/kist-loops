@@ -34,15 +34,14 @@ struct OrganizationalLearningStore: Sendable {
                     outcomeSummary: String, success: Bool,
                     insights: DashboardInsightBundle? = nil,
                     objective: String? = nil) -> LearningCapsule {
-        let bundle = insights ?? DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
-                                                                trajectory: trajectory)
+        // Dashboard hints are ephemeral projections of the current board. Persisting them here promoted
+        // every render-time suggestion into permanent open debt, creating a self-reinforcing queue.
+        // Explicit /knowledge entries and research tasks already have their own durable stores.
+        _ = insights
         let capsule = makeCapsule(plan: plan, spans: spans, trajectory: trajectory,
                                   outcomeSummary: outcomeSummary, success: success,
                                   objective: objective)
         appendJSON(capsule, to: capsulesPath)
-        for item in bundle.research {
-            upsertKnowledgeDebt(from: item, sourceCapsuleID: capsule.id)
-        }
         return capsule
     }
 
@@ -60,7 +59,9 @@ struct OrganizationalLearningStore: Sendable {
 
     func openKnowledgeDebt(limit: Int = 20) -> [KnowledgeDebtRecord] {
         let records = loadJSONL(KnowledgeDebtRecord.self, path: debtPath)
-            .filter { $0.status == .open }
+            // Historical dashboard suggestions carry a source capsule. They were never accepted as
+            // durable work, so retain them on disk for audit but do not resurrect them as live debt.
+            .filter { $0.status == .open && $0.sourceCapsuleID == nil }
             .sorted {
                 if $0.impact != $1.impact { return $0.impact > $1.impact }
                 return $0.updatedAt > $1.updatedAt

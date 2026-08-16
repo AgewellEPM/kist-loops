@@ -271,13 +271,11 @@ extension KistREPL {
             guard !clean.isEmpty, !lastTurnInterrupted else { return }
             let trajectory = turnEvidenceSnapshot()
             let plan = PlanStore(projectRoot: projectRoot).load()
-            let insights = DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
-                                                           trajectory: trajectory)
             let currentObjective = humanTranscript.reversed().first { $0.role == .user }?.content
             _ = OrganizationalLearningStore(projectRoot: projectRoot)
                 .recordTurn(plan: plan, spans: submittedTurnSpans, trajectory: trajectory,
                             outcomeSummary: clean, success: success,
-                            insights: insights, objective: currentObjective)
+                            objective: currentObjective)
 
             // PER-MODEL SCORECARD (interactive path): record THIS turn's model outcome so /fix, /build and
             // normal turns also teach the Captain which models fail/loop. Success is REFEREE-measured

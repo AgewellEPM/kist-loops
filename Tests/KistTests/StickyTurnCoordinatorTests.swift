@@ -6,6 +6,23 @@ import Darwin
 import Glibc
 #endif
 
+private final class InterruptUnavailableReportCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 final class StickyTurnCoordinatorTests: XCTestCase {
     private final class OutputRecorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -361,11 +378,18 @@ final class StickyTurnCoordinatorTests: XCTestCase {
             throw XCTSkip("test runner stdin is a TTY")
         }
         let queue = TurnInputQueue()
-        let session = TurnInteractionSession(enabled: true, queue: queue)
+        let reports = InterruptUnavailableReportCounter()
+        let session = TurnInteractionSession(enabled: true, queue: queue,
+                                             onInterruptUnavailable: { reports.increment() })
         session.start()
         XCTAssertFalse(
             session.watcherActiveForTesting,
             "a failed raw-mode transition must not start a cooked-stdin reader")
+        XCTAssertEqual(reports.value, 1,
+                       "initial raw-watch activation failure must be reported")
+        session.resumeFromStdinLeaseForTesting()
+        XCTAssertEqual(reports.value, 1,
+                       "repeated failed arm boundaries must report only once per session")
         await session.finish()
         #else
         throw XCTSkip("raw mode is unavailable on this platform")

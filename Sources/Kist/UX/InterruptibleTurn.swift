@@ -132,6 +132,10 @@ enum InterruptibleTurn {
     /// Bytes belonging to key sequences (CSI/SS3 tails) are still swallowed, never collected.
     static func scanOnce(readByte: () -> UInt8?, collect: (UInt8) -> Void = { _ in }) -> WatchAction {
         guard let b = readByte() else { return .none }        // VTIME timeout — keep looping
+        // RawMode deliberately clears ISIG, so terminal Ctrl-C arrives here as ETX instead of
+        // delivering SIGINT. Treat it as the same hard-cancel intent as a bare double ESC and never
+        // leak the control byte into the type-ahead queue.
+        if b == 0x03 { return .cancel }
         guard b == 0x1B else { collect(b); return .none }     // typed key → the live input buffer
         guard let follow = readByte() else {                  // lone ESC so far → run the double window
             return waitForSecondEsc(readByte: readByte, collect: collect)

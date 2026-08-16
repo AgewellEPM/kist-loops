@@ -39,7 +39,9 @@ final class TurnInteractionSession: @unchecked Sendable {
     private let onScreenLeaseEnd: (@Sendable () -> Bool)?
     private let onScreenReleaseBeforeFinish: (@Sendable () -> Void)?
     private let setBracketedPasteMode: (@Sendable (_ enabled: Bool) -> Void)?
+    private let onInterruptUnavailable: (@Sendable () -> Void)?
     private var screenLeaseHeld = false
+    private var interruptUnavailableReported = false
 
     init(enabled: Bool = InterruptibleTurn.isInteractive(),
          queue: TurnInputQueue = .shared,
@@ -47,7 +49,8 @@ final class TurnInteractionSession: @unchecked Sendable {
          onScreenLeaseBegin: (@Sendable () -> Bool)? = nil,
          onScreenLeaseEnd: (@Sendable () -> Bool)? = nil,
          onScreenReleaseBeforeFinish: (@Sendable () -> Void)? = nil,
-         setBracketedPasteMode: (@Sendable (_ enabled: Bool) -> Void)? = nil) {
+         setBracketedPasteMode: (@Sendable (_ enabled: Bool) -> Void)? = nil,
+         onInterruptUnavailable: (@Sendable () -> Void)? = nil) {
         self.interactive = enabled
         self.queue = queue
         self.onInputChange = onInputChange
@@ -55,6 +58,7 @@ final class TurnInteractionSession: @unchecked Sendable {
         self.onScreenLeaseEnd = onScreenLeaseEnd
         self.onScreenReleaseBeforeFinish = onScreenReleaseBeforeFinish
         self.setBracketedPasteMode = setBracketedPasteMode
+        self.onInterruptUnavailable = onInterruptUnavailable
     }
 
     func start() {
@@ -79,7 +83,10 @@ final class TurnInteractionSession: @unchecked Sendable {
         // A failed tcgetattr/tcsetattr transition must not start a reader against cooked stdin:
         // that read can block indefinitely and make the next-prompt join hang. Collection remains
         // active, but interrupt/type-ahead watching fails closed for this submitted-message session.
-        guard armWatch() else { return }
+        guard armWatch() else {
+            reportInterruptUnavailableOnce()
+            return
+        }
         StdinArbiter.shared.registerWatcher(
             suspend: { [weak self] in self?.suspendForStdinLease() },
             resume: { [weak self] in self?.resumeFromStdinLease() })
@@ -97,7 +104,10 @@ final class TurnInteractionSession: @unchecked Sendable {
                 }
                 // Re-arming after a cooked stdin lease can fail independently of initial startup.
                 // Exit before read(2) rather than accidentally blocking in canonical mode.
-                guard self.raw.isActive else { break }
+                guard self.raw.isActive else {
+                    if !Task.isCancelled { self.reportInterruptUnavailableOnce() }
+                    break
+                }
                 let action = InterruptibleTurn.scanOnce(
                     readByte: { self.raw.readByteTimed() },
                     collect: { self.queue.feed($0) })
@@ -262,7 +272,19 @@ final class TurnInteractionSession: @unchecked Sendable {
         }
         // Re-capture and re-pin before raw watcher input (and bracketed paste) resumes.
         if held { _ = onScreenLeaseEnd?() }
-        _ = armWatch()
+        if !armWatch() { reportInterruptUnavailableOnce() }
+    }
+
+    /// Raw watch mode is optional, but losing it must never be silent: without it ETX/ESC cannot
+    /// cancel the active model task. Report at most once for this submitted-message session even if
+    /// initial activation, a later stdin-lease re-arm, and the watcher all observe the same failure.
+    private func reportInterruptUnavailableOnce() {
+        let shouldReport = withStateLock {
+            guard started, !finished, !interruptUnavailableReported else { return false }
+            interruptUnavailableReported = true
+            return true
+        }
+        if shouldReport { onInterruptUnavailable?() }
     }
 
     private func emitBracketedPasteMode(_ enabled: Bool) {

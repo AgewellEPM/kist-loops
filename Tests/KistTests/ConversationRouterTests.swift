@@ -55,6 +55,22 @@ final class ConversationRouterTests: XCTestCase {
             "Do a deep dive landscape analysis and cross compare the competitors"))
     }
 
+    func testPastedDashboardResearchLabelsStayLocal() async {
+        let registry = ProviderRegistry(
+            providers: [RouterReplyProvider(reply: "research")],
+            keyStore: RouterNullKeys())
+        let router = ConversationRouter(
+            providers: registry,
+            binding: ProviderBinding(providerId: "router-test"))
+        let request = "findout why this is hard coded in the Kist Build Queue and Research Queue, then fix it"
+
+        XCTAssertTrue(ConversationRouter.isLocalSystemInspection(request))
+        XCTAssertTrue(ConversationRouter.isObviouslyChat(request))
+        let proposal = await router.propose(request)   // hoist the await: XCTAssertNil's autoclosure can't await
+        XCTAssertNil(proposal,
+                     "quoted Research labels must not launch web/estate research for a local source defect")
+    }
+
     func testResearchClassifierReplyProposesEvidencePipeline() async throws {
         let registry = ProviderRegistry(
             providers: [RouterReplyProvider(reply: "research")],
