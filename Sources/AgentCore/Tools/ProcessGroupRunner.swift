@@ -1,5 +1,5 @@
 import Foundation
-import CryptoKit
+import Crypto   // apple/swift-crypto — cross-platform CryptoKit API (BoringSSL-backed on Linux)
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -357,7 +357,12 @@ enum ProcessGroupRunner {
         var combined = collector.combinedText()
         let aggregateTruncated = combined.utf8.count > capPerStream
         if aggregateTruncated {
-            combined = String(combined.prefix(capPerStream)) + "\n…[output truncated]"
+            // BYTE-accurate truncation. `prefix(capPerStream)` counts Characters (grapheme
+            // clusters), NOT bytes — so emoji/multibyte output could retain up to ~4×+ the byte
+            // budget while still being flagged truncated, violating the aggregate byte boundary.
+            // Truncate the UTF-8 byte view at a valid Unicode scalar boundary and RESERVE the
+            // marker's bytes, so the total EMITTED bytes never exceed capPerStream.
+            combined = Self.truncateUTF8(combined, toByteBudget: capPerStream, marker: "\n…[output truncated]")
         }
         // If we couldn't reap (auto-reap host config), the exit status is unknown — report a
         // non-zero/unknown code rather than a fabricated success.
@@ -408,6 +413,43 @@ enum ProcessGroupRunner {
                 }
             }
         }
+    }
+
+    /// Truncate `text` so the returned string's UTF-8 byte count is `<= byteBudget`, ending in
+    /// `marker`. Byte-accurate (NOT `prefix(_:)`, which counts grapheme clusters) and cut on a
+    /// valid Unicode scalar boundary so the result is always well-formed UTF-8 — an emoji is
+    /// kept whole or dropped whole, never split mid-scalar. The marker's own bytes are reserved
+    /// out of the budget, so `content + marker` still fits under `byteBudget`.
+    ///
+    /// Fail-safe edges:
+    /// - If `byteBudget` is smaller than the marker itself, we return a byte-bounded prefix of
+    ///   the marker (never exceed the budget) — the caller only reaches here when the raw output
+    ///   already blew the (much larger) per-stream cap, so a tiny budget is a degenerate input.
+    /// - The empty-content path still emits the marker (subject to the same byte bound).
+    static func truncateUTF8(_ text: String, toByteBudget byteBudget: Int, marker: String) -> String {
+        let markerBytes = Array(marker.utf8)
+        // Degenerate: no room for even the marker → return a byte-bounded marker prefix.
+        guard byteBudget >= markerBytes.count else {
+            let clamped = max(0, byteBudget)
+            return decodeScalarBounded(Array(markerBytes.prefix(clamped)))
+        }
+        let contentBudget = byteBudget - markerBytes.count
+        let contentBytes = Array(text.utf8.prefix(contentBudget))
+        return decodeScalarBounded(contentBytes) + marker
+    }
+
+    /// Decode a UTF-8 byte prefix, backing off to the last VALID scalar boundary if the prefix
+    /// sliced through a multibyte scalar. A UTF-8 continuation byte matches `0b10xxxxxx`; a
+    /// scalar's LEAD byte does not — so we drop trailing continuation bytes (and their lead)
+    /// until the remaining bytes decode cleanly. Bounded: at most 3 back-offs (max UTF-8 scalar
+    /// is 4 bytes) since we only ever cut inside a single scalar.
+    private static func decodeScalarBounded(_ bytes: [UInt8]) -> String {
+        var slice = bytes[...]
+        while !slice.isEmpty {
+            if let s = String(bytes: slice, encoding: .utf8) { return s }
+            slice = slice.dropLast()   // shed the split scalar one byte at a time
+        }
+        return ""
     }
 
     /// Reimplement the `<sys/wait.h>` macros (not imported into Swift): exited → exit code;

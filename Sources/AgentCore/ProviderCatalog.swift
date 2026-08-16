@@ -1,5 +1,8 @@
 import Foundation
-import CryptoKit
+// Use swift-crypto's cross-platform `Crypto` module (CryptoKit-compatible API,
+// BoringSSL-backed on Linux). A system `CryptoKit` module does not exist on Linux,
+// so importing it directly would break the documented Linux build before compilation.
+import Crypto
 
 /// The built-in providers AgentCore ships with. The OpenAI-compatible set includes a deep bench of
 /// Chinese models (DeepSeek, MiMo, Qwen, Doubao, Hunyuan, ERNIE, Yi, GLM, Kimi, Step, Baichuan,

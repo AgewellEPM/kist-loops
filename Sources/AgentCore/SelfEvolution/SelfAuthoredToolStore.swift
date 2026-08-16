@@ -23,16 +23,25 @@ public struct SelfAuthoredToolStore {
             throw NSError(domain: "SelfAuthoredToolStore", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "‘\(manifest.name)’ is not in the self__ namespace"])
         }
-        let home = homeDir(for: manifest.name)
-        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
-        let scriptPath = (home as NSString).appendingPathComponent(manifest.scriptFile)
-        try scriptBody.write(toFile: scriptPath, atomically: true, encoding: .utf8)
-        // Make the script executable-by-interpreter is not required (we always invoke `<interpreter> <script>`),
-        // but mark it read-only-ish for hygiene.
-        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: scriptPath)
-        let manifestPath = (home as NSString).appendingPathComponent("manifest.json")
+        // CONFINE (fail-closed) — `manifest.name`/`scriptFile` are UNTRUSTED (a promoted candidate reloads
+        // its manifest.json from disk, which a hostile/tampered reply controls). Prove the tool home resolves
+        // under the store root and the script + manifest resolve under that home BEFORE creating any dir or
+        // writing any file. A traversal name/scriptFile throws (writes NOTHING) instead of escaping the store —
+        // this is the real activation write the path-traversal finding names.
+        guard let homeURL = PathConfinement.confinedDestination(root: root, components: [manifest.name]),
+              let scriptURL = PathConfinement.confinedDestination(root: root, components: [manifest.name, manifest.scriptFile]),
+              let manifestURL = PathConfinement.confinedDestination(root: root, components: [manifest.name, "manifest.json"]) else {
+            throw NSError(domain: "SelfAuthoredToolStore", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "‘\(manifest.name)’ / ‘\(manifest.scriptFile)’ escapes the self-tools root — refusing to write"])
+        }
+        let home = homeURL.path
+        try FileManager.default.createDirectory(at: homeURL, withIntermediateDirectories: true)
+        try scriptBody.write(to: scriptURL, atomically: true, encoding: .utf8)
+        // An exec bit isn't required (we always invoke `<interpreter> <script>`); mark read-only-ish for hygiene.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: scriptURL.path)
         let data = try JSONEncoder().encode(manifest)
-        try data.write(to: URL(fileURLWithPath: manifestPath))
+        try data.write(to: manifestURL)
         return home
     }
 

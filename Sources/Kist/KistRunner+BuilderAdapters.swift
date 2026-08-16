@@ -466,6 +466,20 @@ extension KistRunner {
         return true
     }
 
+    /// Nested headless adapter learning (global "task failed" lessons + paused journal entries) must be
+    /// deferred until the FINAL Builder receipt is accepted. A sealed headless mutation that stops at
+    /// `.stoppedUnverified` is the EXPECTED handoff: `outcome.success` is still false, but the outer
+    /// BuilderRun continues to node verification, final verification, and independent review before it
+    /// decides acceptance. Recording a failure lesson or a paused journal line at that handoff would
+    /// poison future retrieval for runs that go on to be accepted. So skip nested learning whenever the
+    /// deterministic-verification handoff fires; a genuinely-final headless failure (no handoff) still
+    /// records, so real failures are never swallowed.
+    static func builderShouldRecordNestedAdapterLearning(
+        headlessVerificationHandoff: Bool
+    ) -> Bool {
+        !headlessVerificationHandoff
+    }
+
     static func builderEffortContext(_ effort: EffortController.Assessment) -> String {
         "BUILDER EFFORT CONTRACT (provider-neutral): planning=\(effort.planning.rawValue); "
             + "thinking=\(effort.thinking.rawValue); team=\(effort.team.rawValue); "
@@ -1097,12 +1111,22 @@ extension KistRunner {
                         headlessVerificationHandoff = builderHeadlessCanHandOffToDeterministicVerification(
                             outcome: outcome, sealedPlan: preflightEnvelope?.plan)
                         let executionStagePassed = outcome.success || headlessVerificationHandoff
-                        recordRuntimeLessons(goal: goal, success: outcome.success, recorder: recorder,
-                                             lessonStore: lessonStore,
-                                             maxIterations: opts.maxIterations,
-                                             mode: opts.planMode ? .plan : .inline)
-                        Self.autoJournalRun(goal: goal, success: outcome.success, root: adapterRoot,
-                                            enabled: !opts.noMemory)
+                        // Defer nested adapter learning until the final Builder receipt is accepted. On the
+                        // sealed-headless-mutation handoff (`.stoppedUnverified` + verification handoff) the
+                        // outer BuilderRun is still running its authoritative verifier + independent review,
+                        // so `outcome.success == false` here is the EXPECTED intermediate state, not a
+                        // failure. Writing a global "task failed" lesson or a paused journal entry now would
+                        // poison retrieval for builds that go on to be accepted. Genuinely-final headless
+                        // failures (no handoff) still record, so real failures are never swallowed.
+                        if builderShouldRecordNestedAdapterLearning(
+                            headlessVerificationHandoff: headlessVerificationHandoff) {
+                            recordRuntimeLessons(goal: goal, success: outcome.success, recorder: recorder,
+                                                 lessonStore: lessonStore,
+                                                 maxIterations: opts.maxIterations,
+                                                 mode: opts.planMode ? .plan : .inline)
+                            Self.autoJournalRun(goal: goal, success: outcome.success, root: adapterRoot,
+                                                enabled: !opts.noMemory)
+                        }
                         print(KistREPL.renderSimpleSummary(projectRoot: adapterRoot,
                                                            spans: await traceRecorder.all(),
                                                            trajectory: recorder.snapshot()))

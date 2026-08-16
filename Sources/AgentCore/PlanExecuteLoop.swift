@@ -1,5 +1,6 @@
 import Foundation
-import CryptoKit
+// Cross-platform crypto: swift-crypto's `Crypto` (CryptoKit-compatible, Linux-safe).
+import Crypto
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)

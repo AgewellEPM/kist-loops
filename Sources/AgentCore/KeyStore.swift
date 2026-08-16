@@ -186,6 +186,11 @@ public struct KeychainKeyStore: KeyStore {
         // noninteractive LAContext to this exact query; if that API is unavailable, fail closed
         // instead of issuing a potentially interactive secret read.
         guard applyNoninteractiveAuthentication(to: &query) else { return nil }
+        // LAContext.interactionNotAllowed alone does NOT suppress the legacy ACL login-password
+        // dialog for GUI-created / old-signature Keychain items. Pair it with the UI-fail option so
+        // those legacy reads fail closed (errSecInteractionNotAllowed) instead of blocking on a
+        // dialog after an ad-hoc rebuild. READ site.
+        applyLegacyUIFail(to: &query)
         var result: AnyObject?
         if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
            let item = result as? [String: Any],
@@ -220,6 +225,10 @@ public struct KeychainKeyStore: KeyStore {
             kSecAttrAccount as String: account,
         ]
         guard applyNoninteractiveAuthentication(to: &query) else { return }
+        // Same legacy-ACL hazard as the read path: a GUI-created / old-signature item would otherwise
+        // pop the login-password dialog on SecItemUpdate despite interactionNotAllowed. Pair the
+        // context with the UI-fail option so a legacy update fails closed rather than blocking. UPDATE site.
+        applyLegacyUIFail(to: &query)
         var updates: [String: Any] = [kSecAttrGeneric as String: metadataData]
         if includeValue { updates[kSecValueData as String] = Data(record.value.utf8) }
         _ = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
@@ -236,6 +245,16 @@ public struct KeychainKeyStore: KeyStore {
         #else
         return false
         #endif
+    }
+
+    /// Legacy-ACL backstop for value-bearing reads/updates. `LAContext.interactionNotAllowed`
+    /// suppresses biometric/passcode UI, but items created by the GUI wizard or carrying an old code
+    /// signature still route through the classic ACL path, where only `kSecUseAuthenticationUIFail`
+    /// prevents the blocking login-password dialog and instead returns errSecInteractionNotAllowed.
+    /// Kept macOS-only (Security is present) and applied at the read and update sites so a real
+    /// provider resolution after an ad-hoc rebuild fails closed rather than hanging on a dialog.
+    private func applyLegacyUIFail(to query: inout [String: Any]) {
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
     }
 }
 #endif

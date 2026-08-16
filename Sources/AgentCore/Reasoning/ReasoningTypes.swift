@@ -1,4 +1,5 @@
-import CryptoKit
+// Cross-platform crypto: swift-crypto's `Crypto` (CryptoKit-compatible, Linux-safe).
+import Crypto
 import Foundation
 
 private func durableWorkspaceSHA256(_ components: [String]) -> String {
@@ -9,7 +10,6 @@ private func durableWorkspaceSHA256(_ components: [String]) -> String {
         .map { String(format: "%02x", $0) }
         .joined()
 }
-import CryptoKit
 
 /// The runtime lane selected before work begins. This is intentionally independent of
 /// prompt wording so routing is an executable decision rather than an inferred label.

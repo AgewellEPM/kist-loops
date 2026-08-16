@@ -45,7 +45,11 @@ extension SelfAuthoredManifest {
         let manifestPath = (workdir as NSString).appendingPathComponent("manifest.json")
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
               let manifest = try? JSONDecoder().decode(SelfAuthoredManifest.self, from: data) else { return nil }
-        let scriptPath = (workdir as NSString).appendingPathComponent(manifest.scriptFile)
+        // CONFINE (fail-closed) — `manifest.scriptFile` is UNTRUSTED on-disk data (a tampered manifest.json
+        // could carry `../../foo`). Prove the script resolves to a single-segment file UNDER `workdir`
+        // before we hand its path to the gate/adversary/executor; a traversal escape returns nil.
+        guard let scriptURL = PathConfinement.confinedDestination(root: workdir, components: [manifest.scriptFile]) else { return nil }
+        let scriptPath = scriptURL.path
         guard FileManager.default.fileExists(atPath: scriptPath) else { return nil }
         return (manifest, scriptPath)
     }
@@ -82,7 +86,13 @@ public struct ScriptTool: AgentTool {
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
-        let scriptPath = (homeDir as NSString).appendingPathComponent(manifest.scriptFile)
+        // CONFINE (fail-closed) — `manifest.scriptFile` is UNTRUSTED on-disk data. Prove it resolves to a
+        // single-segment file UNDER `homeDir` before executing; the sandbox confines the interpreter's
+        // WRITES, but scriptPath is the read/exec target, so a `../../…` here would point it outside home.
+        guard let scriptURL = PathConfinement.confinedDestination(root: homeDir, components: [manifest.scriptFile]) else {
+            return ToolResult(success: false, output: "", error: "self__ script path escapes tool home — refusing to execute")
+        }
+        let scriptPath = scriptURL.path
         guard FileManager.default.fileExists(atPath: scriptPath) else {
             return ToolResult(success: false, output: "", error: "self__ script missing at \(scriptPath)")
         }

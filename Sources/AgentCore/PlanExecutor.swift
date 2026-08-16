@@ -1,5 +1,6 @@
 import Foundation
-import CryptoKit
+// Cross-platform crypto: swift-crypto's `Crypto` (CryptoKit-compatible, Linux-safe).
+import Crypto
 
 /// Secret-safe facts captured while the executor still owns the exact resolved arguments. The outer
 /// PlanExecute loop later binds these facts to its immutable contract and durable ordering envelope.

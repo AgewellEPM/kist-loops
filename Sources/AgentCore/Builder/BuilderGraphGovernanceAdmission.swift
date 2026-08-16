@@ -1,5 +1,6 @@
 import Foundation
-import CryptoKit
+// Cross-platform crypto: swift-crypto's `Crypto` (CryptoKit-compatible, Linux-safe).
+import Crypto
 
 public enum BuilderGraphGovernanceAdmissionError: Error, LocalizedError, Sendable, Equatable {
     case unsupportedSchema(Int)

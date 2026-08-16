@@ -10,22 +10,44 @@ import Foundation
 struct MCPServer {
     static let protocolVersion = "2024-11-05"
     static let version = "0.1.0"
+
+    /// How this server instance is reached. Only `.localStdio` exists today
+    /// (main.swift wires stdin/stdout), but the auth decision is written in
+    /// terms of the transport so that adding a network transport later forces
+    /// an explicit, reviewed auth choice rather than silently inheriting the
+    /// local-trusted behavior.
+    enum Transport {
+        /// A local child process spawned by the MCP client over a private
+        /// stdin/stdout pipe. The OS already gates who can spawn us and hand us
+        /// that pipe, so the connection carries ambient local trust — no
+        /// application-level token can be negotiated with a standard stdio
+        /// client (e.g. Claude Code) anyway.
+        case localStdio
+        /// A remote/network transport (HTTP, socket, …). Not implemented here;
+        /// present so the auth decision fails closed if one is ever added.
+        case network
+    }
+
     private let authToken: String?
     private let allowedRoots: [String]
+    private let transport: Transport
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment,
-         currentDirectory: String = FileManager.default.currentDirectoryPath) {
+         currentDirectory: String = FileManager.default.currentDirectoryPath,
+         transport: Transport = .localStdio) {
         let token = environment["FCA_MCP_AUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.authToken = token?.isEmpty == false ? token : nil
         let configured = environment["FCA_MCP_ALLOWED_ROOTS"]?.split(separator: ":").map(String.init)
         self.allowedRoots = (configured?.isEmpty == false ? configured! : [currentDirectory])
             .compactMap(Self.canonicalDirectory)
+        self.transport = transport
     }
 
-    init(authToken: String?, allowedRoots: [String]) {
+    init(authToken: String?, allowedRoots: [String], transport: Transport = .localStdio) {
         let token = authToken?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.authToken = token?.isEmpty == false ? token : nil
         self.allowedRoots = allowedRoots.compactMap(Self.canonicalDirectory)
+        self.transport = transport
     }
 
     static func log(_ message: String) {
@@ -186,10 +208,60 @@ struct MCPServer {
         }
     }
 
+    /// Whether a `tools/call` on THIS instance's transport is authorized.
+    /// Delegates to the pure decision below so the policy is unit-testable
+    /// without a live pipe.
     func isAuthorized(params: [String: Any]) -> Bool {
-        guard let expected = authToken,
-              let meta = params["_meta"] as? [String: Any],
-              let raw = meta["authorization"] as? String else { return false }
+        let presented = (params["_meta"] as? [String: Any])?["authorization"] as? String
+        return Self.authorize(transport: transport, expectedToken: authToken, presentedAuthorization: presented)
+    }
+
+    /// Pure auth policy (no I/O, no instance state) so it can be exercised
+    /// per-transport in tests.
+    ///
+    /// - `.localStdio`: the client owns the private stdin/stdout pipe and the OS
+    ///   already gates who may spawn us, so the connection is trusted-local.
+    ///   Standard stdio MCP clients (Claude Code) never negotiate or echo
+    ///   `_meta.authorization`. The old policy REQUIRED it and so rejected every
+    ///   call — including UNCONDITIONALLY when no token was configured (the
+    ///   default deployment). Because no protocol step can make a standard stdio
+    ///   client echo a token, a MISSING `_meta.authorization` is ALWAYS accepted
+    ///   here, whether or not a token is configured — otherwise merely setting
+    ///   `FCA_MCP_AUTH_TOKEN` in the child env would silently break every
+    ///   compliant client (the exact footgun the finding calls out). A token,
+    ///   when configured, is a defense-in-depth OPT-IN: it is validated only for
+    ///   a caller that actually presents one (a wrong presented token is still
+    ///   rejected), so it can tighten but never break local stdio.
+    /// - `.network`: fails closed. A token MUST be configured and a matching
+    ///   `_meta.authorization` MUST be presented. Missing/nil either side is a
+    ///   reject. (No network transport ships today; this keeps a future one
+    ///   from inheriting local-trusted behavior by accident.)
+    static func authorize(transport: Transport, expectedToken: String?, presentedAuthorization: String?) -> Bool {
+        switch transport {
+        case .localStdio:
+            // The core of the fix: on local stdio a client that sends no
+            // `_meta.authorization` is trusted-local and accepted — even when a
+            // token is configured — because no protocol step can make a standard
+            // client echo the token. Rejecting here is precisely the finding.
+            guard let presented = presentedAuthorization else { return true }
+            // A token was presented. If none is configured we have nothing to
+            // check it against, but local trust already grants access.
+            guard let expected = expectedToken else { return true }
+            // Token configured AND client presented one -> it must match. A
+            // wrong presented token is rejected (defense-in-depth for a client
+            // that does opt into sending it).
+            return constantTimeMatch(expected: expected, presented: presented)
+        case .network:
+            // Fail closed: both a configured token and a matching presented one
+            // are mandatory.
+            guard let expected = expectedToken,
+                  let presented = presentedAuthorization else { return false }
+            return constantTimeMatch(expected: expected, presented: presented)
+        }
+    }
+
+    /// Constant-time comparison of a bearer/raw token against the expected one.
+    private static func constantTimeMatch(expected: String, presented raw: String) -> Bool {
         let presented = raw.hasPrefix("Bearer ") ? String(raw.dropFirst(7)) : raw
         let lhs = Array(expected.utf8), rhs = Array(presented.utf8)
         guard lhs.count == rhs.count else { return false }

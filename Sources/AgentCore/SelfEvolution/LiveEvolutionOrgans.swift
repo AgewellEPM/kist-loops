@@ -5,6 +5,9 @@ import Foundation
 /// (it proposes a concrete breaking input and we RUN the tool on it — a broken tool is caught by the
 /// runner, not by the adversary's say-so).
 
+// `PathConfinement` (the fail-closed gate both this file's write/execute sites and the activation
+// store pass through) now lives in `PathConfinement.swift` — shared by every self__ path site.
+
 // MARK: Author
 
 public struct LiveCapabilityAuthor: CapabilityAuthor {
@@ -25,14 +28,23 @@ public struct LiveCapabilityAuthor: CapabilityAuthor {
                                                      messages: [ChatMessage(role: .user, content: prompt)]),
               let out = Self.parse(raw),
               out.manifest.name.hasPrefix(kistSelfAuthoredPrefix) else { return nil }
-        // Write to a per-candidate sandbox dir (candidate workdir) — NOT the activation store.
-        let home = (sandboxRoot as NSString).appendingPathComponent(out.manifest.name)
+        // CONFINE FIRST (fail-closed) — the name + scriptFile are UNTRUSTED model output. Before creating
+        // ANY directory or writing ANY file, prove the per-candidate home and every file we're about to
+        // write resolve to real single-segment paths UNDER the sandbox root. A name like
+        // `self__x/../../etc/passwd` or a `scriptFile` of `../../foo` is rejected here → nil, write nothing.
+        guard let homeURL = PathConfinement.confinedDestination(root: sandboxRoot,
+                                                                components: [out.manifest.name]),
+              let scriptURL = PathConfinement.confinedDestination(root: sandboxRoot,
+                                                                  components: [out.manifest.name, out.manifest.scriptFile]),
+              let manifestURL = PathConfinement.confinedDestination(root: sandboxRoot,
+                                                                    components: [out.manifest.name, "manifest.json"])
+        else { return nil }
+        let home = homeURL.path
         do {
-            try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
-            try out.script.write(toFile: (home as NSString).appendingPathComponent(out.manifest.scriptFile),
-                                 atomically: true, encoding: .utf8)
+            try FileManager.default.createDirectory(at: homeURL, withIntermediateDirectories: true)
+            try out.script.write(to: scriptURL, atomically: true, encoding: .utf8)
             let mData = try JSONEncoder().encode(out.manifest)
-            try mData.write(to: URL(fileURLWithPath: (home as NSString).appendingPathComponent("manifest.json")))
+            try mData.write(to: manifestURL)
         } catch { return nil }
         return CapabilityCandidate(toolName: out.manifest.name, workdir: home,
                                    contract: out.manifest.contract, authorProvider: providerId)
@@ -87,6 +99,16 @@ public struct LiveCapabilityAdversary: CapabilityAdversary {
         // Attack whatever the author produced (loaded from the candidate workdir).
         guard let (manifest, scriptPath) = SelfAuthoredManifest.loadFrom(workdir: candidate.workdir) else {
             return AdversaryVerdict(survived: false, attackFound: "candidate manifest/script missing", confidence: 0.9)
+        }
+        // ACTIVATION-REUSE CONFINEMENT (fail-closed) — `loadFrom` rebuilds scriptPath from the SAME untrusted
+        // `manifest.scriptFile` and we're about to EXECUTE it below. Re-prove it resolves to a single-segment
+        // file under the candidate workdir before running; a `scriptFile` of `../../foo` (or a tampered
+        // on-disk manifest between write and activation) is refused here rather than executed.
+        guard PathConfinement.confinedDestination(root: candidate.workdir,
+                                                  components: [manifest.scriptFile]) != nil else {
+            return AdversaryVerdict(survived: false,
+                                    attackFound: "script path escapes candidate sandbox — refusing to execute",
+                                    confidence: 0.95)
         }
         let prompt = Self.prompt(manifest: manifest)
         guard let raw = try? await registry.complete(providerId: provider, model: model,

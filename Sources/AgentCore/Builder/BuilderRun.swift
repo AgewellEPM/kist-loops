@@ -1,5 +1,6 @@
 import Foundation
-import CryptoKit
+// Cross-platform crypto: swift-crypto's `Crypto` (CryptoKit-compatible, Linux-safe).
+import Crypto
 
 private func builderIsHostDeterministicVerifier(provider: String, model: String) -> Bool {
     ["host", "process", "kist"].contains(provider.lowercased())

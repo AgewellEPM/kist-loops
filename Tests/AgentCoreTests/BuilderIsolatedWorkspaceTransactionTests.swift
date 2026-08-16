@@ -1,6 +1,5 @@
 import XCTest
-import CryptoKit
-import Darwin
+import Crypto   // swift-crypto's cross-platform CryptoKit API (Linux has no system CryptoKit); `import Darwin` was dead — removed
 @testable import AgentCore
 
 final class BuilderIsolatedWorkspaceTransactionTests: XCTestCase {

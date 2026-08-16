@@ -75,11 +75,19 @@ extension KistRunner {
         let effort = EffortController.assess(goal: goal)
         proofStore.startTurn(goal: goal)
 
+        // ONE ledger for the WHOLE run (Codex P1-C). `--budget`/`--max-cost` are documented as hard
+        // ceilings for the ENTIRE run, so the first attempt and any provider-substitution retry MUST
+        // draw from the SAME depleting instance. Constructing a fresh ledger for the retry (the old bug)
+        // let a first attempt burn ~all of the cap, fail, and then the substitute spend the full cap
+        // again — one command spending the ceiling twice. BudgetLedger is an actor (reference type), so
+        // threading this single instance into both loops shares the depleted `spent` across attempts.
+        let runBudget = opts.makeBudget()
+
         let loop = makeLoop(
             registry: registry, providerId: providerId, model: model, context: context,
             tools: routeTools, checkpoints: checkpoints,
             maxIterations: min(opts.maxIterations, effort.iterationBudget),
-            budget: opts.makeBudget(), planMode: opts.planMode,
+            budget: runBudget, planMode: opts.planMode,
             extendedThinking: opts.extendedThinking || effort.thinking != .none,
             toolMode: toolMode, roles: roles, delegationDepth: 0,
             showReasoning: opts.extendedThinking || effort.thinking == .deep,
@@ -126,7 +134,10 @@ extension KistRunner {
                     model: sub.decision.replacement.model, context: context,
                     tools: routeTools, checkpoints: checkpoints,
                     maxIterations: min(opts.maxIterations, effort.iterationBudget),
-                    budget: opts.makeBudget(), planMode: opts.planMode,
+                    // SAME ledger as the first attempt (Codex P1-C): the retry inherits the DEPLETED cap
+                    // instead of resetting it, so `--budget`/`--max-cost` bound the whole run, not each
+                    // attempt independently. Do NOT reconstruct a fresh ledger here.
+                    budget: runBudget, planMode: opts.planMode,
                     extendedThinking: opts.extendedThinking || effort.thinking != .none,
                     toolMode: toolMode, roles: roles, delegationDepth: 0,
                     showReasoning: opts.extendedThinking || effort.thinking == .deep,
