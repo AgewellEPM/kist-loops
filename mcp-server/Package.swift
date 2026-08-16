@@ -8,6 +8,7 @@ let package = Package(
         .executableTarget(
             name: "fca-mcp",
             path: "Sources/fca-mcp"
-        )
+        ),
+        .testTarget(name: "fca-mcpTests", dependencies: ["fca-mcp"])
     ]
 )

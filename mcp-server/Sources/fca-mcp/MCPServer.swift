@@ -10,6 +10,23 @@ import Foundation
 struct MCPServer {
     static let protocolVersion = "2024-11-05"
     static let version = "0.1.0"
+    private let authToken: String?
+    private let allowedRoots: [String]
+
+    init(environment: [String: String] = ProcessInfo.processInfo.environment,
+         currentDirectory: String = FileManager.default.currentDirectoryPath) {
+        let token = environment["FCA_MCP_AUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.authToken = token?.isEmpty == false ? token : nil
+        let configured = environment["FCA_MCP_ALLOWED_ROOTS"]?.split(separator: ":").map(String.init)
+        self.allowedRoots = (configured?.isEmpty == false ? configured! : [currentDirectory])
+            .compactMap(Self.canonicalDirectory)
+    }
+
+    init(authToken: String?, allowedRoots: [String]) {
+        let token = authToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.authToken = token?.isEmpty == false ? token : nil
+        self.allowedRoots = allowedRoots.compactMap(Self.canonicalDirectory)
+    }
 
     static func log(_ message: String) {
         FileHandle.standardError.write(("fca-mcp: " + message + "\n").data(using: .utf8)!)
@@ -65,6 +82,10 @@ struct MCPServer {
         case "tools/list":
             reply(id: id, result: ["tools": Self.toolSpecs])
         case "tools/call":
+            guard isAuthorized(params: msg["params"] as? [String: Any] ?? [:]) else {
+                replyError(id: id, code: -32001, message: "Unauthorized tool call")
+                return
+            }
             handleToolCall(id: id, params: msg["params"] as? [String: Any] ?? [:])
         default:
             if id != nil {
@@ -92,7 +113,6 @@ struct MCPServer {
                     "provider": ["type": "string", "description": "Provider id (default: mimo)"],
                     "model": ["type": "string", "description": "Optional model id"],
                     "max_iterations": ["type": "integer", "description": "Max agent steps (default 12, clamped 1–30)"],
-                    "allow_shell": ["type": "boolean", "description": "Allow the agent to run shell commands (build/test). Default false; file edits are confined to project_path regardless."]
                 ],
                 "required": ["task", "project_path"]
             ]
@@ -122,17 +142,23 @@ struct MCPServer {
         case "run_agent":
             guard let task = args["task"] as? String,
                   let projectPath = args["project_path"] as? String,
-                  !projectPath.trimmingCharacters(in: .whitespaces).isEmpty else {
+                  !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !projectPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 reply(id: id, result: toolText("Error: 'task' and a non-empty 'project_path' are required", isError: true)); return
             }
+            guard args["allow_shell"] == nil else {
+                reply(id: id, result: toolText("Error: caller-controlled shell access is not supported", isError: true)); return
+            }
+            guard let authorizedRoot = authorizedProjectRoot(projectPath) else {
+                reply(id: id, result: toolText("Error: project_path is outside the server's configured roots", isError: true)); return
+            }
             let maxIter = min(max((args["max_iterations"] as? Int) ?? 12, 1), 30)
-            var agent = Agent(
+            let agent = Agent(
                 providerId: (args["provider"] as? String) ?? "mimo",
                 model: args["model"] as? String,
-                tools: AgentTools(root: projectPath),
+                tools: AgentTools(root: authorizedRoot),
                 maxIterations: maxIter
             )
-            agent.allowShell = (args["allow_shell"] as? Bool) ?? false
             let result = agent.run(task: task)
             // Structured done flag (not transcript text) so the task string can't
             // spoof success.
@@ -158,6 +184,33 @@ struct MCPServer {
         default:
             reply(id: id, result: toolText("Unknown tool: \(name)", isError: true))
         }
+    }
+
+    func isAuthorized(params: [String: Any]) -> Bool {
+        guard let expected = authToken,
+              let meta = params["_meta"] as? [String: Any],
+              let raw = meta["authorization"] as? String else { return false }
+        let presented = raw.hasPrefix("Bearer ") ? String(raw.dropFirst(7)) : raw
+        let lhs = Array(expected.utf8), rhs = Array(presented.utf8)
+        guard lhs.count == rhs.count else { return false }
+        var difference: UInt8 = 0
+        for (a, b) in zip(lhs, rhs) { difference |= a ^ b }
+        return difference == 0
+    }
+
+    func authorizedProjectRoot(_ requested: String) -> String? {
+        guard let candidate = Self.canonicalDirectory(requested), candidate != "/" else { return nil }
+        guard allowedRoots.contains(where: { candidate == $0 || candidate.hasPrefix($0 + "/") }) else { return nil }
+        return candidate
+    }
+
+    private static func canonicalDirectory(_ path: String) -> String? {
+        let canonical = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            .standardizedFileURL.resolvingSymlinksInPath().path
+        var isDirectory: ObjCBool = false
+        guard canonical != "/", FileManager.default.fileExists(atPath: canonical, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return nil }
+        return canonical
     }
 
     private func listModels() -> String {

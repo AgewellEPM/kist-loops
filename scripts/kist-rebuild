@@ -21,7 +21,12 @@ DASHBOARD_RUNTIME="$INSTALL_HOME/.kist/scripts/kist_runtime.py"
 # Build snapshots and suite logs live below one owner-private per-installation directory.  Never
 # enumerate a shared sticky directory for stale names: a different local UID must not be able to
 # wedge recovery by reserving one of our fixed-format names.
-SNAPSHOT_PARENT="$INSTALL_HOME/.kist-rebuild-private-tmp"
+DEFAULT_SNAPSHOT_PARENT="$INSTALL_HOME/.kist-rebuild-private-tmp"
+SNAPSHOT_PARENT=${KIST_REBUILD_SNAPSHOT_PARENT:-$DEFAULT_SNAPSHOT_PARENT}
+case "$SNAPSHOT_PARENT" in
+  /*/.kist-rebuild-private-tmp) ;;
+  *) echo "error: KIST_REBUILD_SNAPSHOT_PARENT must be an absolute owner-private .kist-rebuild-private-tmp directory" >&2; exit 1 ;;
+esac
 # The exact unsigned candidate used by enterprise evidence belongs to Kist, not SwiftPM's mutable
 # convenience layout (`.build/release` is normally a symlink). Both publication and finalization
 # traverse this fixed namespace with no-follow directory descriptors.
@@ -368,11 +373,10 @@ def walk(fd,prefix,target_fd=None):
         rel=f"{prefix}/{name}" if prefix else name; visited+=1
         if visited>250000 or len(rel.encode())>16384: raise RuntimeError("inventory bound")
         st=os.stat(name,dir_fd=fd,follow_symlinks=False); identity=fp(st); observed.append((name,identity))
-        # Root SwiftPM/Xcode build products and the two high-churn telemetry paths are not source.
-        # `.build-local` is the repo's ignored alternate SwiftPM cache and may contain symlinks.
-        # The rest of root .kist (notably agents/, plan.json, and checked-in learning policy) is a
-        # runtime/build input and must be copied and hashed. Same-named paths nested elsewhere
-        # remain source too.
+        # SwiftPM/Xcode build-product directories at any depth and the two high-churn telemetry
+        # paths are not source. `.build-local` is the repo's ignored alternate SwiftPM cache and
+        # may contain generated symlinks. The rest of root .kist (notably agents/, plan.json, and
+        # checked-in learning policy) is a runtime/build input and must be copied and hashed.
         if not prefix and name==".git":
             if stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode): continue
             raise RuntimeError("git metadata has an invalid type")
@@ -1560,8 +1564,12 @@ def cleanup_orphans():
             secure_regular(path); os.unlink(name,dir_fd=bfd); removed=True
     if removed: fsync_dir()
 def cleanup_stale_snapshots():
-    expected=os.path.join(home,".kist-rebuild-private-tmp")
-    if snapshot_parent!=expected or os.path.realpath(snapshot_parent)!=snapshot_parent:
+    # An explicit scratch volume is allowed for space-constrained installations,
+    # but it must retain the fixed private-directory leaf and all of the existing
+    # canonical-path, owner, mode, ACL, and bounded-name cleanup gates below.
+    if (not os.path.isabs(snapshot_parent)
+            or os.path.basename(snapshot_parent)!=".kist-rebuild-private-tmp"
+            or os.path.realpath(snapshot_parent)!=snapshot_parent):
         raise SystemExit(1)
     try: parent_st=os.lstat(snapshot_parent)
     except FileNotFoundError:
@@ -2635,7 +2643,11 @@ if [ "$SKIP_SUITE" -eq 0 ]; then
   # refused); building the bundle explicitly and running the built binary runs the real ~7.4k
   # XCTests. We also require the runner to REPORT that it executed tests: a run that executed
   # zero tests is treated as a discovery failure, never a pass.
-  ( cd "$BUILD_ROOT" && swift_clean build --scratch-path "$BUILD_ROOT/.build" --build-tests ) \
+  # Package.resolved is part of the hashed source snapshot. Do not refresh remote
+  # dependency refs while building that immutable snapshot: doing so makes a valid,
+  # locally cached promotion depend on transient GitHub availability.
+  ( cd "$BUILD_ROOT" && swift_clean build --scratch-path "$BUILD_ROOT/.build" \
+      --disable-automatic-resolution --skip-update --build-tests ) \
     || die "test build failed; refusing to promote an unverified binary"
   SUITE_LOG=$(/usr/bin/mktemp "$SNAPSHOT_PARENT/kist-rebuild-suite.XXXXXX")
   # Force the XCTest bundle (our ~7.5k tests) and DISABLE the swift-testing runner. Mixing the two
@@ -2645,6 +2657,7 @@ if [ "$SKIP_SUITE" -eq 0 ]; then
   # `if !` around the subshell (not a `| tee`, whose exit would be tee's), then echo the log for the
   # operator. `set -e` does not abort inside the `if` condition, so a failure is handled here.
   if ( cd "$BUILD_ROOT" && swift_clean test --scratch-path "$BUILD_ROOT/.build" \
+       --disable-automatic-resolution --skip-update \
        --skip-build --disable-swift-testing --enable-xctest > "$SUITE_LOG" 2>&1 ); then
     /bin/cat "$SUITE_LOG"
   else
@@ -2662,7 +2675,8 @@ else
 fi
 
 echo "kist-rebuild · building release from $REPO ..."
-( cd "$BUILD_ROOT" && swift_clean build --scratch-path "$BUILD_ROOT/.build" -c release ) \
+( cd "$BUILD_ROOT" && swift_clean build --scratch-path "$BUILD_ROOT/.build" \
+    --disable-automatic-resolution --skip-update -c release ) \
   || die "release build failed"
 BIN="$BUILD_ROOT/.build/release/kist"
 [ -x "$BIN" ] || die "build produced no runnable binary at $BIN"

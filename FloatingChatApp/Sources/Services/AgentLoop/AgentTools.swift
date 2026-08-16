@@ -43,12 +43,11 @@ final class ToolRegistry {
         register(RunTestsTool())
         register(InstallDependenciesTool())
 
-        // Search & Web
-        register(WebSearchTool())
+        // Network tools live in AgentCore only. This legacy target has no checked-in
+        // AgentCore linkage, so fail closed rather than duplicate its SSRF policy.
         register(SystemSearchTool())
 
         // Media
-        register(PlaywrightCaptureTool())
         register(ExtractVideoFramesTool())
         register(TranscribeMediaTool())
 
