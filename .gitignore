@@ -7,3 +7,5 @@
 .DS_Store
 *.pyc
 __pycache__/
+.kist/
+.mcp.json
