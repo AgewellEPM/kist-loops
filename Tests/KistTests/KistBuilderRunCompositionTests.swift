@@ -303,7 +303,7 @@ final class KistBuilderRunCompositionTests: XCTestCase {
     }
 
     func testCouncilExecuteHandoffUsesCanonicalPlannedCompatibilityPath() throws {
-        let runner = try source("Sources/Kist/KistRunner.swift")
+        let runner = kistRunnerFamilySource()
         let start = try XCTUnwrap(runner.range(of: "let builderGoal ="))
         let handoff = String(runner[start.lowerBound...].prefix(2_400))
         XCTAssertTrue(handoff.contains("planExecute = true"),

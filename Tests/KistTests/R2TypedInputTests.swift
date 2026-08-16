@@ -193,7 +193,7 @@ final class R2TypedInputTests: XCTestCase {
         }
 
         // Runner: drain chain + sink typed-input provider + every heavy escalation begin() site.
-        let runner = try src("Sources/Kist/KistRunner.swift")
+        let runner = kistRunnerFamilySource()
         XCTAssertTrue(runner.contains("TurnInputQueue.shared.popQueued"),
                       "the deferredInput chain no longer drains typed messages")
         XCTAssertTrue(runner.contains("typedInput: { TurnInputQueue.shared.preview() }"),

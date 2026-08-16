@@ -35,11 +35,18 @@ final class CouncilExecuteRiskObjectiveTests: XCTestCase {
     }
 
     // Source pin: the council→plan-execute hand-off passes the user goal as the risk objective.
+    // The runCouncil / runPlanExecute logic now lives across KistRunner.swift and its extension files
+    // (KistRunner+Council.swift, KistRunner+PlanExecuteEntry.swift), so scan them ALL — the invariant
+    // pin must survive file extraction/refactoring rather than pinning to one filename.
     func testCouncilHandoffThreadsRiskObjective() throws {
-        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let kistDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let src = try String(contentsOf: repo.appendingPathComponent("Sources/Kist/KistRunner.swift"),
-                             encoding: .utf8)
+            .appendingPathComponent("Sources/Kist")
+        let names = try FileManager.default.contentsOfDirectory(atPath: kistDir.path)
+            .filter { $0.hasPrefix("KistRunner") && $0.hasSuffix(".swift") }
+        let src = try names
+            .map { try String(contentsOf: kistDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
         XCTAssertTrue(src.contains("riskObjective: goal"),
                       "council-execute must hand the user's original goal as the gate risk objective")
         XCTAssertTrue(src.contains("let gateObjective = riskObjective ?? goal"),

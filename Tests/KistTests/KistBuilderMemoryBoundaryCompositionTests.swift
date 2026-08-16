@@ -14,7 +14,7 @@ final class KistBuilderMemoryBoundaryCompositionTests: XCTestCase {
     }
 
     func testNestedPlanExecuteReadsHostMemoryWithoutPersistingInsideTransaction() throws {
-        let runner = try source("Sources/Kist/KistRunner.swift")
+        let runner = kistRunnerFamilySource()
         XCTAssertTrue(runner.contains("let memoryReadRoot = memoryRoot ?? root"))
         XCTAssertTrue(runner.contains("opts.noMemory || !persistMemoryEpisode"))
         XCTAssertTrue(runner.contains("ProjectMemory(root: memoryReadRoot)"))

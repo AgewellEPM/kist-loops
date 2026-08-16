@@ -185,7 +185,7 @@ final class RateLimitLaneCooldownTests: XCTestCase {
     }
 
     func testSiteDefaultProviderSelectionConsultsCooldowns() throws {
-        let src = try source("Sources/Kist/KistRunner.swift")
+        let src = kistRunnerFamilySource()
         XCTAssertTrue(src.contains("cooldowns.coolingDown($0.id)"),
                       "default provider selection must skip cooling providers (0.17.58)")
         XCTAssertTrue(src.contains("avoid: liveCooldowns.coolingDown"),

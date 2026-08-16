@@ -483,8 +483,7 @@ final class StickyTurnCoordinatorTests: XCTestCase {
 
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let runner = try String(contentsOf: root.appendingPathComponent("Sources/Kist/KistRunner.swift"),
-                                encoding: .utf8)
+        let runner = kistRunnerFamilySource()
         let dispatch = try XCTUnwrap(runner.range(of: "if opts.stickyBarSelfTest"))
         let registry = try XCTUnwrap(runner.range(of: "var registry = makeRegistry()"))
         XCTAssertLessThan(dispatch.lowerBound, registry.lowerBound,
@@ -498,8 +497,7 @@ final class StickyTurnCoordinatorTests: XCTestCase {
         let session = try String(contentsOf:
             root.appendingPathComponent("Sources/Kist/UX/TurnInteractionSession.swift"),
                                  encoding: .utf8)
-        let runner = try String(contentsOf: root.appendingPathComponent("Sources/Kist/KistRunner.swift"),
-                                encoding: .utf8)
+        let runner = kistRunnerFamilySource()
 
         let turnStart = try XCTUnwrap(repl.range(of: "let session = TurnInteractionSession("))
         let turnBody = repl[turnStart.lowerBound...]

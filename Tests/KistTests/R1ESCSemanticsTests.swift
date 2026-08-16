@@ -97,7 +97,7 @@ final class R1ESCSemanticsTests: XCTestCase {
         // KistRunner: plan-execute AND council AND research escalations run under the ESC watcher
         // (council/research were the review-caught sibling dead zones), and an interrupted plan
         // run must not book a false obstacle lesson.
-        let runner = try src("Sources/Kist/KistRunner.swift")
+        let runner = kistRunnerFamilySource()
         XCTAssertGreaterThanOrEqual(runner.components(separatedBy: "InterruptibleTurn.run").count - 1, 3,
                                     "an escalation surface (plan-execute/council/research) lost its ESC watcher")
         XCTAssertTrue(runner.contains("!pOut.interrupted"),

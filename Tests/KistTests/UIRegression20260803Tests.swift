@@ -73,7 +73,7 @@ final class UIRegression20260803Tests: XCTestCase {
         // own TTY detection + ModelPicker's fail-closed raw-mode gate). Everything else must use
         // TerminalCapabilities.stdoutIsInteractive.
         let allowed: [String: Set<String>] = [
-            "isatty(fileno(stdout))": ["TerminalCapabilities.swift", "TerminalMediaRenderer.swift", "KistRunner.swift"],
+            "isatty(fileno(stdout))": ["TerminalCapabilities.swift", "TerminalMediaRenderer.swift", "KistRunner.swift", "KistRunner+StickyBarSelfTest.swift"],
             "isatty(STDOUT_FILENO)": ["TerminalScreenCoordinator.swift", "ModelPicker.swift"],
         ]
         let kistDir = repoRoot().appendingPathComponent("Sources/Kist")

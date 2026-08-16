@@ -156,6 +156,17 @@ final class BudgetEnforcementTests: XCTestCase {
         // #filePath: <repo>/Tests/AgentCoreTests/BudgetEnforcementTests.swift → up 3 to <repo>.
         let here = URL(fileURLWithPath: #filePath)
         let repo = here.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        // KistRunner's logic is split across KistRunner.swift + KistRunner+*.swift extension files;
+        // a request for the core file returns the whole family so location-pins survive extraction.
+        if rel == "Sources/Kist/KistRunner.swift" {
+            let dir = repo.appendingPathComponent("Sources/Kist")
+            let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+                .filter { $0 == "KistRunner.swift" || $0.hasPrefix("KistRunner+") }
+                .sorted()
+            return try files
+                .map { try String(contentsOf: dir.appendingPathComponent($0), encoding: .utf8) }
+                .joined(separator: "\n")
+        }
         return try String(contentsOf: repo.appendingPathComponent(rel), encoding: .utf8)
     }
 }

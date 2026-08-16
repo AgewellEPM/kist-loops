@@ -20,7 +20,7 @@ final class KistRunnerSafetyTests: XCTestCase {
     }
 
     private func runnerSource() throws -> String {
-        try String(contentsOfFile: repoRoot() + "/Sources/Kist/KistRunner.swift", encoding: .utf8)
+        kistRunnerFamilySource()
     }
 
     private func assertOrder(_ first: String, before second: String, in text: String,
