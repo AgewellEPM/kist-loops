@@ -9,3 +9,5 @@
 __pycache__/
 .kist/
 .mcp.json
+.mythos/council/
+.mythos/memory/
