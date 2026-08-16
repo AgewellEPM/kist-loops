@@ -12,22 +12,36 @@ public enum AdvisorSession {
     /// persona (isolated) and returns its output.
     public static func advise(task: String,
                               matcher: TaskPersonaMatcher,
+                              catalog: [SpecialistDefinition] = BuiltinSpecialists.all,
                               limit: Int = 1,
+                              classify: ((_ task: String, _ catalog: [SpecialistDefinition]) async -> [String])? = nil,
                               convene: (_ persona: SpecialistDefinition, _ task: String) async -> String) async -> String? {
         let trimmed = task.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let matches = matcher.matches(for: trimmed, limit: max(1, limit))
-        guard let top = matches.first else { return nil }
 
-        let advice = await convene(top.specialist, trimmed)
-        let consulted = matches.dropFirst().map(\.specialist.name)
-        var header = "🧑‍⚖️ advisor · \(top.specialist.name) · \(top.reasons.joined(separator: "; "))"
+        // 1) deterministic keyword match — free, fast, and it wins when it fires.
+        let matches = matcher.matches(for: trimmed, limit: max(1, limit))
+        var picks: [(def: SpecialistDefinition, reason: String)] =
+            matches.map { ($0.specialist, $0.reasons.joined(separator: "; ")) }
+
+        // 2) A2 — LLM domain-classifier fallback ONLY when keywords miss (novel phrasing/domain). The classifier
+        // returns catalog names (already catalog-validated in AdvisorPanelPlanner); resolve them to definitions.
+        // Fail-open: a nil/empty classify result leaves `picks` empty ⇒ the caller answers normally.
+        if picks.isEmpty, let classify {
+            let byName = Dictionary(catalog.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
+            picks = (await classify(trimmed, catalog)).compactMap { name in byName[name].map { ($0, "domain-classified") } }
+        }
+
+        guard let top = picks.first else { return nil }
+        let advice = await convene(top.def, trimmed)
+        let consulted = picks.dropFirst().map(\.def.name)
+        var header = "🧑‍⚖️ advisor · \(top.def.name) · \(top.reason)"
         if !consulted.isEmpty { header += " · also considered: \(consulted.joined(separator: ", "))" }
 
         var out = "\(header)\n\n\(advice)"
         // MECHANICAL disclaimer — appended regardless of what the persona's own prose said, so a regulated
         // advisor can never present as licensed advice even if the model drops its in-prompt caveat.
-        if AdvisorSafety.isRegulated(top.specialist.name) { out += "\n\n\(AdvisorSafety.disclaimer)" }
+        if AdvisorSafety.isRegulated(top.def.name) { out += "\n\n\(AdvisorSafety.disclaimer)" }
         return out
     }
 }

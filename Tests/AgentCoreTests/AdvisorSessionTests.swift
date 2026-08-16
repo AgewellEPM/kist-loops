@@ -56,4 +56,42 @@ final class AdvisorSessionTests: XCTestCase {
         XCTAssertFalse(AdvisorSafety.isRegulated("comedian"))
         XCTAssertFalse(AdvisorSafety.isRegulated("swift-engineer"))
     }
+
+    // MARK: A2 — LLM domain-classifier fallback (keyword-first, classifier only on miss)
+
+    /// When keywords MISS (novel phrasing), the classifier is consulted and its pick is convened.
+    func testClassifierFallbackConvenesWhenKeywordsMiss() async {
+        var classifyCalled = false
+        let out = await AdvisorSession.advise(
+            task: "xyzzy plugh frobnicate",   // deliberate nonsense: no keyword overlap with any persona
+            matcher: matcher(),
+            classify: { _, _ in classifyCalled = true; return ["comedian"] }
+        ) { persona, _ in "advice from \(persona.name)" }
+        XCTAssertTrue(classifyCalled, "the classifier must be consulted when keywords miss")
+        XCTAssertNotNil(out)
+        XCTAssertTrue(out!.contains("advisor · comedian"))
+        XCTAssertTrue(out!.contains("domain-classified"))
+        XCTAssertTrue(out!.contains("advice from comedian"))
+    }
+
+    /// A keyword match wins and SKIPS the (paid) classifier entirely.
+    func testKeywordMatchSkipsClassifier() async {
+        var classifyCalled = false
+        let out = await AdvisorSession.advise(
+            task: "write me a joke",   // keyword-matches comedian
+            matcher: matcher(),
+            classify: { _, _ in classifyCalled = true; return ["copywriter"] }
+        ) { persona, _ in persona.name }
+        XCTAssertFalse(classifyCalled, "a keyword match must NOT spend a classifier call")
+        XCTAssertEqual(out?.contains("advisor · comedian"), true)
+    }
+
+    /// Classifier returns nothing usable ⇒ still nil (fail-open to normal handling).
+    func testClassifierEmptyStillFailsOpen() async {
+        let out = await AdvisorSession.advise(
+            task: "xyzzy plugh frobnicate", matcher: matcher(),
+            classify: { _, _ in [] }
+        ) { _, _ in "unused" }
+        XCTAssertNil(out)
+    }
 }

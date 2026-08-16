@@ -896,7 +896,18 @@ enum KistRunner {
                                                     roleDefault: ProviderBinding(providerId: providerId, model: model),
                                                     defaultMaxIterations: opts.maxIterations)
                     let matcher = TaskPersonaMatcher(projectRoot: root)
-                    let result = await AdvisorSession.advise(task: task, matcher: matcher, limit: 3) { persona, subtask in
+                    let result = await AdvisorSession.advise(
+                        task: task, matcher: matcher, limit: 3,
+                        classify: { t, catalog in
+                            // A2 — LLM domain classifier: consulted ONLY when keyword matching missed (novel
+                            // phrasing/domain). One fast completion; catalog-validated inside the planner; fail-open.
+                            await AdvisorPanelPlanner.classify(task: t, catalog: catalog, limit: 2) { system, user in
+                                let messages = [ChatMessage(role: .system, content: system),
+                                                ChatMessage(role: .user, content: user)]
+                                return try? await registry.complete(providerId: providerId, model: model, messages: messages)
+                            }
+                        }
+                    ) { persona, subtask in
                         let outcome = await spawner.run(specialist: persona, task: subtask)
                         return outcome.summary
                     }
