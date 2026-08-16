@@ -1209,6 +1209,17 @@ extension KistREPL {
                     guard let ablation else { print("\u{001B}[31m/ablation isn't available here\u{001B}[0m"); return .handled }
                     _ = await ablation(KistREPL.ablationCorpus(forArg: args))
                     return .handled
+                case "advise", "advisor":
+                    // Convene the best-matching domain advisor for the task (dynamic-advisor A1.5):
+                    // "write me a joke" -> comedian, "marketing copy" -> copywriter, "sync license" -> music-licensing.
+                    let task = args.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !task.isEmpty else {
+                        print("usage: /advise <task> — convene a domain expert (e.g. /advise write me a joke about deadlines)")
+                        return .handled
+                    }
+                    guard let advise else { print("\u{001B}[31m/advise isn't available here\u{001B}[0m"); return .handled }
+                    await advise(task)
+                    return .handled
                 case "competitive", "compete", "competitor", "vs":
                     // Point Kist at a competitor/URL/product and get a deep, cited R&D cross-comparison
                     // of OUR project vs theirs. Rides the /research evidence pipeline (web + our own

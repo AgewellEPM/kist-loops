@@ -35,6 +35,9 @@ final class KistREPL {
     /// `/ablation` — run the COLD-vs-WARM ablation oracle: is the accumulated state actually compounding on
     /// held-out work? Reports an un-fakeable advantage that can be flat or negative.
     var ablation: ((_ corpus: String) async -> Int32)? = nil
+    /// `/advise` — convene the best-matching advisor persona (dynamic-advisor A1.5): reads the task's domain,
+    /// runs the matched expert isolated + READ-ONLY, prints its advice with provenance + a regulated disclaimer.
+    var advise: ((_ task: String) async -> Void)? = nil
     /// Forge a specialist from a plain-English role description (AgentForge), bounded by the loop's tool
     /// ceiling, validated, and saved to the registry. nil = forging unavailable in this mode.
     var forge: ((_ description: String, _ roles: RoleBindings) async -> Void)? = nil

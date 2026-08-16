@@ -880,6 +880,29 @@ enum KistRunner {
                     return await runAblation(opts, registry: registry, root: root, tools: tools,
                                              context: context, providerId: providerId, model: model, corpus: corpus)
                 }
+                repl.advise = { task in
+                    // /advise — convene the best-matching advisor persona (dynamic-advisor A1.5). READ-ONLY:
+                    // the convened expert may research (web/read) but NOT write/exec — advisory, no side effects.
+                    TurnInputQueue.shared.begin()
+                    defer { TurnInputQueue.shared.end() }
+                    // POSITIVE allowlist (fail-safe): only explicitly-safe READ/research tools reach an advisor —
+                    // anything not on this list (write/exec/spawn/board-mutation, AND any unknown/MCP tool) is
+                    // excluded by default, so /advise can never cause a side effect even as the tool set grows.
+                    let safeReadTools: Set<String> = ["read_file", "search_code", "glob_files", "web_search",
+                                                      "fetch_url", "browse", "read_spreadsheet", "query_data",
+                                                      "view_image", "ask_user"]
+                    let readOnlyTools = ToolRegistry(tools.all().filter { safeReadTools.contains($0.name) })
+                    let spawner = SpecialistSpawner(providers: registry, baseTools: readOnlyTools, context: context,
+                                                    roleDefault: ProviderBinding(providerId: providerId, model: model),
+                                                    defaultMaxIterations: opts.maxIterations)
+                    let matcher = TaskPersonaMatcher(projectRoot: root)
+                    let result = await AdvisorSession.advise(task: task, matcher: matcher, limit: 3) { persona, subtask in
+                        let outcome = await spawner.run(specialist: persona, task: subtask)
+                        return outcome.summary
+                    }
+                    if let result { print(result) }
+                    else { note("no advisor matched — try a more specific task (e.g. 'write me a joke', 'draft marketing copy', 'sync license question'), or just ask normally.") }
+                }
                 repl.forge = { description, roles in
                     // AgentForge: generate a specialist bounded by the loop's tool ceiling, validate, save.
                     let forge = AgentForge(providers: registry, roles: roles)
