@@ -36,7 +36,7 @@ final class VerificationReplayTests: XCTestCase {
         try "all:\n\t@echo build-ok\n".write(toFile: root + "/Makefile", atomically: true, encoding: .utf8)
 
         let out = await loop([
-            #"{"tool":"run_command","parameters":{"command":"make"}}"#,
+            #"{"tool":"run_command","parameters":{"executable":"make","args":[]}}"#,
             #"{"tool":"write_file","parameters":{"path":"Sources/New.swift","content":"struct New {}"}}"#,
             #"{"done":true,"summary":"done after final edit"}"#,
             // If the loop asked the model instead of replaying, these would be consumed:

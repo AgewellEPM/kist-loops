@@ -58,7 +58,12 @@ public struct OllamaProvider: ChatProvider {
         if let host = ProcessInfo.processInfo.environment["OLLAMA_HOST"], !host.isEmpty {
             return "\(host)/api/chat"
         }
-        return "http://localhost:11434/api/chat"
+        // The COBOL specialist is contractually loopback-only. Keep other Ollama providers'
+        // legacy default unchanged, but make the specialist's unset-host route numeric so its
+        // provenance cannot depend on hostname resolution.
+        return id == "cobol"
+            ? "http://127.0.0.1:11434/api/chat"
+            : "http://localhost:11434/api/chat"
     }
 
     /// Liveness-probe URL so a fan-out (wide council) can skip Ollama when the daemon isn't running,

@@ -2,6 +2,14 @@ import XCTest
 @testable import AgentCore
 
 final class PromptCompilerTests: XCTestCase {
+    func testLocalKistQueueRepairWinsOverPastedResearchLabels() {
+        let request = "findout why the Kist Build Queue is hardcoded; Research: prior art; then fix it"
+
+        XCTAssertEqual(PromptCompiler.inferIntent(request), .build)
+        XCTAssertEqual(PromptCompiler.inferIntent("why is the Kist research queue hardcoded?"), .chat)
+        XCTAssertEqual(PromptCompiler.inferIntent("research current Kist competitors and cite sources"), .research)
+    }
+
     func testResolvedIntentIsReusedAndDefinesOneExpectedOutcome() {
         let brief = PromptCompiler.compile("compare the implementations",
                                            mode: .inline,

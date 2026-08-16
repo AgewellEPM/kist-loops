@@ -22,12 +22,30 @@ public struct ToolResult: Sendable, Equatable {
     public let output: String
     public let error: String?
     public let metadata: [String: String]
+    /// Host-only proof handle. Publicly readable by orchestration code, but public callers cannot
+    /// populate it and it is never serialized into model-visible metadata/output.
+    public private(set) var trustedCommandReference: BuilderTrustedCommandReference?
+    /// One-shot host authority proving this exact successful command matched a frozen Builder
+    /// verification command. It is deliberately internal and never enters model-visible metadata.
+    var trustedBuilderVerification: BuilderVerificationCommandAuthorityReceipt?
 
     public init(success: Bool, output: String, error: String? = nil, metadata: [String: String] = [:]) {
         self.success = success
         self.output = output
         self.error = error
         self.metadata = metadata
+        self.trustedCommandReference = nil
+        self.trustedBuilderVerification = nil
+    }
+
+    init(success: Bool, output: String, error: String? = nil,
+         metadata: [String: String] = [:],
+         trustedCommandReference: BuilderTrustedCommandReference?,
+         trustedBuilderVerification: BuilderVerificationCommandAuthorityReceipt? = nil) {
+        self.success = success; self.output = output; self.error = error
+        self.metadata = metadata
+        self.trustedCommandReference = trustedCommandReference
+        self.trustedBuilderVerification = trustedBuilderVerification
     }
 
     /// Convenience for the common failure shape.
@@ -53,9 +71,11 @@ public struct ToolParameter: Sendable, Codable, Equatable {
 
 /// Errors thrown by tools and the execution context. `CustomStringConvertible` so the
 /// message round-trips cleanly into `ToolResult.error`.
-public enum ToolError: Error, Sendable, CustomStringConvertible, Equatable {
+public enum ToolError: Error, LocalizedError, Sendable, CustomStringConvertible, Equatable {
     case configuration(String)
     case missingParameter(String)
+    case invalidParameter(String)
+    case permissionDenied(String)
     case pathEscape(path: String, root: String)
     case notFound(String)
     case shellDenied(String)
@@ -65,12 +85,16 @@ public enum ToolError: Error, Sendable, CustomStringConvertible, Equatable {
         switch self {
         case .configuration(let m): return "configuration error: \(m)"
         case .missingParameter(let p): return "missing required parameter: \(p)"
+        case .invalidParameter(let m): return "invalid tool parameter: \(m)"
+        case .permissionDenied(let m): return "permission denied: \(m)"
         case .pathEscape(let path, let root): return "path '\(path)' escapes the project root (\(root)) — refused"
         case .notFound(let p): return "not found: \(p)"
         case .shellDenied(let m): return "shell command denied: \(m)"
         case .execution(let m): return "execution failed: \(m)"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 // MARK: - Shell policy
@@ -265,7 +289,7 @@ public struct ToolContext: Sendable {
     /// the CLI wires one writing `.kist/audit/tools.jsonl`.
     public let auditLog: AuditLog?
 
-    public init(projectRoot: String, shell: ShellPolicy = .denied, sandbox: SandboxPolicy = .disabled,
+    public init(projectRoot: String, shell: ShellPolicy = .denied, sandbox: SandboxPolicy = .confined(),
                 authorizationScope: ScopeDecision? = nil, scopeOverrideApproved: Bool = false,
                 skillLocations: [String: String] = [:], skillTracker: SkillTracker? = nil,
                 auditLog: AuditLog? = nil, externalReadRoots: [String] = []) {
@@ -348,7 +372,18 @@ public struct ToolContext: Sendable {
         // macOS drag/screenshot inbox: a file the user ATTACHED (dragged/pasted a screenshot) lands
         // here read-only. Vision/media tools may read it without a --allow-read grant. See mediaDropInbox().
         if let inbox = Self.mediaDropInbox(), resolved == inbox || resolved.hasPrefix(inbox + "/") {
-            return (try ConfinedRoot(root: inbox, readOnly: true), resolved)
+            // Screenshot/drag drops normally live in a unique OS-created subdirectory. Root the
+            // descriptor confinement at the requested item's canonical parent instead of opening
+            // the shared TemporaryItems directory: this grants a strictly smaller read surface and
+            // avoids macOS file-coordination interruptions observed when the shared inbox is busy.
+            // A request for the inbox itself keeps the inbox root; a missing parent falls back to it.
+            let parent = (resolved as NSString).deletingLastPathComponent
+            let attachmentRoot = resolved == inbox
+                ? inbox
+                : (Self.canonicalize(parent).flatMap {
+                    ($0 == inbox || $0.hasPrefix(inbox + "/")) ? $0 : nil
+                } ?? inbox)
+            return (try ConfinedRoot(root: attachmentRoot, readOnly: true), resolved)
         }
         throw ToolError.pathEscape(path: path, root: readableRootsDescription(projectReal: rootReal))
     }

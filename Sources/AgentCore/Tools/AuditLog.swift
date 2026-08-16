@@ -10,6 +10,8 @@ import Glibc
 /// raw argument VALUES (those can carry secrets/paths): argument values are reduced to a SHA-256
 /// digest so identical calls correlate without leaking content; only the argument KEYS are kept.
 public struct AuditEntry: Codable, Sendable, Equatable {
+    public let schemaVersion: Int? // present for run-scoped receipts; nil for legacy/project logs
+    public let runID: String?      // binds the receipt to one CLI invocation when available
     public let at: Double           // epoch seconds
     public let tool: String
     public let argKeys: [String]    // sorted argument names (no values)
@@ -19,7 +21,9 @@ public struct AuditEntry: Codable, Sendable, Equatable {
     public let scope: [String]?     // the active skill capability scope, if one was in force
 
     public init(at: Double, tool: String, argKeys: [String], argsDigest: String,
-                outcome: String, success: Bool, scope: [String]?) {
+                outcome: String, success: Bool, scope: [String]?,
+                schemaVersion: Int? = nil, runID: String? = nil) {
+        self.schemaVersion = schemaVersion; self.runID = runID
         self.at = at; self.tool = tool; self.argKeys = argKeys; self.argsDigest = argsDigest
         self.outcome = outcome; self.success = success; self.scope = scope
     }
@@ -29,21 +33,64 @@ public struct AuditEntry: Codable, Sendable, Equatable {
 /// (no interleaved/corrupt lines). Owner-only file; one line per tool invocation. Best-effort: a
 /// write failure never blocks or fails the tool call (the audit must not become a denial-of-service).
 public actor AuditLog {
-    private let path: String
+    public nonisolated let path: String
+    public nonisolated let runID: String?
     private var ensured = false
 
-    public init(path: String) { self.path = path }
+    public init(path: String) {
+        self.path = path
+        self.runID = nil
+    }
+
+    private init(path: String, runID: String) {
+        self.path = path
+        self.runID = runID
+    }
 
     /// Project-scoped audit log at `<root>/.kist/audit/tools.jsonl`.
     public static func forProject(root: String) -> AuditLog {
         AuditLog(path: root + "/.kist/audit/tools.jsonl")
     }
 
+    /// One receipt stream per CLI invocation. The run identifier is reduced to a conservative filename
+    /// alphabet (or an opaque digest), so even a future caller that accepts external IDs cannot escape the
+    /// owner-only audit directory. The exact path is deterministic for `(root, runID)` and can be printed by
+    /// the host for dogfood/CI discovery.
+    public static func forRun(root: String, runID: String) -> AuditLog {
+        let safeID = safeRunID(runID)
+        return AuditLog(path: root + "/" + runRelativePath(runID: safeID), runID: safeID)
+    }
+
+    public static func runRelativePath(runID: String) -> String {
+        ".kist/audit/tools-\(safeRunID(runID)).jsonl"
+    }
+
+    private nonisolated static func safeRunID(_ raw: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+        if !raw.isEmpty, raw.utf8.count <= 128,
+           raw.unicodeScalars.allSatisfy({ allowed.contains($0) }), raw != ".", raw != ".." {
+            return raw
+        }
+        return "opaque-" + MythosCrypto.sha256(Data(raw.utf8)).map {
+            String(format: "%02x", $0)
+        }.joined()
+    }
+
     private var warned = false
 
     public func record(_ entry: AuditEntry) {
         guard ensureDir() else { warnOnce(); return }
-        guard var line = try? JSONEncoder().encode(entry) else { return }
+        let receipt: AuditEntry
+        if let runID {
+            receipt = AuditEntry(
+                at: entry.at, tool: entry.tool, argKeys: entry.argKeys,
+                argsDigest: entry.argsDigest, outcome: entry.outcome,
+                success: entry.success, scope: entry.scope,
+                schemaVersion: 1, runID: runID)
+        } else {
+            receipt = entry
+        }
+        guard var line = try? JSONEncoder().encode(receipt) else { return }
         line.append(0x0A)   // newline — written in ONE write() so O_APPEND keeps small lines atomic
         // O_NOFOLLOW: refuse if the audit file is a SYMLINK (a cloned repo could plant one pointing at
         // a secret/world-writable target to exfiltrate the trail — Codex CRITICAL). O_APPEND: atomic

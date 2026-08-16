@@ -119,17 +119,21 @@ final class LocalModelProfileStoreTests: XCTestCase {
                      template: LocalModelTemplate.from(chatTemplate: "<|im_end|>", eosToken: nil, modelName: nil, source: "t"), verifiedReady: true)
 
         let provider = ScriptedStopCaptureProvider(responses: [
-            #"{"tool":"read_file","parameters":{"path":"missing.txt"}}"#,
+            "not a protocol action 1",
+            "not a protocol action 2",
+            "not a protocol action 3",
             #"{"done":true,"summary":"final"}"#,
         ])
         let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
         let root = ToolContext.canonicalize(dir) ?? dir
         _ = await HeadlessAgentLoop(providers: registry, providerId: "local", model: "weak-1b",
                                     tools: .headless(), context: ToolContext(projectRoot: root),
-                                    maxIterations: 1, modelProfiles: store).run(goal: "go")
+                                    maxIterations: 4, modelProfiles: store).run(goal: "go")
 
         let seen = await provider.allStops()
         XCTAssertEqual(seen, [
+            ["<|im_end|>", "<|endoftext|>"],
+            ["<|im_end|>", "<|endoftext|>"],
             ["<|im_end|>", "<|endoftext|>"],
             ["<|im_end|>", "<|endoftext|>"],
         ])

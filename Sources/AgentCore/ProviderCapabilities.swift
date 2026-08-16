@@ -11,6 +11,8 @@ public struct ModelCapabilities: Sendable, Equatable {
     public var vision: Bool
     /// The model emits a separate reasoning/thinking stream.
     public var reasoning: Bool
+    /// Which neutral reasoning levels this exact provider/model path can honor explicitly.
+    public var reasoningEffortSupport: ProviderReasoningEffortSupport
     /// Advertised context window, when known.
     public var contextWindowTokens: Int?
     /// The model/provider path accepts video input directly or through a first-class media file ref.
@@ -36,7 +38,9 @@ public struct ModelCapabilities: Sendable, Equatable {
     /// The provider/model can reliably constrain responses to structured output.
     public var structuredOutput: Bool
 
-    public init(nativeTools: Bool, vision: Bool = false, reasoning: Bool = false, contextWindowTokens: Int? = nil,
+    public init(nativeTools: Bool, vision: Bool = false, reasoning: Bool = false,
+                reasoningEffortSupport: ProviderReasoningEffortSupport = .unsupported,
+                contextWindowTokens: Int? = nil,
                 video: Bool = false, audio: Bool = false, imageGeneration: Bool = false,
                 imageEditing: Bool = false, codeExecution: Bool = false, grounding: Bool = false,
                 urlContext: Bool = false, computerUse: Bool = false, live: Bool = false,
@@ -44,6 +48,7 @@ public struct ModelCapabilities: Sendable, Equatable {
         self.nativeTools = nativeTools
         self.vision = vision
         self.reasoning = reasoning
+        self.reasoningEffortSupport = reasoningEffortSupport
         self.contextWindowTokens = contextWindowTokens
         self.video = video
         self.audio = audio

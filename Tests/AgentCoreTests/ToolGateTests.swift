@@ -6,6 +6,18 @@ import Foundation
 /// (research_run / visual_verify) pass through — closing the council/Codex composite-bypass.
 final class ToolGateTests: XCTestCase {
 
+    private struct SchemaProbeTool: AgentTool {
+        let name = "schema_probe"
+        let description = "schema validation probe"
+        let parameters = [
+            ToolParameter(name: "value", type: "string", description: "value", required: true),
+            ToolParameter(name: "enabled", type: "boolean", description: "enabled", required: false),
+        ]
+        func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+            .init(success: true, output: "ran")
+        }
+    }
+
     private var root: String!
     override func setUpWithError() throws {
         let dir = NSTemporaryDirectory() + "gate-" + UUID().uuidString
@@ -75,6 +87,29 @@ final class ToolGateTests: XCTestCase {
             .init(success: true, output: "token sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
         }
         XCTAssertFalse(result.output.contains("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"), "secrets masked")
+    }
+
+    func testRegistryRejectsMissingMistypedAndUnknownArguments() async {
+        let registry = ToolRegistry([SchemaProbeTool()])
+        let context = ToolContext(projectRoot: root)
+        let missing = await registry.execute(name: "schema_probe", arguments: [:], context: context)
+        XCTAssertFalse(missing.success)
+        XCTAssertTrue((missing.error ?? "").contains("missing required field 'value'"))
+
+        let mistyped = await registry.execute(name: "schema_probe", arguments: ["value": 7], context: context)
+        XCTAssertFalse(mistyped.success)
+        XCTAssertTrue((mistyped.error ?? "").contains("must be string"))
+
+        let unknown = await registry.execute(name: "schema_probe", arguments: ["value": "ok", "surprise": true], context: context)
+        XCTAssertFalse(unknown.success)
+        XCTAssertTrue((unknown.error ?? "").contains("unknown field 'surprise'"))
+
+        let valid = await registry.execute(name: "schema_probe", arguments: ["value": "ok", "enabled": true], context: context)
+        XCTAssertTrue(valid.success, valid.error ?? "")
+    }
+
+    func testPermissionDeniedErrorIsExplicit() {
+        XCTAssertEqual(ToolError.permissionDenied("scope").description, "permission denied: scope")
     }
 
     // Codex HIGH: the gate enforces AUTHORIZATION scope (plan-only / needs-approval), not just the

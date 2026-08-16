@@ -98,7 +98,10 @@ public struct SpecialistSpawner: Sendable {
     /// isolation footer appended when `isolation: worktree` was requested.
     public func run(specialist def: SpecialistDefinition, task: String,
                     approvalTools: Set<String> = [], planMode: Bool = false,
-                    now: Double = Date().timeIntervalSince1970) async -> HeadlessAgentLoop.Outcome {
+                    now: Double = Date().timeIntervalSince1970,
+                    forceWorktreeIsolation: Bool = false,
+                    preparedWorktree: GitWorktree? = nil,
+                    steeringMailbox: DelegationSteeringMailbox? = nil) async -> HeadlessAgentLoop.Outcome {
         // `ask_user` is a communication primitive the loop can inject; put it IN the ceiling so the
         // specialist's allowlist/denylist governs it too. A `tools: []` specialist is then truly hermetic
         // (no ask_user); a nil allowlist inherits it; an author can allow/deny it explicitly.
@@ -127,14 +130,18 @@ public struct SpecialistSpawner: Sendable {
         // The specialist NEVER gets spawn_specialist/spawn_agent (no recursive fan-out from a named agent)
         // and is scoped to its resolved tools — fail-closed: an empty list yields no tools. `ask_user` is a
         // loop-injected primitive (not in baseTools), so filter it out of the concrete scoping set.
-        let scoped = baseTools.scoped(to: p.toolNames.filter { $0 != "ask_user" })
+        var scoped = baseTools.scoped(to: p.toolNames.filter { $0 != "ask_user" })
+        if let steeringMailbox { scoped = scoped.adding(DelegationInboxTool(mailbox: steeringMailbox)) }
 
         // isolation: worktree — the specialist's edits land on an isolated branch, never the main tree.
-        let wantsIsolation = def.isolation?.lowercased() == "worktree"
+        let wantsIsolation = forceWorktreeIsolation || preparedWorktree != nil
+            || def.isolation?.lowercased() == "worktree"
         var runContext = context
-        var worktree: GitWorktree? = nil
+        var worktree: GitWorktree? = preparedWorktree
         if wantsIsolation {
-            worktree = GitIsolation.makeWorktree(repo: context.projectRoot, label: def.name, nowEpoch: now)
+            if worktree == nil {
+                worktree = GitIsolation.makeWorktree(repo: context.projectRoot, label: def.name, nowEpoch: now)
+            }
             // FAIL CLOSED (Codex CRITICAL): if isolation was requested but a worktree can't be created (not
             // a git repo, or `git worktree add` failed), REFUSE — do NOT silently run a write-capable
             // specialist against the main tree while the caller believes it was sandboxed.
@@ -150,8 +157,12 @@ public struct SpecialistSpawner: Sendable {
             // the worktree. (Enforcement is Seatbelt on macOS; a platform without it is a known limitation.)
             let isoSandbox = context.sandbox.confineWrites ? context.sandbox
                                                            : SandboxPolicy.confined(denyNetwork: false, confineWrites: true)
-            runContext = ToolContext(projectRoot: wt.path, shell: context.shell, sandbox: isoSandbox,
-                                     externalReadRoots: context.externalReadRoots)
+            runContext = ToolContext(
+                projectRoot: wt.path, shell: context.shell, sandbox: isoSandbox,
+                authorizationScope: context.authorizationScope,
+                scopeOverrideApproved: context.scopeOverrideApproved,
+                skillLocations: context.skillLocations, skillTracker: context.skillTracker,
+                auditLog: context.auditLog, externalReadRoots: context.externalReadRoots)
         }
 
         let loop = HeadlessAgentLoop(
@@ -162,7 +173,13 @@ public struct SpecialistSpawner: Sendable {
             extendedThinking: extendedThinking, budget: budget,
             contextWindow: ContextWindowManager.forModel(
                 capabilities: providers.capabilities(providerId: p.binding.providerId, model: p.binding.model)))
-        let outcome = await loop.run(goal: p.goal)
+        let runGoal = steeringMailbox == nil ? p.goal : p.goal + """
+
+
+        BACKGROUND CONTROL: call delegation_updates before each major phase and before your final
+        response; incorporate returned parent messages without widening your permissions.
+        """
+        let outcome = await loop.run(goal: runGoal)
 
         guard let wt = worktree else { return outcome }
         let committed = GitIsolation.commit(wt, message: "specialist/\(def.name): \(task.prefix(60))")

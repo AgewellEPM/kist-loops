@@ -183,11 +183,17 @@ public final class CaptainOrchestrator: @unchecked Sendable {
                                scope: lease.isEmpty ? nil : lease.joined(separator: ", "), assignedAgentID: aid)
         }
 
-        struct PreparedAgent {
+        struct PreparedAgent: Sendable {
             let assigned: AssignedFleetTask
             let agentID: UUID
             let lease: [String]
             let worktree: GitWorktree
+        }
+
+        struct SpawnResult: Sendable {
+            let preparedIndex: Int
+            let agentID: UUID
+            let launched: Bool
         }
 
         var agents: [LaunchedAgent] = []
@@ -233,81 +239,114 @@ public final class CaptainOrchestrator: @unchecked Sendable {
 
         let batonStore = FleetBatonStore(baseDir: fleetDir)
         var launchIssues: [String] = []
-        for (preparedIndex, item) in prepared.enumerated() {
-            let sub = item.assigned.subtask
-            let cellIndex = board.cells.firstIndex(where: { $0.id == item.agentID })
-            guard let cellIndex else { continue }
-            var workingBoard = board
-            workingBoard.cells[cellIndex].status = .working
-            workingBoard.revision += 1
-            guard boardStore.seed(workingBoard) else {
-                let reason = boardStore.lastSaveError() ?? "unknown blackboard persistence error"
-                launchIssues.append("launch status persistence failed for \(item.agentID.uuidString): \(reason)")
-                var failedBoard = board
-                Self.markLaunchesFailed(&failedBoard, agentIDs: prepared[preparedIndex...].map(\.agentID))
-                failedBoard.revision += 1
-                board = failedBoard
-                if !boardStore.seed(failedBoard) {
-                    let failedReason = boardStore.lastSaveError() ?? "unknown blackboard persistence error"
-                    launchIssues.append("failed to persist launch-abort statuses after status persistence failure: \(failedReason)")
-                }
-                break
-            }
-            board = workingBoard
-
-            let heldBaton = Baton(fleetID: fleetID, missionGoal: goal, repo: trimmedRepo,
-                                  holder: item.agentID.uuidString, currentWorktree: item.worktree.path,
-                                  currentBranch: item.worktree.branch, scopeGlobs: item.lease, state: .held,
-                                  lineage: [BatonHop(from: "captain", to: item.agentID.uuidString,
-                                                     atEpoch: nowEpoch, state: .held)])
-            guard batonStore.save(heldBaton) else {
-                let reason = batonStore.lastSaveError() ?? "unknown baton persistence error"
-                launchIssues.append("baton persistence failed for \(item.agentID.uuidString): \(reason)")
-                var failedBoard = board
-                failedBoard.cells[cellIndex].status = .failed
-                failedBoard.revision += 1
-                board = failedBoard
-                if !boardStore.seed(failedBoard) {
-                    let boardReason = boardStore.lastSaveError() ?? "unknown blackboard persistence error"
-                    launchIssues.append("failed to persist baton-failure status for \(item.agentID.uuidString): \(boardReason)")
+        var heldBatons: [UUID: Baton] = [:]
+        let spawnDriver = spawner
+        var spawnResults: [SpawnResult] = []
+        await withTaskGroup(of: SpawnResult.self) { group in
+            // `chosen` is already hard-capped by maxAgents, so this group cannot exceed the
+            // caller's fleet bound. Arming stays ordered; only spawn calls overlap.
+            for (preparedIndex, item) in prepared.enumerated() {
+                let sub = item.assigned.subtask
+                let cellIndex = board.cells.firstIndex(where: { $0.id == item.agentID })
+                guard let cellIndex else { continue }
+                var workingBoard = board
+                workingBoard.cells[cellIndex].status = .working
+                workingBoard.revision += 1
+                guard boardStore.seed(workingBoard) else {
+                    let reason = boardStore.lastSaveError() ?? "unknown blackboard persistence error"
+                    launchIssues.append("launch status persistence failed for \(item.agentID.uuidString): \(reason)")
+                    var failedBoard = board
+                    Self.markLaunchesFailed(
+                        &failedBoard, agentIDs: prepared[preparedIndex...].map(\.agentID))
+                    failedBoard.revision += 1
+                    board = failedBoard
+                    if !boardStore.seed(failedBoard) {
+                        let failedReason = boardStore.lastSaveError()
+                            ?? "unknown blackboard persistence error"
+                        launchIssues.append(
+                            "failed to persist launch-abort statuses after status persistence failure: \(failedReason)")
+                    }
                     break
                 }
+                board = workingBoard
+
+                let heldBaton = Baton(
+                    fleetID: fleetID, missionGoal: goal, repo: trimmedRepo,
+                    holder: item.agentID.uuidString, currentWorktree: item.worktree.path,
+                    currentBranch: item.worktree.branch, scopeGlobs: item.lease, state: .held,
+                    lineage: [BatonHop(
+                        from: "captain", to: item.agentID.uuidString,
+                        atEpoch: nowEpoch, state: .held)])
+                guard batonStore.save(heldBaton) else {
+                    let reason = batonStore.lastSaveError() ?? "unknown baton persistence error"
+                    launchIssues.append("baton persistence failed for \(item.agentID.uuidString): \(reason)")
+                    var failedBoard = board
+                    failedBoard.cells[cellIndex].status = .failed
+                    failedBoard.revision += 1
+                    board = failedBoard
+                    if !boardStore.seed(failedBoard) {
+                        let boardReason = boardStore.lastSaveError()
+                            ?? "unknown blackboard persistence error"
+                        launchIssues.append(
+                            "failed to persist baton-failure status for \(item.agentID.uuidString): \(boardReason)")
+                        break
+                    }
+                    continue
+                }
+                heldBatons[item.agentID] = heldBaton
+
+                let brief = Self.batonBrief(
+                    subtask: sub, goal: goal, agentID: item.agentID, manifest: manifest,
+                    fleetID: fleetID, worktreePath: item.worktree.path,
+                    scopeGlobs: item.lease, assignment: item.assigned.assignment)
+                group.addTask {
+                    let ok: Bool
+                    if let assignedSpawner = spawnDriver as? any AssignedAgentSpawner {
+                        ok = await assignedSpawner.spawn(
+                            task: brief, worktree: item.worktree,
+                            assignment: item.assigned.assignment)
+                    } else {
+                        ok = await spawnDriver.spawn(task: brief, worktree: item.worktree)
+                    }
+                    return SpawnResult(
+                        preparedIndex: preparedIndex, agentID: item.agentID, launched: ok)
+                }
+            }
+            for await result in group { spawnResults.append(result) }
+        }
+
+        // Completion order is nondeterministic; all durable/public state transitions are not.
+        for result in spawnResults.sorted(by: { $0.preparedIndex < $1.preparedIndex }) {
+            let item = prepared[result.preparedIndex]
+            let sub = item.assigned.subtask
+            if let idx = agents.firstIndex(where: { $0.agentID == result.agentID }) {
+                agents[idx] = LaunchedAgent(
+                    agentID: item.agentID, title: sub.title,
+                    branch: item.worktree.branch, worktreePath: item.worktree.path,
+                    scopeGlobs: item.lease, launched: result.launched,
+                    assignment: item.assigned.assignment)
+            }
+            guard !result.launched,
+                  let cellIndex = board.cells.firstIndex(where: { $0.id == item.agentID }) else {
                 continue
             }
-
-            let brief = Self.batonBrief(subtask: sub, goal: goal, agentID: item.agentID, manifest: manifest,
-                                        fleetID: fleetID, worktreePath: item.worktree.path,
-                                        scopeGlobs: item.lease,
-                                        assignment: item.assigned.assignment)
-            let ok: Bool
-            if let assignedSpawner = spawner as? any AssignedAgentSpawner {
-                ok = await assignedSpawner.spawn(task: brief, worktree: item.worktree,
-                                                 assignment: item.assigned.assignment)
-            } else {
-                ok = await spawner.spawn(task: brief, worktree: item.worktree)
+            var failedBoard = board
+            failedBoard.cells[cellIndex].status = .failed
+            failedBoard.revision += 1
+            board = failedBoard
+            if !boardStore.seed(failedBoard) {
+                let reason = boardStore.lastSaveError() ?? "unknown blackboard persistence error"
+                launchIssues.append(
+                    "failed to persist spawn-failure status for \(item.agentID.uuidString): \(reason)")
             }
-            if let idx = agents.firstIndex(where: { $0.agentID == item.agentID }) {
-                agents[idx] = LaunchedAgent(agentID: item.agentID, title: sub.title,
-                                            branch: item.worktree.branch, worktreePath: item.worktree.path,
-                                            scopeGlobs: item.lease, launched: ok,
-                                            assignment: item.assigned.assignment)
-            }
-            if !ok {
-                var failedBoard = board
-                failedBoard.cells[cellIndex].status = .failed
-                failedBoard.revision += 1
-                board = failedBoard
-                if !boardStore.seed(failedBoard) {
-                    let reason = boardStore.lastSaveError() ?? "unknown blackboard persistence error"
-                    launchIssues.append("failed to persist spawn-failure status for \(item.agentID.uuidString): \(reason)")
-                    break
-                }
-                if let timedOut = heldBaton.advanced(to: .timedOut, from: item.agentID.uuidString,
-                                                     to: "captain", atEpoch: nowEpoch),
-                   let failed = timedOut.advanced(to: .failed, from: "captain",
-                                                  to: item.agentID.uuidString, atEpoch: nowEpoch) {
-                    _ = batonStore.save(failed)
-                }
+            if let heldBaton = heldBatons[item.agentID],
+               let timedOut = heldBaton.advanced(
+                    to: .timedOut, from: item.agentID.uuidString,
+                    to: "captain", atEpoch: nowEpoch),
+               let failed = timedOut.advanced(
+                    to: .failed, from: "captain",
+                    to: item.agentID.uuidString, atEpoch: nowEpoch) {
+                _ = batonStore.save(failed)
             }
         }
 

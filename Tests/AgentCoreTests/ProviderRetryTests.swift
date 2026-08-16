@@ -102,7 +102,8 @@ final class ProviderRetryTests: XCTestCase {
             retryDelaysNanoseconds: [0]
         )
 
-        let text = try await registry.complete(providerId: "primary", messages: [ChatMessage(role: .user, content: "hi")])
+        let text = try await registry.complete(providerId: "primary", messages: [ChatMessage(role: .user, content: "hi")],
+                                               allowFallback: true)
 
         XCTAssertEqual(text, "backup-ok")
         let primaryCount = await primaryAttempts.count()
@@ -126,7 +127,8 @@ final class ProviderRetryTests: XCTestCase {
             retryDelaysNanoseconds: [0]
         )
 
-        let text = try await registry.complete(providerId: "grok", messages: [ChatMessage(role: .user, content: "hi")])
+        let text = try await registry.complete(providerId: "grok", messages: [ChatMessage(role: .user, content: "hi")],
+                                               allowFallback: true)
 
         XCTAssertEqual(text, "fallback-ok")
         let primaryCount = await primaryAttempts.count()

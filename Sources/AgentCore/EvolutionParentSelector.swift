@@ -86,15 +86,7 @@ public enum EvolutionParentSelector {
     /// Stable, process-independent seed from string tokens (FNV-1a 64). Tokens are length-prefixed so
     /// boundaries remain unambiguous even when a token contains a separator-like character.
     public static func seed(_ tokens: String...) -> UInt64 {
-        var hash: UInt64 = 0xCBF29CE484222325
-        for token in tokens {
-            let length = UInt64(token.utf8.count)
-            for shift in stride(from: 0, to: 64, by: 8) {
-                hash = (hash ^ UInt64(UInt8(truncatingIfNeeded: length >> UInt64(shift)))) &* 0x100000001B3
-            }
-            for byte in token.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001B3 }
-        }
-        return hash
+        FNV1a.seed(tokens)   // canonical length-prefixed FNV-1a (constants were inlined here)
     }
 
     /// Stable per-candidate seed for evolution parent selection. Deliberately excludes runID/candidateID:

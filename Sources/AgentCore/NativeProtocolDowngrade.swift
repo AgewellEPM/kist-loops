@@ -9,51 +9,113 @@ import Foundation
 /// native-tool-protocol rejection, transparently re-drive the SAME run in the universal text protocol —
 /// which needs no provider-side tool support. Forced `--tools native` is never silently downgraded.
 public enum NativeProtocolDowngrade {
+    public enum Decision: Sendable, Equatable {
+        /// Continue this checkpoint in text mode, but probe native again on a fresh turn.
+        case currentRunOnly
+        /// Deterministic first-request schema/support mismatch safe to quarantine by exact schema.
+        case cacheableCapabilityMismatch
+    }
 
     /// Is this error a native tool-calling protocol rejection we can recover from by switching to text?
     ///
-    /// `initialToolCall` = the FIRST native model call of the run has failed with NO successful tool
-    /// round-trip yet. That failure can't be caused by growing tool history — it's a tool-schema/tool-support
-    /// rejection — so we downgrade on ANY non-auth/non-quota HTTP status, INCLUDING a server-side 5xx.
-    /// (Live: Gemini returns a GENERIC `500 "Internal error"` for a tool schema it can't parse — no
-    /// "function" in the body — and repeats it every cycle. Downgrading once is strictly safe: a genuine
-    /// outage fails on the text protocol too → honest error; a bad tool payload succeeds without tools.)
+    /// `initialToolCall` means this turn has not completed a native assistant→tool-result round-trip yet.
+    /// It permits a run-local fallback for deterministic first-request 400/422/404 failures. A fallback is
+    /// cacheable only when `hasToolProtocolHistory` is also false for the repaired transcript actually sent:
+    /// a later REPL turn can have zero round-trips of its own while still carrying old native exchanges, and
+    /// a rejection of that accumulated history is not proof that the exact tool schema is unsupported.
     ///
     /// Mid-run (default, `initialToolCall == false`): deliberately NARROW — only a 4xx/5xx whose body NAMES
     /// tools/functions, since a mid-run 5xx is more likely a real transient that text mode can't fix.
     /// Auth (401/403), quota (429), transport, and content errors that don't mention tools are never
     /// downgrade-worthy. Fail-closed: when unsure, return false (no downgrade).
-    public static func shouldDowngrade(from error: Error, initialToolCall: Bool = false) -> Bool {
-        guard let provider = error as? AIProviderError else { return false }
+    public static func decision(from error: Error,
+                                initialToolCall: Bool = false,
+                                hasToolProtocolHistory: Bool = false,
+                                capabilityAlreadyProven: Bool = false) -> Decision? {
+        guard let provider = error as? AIProviderError else { return nil }
         switch provider {
         case .http(let status, let body):
-            // First-call rejection: downgrade on a tool-schema 4xx (400/422/404) regardless of body — a
-            // deterministic 4xx on the very first native call is almost always the tool request itself, and
-            // text mode (no tools) is a strictly safe fallback. A 5xx is treated the SAME as mid-run (below):
-            // only downgrade when the body NAMES tools. A GENERIC 5xx is far more likely a TRANSIENT outage
-            // (live repro: the exact escalated tool request returns 200; a "500 every cycle" run was a
-            // Gemini outage window) — downgrading it would silently disable native tools for the run on a
-            // blip. Generic 5xx instead flows to retry + cross-cycle provider route-around, the correct fix.
-            if initialToolCall, status == 400 || status == 422 || status == 404 { return true }
-            if status == 400 || status == 422 || status == 404 { return bodyNamesTools(body) }
-            if (500...599).contains(status) { return bodyNamesTools(body) }
-            return false
-        case .invalidResponse(let body):
-            return bodyNamesTools(body)
+            // Server faults are never evidence of a missing tool capability, regardless of wording.
+            // A generic client error can describe context, model, endpoint, or policy failures; only a
+            // bounded, explicit tool/function/schema rejection may switch protocols.
+            guard status == 400 || status == 404 || status == 422,
+                  explicitlyRejectsToolProtocol(body) else { return nil }
+            if initialToolCall, !hasToolProtocolHistory, !capabilityAlreadyProven {
+                return .cacheableCapabilityMismatch
+            }
+            return .currentRunOnly
         default:
-            return false   // missingAPIKey / invalidAPIKey / rateLimited / transport / configuration
+            return nil   // missingAPIKey / invalidAPIKey / rateLimited / transport / configuration
         }
     }
 
-    /// True when the error body references the tool/function-calling surface — the fingerprint of a
-    /// native-protocol rejection (vs an auth/quota/content error that text mode can't fix).
-    static func bodyNamesTools(_ body: String) -> Bool {
-        let b = body.lowercased()
-        // SPECIFIC phrases only — a bare "tool" would false-trigger on "the requested tool is not
-        // available" / "toolbar", masking a genuine missing-tool/config error behind a protocol downgrade.
-        let needles = ["function", "functiondeclaration", "function_call", "function calling",
-                       "tool_use", "tool_call", "tool calling", "tools are", "tool-use", "toolconfig", "tool schema"]
-        return needles.contains { b.contains($0) }
+    public static func shouldDowngrade(from error: Error, initialToolCall: Bool = false,
+                                       hasToolProtocolHistory: Bool = false,
+                                       capabilityAlreadyProven: Bool = false) -> Bool {
+        decision(from: error, initialToolCall: initialToolCall,
+                 hasToolProtocolHistory: hasToolProtocolHistory,
+                 capabilityAlreadyProven: capabilityAlreadyProven) != nil
+    }
+
+    /// Require either a provider capability code or rejection grammar whose subject is the native
+    /// tool/function/schema surface. Merely mentioning `tools parameter` in a context/model error is
+    /// not evidence that switching protocols will help and must never seed a negative capability cache.
+    static func explicitlyRejectsToolProtocol(_ body: String) -> Bool {
+        if hasStructuredCapabilityCode(body) { return true }
+        let normalized = body.lowercased()
+            .replacingOccurrences(of: "[_-]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "[^a-z0-9' ]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+
+        let surface = "(?:function (?:calling|declarations?|schemas?|definitions?|parameters?)|"
+            + "tool (?:calling|use|calls?|schemas?|config)|toolconfig|tools(?: parameter)?)"
+        let forwardRejection = "(?:is |are |was |were |has been |have been )?"
+            + "(?:unsupported|not supported|not allowed|invalid|rejected|unknown|unrecognized|disabled|unavailable|error)"
+        let patterns = [
+            "\\b\(surface)(?: [a-z0-9']+){0,3} \(forwardRejection)\\b",
+            "\\b(?:unsupported|unknown|unrecognized|invalid|disabled) \(surface)\\b",
+            "\\b(?:does not|doesn't|cannot|can't) support(?: [a-z0-9']+){0,2} \(surface)\\b",
+        ]
+        return patterns.contains { normalized.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    private static func hasStructuredCapabilityCode(_ body: String) -> Bool {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) else { return false }
+        let accepted: Set<String> = [
+            "function calling unsupported", "function calling not supported",
+            "tool calling unsupported", "tool calling not supported",
+            "tool use unsupported", "tools not supported", "tools not allowed",
+            "unsupported tool schema", "unknown tool schema", "invalid tool schema",
+        ]
+        func normalizedCode(_ value: String) -> String {
+            value.lowercased()
+                .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+        }
+        func visit(_ value: Any) -> Bool {
+            if let object = value as? [String: Any] {
+                for (key, child) in object {
+                    if ["code", "type", "reason"].contains(key.lowercased()),
+                       let string = child as? String,
+                       accepted.contains(normalizedCode(string)) { return true }
+                    if visit(child) { return true }
+                }
+            } else if let array = value as? [Any] {
+                return array.contains(where: visit)
+            }
+            return false
+        }
+        return visit(json)
+    }
+
+    /// Native protocol structures present in the effective provider transcript. Callers should pass the
+    /// transcript through `TranscriptRepair` first so incomplete crash-resume fragments that are converted
+    /// to plain notes do not masquerade as a completed native history exchange.
+    static func hasToolProtocolHistory(_ messages: [ChatMessage]) -> Bool {
+        messages.contains { message in
+            message.role == .tool || !(message.toolCalls?.isEmpty ?? true)
+        }
     }
 
     /// Flatten a native-form transcript into one the text/`complete` path can consume safely: drop the

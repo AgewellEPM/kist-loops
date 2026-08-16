@@ -27,12 +27,16 @@ final class ExtendedThinkingTests: XCTestCase {
     }
     private struct Keys: KeyStore { func key(forAccount account: String) -> String? { nil } }
 
-    private func capturedDisableThinking(extendedThinking: Bool) async -> Bool? {
+    private func capturedDisableThinking(
+        extendedThinking: Bool,
+        reasoningEffort: ProviderReasoningEffort? = nil
+    ) async -> Bool? {
         let cap = CaptureProvider()
         let loop = HeadlessAgentLoop(providers: ProviderRegistry(providers: [cap], keyStore: Keys()),
                                      providerId: "cap", model: nil, tools: .headless(),
                                      context: ToolContext(projectRoot: root),
-                                     maxIterations: 4, extendedThinking: extendedThinking)
+                                     maxIterations: 4, extendedThinking: extendedThinking,
+                                     reasoningEffort: reasoningEffort)
         _ = await loop.run(goal: "say done")
         return cap.lastDisableThinking
     }
@@ -45,6 +49,15 @@ final class ExtendedThinkingTests: XCTestCase {
     func testExtendedThinkingLetsTheModelReason() async {
         let v = await capturedDisableThinking(extendedThinking: true)
         XCTAssertEqual(v, false, "--think must let the model reason: disableThinking = false")
+    }
+
+    func testTypedEffortOverridesLegacyThinkingBoolean() async {
+        let explicitNone = await capturedDisableThinking(
+            extendedThinking: true, reasoningEffort: ProviderReasoningEffort.none)
+        XCTAssertEqual(explicitNone, true, "typed .none must override the legacy --think Boolean")
+
+        let explicitDeep = await capturedDisableThinking(extendedThinking: false, reasoningEffort: .deep)
+        XCTAssertEqual(explicitDeep, false, "typed .deep must override the legacy default-off Boolean")
     }
 
     func testToggleCopyFlipsTheFlag() {

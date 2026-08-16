@@ -49,10 +49,13 @@ public struct ChatMessage: Sendable, Codable, Equatable {
     public let toolCalls: [ToolCallRef]?
     /// For a `.tool` message: the id of the call this result answers.
     public let toolCallId: String?
+    /// Provider-issued opaque reasoning continuation state. This never contains raw reasoning text.
+    public let providerReasoningHandles: [OpaqueProviderReasoningHandle]
 
     public init(role: Role, content: String, imageData: Data? = nil, imageMimeType: String? = nil,
                 attachments: [MediaAttachment] = [],
-                toolCalls: [ToolCallRef]? = nil, toolCallId: String? = nil) {
+                toolCalls: [ToolCallRef]? = nil, toolCallId: String? = nil,
+                providerReasoningHandles: [OpaqueProviderReasoningHandle] = []) {
         self.role = role
         self.content = content
         self.imageData = imageData
@@ -60,12 +63,14 @@ public struct ChatMessage: Sendable, Codable, Equatable {
         self.attachments = attachments
         self.toolCalls = toolCalls
         self.toolCallId = toolCallId
+        self.providerReasoningHandles = Array(providerReasoningHandles.suffix(32))
     }
 
     // Custom Codable so persisted checkpoints written BEFORE `attachments` existed still decode
     // (the key is simply absent → default to []). Everything else round-trips as synthesized would.
     private enum CodingKeys: String, CodingKey {
-        case role, content, imageData, imageMimeType, attachments, toolCalls, toolCallId
+        case role, content, imageData, imageMimeType, attachments, toolCalls, toolCallId,
+             providerReasoningHandles
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,6 +82,8 @@ public struct ChatMessage: Sendable, Codable, Equatable {
         attachments = try c.decodeIfPresent([MediaAttachment].self, forKey: .attachments) ?? []
         toolCalls = try c.decodeIfPresent([ToolCallRef].self, forKey: .toolCalls)
         toolCallId = try c.decodeIfPresent(String.self, forKey: .toolCallId)
+        providerReasoningHandles = Array((try c.decodeIfPresent(
+            [OpaqueProviderReasoningHandle].self, forKey: .providerReasoningHandles) ?? []).suffix(32))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -88,6 +95,9 @@ public struct ChatMessage: Sendable, Codable, Equatable {
         if !attachments.isEmpty { try c.encode(attachments, forKey: .attachments) }
         try c.encodeIfPresent(toolCalls, forKey: .toolCalls)
         try c.encodeIfPresent(toolCallId, forKey: .toolCallId)
+        if !providerReasoningHandles.isEmpty {
+            try c.encode(providerReasoningHandles, forKey: .providerReasoningHandles)
+        }
     }
 
     public var hasImage: Bool { imageData != nil || attachments.contains { $0.kind == .image } }
@@ -136,13 +146,20 @@ public struct ModelSettings: Sendable {
     public var presencePenalty: Double?
     /// Positive thinking-token budget (Gemini 2.5). nil = provider default; ignored if disableThinking.
     public var thinkingBudget: Int?
+    /// Provider-neutral reasoning request. Nil preserves legacy direct-provider behavior.
+    public var reasoningEffort: ProviderReasoningEffort?
+    /// Native control selected by `ProviderEffortMapper`; adapters encode this instead of guessing
+    /// from the legacy Boolean when an explicit neutral request is present.
+    public var providerReasoningControl: ProviderReasoningNativeControl?
 
     public init(temperature: Double = 0.3, topP: Double = 0.9, maxTokens: Int = 4096,
                 systemPrompt: String = "", seed: Int? = nil, disableThinking: Bool = false,
                 geminiBuiltins: Bool = true, jsonOutput: Bool = false,
                 toolChoice: ToolChoice = .auto, jsonSchema: String? = nil,
                 topK: Int? = nil, stopSequences: [String] = [], frequencyPenalty: Double? = nil,
-                presencePenalty: Double? = nil, thinkingBudget: Int? = nil) {
+                presencePenalty: Double? = nil, thinkingBudget: Int? = nil,
+                reasoningEffort: ProviderReasoningEffort? = nil,
+                providerReasoningControl: ProviderReasoningNativeControl? = nil) {
         self.temperature = temperature
         self.topP = topP
         self.maxTokens = maxTokens
@@ -158,6 +175,17 @@ public struct ModelSettings: Sendable {
         self.frequencyPenalty = frequencyPenalty
         self.presencePenalty = presencePenalty
         self.thinkingBudget = thinkingBudget
+        self.reasoningEffort = reasoningEffort
+        self.providerReasoningControl = providerReasoningControl
+    }
+
+    /// Parse `jsonSchema` (a raw JSON-schema string) into an object, or nil if absent OR unparseable.
+    /// One place for the "malformed schema → nil → caller falls back to plain JSON" policy, so the OpenAI
+    /// and Gemini structured-output paths can't drift on how they handle a bad schema string.
+    public func decodedJSONSchema() -> [String: Any]? {
+        guard let s = jsonSchema, let data = s.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj
     }
 }
 
@@ -165,7 +193,12 @@ public struct ModelSettings: Sendable {
 /// one; `none` = must not call any (answer in text).
 public enum ToolChoice: String, Sendable, Equatable { case auto, any, none }
 
-public enum AIProviderError: Error, Sendable, Equatable {
+public enum ProviderStreamTimeoutPhase: String, Sendable, Equatable {
+    case firstEvent
+    case idle
+}
+
+public enum AIProviderError: Error, Sendable, Equatable, LocalizedError {
     case missingAPIKey(provider: String)
     case invalidAPIKey
     case rateLimited
@@ -173,6 +206,7 @@ public enum AIProviderError: Error, Sendable, Equatable {
     case http(status: Int, body: String)
     case transport(String)
     case configuration(String)
+    case streamTimedOut(provider: String, model: String, phase: ProviderStreamTimeoutPhase)
 
     public var isRetryable: Bool {
         switch self {
@@ -180,5 +214,43 @@ public enum AIProviderError: Error, Sendable, Equatable {
         case .http(let status, _): return status == 429 || (500...599).contains(status)
         default: return false
         }
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingAPIKey(let provider):
+            return "Missing API key for provider '\(Self.boundedContext(provider, limit: 96))'."
+        case .invalidAPIKey:
+            return "The provider rejected the configured API key."
+        case .rateLimited:
+            return "The provider rate limit was exceeded."
+        case .invalidResponse(let detail):
+            return "The provider returned an invalid response: \(Self.boundedContext(detail))"
+        case .http(let status, let body):
+            let bodyContext = body.isEmpty ? "no response body" : "response body omitted"
+            return "The provider HTTP request failed with status \(status) (\(bodyContext))."
+        case .transport(let detail):
+            return "Provider transport error: \(Self.boundedContext(detail))"
+        case .configuration(let detail):
+            return "Provider configuration error: \(Self.boundedContext(detail))"
+        case .streamTimedOut(let provider, let model, let phase):
+            return "Provider stream timed out (provider: \(Self.boundedContext(provider, limit: 96)), "
+                + "model: \(Self.boundedContext(model, limit: 96)), phase: \(phase.rawValue))."
+        }
+    }
+
+    /// Bound before running repository redactors so a server-controlled diagnostic cannot turn
+    /// error rendering into unbounded regex work. The second bound covers redactor expansion.
+    private static func boundedContext(_ raw: String, limit: Int = 320) -> String {
+        let sample = raw.prefix(limit + 1)
+        let inputWasTruncated = sample.count > limit
+        let boundedInput = String(sample.prefix(limit))
+        let redacted = SecretMasker.mask(SecretScanner.redactSecrets(in: boundedInput))
+        let singleLine = redacted.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let output = singleLine.prefix(limit + 1)
+        let outputWasTruncated = output.count > limit
+        let context = String(output.prefix(limit))
+        guard !context.isEmpty else { return "no additional details" }
+        return context + (inputWasTruncated || outputWasTruncated ? " [truncated]" : "")
     }
 }

@@ -17,6 +17,7 @@ public enum ProviderFault {
         switch e {
         case .rateLimited:          return true
         case .transport:            return true                 // connection reset / timeout / TLS
+        case .streamTimedOut:       return true
         case .http(let status, _):  return status == 429 || (500...599).contains(status)
         case .invalidResponse:      return false                // malformed body ≠ server down
         case .missingAPIKey, .invalidAPIKey, .configuration:

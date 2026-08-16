@@ -8,7 +8,7 @@ import Foundation
 /// Recursion is bounded by construction: nested sub-agents receive `spawn_agent` only while a
 /// caller-supplied delegation-depth budget remains, so a team can ask for help without forking
 /// unboundedly.
-public struct SpawnAgentTool: AgentTool {
+public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
     public let name = "spawn_agent"
     public var description: String {
         "Delegate a focused, SELF-CONTAINED subtask to a fresh sub-agent. " +
@@ -18,6 +18,8 @@ public struct SpawnAgentTool: AgentTool {
         "Optionally set role to planner, worker/researcher, coder/builder, or critic/reviewer; " +
         "current role bindings: \(roleBindings.summary). You may also set provider/model directly " +
         "to spawn any configured AI for this subtask. " +
+        "Set background=true to receive a typed handle immediately; use join_agent, steer_agent, " +
+        "or cancel_agent to control that isolated run. " +
         (delegationDepthRemaining > 0
             ? "This sub-agent may delegate \(delegationDepthRemaining) more level(s) to teammates if it gets stuck."
             : "This sub-agent cannot delegate further.")
@@ -27,6 +29,7 @@ public struct SpawnAgentTool: AgentTool {
         ToolParameter(name: "role", type: "string", description: "Optional specialist role for the sub-agent: planner, worker/researcher, coder/builder, or critic/reviewer.", required: false),
         ToolParameter(name: "provider", type: "string", description: "Optional provider id/name override for this sub-agent, e.g. deepseek, gemini, openai, mimo.", required: false),
         ToolParameter(name: "model", type: "string", description: "Optional model id override for this sub-agent. If provider is omitted, it overrides the selected role/default provider's model.", required: false),
+        ToolParameter(name: "background", type: "boolean", description: "Run concurrently in a mandatory isolated worktree and return a handle immediately.", required: false),
     ]
 
     private let providers: ProviderRegistry
@@ -43,6 +46,7 @@ public struct SpawnAgentTool: AgentTool {
     /// Shared token ledger — the SAME instance the parent loop uses, so every delegated/fleet agent
     /// draws from ONE global budget (BudgetLedger is an actor). nil = uncapped.
     private let budget: BudgetLedger?
+    public let delegationRegistry: AsyncDelegationRegistry
 
     public init(providers: ProviderRegistry, providerId: String, model: String?,
                 roles: RoleBindings? = nil,
@@ -51,7 +55,8 @@ public struct SpawnAgentTool: AgentTool {
                 maxIterations: Int = 10,
                 delegationDepth: Int = 0,
                 extendedThinking: Bool = false,
-                budget: BudgetLedger? = nil) {
+                budget: BudgetLedger? = nil,
+                delegationRegistry: AsyncDelegationRegistry = .shared) {
         self.providers = providers
         self.providerId = providerId
         self.model = model
@@ -64,6 +69,7 @@ public struct SpawnAgentTool: AgentTool {
         self.delegationDepthRemaining = max(0, delegationDepth)
         self.extendedThinking = extendedThinking
         self.budget = budget
+        self.delegationRegistry = delegationRegistry
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
@@ -92,6 +98,11 @@ public struct SpawnAgentTool: AgentTool {
         // so the child can only ever be narrower).
         let parentCeiling = await context.skillTracker?.activeToolAllowlist()
         let childTools = parentCeiling.map { subTools(for: selected).scoped(to: Array($0)) } ?? subTools(for: selected)
+        let background = optionalBool("background", from: arguments) ?? false
+        if background {
+            return await spawnBackground(task: task, compiledTask: compiledTask, role: role,
+                                         selected: selected, childTools: childTools, context: context)
+        }
         let sub = HeadlessAgentLoop(
             providers: providers, providerId: selected.providerId, model: selected.model,
             tools: childTools, context: context, sink: sink,
@@ -137,9 +148,113 @@ public struct SpawnAgentTool: AgentTool {
             maxIterations: maxIterations,
             delegationDepth: delegationDepthRemaining - 1,
             extendedThinking: extendedThinking,
-            budget: budget   // propagate the shared ledger down the whole delegation tree
+            budget: budget,   // propagate the shared ledger down the whole delegation tree
+            delegationRegistry: delegationRegistry
         )
         return ToolRegistry(baseTools.all() + [nestedSpawn])
+    }
+
+    private func spawnBackground(task: String, compiledTask: String, role: AgentRole?,
+                                 selected: ProviderBinding, childTools: ToolRegistry,
+                                 context: ToolContext) async -> ToolResult {
+        guard let worktree = GitIsolation.makeWorktree(
+            repo: context.projectRoot, label: "background-agent",
+            nowEpoch: Date().timeIntervalSince1970) else {
+            return .failure("background delegation requires worktree isolation, but no worktree could be created; refusing live-tree execution")
+        }
+        let sandbox = context.sandbox.confineWrites ? context.sandbox
+            : SandboxPolicy.confined(denyNetwork: false, confineWrites: true)
+        let runContext = ToolContext(
+            projectRoot: worktree.path, shell: context.shell, sandbox: sandbox,
+            authorizationScope: context.authorizationScope,
+            scopeOverrideApproved: context.scopeOverrideApproved,
+            skillLocations: context.skillLocations, skillTracker: context.skillTracker,
+            auditLog: context.auditLog, externalReadRoots: context.externalReadRoots)
+        let inboxName = DelegationInboxTool(mailbox: DelegationSteeringMailbox()).name
+        let childNames = Set(childTools.names + [inboxName])
+        let mcpServers = Set(childNames.compactMap { name -> String? in
+            guard ReversibilityClassifier.isMCPTool(name) else { return nil }
+            return name.components(separatedBy: MCPClientManager.namespaceSeparator).first
+        })
+        let remainingTokens = await budget?.remaining()
+        let childCeiling = DelegationCapabilityCeiling(
+            allowedToolNames: childNames, allowedMCPServers: mcpServers,
+            allowedProjectPaths: [worktree.path], maxIterations: maxIterations,
+            maxTokens: remainingTokens, maxDelegationDepth: delegationDepthRemaining,
+            requiresMutationApproval: true)
+        let parentCapability = DelegationCapabilityCeiling(
+            allowedToolNames: childNames, allowedMCPServers: mcpServers,
+            allowedProjectPaths: [context.projectRoot, worktree.path], maxIterations: maxIterations,
+            maxTokens: remainingTokens, maxDelegationDepth: delegationDepthRemaining,
+            requiresMutationApproval: true)
+        let request = DelegationRequest(role: role?.rawValue ?? "worker", task: task,
+                                        capabilityCeiling: childCeiling)
+        do {
+            let handle = try await delegationRegistry.spawn(request, parentCeiling: parentCapability) { execution in
+                let before = await self.budget?.spentTokens() ?? 0
+                let tools = childTools.adding(DelegationInboxTool(mailbox: execution.steering))
+                let backgroundGoal = compiledTask + """
+
+
+                BACKGROUND CONTROL: call delegation_updates before each major phase and before your
+                final response; incorporate every returned parent message without widening scope.
+                """
+                let loop = HeadlessAgentLoop(
+                    providers: self.providers, providerId: selected.providerId, model: selected.model,
+                    tools: tools, context: runContext, sink: self.sink,
+                    interactor: self.interactor, approvalTools: self.approvalTools,
+                    maxIterations: self.maxIterations, extendedThinking: self.extendedThinking,
+                    budget: self.budget,
+                    contextWindow: ContextWindowManager.forModel(
+                        capabilities: self.providers.capabilities(providerId: selected.providerId,
+                                                                  model: selected.model)))
+                let outcome = await loop.run(goal: backgroundGoal)
+                let committed = GitIsolation.commit(worktree, message: "background agent: \(task.prefix(60))")
+                let changed = GitIsolation.committedChangedPaths(worktree)
+                if changed.isEmpty { GitIsolation.discard(worktree) }
+                let artifacts = changed.map {
+                    ReasoningArtifactReference(
+                        id: execution.handle.id + ":" + $0, path: $0,
+                        revision: worktree.branch + (committed ? ":committed" : ":uncommitted"))
+                }
+                let evidence = ReasoningEvidenceReference(
+                    id: execution.handle.id + ":summary", kind: .delegation,
+                    locator: worktree.branch, summary: outcome.summary)
+                let check = ReasoningCheckReceipt(
+                    id: execution.handle.id + ":completion", name: "delegated task completion",
+                    state: outcome.success ? .passed : .failed, evidenceID: evidence.id)
+                var progress = artifacts.map {
+                    ReasoningProgressReceipt(evidence: .artifact($0))
+                }
+                progress.append(ReasoningProgressReceipt(
+                    evidence: .delegationCompleted(effectID: execution.handle.id,
+                                                   childID: outcome.checkpointId,
+                                                   artifactIDs: artifacts.map(\.id))))
+                var risks: [ReasoningRiskReceipt] = []
+                if !outcome.success {
+                    risks.append(ReasoningRiskReceipt(level: .high,
+                                                       summary: "background delegation did not complete successfully"))
+                }
+                if !changed.isEmpty && !committed {
+                    risks.append(ReasoningRiskReceipt(level: .high,
+                                                       summary: "isolated changes remain uncommitted"))
+                }
+                let after = await self.budget?.spentTokens() ?? before
+                return DelegationResult(
+                    handleID: execution.handle.id, summary: outcome.summary,
+                    artifacts: artifacts, checks: [check], evidence: [evidence], risks: risks,
+                    progress: progress,
+                    childCheckpointID: outcome.checkpointId.isEmpty ? nil : outcome.checkpointId,
+                    tokensSpent: max(0, after - before))
+            }
+            return ToolResult(
+                success: true, output: try DelegationProjection.encode(handle),
+                metadata: ["delegation_handle": handle.id, "delegation_status": "running",
+                           "sub_agent_provider": selected.providerId])
+        } catch {
+            GitIsolation.discard(worktree)
+            return .failure("could not start background delegation: \(error)")
+        }
     }
 
     private func optionalString(_ key: String, from arguments: [String: Any]) -> String? {

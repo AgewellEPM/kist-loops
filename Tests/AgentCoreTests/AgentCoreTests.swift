@@ -203,6 +203,7 @@ final class AgentCoreTests: XCTestCase {
             "mimo", "zhipu", "moonshot", "deepseek", "qwen", "doubao", "hunyuan", "ernie",
             "yi", "stepfun", "baichuan", "minimax", "openai", "grok", "mlx",
             "anthropic", "gemini", "watsonx", "ollama",
+            "cobol",   // local offline COBOL model (0.17.42) — unconditional, no key, out of default rotation
         ]
         if CLIChatProvider.claudeCode().isInstalled() { expected.insert("claude-cli") }
         if CLIChatProvider.codexCLI().isInstalled() { expected.insert("codex-cli") }
@@ -218,6 +219,27 @@ final class AgentCoreTests: XCTestCase {
             XCTAssertFalse(p.requiresAPIKey, "\(p.id) must not require an API key")
             XCTAssertFalse(p.supportsNativeTools, "\(p.id) must use the text-protocol path")
         }
+    }
+
+    func testCodexCLIAdvertisesTheProbedSubscriptionModel() {
+        let provider = CLIChatProvider.codexCLI()
+
+        XCTAssertEqual(provider.defaultModel, "gpt-5.6-sol")
+        XCTAssertEqual(provider.availableModels.map(\.id), ["gpt-5.6-sol"])
+    }
+
+    func testCodexCLIAlwaysPassesEveryNonemptyRequestedModelExplicitly() {
+        let provider = CLIChatProvider.codexCLI()
+
+        for model in [provider.defaultModel, "gpt-explicit-override"] {
+            let arguments = provider.argsForModel(model)
+            let modelFlag = try? XCTUnwrap(arguments.firstIndex(of: "--model"))
+            XCTAssertNotNil(modelFlag)
+            if let modelFlag {
+                XCTAssertEqual(arguments[modelFlag + 1], model)
+            }
+        }
+        XCTAssertFalse(provider.argsForModel("").contains("--model"))
     }
 
     func testCatalogGatesCLIProvidersOnInstallation() {

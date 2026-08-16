@@ -24,8 +24,10 @@ public actor OAuthTokenStore {
     }
 
     public init(path: String? = nil) {
-        self.path = path ?? (NSHomeDirectory() as NSString).appendingPathComponent(".kist/mcp-oauth.json")
-        load()
+        let resolvedPath = path
+            ?? (NSHomeDirectory() as NSString).appendingPathComponent(".kist/mcp-oauth.json")
+        self.path = resolvedPath
+        self.records = Self.loadRecords(at: resolvedPath)
     }
 
     public func token(for server: String) -> MCPOAuth.Token? { records[server]?.token }
@@ -69,14 +71,14 @@ public actor OAuthTokenStore {
 
     // MARK: - Persistence
 
-    private func load() {
-        guard FileManager.default.fileExists(atPath: path) else { return }
+    private static func loadRecords(at path: String) -> [String: Record] {
+        guard FileManager.default.fileExists(atPath: path) else { return [:] }
         // Refuse a token file that isn't owner-only (a group/world-readable secret file is a leak).
         if let perms = (try? FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue,
-           (perms & 0o077) != 0 { return }
+           (perms & 0o077) != 0 { return [:] }
         guard let data = FileManager.default.contents(atPath: path),
-              let raw = try? JSONDecoder().decode([String: Persisted].self, from: data) else { return }
-        records = raw.compactMapValues { p in
+              let raw = try? JSONDecoder().decode([String: Persisted].self, from: data) else { return [:] }
+        return raw.compactMapValues { p in
             guard let ep = URL(string: p.tokenEndpoint) else { return nil }
             return Record(token: MCPOAuth.Token(accessToken: p.accessToken, refreshToken: p.refreshToken,
                                                 expiresAt: p.expiresAtEpoch.map { Date(timeIntervalSince1970: $0) }),

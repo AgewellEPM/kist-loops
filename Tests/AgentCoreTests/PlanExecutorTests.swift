@@ -96,7 +96,7 @@ final class PlanExecutorTests: XCTestCase {
             PlanStep(id: "E1", intent: "edit source", tool: "write_file",
                      argumentsJSON: #"{"path":"Sources/App.swift","content":"let value = 1\n"}"#),
             PlanStep(id: "E2", intent: "verify", tool: "run_command",
-                     argumentsJSON: #"{"command":"swift test"}"#, dependsOn: ["E1"]),
+                     argumentsJSON: #"{"executable":"swift","args":["test"]}"#, dependsOn: ["E1"]),
         ])
         let exec = await PlanExecutor(
             tools: ToolRegistry([WriteFileTool(), RepairableRunCommandTool()]),
@@ -121,7 +121,7 @@ final class PlanExecutorTests: XCTestCase {
     func testFailedPartialMutationSurvivesHarmlessRepairInAttemptLedger() async throws {
         let plan = ExecutablePlan(goal: "recover without hiding a partial write", steps: [
             PlanStep(id: "E1", intent: "write source then fail", tool: "run_command",
-                     argumentsJSON: #"{"command":"printf broken > Sources/Partial.swift"}"#),
+                     argumentsJSON: #"{"executable":"touch","args":["Sources/Partial.swift"]}"#),
             PlanStep(id: "E2", intent: "write release note", tool: "write_file",
                      argumentsJSON: #"{"path":"README.md","content":"done"}"#, dependsOn: ["E1"]),
         ])
@@ -154,7 +154,7 @@ final class PlanExecutorTests: XCTestCase {
             PlanStep(id: "E1", intent: "edit source", tool: "write_file",
                      argumentsJSON: #"{"path":"Sources/App.swift","content":"let x = 1"}"#),
             PlanStep(id: "E2", intent: "verify", tool: "run_command",
-                     argumentsJSON: #"{"command":"swift test"}"#),
+                     argumentsJSON: #"{"executable":"swift","args":["test"]}"#),
         ])
         let exec = await PlanExecutor(
             tools: ToolRegistry([WriteFileTool(), PassingRunCommandTool()]),
@@ -180,7 +180,7 @@ final class PlanExecutorTests: XCTestCase {
             PlanStep(id: "E1", intent: "edit source", tool: "write_file",
                      argumentsJSON: #"{"path":"Sources/App.swift","content":"broken"}"#),
             PlanStep(id: "E2", intent: "verify", tool: "run_command",
-                     argumentsJSON: #"{"command":"swift test"}"#),
+                     argumentsJSON: #"{"executable":"swift","args":["test"]}"#),
         ])
         let exec = await PlanExecutor(
             tools: ToolRegistry([RepairingWriteFileTool(), PassingRunCommandTool()]),
@@ -205,7 +205,7 @@ final class PlanExecutorTests: XCTestCase {
             PlanStep(id: "E1", intent: "edit source", tool: "write_file",
                      argumentsJSON: #"{"path":"Sources/App.swift","content":"let x = 1"}"#),
             PlanStep(id: "E2", intent: "verify", tool: "run_command",
-                     argumentsJSON: #"{"command":"swift test"}"#, dependsOn: ["E1"]),
+                     argumentsJSON: #"{"executable":"swift","args":["test"]}"#, dependsOn: ["E1"]),
         ])
         let exec = await PlanExecutor(
             tools: ToolRegistry([WriteFileTool(), PassingRunCommandTool()]),
@@ -318,7 +318,8 @@ private struct RepairableRunCommandTool: AgentTool {
     let parameters: [ToolParameter] = []
 
     func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
-        if arguments["command"] as? String == "swift test" {
+        if arguments["executable"] as? String == "swift",
+           arguments["args"] as? [String] == ["test"] {
             return .failure("simulated failing tests")
         }
         if arguments["executable"] as? String == "true" {
@@ -344,7 +345,8 @@ private struct PartialFailureRunCommandTool: AgentTool {
     let parameters: [ToolParameter] = []
 
     func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
-        if arguments["command"] as? String != nil {
+        if arguments["executable"] as? String == "touch",
+           arguments["args"] as? [String] == ["Sources/Partial.swift"] {
             try FileManager.default.createDirectory(atPath: context.projectRoot + "/Sources",
                                                     withIntermediateDirectories: true)
             try "broken".write(toFile: context.projectRoot + "/Sources/Partial.swift",

@@ -199,6 +199,33 @@ public enum PromptCompiler {
                 resolvedIntent: resolvedIntent).prompt
     }
 
+    /// Recover the typed request field from a TaskBrief prompt. Safety/risk gates must classify
+    /// what the user requested, not generated constraints such as "do not expose credentials".
+    /// Returns nil for ordinary text and for malformed/ambiguous brief-shaped input.
+    public static func originalRequest(fromCompiledPrompt prompt: String) -> String? {
+        guard prompt.contains("TASK BRIEF") else { return nil }
+        let label = "\nOriginal user request:\n"
+        let intentMarker = "\n\nInterpreted intent:"
+        let executionMarker = "\nExecution mode:"
+        let riskMarker = "\nRisk level:"
+
+        guard let executionRange = prompt.range(of: executionMarker),
+              prompt.range(of: riskMarker,
+                           range: executionRange.upperBound..<prompt.endIndex) != nil,
+              let intentRange = prompt.range(of: intentMarker,
+                                             options: .backwards,
+                                             range: prompt.startIndex..<executionRange.lowerBound),
+              let labelRange = prompt.range(of: label,
+                                            options: .backwards,
+                                            range: prompt.startIndex..<intentRange.lowerBound) else {
+            return nil
+        }
+        let request = prompt[labelRange.upperBound..<intentRange.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !request.isEmpty else { return nil }
+        return request
+    }
+
     public static func conversationContext(from transcript: [ChatMessage],
                                            maxMessages: Int = 10,
                                            maxCharacters: Int = 2_400) -> String? {
@@ -253,6 +280,14 @@ public enum PromptCompiler {
             "explain ", "describe ", "tell me ", "what ", "why ", "how ", "where ", "when ",
             "which ", "who ", "how would ", "what would ", "should i ", "should we ",
         ].contains { lower.hasPrefix($0) }
+        if isOwnCodeInspection(lower) {
+            let asksForRepair = containsAny(lower, [
+                "fix it", "fix this", "then fix", "and fix", "need to fix", "repair it", "patch it"
+            ])
+            if !explicitlyReadOnly, asksForRepair { return .build }
+            if containsAny(lower, ["review", "audit", "assess", "analyze", "analyse"]) { return .review }
+            return .chat
+        }
         if !explicitlyReadOnly, !asksForExplanation,
            containsAny(lower, ["open safari", "open chrome", "open firefox", "open browser", "youtube",
                                "play me", "clean desktop", "clean my desktop"]) {
@@ -491,6 +526,20 @@ public enum PromptCompiler {
                 "upgrade", "downgrade", "configure", "refactor", "patch", "update", "commit"].contains {
             directive == $0 || directive.hasPrefix($0 + " ")
         }
+    }
+
+    private static func isOwnCodeInspection(_ text: String) -> Bool {
+        let namesLocalSystem = containsAny(text, [
+            "kist", ".kist", "the captain", "captain/orchestration", "orchestration loop",
+            "this system", "your system", "your code", "your source", "our code", "our repo",
+            "build queue", "research queue"
+        ])
+        let inspectsOrRepairs = containsAny(text, [
+            "why", "how does", "what is", "where", "hardcod", "same for every", "analy",
+            "assess", "audit", "inspect", "trace", "findout", "find out", "fix it", "fix this",
+            "need to fix"
+        ])
+        return namesLocalSystem && inspectsOrRepairs
     }
 
     private static func normalized(_ text: String) -> String {

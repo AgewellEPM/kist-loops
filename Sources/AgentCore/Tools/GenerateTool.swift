@@ -33,7 +33,6 @@ public struct GenerateTool: AgentTool {
         self.recorder = recorder; self.budget = budget; self.sink = sink
     }
 
-    /// If the ENTIRE text is a single ```lang … ``` block, return the inner code; otherwise return
     /// Extract the real code from a model reply meant to be a file's content. Handles the three
     /// shapes models actually return: (1) raw code (no fence) → unchanged; (2) a sole ```lang…```
     /// block → its inner content; (3) PROSE wrapping one or MORE fenced blocks (e.g. "Okay, here's
@@ -42,7 +41,11 @@ public struct GenerateTool: AgentTool {
     /// visual-dogfood bug: the model wrapped DOS asm in an essay + extra ```bash``` blocks, the
     /// whole essay was written to hello.asm, and nasm choked on "Okay, here's…".
     static func unwrapSoleCodeFence(_ text: String) -> String {
-        let lines = text.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
+        // Never normalize the payload before inspecting it. Plain generated content is a byte-bearing
+        // artifact, and leading whitespace / terminal newlines can be semantically required. Splitting
+        // and rejoining only the selected fenced payload preserves every interior byte, including the
+        // newline which separates its final content line from the closing fence.
+        let lines = text.components(separatedBy: "\n")
         let isFence: (String) -> Bool = { line in
             let s = line.trimmingCharacters(in: .whitespaces)
             return s.range(of: #"^```[A-Za-z0-9_+#.\-]*$"#, options: .regularExpression) != nil
@@ -57,7 +60,7 @@ public struct GenerateTool: AgentTool {
         guard let best = blocks.filter({ $0.close > $0.open + 1 })
                                .max(by: { ($0.close - $0.open) < ($1.close - $1.open) })
         else { return text }
-        return lines[(best.open + 1)..<best.close].joined(separator: "\n")
+        return lines[(best.open + 1)..<best.close].joined(separator: "\n") + "\n"
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
@@ -82,7 +85,8 @@ public struct GenerateTool: AgentTool {
             // later write_file wrote the backticks verbatim → the file was corrupt (2026-08-04: nasm
             // choked on ```asm at line 1). Only unwrapped when the WHOLE output is ONE fenced block,
             // so prose that merely contains a fence is left intact.
-            let trimmed = Self.unwrapSoleCodeFence(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            let generated = Self.unwrapSoleCodeFence(text)
+            let generatedIsEmpty = generated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let measured = usage.isZero ? TokenUsage.estimate(promptChars: prompt.count, completionChars: text.count) : usage
             // R0.4 sibling (review catch 2026-07-28): coder `generate` steps are often the LONGEST
             // calls in a plan and previously contributed nothing to the live token line — the same
@@ -93,7 +97,7 @@ public struct GenerateTool: AgentTool {
                 await recorder.record(AgentSpan(id: TraceID.make(), traceId: recorder.traceId, kind: .llmCall,
                     role: AgentRole.coder.rawValue, vendor: binding.providerId, model: binding.model,
                     promptTokens: measured.promptTokens, completionTokens: measured.completionTokens,
-                    startedAt: started, endedAt: Date(), status: trimmed.isEmpty ? .error : .ok))
+                    startedAt: started, endedAt: Date(), status: generatedIsEmpty ? .error : .ok))
             }
             if let budget, let id = reservationID {
                 let usd = CompetitiveBenchmark.priceUSD(vendor: binding.providerId,
@@ -101,8 +105,8 @@ public struct GenerateTool: AgentTool {
                                                         completionTokens: measured.completionTokens) ?? 0
                 await budget.commit(reservation: id, actualTokens: measured.total, actualUSD: usd)
             }
-            guard !trimmed.isEmpty else { return ToolResult.failure("generate produced empty output") }
-            return ToolResult(success: true, output: trimmed, metadata: ["provider": binding.providerId])
+            guard !generatedIsEmpty else { return ToolResult.failure("generate produced empty output") }
+            return ToolResult(success: true, output: generated, metadata: ["provider": binding.providerId])
         } catch {
             // Release the reservation on failure so a failed call doesn't leak its hold.
             if let id = reservationID { await budget?.commit(reservation: id, actualTokens: 0, actualUSD: 0) }

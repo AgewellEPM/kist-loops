@@ -1,5 +1,50 @@
 import Foundation
 
+public enum PEELEvidenceStatus: String, Codable, Sendable, Equatable {
+    case passed
+    case failed
+    case skippedUnavailable
+    case blockedRequired
+}
+
+/// Durable, bounded proof that a particular research run crossed (or failed to cross) the symbolic
+/// PEEL gate. It stores lineage and a content digest, never private model reasoning.
+public struct PEELEvidenceReceipt: Codable, Sendable, Equatable {
+    public let researchRunID: String
+    public let status: PEELEvidenceStatus
+    public let evidenceID: String?
+    public let locator: String?
+    public let digest: String?
+    public let summary: String
+
+    public init(researchRunID: String, status: PEELEvidenceStatus,
+                evidenceID: String? = nil, locator: String? = nil,
+                digest: String? = nil, summary: String) {
+        self.researchRunID = researchRunID
+        self.status = status
+        self.evidenceID = evidenceID
+        self.locator = locator
+        self.digest = digest
+        self.summary = String(summary.prefix(1_000))
+    }
+
+    public var satisfiesRequiredGate: Bool {
+        status == .passed && evidenceID != nil && locator != nil && digest != nil
+    }
+
+    public func reasoningReference(nodeID: String) -> ReasoningEvidenceReference {
+        ReasoningEvidenceReference(
+            id: "peel:\(researchRunID):\(evidenceID ?? status.rawValue)",
+            kind: .research, nodeID: nodeID, locator: locator, digest: digest,
+            summary: "symbolic PEEL gate \(status.rawValue): \(summary)"
+        )
+    }
+
+    public static func contentDigest(_ text: String) -> String {
+        BuilderEvidenceDigest.sha256(text)
+    }
+}
+
 /// R6 (2026-07-29): the SYMBOLIC-FIRST research primitive — a first-class tool so ANY loop
 /// (plan-execute, great-loop, single-turn, fleet) can ground a factual/engineering question on TRUE
 /// FACTS instead of raw LLM guessing. It runs Luke's Jeeves link-wheel bridge (`~/bin/jeeves-research`):
@@ -31,12 +76,66 @@ public struct JeevesResearchTool: AgentTool {
     public let parameters = [
         ToolParameter(name: "query", type: "string",
                       description: "The factual/engineering question to ground on true facts.", required: true),
+        ToolParameter(name: "research_goal", type: "string",
+                      description: "Original unrendered goal required by evidence-bound PEEL.", required: false),
+        ToolParameter(name: "primary_evidence_id", type: "string",
+                      description: "Optional trusted research-ledger evidence ID for evidence-bound PEEL.", required: false),
+        ToolParameter(name: "primary_url", type: "string",
+                      description: "Fetched source URL paired with primary_evidence_text.", required: false),
+        ToolParameter(name: "primary_status", type: "integer",
+                      description: "Successful HTTP status paired with primary evidence.", required: false),
+        ToolParameter(name: "primary_digest", type: "string",
+                      description: "SHA-256 of the exact stored primary evidence text.", required: false),
+        ToolParameter(name: "primary_evidence_text", type: "string",
+                      description: "Exact bounded fetched evidence for deterministic PEEL.", required: false),
     ]
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let query = ((arguments["query"] as? String) ?? (arguments["goal"] as? String) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return .failure("jeeves_research needs a non-empty 'query'") }
+        let evidenceKeys = [
+            "primary_evidence_id", "primary_url", "primary_status", "primary_digest",
+            "primary_evidence_text",
+        ]
+        if evidenceKeys.contains(where: { arguments[$0] != nil }) {
+            guard let researchGoal = (arguments["research_goal"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !researchGoal.isEmpty,
+                  let evidenceID = arguments["primary_evidence_id"] as? String,
+                  evidenceID.range(of: #"^E[0-9]{3,}$"#, options: .regularExpression) != nil,
+                  let url = arguments["primary_url"] as? String,
+                  let status = arguments["primary_status"] as? Int,
+                  let digest = arguments["primary_digest"] as? String,
+                  let text = arguments["primary_evidence_text"] as? String,
+                  text.utf8.count <= ResearchEvidencePolicy.primaryFetchByteLimit else {
+                return .failure("evidence-bound PEEL requires one complete bounded primary evidence binding")
+            }
+            let candidate = ResearchEvidence(
+                sequence: 1, id: evidenceID, kind: "fetch_url", title: url,
+                url: url, path: nil, text: text,
+                metadata: [
+                    "status": String(status),
+                    "fetch_status": status == 206 ? "partial" : "complete",
+                    "content_sha256": digest,
+                ],
+                at: 0)
+            guard let primary = ResearchEvidencePolicy.verifiedPrimarySources(
+                in: [candidate]).first,
+                  let proof = ResearchEvidencePolicy.symbolicPEEL(
+                    goal: researchGoal, primary: primary) else {
+                return .failure(
+                    "evidence-bound PEEL rejected an invalid, tampered, contradictory, or irrelevant primary source")
+            }
+            return ToolResult(success: true, output: proof, metadata: [
+                "source": "kist-evidence-bound-peel",
+                "grounded": "true",
+                "primary_evidence_id": primary.evidenceID,
+                "primary_url": primary.url,
+                "primary_content_sha256": primary.contentSHA256,
+                "relevance": "passed",
+            ])
+        }
         return await runner(query)
     }
 

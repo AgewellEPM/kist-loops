@@ -90,11 +90,13 @@ public struct PlanStore: Sendable {
 
     /// Replace the whole plan (e.g. seeding from a runbook). Re-bases nextId past the max id.
     public func replace(title: String, tasks: [PlanTask]) {
-        let maxId = tasks.map(\.id).max() ?? 0
-        save(Plan(title: title, tasks: tasks, nextId: maxId + 1))
+        withLock {
+            let maxId = tasks.map(\.id).max() ?? 0
+            save(Plan(title: title, tasks: tasks, nextId: maxId + 1))
+        }
     }
 
-    public func clear() { save(Plan()) }
+    public func clear() { withLock { save(Plan()) } }
 
     /// Mark the lowest todo task in progress and return it (drives "start the next task").
     @discardableResult

@@ -113,6 +113,9 @@ final class ProcessGroupRunnerTests: XCTestCase {
         XCTAssertFalse(o.timedOut)
         XCTAssertEqual(o.exitCode, 0)
         XCTAssertTrue(o.combined.contains("hello-kist"), o.combined)
+        XCTAssertFalse(o.stdoutTruncated)
+        XCTAssertFalse(o.stderrTruncated)
+        XCTAssertFalse(o.outputTruncated)
     }
 
     func testExitCodePropagates() {
@@ -166,6 +169,26 @@ final class ProcessGroupRunnerTests: XCTestCase {
         let o = ProcessGroupRunner.run(launchPath: "/bin/sh", launchArgs: ["-c", "yes kist | head -n 100000"],
                                        cwd: cwd, env: env, timeoutSeconds: 10, capPerStream: 2_000)
         XCTAssertLessThanOrEqual(o.combined.utf8.count, 2_000 + 100)
+        XCTAssertTrue(o.stdoutTruncated)
+        XCTAssertFalse(o.stderrTruncated)
+        XCTAssertTrue(o.outputTruncated)
+    }
+
+    func testStderrAndAggregateTruncationAreReportedSeparately() {
+        let stderr = ProcessGroupRunner.run(
+            launchPath: "/bin/sh", launchArgs: ["-c", "yes error 1>&2"],
+            cwd: cwd, env: env, timeoutSeconds: 10, capPerStream: 2_000)
+        XCTAssertFalse(stderr.stdoutTruncated)
+        XCTAssertTrue(stderr.stderrTruncated)
+        XCTAssertTrue(stderr.outputTruncated)
+
+        let aggregate = ProcessGroupRunner.run(
+            launchPath: "/bin/sh",
+            launchArgs: ["-c", "yes o | head -c 700; yes e | head -c 700 1>&2"],
+            cwd: cwd, env: env, timeoutSeconds: 10, capPerStream: 1_000)
+        XCTAssertFalse(aggregate.stdoutTruncated)
+        XCTAssertFalse(aggregate.stderrTruncated)
+        XCTAssertTrue(aggregate.outputTruncated)
     }
 
     func testTimeoutReportedForSimpleSleep() {

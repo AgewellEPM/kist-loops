@@ -11,6 +11,12 @@ import Foundation
 /// supports cheap AUTO-escalation (feed live struggle `Signals` back and re-route) so a fast/standard run
 /// that hits a wall is promoted without the user re-asking.
 public enum TaskRouter {
+    /// Typed, provider-neutral reasoning route selection. Callers should build the
+    /// request from task metadata rather than objective wording.
+    public static func route(_ request: ReasoningRouteRequest) -> ReasoningRouteDecision {
+        SolReasoningRoutePolicy().decide(request)
+    }
+
 
     public enum Route: String, Sendable, Equatable {
         case fast       // trivial, non-mutating: lean loop — economy model, read-only tools, few iterations, skip heavy memory

@@ -56,19 +56,33 @@ public enum MCPOAuth {
     /// Parse the JSON metadata document. Endpoints must be https (or loopback) — a metadata doc can't
     /// point the flow at a cleartext or internal endpoint.
     public static func parseMetadata(_ data: Data) -> Metadata? {
+        parseMetadata(data, ssrfBlockReason: WebFetchTool.ssrfBlockReason(host:))
+    }
+
+    /// Internal resolver seam for deterministic trust-boundary tests. Production always enters through
+    /// the public overload above and therefore retains fail-closed DNS/address validation.
+    static func parseMetadata(_ data: Data, ssrfBlockReason: (String) -> String?) -> Metadata? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let authStr = obj["authorization_endpoint"] as? String, let auth = secureURL(authStr),
-              let tokenStr = obj["token_endpoint"] as? String, let token = secureURL(tokenStr) else { return nil }
-        let reg = (obj["registration_endpoint"] as? String).flatMap(secureURL)
+              let authStr = obj["authorization_endpoint"] as? String,
+              let auth = secureURL(authStr, ssrfBlockReason: ssrfBlockReason),
+              let tokenStr = obj["token_endpoint"] as? String,
+              let token = secureURL(tokenStr, ssrfBlockReason: ssrfBlockReason) else { return nil }
+        let reg = (obj["registration_endpoint"] as? String).flatMap {
+            secureURL($0, ssrfBlockReason: ssrfBlockReason)
+        }
         return Metadata(authorizationEndpoint: auth, tokenEndpoint: token, registrationEndpoint: reg)
     }
 
     /// An https URL (or explicit loopback) whose host passes the SSRF guard — nil otherwise.
     public static func secureURL(_ s: String) -> URL? {
+        secureURL(s, ssrfBlockReason: WebFetchTool.ssrfBlockReason(host:))
+    }
+
+    static func secureURL(_ s: String, ssrfBlockReason: (String) -> String?) -> URL? {
         guard let url = URL(string: s), let scheme = url.scheme?.lowercased(), let host = url.host, !host.isEmpty else { return nil }
         let loopback = MCPClientConfig.isLoopbackHost(host)
         guard scheme == "https" || (scheme == "http" && loopback) else { return nil }
-        if !loopback, WebFetchTool.ssrfBlockReason(host: host) != nil { return nil }
+        if !loopback, ssrfBlockReason(host) != nil { return nil }
         return url
     }
 

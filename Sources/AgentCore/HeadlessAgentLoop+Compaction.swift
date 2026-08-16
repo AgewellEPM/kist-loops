@@ -11,7 +11,8 @@ extension HeadlessAgentLoop {
     /// governed by their request/provider layers, not by this transcript character allowance.
     func prepareForProviderCall(_ cp: inout LoopCheckpoint,
                                         mode: ConversationTranscriptMode,
-                                        reassertObjective: Bool = true) async -> [ChatMessage] {
+                                        reassertObjective: Bool = true,
+                                        requestBudget: ProviderRequestBudget? = nil) async -> [ChatMessage] {
         let objective = reassertObjective ? Self.compactionObjective(for: cp) : nil
         let prepared = await conversationWindow.prepare(
             cp.messages,
@@ -20,7 +21,17 @@ extension HeadlessAgentLoop {
         ) { middle in
             await hooks?.fireNotification(.preCompact,
                                           detail: "compacting \(middle.count) earlier messages")
-            return await self.summarizeMiddle(middle)
+            return await self.summarizeMiddle(
+                middle, requestBudget: requestBudget,
+                routePolicy: self.providerRoutePolicy())
+        }
+        // Summarization may have admitted one or more concrete provider attempts (retry/model heal).
+        // Reconcile that durable count before this method persists compacted messages, or the message
+        // checkpoint could overwrite the just-admitted count and refund requests after a crash.
+        if let requestBudget {
+            let consumed = await requestBudget.consumedCount()
+            cp.providerRequestsConsumed = consumed
+            cp.iteration = consumed
         }
         if prepared.checkpointMessages != cp.messages {
             cp.messages = prepared.checkpointMessages
@@ -34,7 +45,9 @@ extension HeadlessAgentLoop {
 
     /// Produce the compaction summary with a cheap, non-streaming same-model call. Returns nil on any
     /// error/cancel, in which case the compactor falls back to a factual "[N compacted]" notice.
-    private func summarizeMiddle(_ middle: [ChatMessage]) async -> String? {
+    private func summarizeMiddle(_ middle: [ChatMessage],
+                                 requestBudget: ProviderRequestBudget?,
+                                 routePolicy: ProviderRoutePolicy) async -> String? {
         let systemMessage = ChatMessage(role: .system, content: Self.compactionSummaryPrompt)
         let emptyUser = ChatMessage(role: .user, content: "")
         // The summary call is itself a provider call. Bound its source independently so a huge checkpoint
@@ -54,7 +67,9 @@ extension HeadlessAgentLoop {
         let started = Date()
         do {
             let text = try await providers.complete(providerId: providerId, model: model, messages: messages,
-                                                    settings: ModelSettings(temperature: 0.0, maxTokens: 700))
+                                                    settings: ModelSettings(temperature: 0.0, maxTokens: 700),
+                                                    routePolicy: routePolicy,
+                                                    requestBudget: requestBudget)
             await recordLLMSpan(usage: .zero, promptChars: promptChars, completionChars: text.count,
                                 started: started, status: .ok, reservation: reservation)
             return text

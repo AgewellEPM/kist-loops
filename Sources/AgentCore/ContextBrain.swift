@@ -33,18 +33,36 @@ public struct ContextBrainIndex: Sendable, Equatable {
 
     public static let defaultSkipDirectories: Set<String> = [
         ".git", ".build", ".kist", "DerivedData", "node_modules", ".swiftpm",
-        ".claude", ".codex", "build", "dist", ".next"
+        ".claude", ".codex", "build", "dist", ".next",
+        // Language/package managers keep downloaded SDKs, package registries, and
+        // generated artifacts here. They are never project context and can dwarf a
+        // home-root workspace by millions of entries.
+        ".cache", ".cargo", ".gradle", ".npm", ".nvm", ".rustup", ".local",
+        ".gem", ".nuget", ".android", ".docker", ".wine", ".Trash",
+        // A launch-root workspace may intentionally be the user's home. The
+        // macOS Library is OS/app state rather than project source and can hold
+        // multi-million-entry app bundles and iCloud mirrors; indexing it makes
+        // an otherwise valid headless run appear permanently stuck.
+        "Library"
     ]
 
     public static func build(root: String,
                              chunkCharacters: Int = 12_000,
                              maxFileBytes: Int = 2_000_000,
                              maxTotalTextBytes: Int = 64_000_000,
+                             maxWalkEntries: Int = 25_000,
                              skipDirectories: Set<String> = defaultSkipDirectories) throws -> ContextBrainIndex {
         let confined = try ConfinedRoot(root: root)
         let canonicalRoot = confined.rootPath
         var filePaths: [String] = []
+        var walkedEntries = 0
         try confined.walk("", skipDirs: skipDirectories) { relPath, isDir in
+            walkedEntries += 1
+            guard walkedEntries <= max(1, maxWalkEntries) else {
+                throw ToolError.execution(
+                    "context index entry budget exceeded (\(maxWalkEntries)); " +
+                    "use a narrower project root or exclude generated/cache directories")
+            }
             if !isDir { filePaths.append(relPath) }
         }
         filePaths.sort()
@@ -93,10 +111,18 @@ public struct ContextBrainIndex: Sendable, Equatable {
     }
 
     public static func sourceSignature(root: String,
+                                       maxWalkEntries: Int = 25_000,
                                        skipDirectories: Set<String> = defaultSkipDirectories) throws -> String {
         let confined = try ConfinedRoot(root: root)
         var parts: [String] = []
+        var walkedEntries = 0
         try confined.walk("", skipDirs: skipDirectories) { relPath, isDir in
+            walkedEntries += 1
+            guard walkedEntries <= max(1, maxWalkEntries) else {
+                throw ToolError.execution(
+                    "context index entry budget exceeded (\(maxWalkEntries)); " +
+                    "use a narrower project root or exclude generated/cache directories")
+            }
             guard !isDir else { return }
             let meta = try confined.fileMetadata(relPath)
             guard meta.isRegular else { return }

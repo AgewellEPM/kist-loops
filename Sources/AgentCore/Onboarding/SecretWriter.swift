@@ -32,15 +32,30 @@ public enum SecretWriter {
     public static func write(account: String, key: String, path: String = defaultPath()) throws {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw SecretError.emptyKey }
-
-        // Merge with whatever is already there (best-effort read, perms-agnostic for merge).
-        var keys: [String: String] = [:]
-        if let data = FileManager.default.contents(atPath: path),
-           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-            keys = existing
+        try withLockedEnvelope(path: path) { envelope in
+            let previous = envelope.keys[account]?.updatedAtMilliseconds ?? Int64.min
+            let now = SecretVersioning.milliseconds()
+            let next = previous == Int64.max ? previous : max(now, previous + 1)
+            envelope.keys[account] = .make(value: trimmed, updatedAtMilliseconds: next)
         }
-        keys[account] = trimmed
+    }
 
+    /// Preserve a selected logical record while synchronizing an existing stale backend. A record that is
+    /// already newer is never overwritten, and a same-version/different-value ambiguity stays untouched.
+    static func writeVersioned(account: String, record: VersionedSecretRecord, path: String) throws {
+        guard record.isValid else { throw SecretError.writeFailed("refused invalid versioned secret record") }
+        try withLockedEnvelope(path: path) { envelope in
+            if let existing = envelope.keys[account] {
+                if existing.updatedAtMilliseconds > record.updatedAtMilliseconds { return }
+                if existing.updatedAtMilliseconds == record.updatedAtMilliseconds,
+                   existing.digest != record.digest { return }
+            }
+            envelope.keys[account] = record
+        }
+    }
+
+    private static func withLockedEnvelope(path: String,
+                                           mutate: (inout SecretFileEnvelope) throws -> Void) throws {
         let dir = (path as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(
             atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -52,11 +67,54 @@ public enum SecretWriter {
             throw SecretError.permsFailed("secret dir \(dir) is not owner-only (0700)")
         }
 
+        // A stable sidecar lock serializes the read/merge/rename transaction across threads and processes.
+        // Locking the destination inode would be ineffective because the atomic rename replaces that inode.
+        let lockPath = path + ".lock"
+        let lockFD = open(lockPath, O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+        guard lockFD >= 0 else { throw SecretError.writeFailed("could not securely open key-file lock") }
+        defer { _ = flock(lockFD, LOCK_UN); close(lockFD) }
+        guard fchmod(lockFD, 0o600) == 0, flock(lockFD, LOCK_EX) == 0 else {
+            throw SecretError.writeFailed("could not acquire owner-only key-file lock")
+        }
+
+        var envelope = try loadEnvelope(path: path)
+        try mutate(&envelope)
+        try persist(envelope: envelope, path: path, dir: dir)
+    }
+
+    private static func loadEnvelope(path: String) throws -> SecretFileEnvelope {
+        guard FileManager.default.fileExists(atPath: path) else {
+            return SecretFileEnvelope(formatVersion: SecretFileEnvelope.currentFormat, keys: [:])
+        }
+        guard let data = FileManager.default.contents(atPath: path) else {
+            throw SecretError.writeFailed("could not read existing key file")
+        }
+        if let envelope = try? JSONDecoder().decode(SecretFileEnvelope.self, from: data),
+           envelope.formatVersion == SecretFileEnvelope.currentFormat,
+           envelope.keys.values.allSatisfy(\.isValid) {
+            return envelope
+        }
+        if let legacy = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+           legacy.values.allSatisfy({ !$0.isEmpty }) {
+            let modified = ((try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date)
+                .map(SecretVersioning.milliseconds) ?? 0
+            return SecretFileEnvelope(formatVersion: SecretFileEnvelope.currentFormat,
+                                      keys: legacy.mapValues { .make(value: $0, updatedAtMilliseconds: modified) })
+        }
+        throw SecretError.writeFailed("existing key file is corrupt or uses an unsupported format")
+    }
+
+    private static func persist(envelope: SecretFileEnvelope, path: String, dir: String) throws {
+
         // FAIL-CLOSED secure write. O_CREAT|O_EXCL|O_NOFOLLOW: the temp is brand-new and never a
         // symlink (defeats a pre-planted-symlink TOCTOU), created at 0600 so it's owner-only the
         // instant it exists. Then atomic rename (keeps the 0600 inode) + exact-perm verify.
         let data: Data
-        do { data = try JSONSerialization.data(withJSONObject: keys, options: [.sortedKeys]) }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            data = try encoder.encode(envelope)
+        }
         catch { throw SecretError.writeFailed("\(error)") }
 
         let tmpPath = dir + "/.keys-\(ProcessInfo.processInfo.globallyUniqueString).tmp"

@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 #if canImport(Security)
 import Security
 #endif
@@ -12,6 +13,15 @@ import LocalAuthentication
 /// "keychain reader with env fallback" seam from the unification spec.
 public protocol KeyStore: Sendable {
     func key(forAccount account: String) -> String?
+    /// Presence checks must not require decrypting the secret. The default preserves compatibility
+    /// for simple stores; Keychain overrides it so startup/catalog probes cannot block on ACL UI.
+    func containsKey(forAccount account: String) -> Bool
+}
+
+public extension KeyStore {
+    func containsKey(forAccount account: String) -> Bool {
+        key(forAccount: account) != nil
+    }
 }
 
 /// Env-var first/last helpers shared by both implementations. Account
@@ -19,6 +29,71 @@ public protocol KeyStore: Sendable {
 private func envKey(_ account: String) -> String? {
     let v = ProcessInfo.processInfo.environment[account.uppercased()]
     return (v?.isEmpty == false) ? v : nil
+}
+
+/// Logical secret record shared by the file and Keychain backends. The digest binds the version to
+/// the value, so an external Keychain rotation that changes the value while leaving old metadata is
+/// detected rather than mistaken for an already-synchronized record.
+struct VersionedSecretRecord: Codable, Sendable, Equatable {
+    let value: String
+    let updatedAtMilliseconds: Int64
+    let digest: String
+
+    static func make(value: String, updatedAtMilliseconds: Int64) -> VersionedSecretRecord {
+        VersionedSecretRecord(value: value, updatedAtMilliseconds: updatedAtMilliseconds,
+                              digest: SecretVersioning.digest(value))
+    }
+
+    var isValid: Bool { !value.isEmpty && digest == SecretVersioning.digest(value) }
+
+    enum CodingKeys: String, CodingKey {
+        case value
+        case updatedAtMilliseconds = "updated_at_ms"
+        case digest
+    }
+}
+
+struct SecretFileEnvelope: Codable, Sendable, Equatable {
+    static let currentFormat = 1
+    let formatVersion: Int
+    var keys: [String: VersionedSecretRecord]
+
+    enum CodingKeys: String, CodingKey {
+        case formatVersion = "format_version"
+        case keys
+    }
+}
+
+enum SecretRecordSource: Sendable, Equatable { case primary, fallback }
+
+enum SecretVersioning {
+    static func digest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func milliseconds(_ date: Date = Date()) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1_000).rounded(.down))
+    }
+
+    /// Deterministic newest-record selection. A tie prefers the primary backend; synchronized records
+    /// normally have the same digest, while a same-version/different-value tie is ambiguous and must not
+    /// let a fallback silently replace the primary.
+    static func newest(primary: VersionedSecretRecord?, fallback: VersionedSecretRecord?)
+        -> (record: VersionedSecretRecord, source: SecretRecordSource)? {
+        switch (primary?.isValid == true ? primary : nil, fallback?.isValid == true ? fallback : nil) {
+        case let (.some(primary), .some(fallback)):
+            return fallback.updatedAtMilliseconds > primary.updatedAtMilliseconds
+                ? (fallback, .fallback) : (primary, .primary)
+        case let (.some(primary), .none): return (primary, .primary)
+        case let (.none, .some(fallback)): return (fallback, .fallback)
+        case (.none, .none): return nil
+        }
+    }
+}
+
+protocol VersionedKeyStore: KeyStore {
+    func versionedKey(forAccount account: String) -> VersionedSecretRecord?
+    func synchronize(_ record: VersionedSecretRecord, forAccount account: String) throws
 }
 
 #if canImport(Security)
@@ -35,50 +110,138 @@ public struct KeychainKeyStore: KeyStore {
 
     public func key(forAccount account: String) -> String? {
         if let v = envKey(account) { return v }   // env always wins; never touch Keychain when set
-        // File store is checked BEFORE the Keychain on purpose: once a key lives in the
-        // owner-only on-disk file, kist resolves it without ever calling SecItemCopyMatching,
-        // so the OS never throws a "enter your login password" auth prompt. This is what keeps
-        // a frequently-rebuilt CLI (whose code signature changes each build, invalidating the
-        // Keychain's "Always Allow") from re-prompting forever. The Keychain remains a fallback
-        // for any key the file doesn't carry (kept in sync with the GUI app's wizard).
-        if let v = fileFallback?.key(forAccount: account), !v.isEmpty { return v }
+        let versionedFallback = fileFallback as? any VersionedKeyStore
+        let fallbackRecord = versionedFallback?.versionedKey(forAccount: account)
+        // Preserve compatibility for injected/legacy KeyStore implementations that cannot expose a version:
+        // their old fallback-first behavior remains unchanged. FileKeyStore is version-aware and takes the
+        // newest-record path below.
+        if versionedFallback == nil, let value = fileFallback?.key(forAccount: account), !value.isEmpty {
+            return value
+        }
+        let keychain = keychainRecord(forAccount: account,
+                                      staleMetadataFloor: fallbackRecord?.updatedAtMilliseconds)
+        guard let selected = SecretVersioning.newest(primary: keychain?.record, fallback: fallbackRecord) else {
+            return nil
+        }
+
+        switch selected.source {
+        case .primary:
+            // Stamp missing/stale digest-bound metadata, then update an EXISTING fallback record only.
+            // Do not create a new plaintext file for a Keychain-only user.
+            if keychain?.metadataTrusted != true { synchronizeKeychain(selected.record, account: account, includeValue: false) }
+            if let fallbackRecord,
+               fallbackRecord.digest != selected.record.digest ||
+               fallbackRecord.updatedAtMilliseconds != selected.record.updatedAtMilliseconds {
+                try? versionedFallback?.synchronize(selected.record, forAccount: account)
+            }
+        case .fallback:
+            // Update an EXISTING Keychain item only. Do not create one for file-only/headless users, which
+            // would reintroduce ACL prompts on frequently rebuilt command-line binaries.
+            if keychain != nil { synchronizeKeychain(selected.record, account: account, includeValue: true) }
+        }
+        return selected.record.value
+    }
+
+    public func containsKey(forAccount account: String) -> Bool {
+        if envKey(account) != nil { return true }
+        if fileFallback?.containsKey(forAccount: account) == true { return true }
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        guard applyNoninteractiveAuthentication(to: &query) else { return false }
+        // No kSecReturnData: existence checks must never decrypt a secret or trigger an ACL prompt.
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    private struct KeychainCandidate {
+        let record: VersionedSecretRecord
+        let metadataTrusted: Bool
+    }
+
+    private struct KeychainMetadata: Codable {
+        let formatVersion: Int
+        let updatedAtMilliseconds: Int64
+        let digest: String
+
+        enum CodingKeys: String, CodingKey {
+            case formatVersion = "format_version"
+            case updatedAtMilliseconds = "updated_at_ms"
+            case digest
+        }
+    }
+
+    private func keychainRecord(forAccount account: String, staleMetadataFloor: Int64?) -> KeychainCandidate? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
+            kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        // CLI health/startup must never hang behind a Keychain UI/auth prompt. If the item is
-        // inaccessible, fail fast and report "missing key" rather than blocking the terminal.
-        //
-        // NOTE on the two guards below: LAContext.interactionNotAllowed only suppresses
-        // *access-control* prompts (biometric/passcode for kSecAttrAccessControl items). It does
-        // NOT suppress the legacy ACL "<app> wants to use your confidential information … enter the
-        // login keychain password" dialog that fires when an untrusted (ad-hoc-signed) caller reads
-        // an item another app owns — which is exactly what bit Luke on every rebuild. The only API
-        // that turns THAT dialog into a fast errSecInteractionNotAllowed is kSecUseAuthenticationUI
-        // = …UIFail. It's deprecated in favour of the LAContext path, but the replacement does not
-        // cover legacy ACL trust, so we deliberately keep it: a silent "missing key" beats a
-        // blocking password prompt in a terminal.
-        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
-        #if canImport(LocalAuthentication)
-        let auth = LAContext()
-        auth.interactionNotAllowed = true
-        query[kSecUseAuthenticationContext as String] = auth
-        #endif
+        // CLI health/startup must never hang behind a Keychain authentication prompt. Bind a
+        // noninteractive LAContext to this exact query; if that API is unavailable, fail closed
+        // instead of issuing a potentially interactive secret read.
+        guard applyNoninteractiveAuthentication(to: &query) else { return nil }
         var result: AnyObject?
         if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-           let data = result as? Data, let value = String(data: data, encoding: .utf8), !value.isEmpty {
-            return value
+           let item = result as? [String: Any],
+           let data = item[kSecValueData as String] as? Data,
+           let value = String(data: data, encoding: .utf8), !value.isEmpty {
+            let digest = SecretVersioning.digest(value)
+            let metadataData = item[kSecAttrGeneric as String] as? Data
+            let metadata = metadataData.flatMap { try? JSONDecoder().decode(KeychainMetadata.self, from: $0) }
+            let trusted = metadata?.formatVersion == SecretFileEnvelope.currentFormat && metadata?.digest == digest
+            let modified = (item[kSecAttrModificationDate as String] as? Date).map(SecretVersioning.milliseconds) ?? 0
+            var logicalVersion = trusted ? (metadata?.updatedAtMilliseconds ?? modified) : modified
+            // Metadata whose digest no longer matches proves an external writer rotated the value without
+            // updating Kist metadata. Make that observed rotation newer than the compared fallback even if
+            // Keychain timestamps are coarse or the wall clock moved backwards.
+            if metadataData != nil, !trusted, let floor = staleMetadataFloor, logicalVersion <= floor {
+                logicalVersion = floor == Int64.max ? floor : floor + 1
+            }
+            return KeychainCandidate(record: .make(value: value, updatedAtMilliseconds: logicalVersion),
+                                     metadataTrusted: trusted)
         }
         return nil
+    }
+
+    private func synchronizeKeychain(_ record: VersionedSecretRecord, account: String, includeValue: Bool) {
+        let metadata = KeychainMetadata(formatVersion: SecretFileEnvelope.currentFormat,
+                                        updatedAtMilliseconds: record.updatedAtMilliseconds,
+                                        digest: record.digest)
+        guard let metadataData = try? JSONEncoder().encode(metadata) else { return }
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        guard applyNoninteractiveAuthentication(to: &query) else { return }
+        var updates: [String: Any] = [kSecAttrGeneric as String: metadataData]
+        if includeValue { updates[kSecValueData as String] = Data(record.value.utf8) }
+        _ = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
+    }
+
+    /// Security.framework's supported noninteractive path. The context is retained by the query
+    /// dictionary for the duration of SecItemCopyMatching/SecItemUpdate.
+    private func applyNoninteractiveAuthentication(to query: inout [String: Any]) -> Bool {
+        #if canImport(LocalAuthentication)
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+        return true
+        #else
+        return false
+        #endif
     }
 }
 #endif
 
 /// Linux / portable: env vars, then an optional JSON file ({account: key}).
-public struct FileKeyStore: KeyStore {
+public struct FileKeyStore: VersionedKeyStore {
     private let path: String
     public init(path: String? = nil) {
         // $HOME wins (respects sudo/CI overrides); NSHomeDirectory() keeps key lookups working when
@@ -91,11 +254,21 @@ public struct FileKeyStore: KeyStore {
     /// that adds a key mid-session (via `SecretWriter`, e.g. adding a key to a red model in the picker, or
     /// `/model import`) then resolves it WITHOUT a restart. The owner-only perms gate runs per read; env
     /// still wins over the file. The file is tiny and OS-page-cached, so per-lookup reads are cheap.
-    private func fileKeys() -> [String: String] {
+    func versionedKey(forAccount account: String) -> VersionedSecretRecord? {
         guard !path.isEmpty, Self.isOwnerOnlySecretFile(path: path),
-              let data = FileManager.default.contents(atPath: path),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return [:] }
-        return json
+              let data = FileManager.default.contents(atPath: path) else { return nil }
+        if let envelope = try? JSONDecoder().decode(SecretFileEnvelope.self, from: data),
+           envelope.formatVersion == SecretFileEnvelope.currentFormat,
+           let record = envelope.keys[account], record.isValid {
+            return record
+        }
+        // Legacy compatibility: flat `{account: key}` files remain readable. Their per-key logical version
+        // starts at the file modification time and is materialized into the envelope on the next write.
+        guard let legacy = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let value = legacy[account], !value.isEmpty else { return nil }
+        let modified = ((try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date)
+            .map(SecretVersioning.milliseconds) ?? 0
+        return .make(value: value, updatedAtMilliseconds: modified)
     }
 
     static func isOwnerOnlySecretFile(path: String) -> Bool {
@@ -109,8 +282,11 @@ public struct FileKeyStore: KeyStore {
 
     public func key(forAccount account: String) -> String? {
         if let v = envKey(account) { return v }
-        let v = fileKeys()[account]
-        return (v?.isEmpty == false) ? v : nil
+        return versionedKey(forAccount: account)?.value
+    }
+
+    func synchronize(_ record: VersionedSecretRecord, forAccount account: String) throws {
+        try SecretWriter.writeVersioned(account: account, record: record, path: path)
     }
 }
 

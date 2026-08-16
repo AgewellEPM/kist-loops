@@ -74,9 +74,13 @@ final class CodexReviewFixTests: XCTestCase {
         XCTAssertEqual(f.count, 1)
     }
 
-    // T0.2 live-verify fix — the driver requires playwright from argv[3] so a GLOBAL install resolves.
-    func testDriverResolvesPlaywrightFromArgv3() {
-        XCTAssertTrue(BrowserSpec.driverJS.contains("process.argv[3]"))
+    // The only argv payload is the module path. The request/spec (which may contain signed URLs,
+    // credentials, selectors, and fill values) must remain on private stdin.
+    func testDriverReadsPrivateSpecFromStdinAndModuleFromArgv2() {
+        XCTAssertTrue(BrowserSpec.driverJS.contains("fs.readFileSync(0)"))
+        XCTAssertTrue(BrowserSpec.driverJS.contains("require(process.argv[2] || 'playwright')"))
+        XCTAssertFalse(BrowserSpec.driverJS.contains("JSON.parse(process.argv"))
+        XCTAssertFalse(BrowserSpec.driverJS.contains("process.argv[3]"))
         let p = BrowserTool.playwrightModulePath()
         XCTAssertTrue(p == "playwright" || p.hasSuffix("/playwright"), "got \(p)")
     }

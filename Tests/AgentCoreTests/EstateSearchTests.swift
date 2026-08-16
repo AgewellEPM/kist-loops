@@ -53,6 +53,14 @@ final class EstateSearchTests: XCTestCase {
         XCTAssertNil(search.groundingBlock(for: "find what we did for nonexistentprojectxyz"))
     }
 
+    func testThreeCharacterSubstringCannotNominateUnrelatedQueueFile() throws {
+        try "unrelated planning notes\n"
+            .write(toFile: root + "/other-project/request-queue.md", atomically: true, encoding: .utf8)
+        let search = EstateSearch(roots: [root], maxFiles: 8, timeout: 8)
+
+        XCTAssertTrue(search.search(terms: ["que"]).isEmpty)
+    }
+
     func testGroundingBlockIsBounded() throws {
         let search = EstateSearch(roots: [root], maxFiles: 8, timeout: 8, maxTotalChars: 400)
         if let g = search.groundingBlock(for: "tinkyspeak") {

@@ -25,6 +25,9 @@ final class ContextBrainToolTests: XCTestCase {
         """)
         try write(root, "Tests/AppTests.swift", "func testReplayLedger() {}\n")
         try write(root, ".build/generated.swift", "let ignored = true\n")
+        try write(root, "Library/Mobile Documents/generated.swift", "let privateAppState = true\n")
+        try write(root, ".cache/toolchain/generated.swift", "let cachedToolchain = true\n")
+        try write(root, ".android/sdk/generated.swift", "let downloadedSDK = true\n")
         try Data([0, 159, 255]).write(to: URL(fileURLWithPath: root + "/asset.bin"))
 
         let tool = ContextBrainTool()
@@ -36,6 +39,9 @@ final class ContextBrainToolTests: XCTestCase {
         XCTAssertTrue(index.output.contains("Tests/AppTests.swift"))
         XCTAssertTrue(index.output.contains("asset.bin"))
         XCTAssertFalse(index.output.contains(".build/generated.swift"))
+        XCTAssertFalse(index.output.contains("Library/Mobile Documents/generated.swift"))
+        XCTAssertFalse(index.output.contains(".cache/toolchain/generated.swift"))
+        XCTAssertFalse(index.output.contains(".android/sdk/generated.swift"))
 
         let search = try await tool.execute(arguments: ["action": "search", "query": "ReplayLedger"], context: context)
         XCTAssertTrue(search.success, search.error ?? "")
@@ -54,6 +60,23 @@ final class ContextBrainToolTests: XCTestCase {
         XCTAssertTrue(coverage.output.contains("Batch 1"))
         XCTAssertTrue(coverage.output.contains("Sources/App.swift"))
         XCTAssertTrue(coverage.output.contains("Metadata-only files"))
+    }
+
+    func testIndexAndSignatureFailClosedAtWalkEntryBudget() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        for index in 0..<8 {
+            try write(root, "Sources/File\(index).swift", "let value\(index) = \(index)\n")
+        }
+
+        XCTAssertThrowsError(try ContextBrainIndex.build(
+            root: root, maxWalkEntries: 4, skipDirectories: [])) { error in
+            XCTAssertTrue(String(describing: error).contains("entry budget exceeded"))
+        }
+        XCTAssertThrowsError(try ContextBrainIndex.sourceSignature(
+            root: root, maxWalkEntries: 4, skipDirectories: [])) { error in
+            XCTAssertTrue(String(describing: error).contains("entry budget exceeded"))
+        }
     }
 
     func testGetRequiresChunkIdFromCurrentIndex() async throws {

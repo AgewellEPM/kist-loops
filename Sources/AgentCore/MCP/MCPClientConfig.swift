@@ -82,6 +82,20 @@ public enum MCPClientConfig {
     ///   user has explicitly trusted.
     public static func load(projectRoot: String, allowProjectConfig: Bool = false,
                             includeUserConfig: Bool = true) -> (servers: [MCPServerConfig], issues: [MCPConfigIssue]) {
+        load(
+            projectRoot: projectRoot,
+            allowProjectConfig: allowProjectConfig,
+            includeUserConfig: includeUserConfig,
+            hostEnvironment: ProcessInfo.processInfo.environment,
+            ssrfBlockReason: WebFetchTool.ssrfBlockReason(host:))
+    }
+
+    /// Injectable trust-boundary inputs keep config validation deterministic in tests without
+    /// weakening production's fail-closed DNS policy or mutating the process-wide environment.
+    static func load(projectRoot: String, allowProjectConfig: Bool,
+                     includeUserConfig: Bool, hostEnvironment: [String: String],
+                     ssrfBlockReason: (String) -> String?)
+        -> (servers: [MCPServerConfig], issues: [MCPConfigIssue]) {
         var servers: [MCPServerConfig] = []
         var issues: [MCPConfigIssue] = []
         var seen: Set<String> = []
@@ -92,7 +106,9 @@ public enum MCPClientConfig {
             for (name, entry) in raw {
                 guard !seen.contains(name) else { continue }   // first file wins
                 seen.insert(name)
-                switch validate(name: name, entry: entry) {
+                switch validate(
+                    name: name, entry: entry, hostEnvironment: hostEnvironment,
+                    ssrfBlockReason: ssrfBlockReason) {
                 case .success(let cfg, let warnings):
                     servers.append(cfg)
                     issues.append(contentsOf: warnings)
@@ -145,7 +161,9 @@ public enum MCPClientConfig {
     /// Validate an HTTP-transport server entry: an http(s) `url` (SSRF-guarded so a config can't point at
     /// internal/link-local hosts) + optional `headers` for auth. Header values expand `${ENV}` so secrets
     /// live in the environment, not the config file on disk.
-    private static func validateHTTP(name: String, entry: [String: Any]) -> ValidationOutcome {
+    private static func validateHTTP(name: String, entry: [String: Any],
+                                     hostEnvironment: [String: String],
+                                     ssrfBlockReason: (String) -> String?) -> ValidationOutcome {
         guard let urlStr = (entry["url"] as? String)?.trimmingCharacters(in: .whitespaces), !urlStr.isEmpty else {
             return .failure(reason: "http transport requires a 'url'")
         }
@@ -157,7 +175,7 @@ public enum MCPClientConfig {
         // other host is SSRF-guarded (blocks internal/link-local/cloud-metadata, and a public host that
         // resolves to internal = rebinding). The distinction is whether the CONFIG explicitly said loopback.
         let loopback = isLoopbackHost(host)
-        if !loopback, let reason = WebFetchTool.ssrfBlockReason(host: host) {
+        if !loopback, let reason = ssrfBlockReason(host) {
             return .failure(reason: "url refused (SSRF guard): \(reason)")
         }
         var headers: [String: String] = [:]
@@ -171,10 +189,10 @@ public enum MCPClientConfig {
                     return .failure(reason: "'headers' contains a control character")
                 }
                 // Warn if a ${VAR} reference is unset — an empty auth header is a silent misconfig (Codex).
-                if let missing = unsetEnvReference(in: v) {
+                if let missing = unsetEnvReference(in: v, environment: hostEnvironment) {
                     warnings.append(MCPConfigIssue(server: name, reason: "header '\(k)' references unset env var ${\(missing)} — it will be empty"))
                 }
-                headers[k] = expandEnv(v)
+                headers[k] = expandEnv(v, environment: hostEnvironment)
             }
         }
         // Require HTTPS for any non-loopback endpoint. Beyond keeping auth off the wire, TLS cert
@@ -203,40 +221,50 @@ public enum MCPClientConfig {
     /// referenced by name in config and supplied via the environment.
     /// The name of the first `${VAR}` reference that is unset in the environment, or nil if all resolve.
     static func unsetEnvReference(in s: String) -> String? {
+        unsetEnvReference(in: s, environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func unsetEnvReference(in s: String, environment: [String: String]) -> String? {
         guard s.contains("${") else { return nil }
-        let env = ProcessInfo.processInfo.environment
         var rest = Substring(s)
         while let open = rest.range(of: "${"), let close = rest.range(of: "}", range: open.upperBound..<rest.endIndex) {
             let key = String(rest[open.upperBound..<close.lowerBound])
-            if env[key] == nil { return key }
+            if environment[key] == nil { return key }
             rest = rest[close.upperBound...]
         }
         return nil
     }
 
     static func expandEnv(_ s: String) -> String {
+        expandEnv(s, environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func expandEnv(_ s: String, environment: [String: String]) -> String {
         guard s.contains("${") else { return s }
-        let env = ProcessInfo.processInfo.environment
         var out = ""
         var rest = Substring(s)
         while let open = rest.range(of: "${"), let close = rest.range(of: "}", range: open.upperBound..<rest.endIndex) {
             out += rest[rest.startIndex..<open.lowerBound]
             let key = String(rest[open.upperBound..<close.lowerBound])
-            out += env[key] ?? ""
+            out += environment[key] ?? ""
             rest = rest[close.upperBound...]
         }
         out += rest
         return out
     }
 
-    private static func validate(name: String, entry: [String: Any]) -> ValidationOutcome {
+    private static func validate(name: String, entry: [String: Any],
+                                 hostEnvironment: [String: String],
+                                 ssrfBlockReason: (String) -> String?) -> ValidationOutcome {
         guard isSafeIdentifier(name) else {
             return .failure(reason: "server name '\(name)' is not a safe identifier (letters, digits, _ , -)")
         }
         // HTTP (Streamable-HTTP) transport: a `url` is present, or transport is http/streamable-http/sse.
         let transport = (entry["transport"] as? String)?.lowercased()
         if entry["url"] != nil || transport == "http" || transport == "streamable-http" || transport == "sse" {
-            return validateHTTP(name: name, entry: entry)
+            return validateHTTP(
+                name: name, entry: entry, hostEnvironment: hostEnvironment,
+                ssrfBlockReason: ssrfBlockReason)
         }
         // Otherwise stdio: a spawned subprocess.
         guard let command = (entry["command"] as? String)?.trimmingCharacters(in: .whitespaces), !command.isEmpty else {

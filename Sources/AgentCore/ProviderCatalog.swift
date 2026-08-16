@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// The built-in providers AgentCore ships with. The OpenAI-compatible set includes a deep bench of
 /// Chinese models (DeepSeek, MiMo, Qwen, Doubao, Hunyuan, ERNIE, Yi, GLM, Kimi, Step, Baichuan,
@@ -143,6 +144,113 @@ final class RetryTally: @unchecked Sendable {
 
 /// Holds the available providers and resolves keys via a KeyStore.
 /// Fully Sendable: only immutable Sendable state (the retry tally is a lock-guarded reference).
+public enum ProviderRequestBudgetError: Error, Sendable, Equatable, CustomStringConvertible {
+    case exhausted(limit: Int, consumed: Int)
+    case persistence(String)
+
+    public var description: String {
+        switch self {
+        case .exhausted(let limit, let consumed):
+            return "provider request limit reached (\(consumed)/\(limit))"
+        case .persistence(let detail):
+            return "provider request admission could not be persisted: \(detail)"
+        }
+    }
+}
+
+/// One route decision shared by the visible completion and every hidden provider request it can
+/// trigger. `.exact` is the forced-native contract: same provider, same model, no fallback, and no
+/// administrative model-list discovery. Adaptive routes may heal a dead model, but that discovery
+/// is itself a budgeted provider-network attempt.
+public struct ProviderRoutePolicy: Sendable, Equatable {
+    public let allowFallback: Bool
+    public let allowModelResolution: Bool
+    public let allowModelDiscovery: Bool
+
+    public init(allowFallback: Bool, allowModelResolution: Bool,
+                allowModelDiscovery: Bool) {
+        self.allowFallback = allowFallback
+        self.allowModelResolution = allowModelResolution
+        self.allowModelDiscovery = allowModelDiscovery
+    }
+
+    public static func adaptive(allowFallback: Bool) -> ProviderRoutePolicy {
+        ProviderRoutePolicy(allowFallback: allowFallback,
+                            allowModelResolution: true,
+                            allowModelDiscovery: true)
+    }
+
+    public static let sameProviderAdaptive = ProviderRoutePolicy(
+        allowFallback: false, allowModelResolution: true, allowModelDiscovery: true)
+    public static let exact = ProviderRoutePolicy(
+        allowFallback: false, allowModelResolution: false, allowModelDiscovery: false)
+}
+
+/// One absolute request ceiling shared by every provider route used by a loop invocation. A slot is
+/// durably admitted immediately before the concrete provider request, so retries, fallback candidates,
+/// model resolution, compaction, and synthesis cannot hide requests inside one outer agent iteration.
+public actor ProviderRequestBudget {
+    /// Persist one atomic increment and return the authoritative total. Returning the total rather
+    /// than accepting a local absolute count is what makes independent actors/processes compose.
+    public typealias Persistence = @Sendable (_ minimumConsumed: Int, _ limit: Int) throws -> Int
+
+    public let limit: Int
+    private var consumed: Int
+    private let persistence: Persistence?
+    private var persistenceFailure: ProviderRequestBudgetError?
+
+    public init(limit: Int, consumed: Int = 0, persistence: Persistence? = nil) {
+        self.limit = max(0, limit)
+        self.consumed = max(0, consumed)
+        self.persistence = persistence
+    }
+
+    /// Atomically burn and persist one request slot. A persistence failure is fail-closed and sticky:
+    /// no provider request is issued after durable accounting becomes uncertain.
+    @discardableResult
+    public func admit() throws -> Int {
+        if let persistenceFailure { throw persistenceFailure }
+        if let persistence {
+            do {
+                let admitted = try persistence(consumed, limit)
+                guard admitted > consumed, admitted <= limit else {
+                    let failure = ProviderRequestBudgetError.persistence(
+                        "durable admission returned invalid counter \(admitted) after \(consumed)")
+                    persistenceFailure = failure
+                    throw failure
+                }
+                consumed = admitted
+            } catch let budgetError as ProviderRequestBudgetError {
+                if case .exhausted(_, let durableConsumed) = budgetError {
+                    consumed = max(consumed, durableConsumed)
+                } else {
+                    consumed = min(limit, consumed + (consumed < limit ? 1 : 0))
+                    persistenceFailure = budgetError
+                }
+                throw budgetError
+            } catch {
+                consumed = min(limit, consumed + (consumed < limit ? 1 : 0))
+                let failure = ProviderRequestBudgetError.persistence(String(describing: error))
+                persistenceFailure = failure
+                throw failure
+            }
+        } else {
+            guard consumed < limit else {
+                throw ProviderRequestBudgetError.exhausted(limit: limit, consumed: consumed)
+            }
+            consumed += 1
+        }
+        return consumed
+    }
+
+    public func consumedCount() -> Int { consumed }
+
+    /// Non-nil means another provider request must not be attempted.
+    public func blockingError() -> ProviderRequestBudgetError? {
+        persistenceFailure ?? (consumed >= limit ? .exhausted(limit: limit, consumed: consumed) : nil)
+    }
+}
+
 public final class ProviderRegistry: Sendable {
     public let providers: [any ChatProvider]
     private let keyStore: KeyStore
@@ -177,17 +285,72 @@ public final class ProviderRegistry: Sendable {
 
     /// Resolve a valid model id on the SAME provider after a model-not-found error (Layer B). Returns the
     /// resolved id (different from `current`) or nil if no resolution is possible (caller then falls back).
-    private func resolveValidModel(for provider: any ChatProvider, apiKey: String?, current: String) async -> String? {
-        guard let modelsURL = provider.modelsListEndpoint,
-              case let .success(live) = await modelListFetch(modelsURL, apiKey),
-              let resolved = ModelResolver.resolve(requested: current, default: provider.defaultModel, live: live),
-              resolved != current
-        else { return nil }
-        return resolved
+    private func resolveValidModel(
+        for provider: any ChatProvider, apiKey: String?, current: String,
+        routePolicy: ProviderRoutePolicy,
+        requestBudget: ProviderRequestBudget?
+    ) async throws -> String? {
+        guard routePolicy.allowModelResolution,
+              routePolicy.allowModelDiscovery,
+              let modelsURL = provider.modelsListEndpoint else { return nil }
+        // The GET /models request is a real provider-network attempt. Admit immediately before it;
+        // denial or disabled discovery returns to the original model error without network activity.
+        let started = DispatchTime.now().uptimeNanoseconds
+        let requestOrdinal: Int?
+        do {
+            requestOrdinal = try await requestBudget?.admit()
+        } catch {
+            BuilderTrustedTelemetry.recordTool(
+                name: "provider-admission",
+                argumentsDigest: BuilderEvidenceDigest.sha256(
+                    "model-discovery:\(provider.id):\(current)"),
+                success: false, elapsedMilliseconds: 1)
+            throw error
+        }
+        let result = await modelListFetch(modelsURL, apiKey)
+        let elapsed = max(1, Int((DispatchTime.now().uptimeNanoseconds &- started) / 1_000_000))
+        switch result {
+        case .success(let live):
+            BuilderTrustedTelemetry.recordProvider(
+                providerID: provider.id, modelID: current,
+                inputTokens: max(1, modelsURL.utf8.count),
+                outputTokens: max(1, live.reduce(0) { $0 + $1.utf8.count }),
+                elapsedMilliseconds: elapsed,
+                outputDigest: BuilderEvidenceDigest.sha256(
+                    "\(requestOrdinal ?? 0):\(live.sorted().joined(separator: "\u{0}"))"),
+                mechanism: "model-discovery")
+            guard let resolved = ModelResolver.resolve(
+                requested: current, default: provider.defaultModel, live: live),
+                  resolved != current else { return nil }
+            return resolved
+        case .failure(let error):
+            BuilderTrustedTelemetry.recordProvider(
+                providerID: provider.id, modelID: current,
+                inputTokens: max(1, modelsURL.utf8.count), outputTokens: 0,
+                elapsedMilliseconds: elapsed,
+                outputDigest: BuilderEvidenceDigest.sha256(
+                    "\(requestOrdinal ?? 0):\(String(reflecting: type(of: error)))"),
+                success: false, mechanism: "model-discovery")
+            return nil
+        }
     }
 
     public func provider(id: String) -> (any ChatProvider)? {
         providers.first { $0.id == id || $0.name.lowercased() == id.lowercased() }
+    }
+
+    public func reasoningEffortResolution(providerId: String, model: String?,
+                                          requested: ProviderReasoningEffort,
+                                          base: ModelSettings) -> ProviderEffortResolution {
+        guard let provider = provider(id: providerId) else {
+            return ProviderEffortMapper.resolve(providerID: providerId, modelID: model ?? "",
+                                                requested: requested, support: .unsupported, base: base)
+        }
+        let modelID = provider.resolvedModel(model)
+        return ProviderEffortMapper.resolve(providerID: provider.id, modelID: modelID,
+                                            requested: requested,
+                                            support: provider.capabilities(forModel: modelID).reasoningEffortSupport,
+                                            base: base)
     }
 
     /// Cumulative count of same-provider RETRIES issued for `providerId` this process — a FLAKINESS signal.
@@ -198,7 +361,7 @@ public final class ProviderRegistry: Sendable {
     public func retryCount(providerId: String) -> Int { retryTally.count(providerId) }
 
     public func hasKey(for provider: any ChatProvider) -> Bool {
-        !provider.requiresAPIKey || keyStore.key(forAccount: provider.keyAccount) != nil
+        !provider.requiresAPIKey || keyStore.containsKey(forAccount: provider.keyAccount)
     }
 
     /// Resolve the API key for a provider id (nil if unknown or unset). Needed by out-of-band
@@ -210,18 +373,39 @@ public final class ProviderRegistry: Sendable {
 
     /// Stream a completion from a provider id, resolving the key.
     public func stream(providerId: String, model: String?, messages: [ChatMessage], settings: ModelSettings,
-                       allowFallback: Bool = true) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        guard let provider = provider(id: providerId) else { throw AIProviderError.configuration("unknown provider \(providerId)") }
-        let candidates = streamCandidates(primary: provider, providerId: providerId, requestedModel: model, allowFallback: allowFallback)
-        return retryingCandidateStream(candidates) { candidate, resolvedModel in
-            try await candidate.provider.stream(messages: messages, model: resolvedModel, settings: settings, apiKey: candidate.apiKey)
+                       allowFallback: Bool = false,
+                       routePolicy: ProviderRoutePolicy? = nil,
+                       requestBudget: ProviderRequestBudget? = nil) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        guard let provider = provider(id: providerId) else {
+            BuilderTrustedTelemetry.recordTool(
+                name: "provider-routing", argumentsDigest: BuilderEvidenceDigest.sha256(providerId),
+                success: false, elapsedMilliseconds: 1)
+            throw AIProviderError.configuration("unknown provider \(providerId)")
+        }
+        let policy = routePolicy ?? .adaptive(allowFallback: allowFallback)
+        let candidates = streamCandidates(primary: provider, providerId: providerId, requestedModel: model,
+                                          allowFallback: policy.allowFallback)
+        return retryingCandidateStream(candidates, routePolicy: policy,
+                                       mechanism: "stream",
+                                       inputTokenUpperBound: Self.tokenUpperBound(messages),
+                                       requestBudget: requestBudget) { candidate, resolvedModel in
+            let resolution = Self.resolveEffort(candidate: candidate, model: resolvedModel, settings: settings)
+            let stream = try await candidate.provider.stream(messages: messages, model: resolvedModel,
+                                                             settings: resolution.settings, apiKey: candidate.apiKey)
+            return Self.annotate(stream, record: resolution.record)
         }
     }
 
     /// Convenience: stream and collapse to full assistant text.
-    public func complete(providerId: String, model: String? = nil, messages: [ChatMessage], settings: ModelSettings = ModelSettings()) async throws -> String {
+    public func complete(providerId: String, model: String? = nil, messages: [ChatMessage],
+                         settings: ModelSettings = ModelSettings(), allowFallback: Bool = false,
+                         routePolicy: ProviderRoutePolicy? = nil,
+                         requestBudget: ProviderRequestBudget? = nil) async throws -> String {
         // Route through completeWithUsage so non-streaming callers also get the reasoning self-heal.
-        try await completeWithUsage(providerId: providerId, model: model, messages: messages, settings: settings).text
+        try await completeWithUsage(providerId: providerId, model: model, messages: messages,
+                                    settings: settings, allowFallback: allowFallback,
+                                    routePolicy: routePolicy,
+                                    requestBudget: requestBudget).text
     }
 
     /// Self-heal bounds: how many times an empty-because-truncated completion is retried on the SAME model
@@ -233,12 +417,47 @@ public final class ProviderRegistry: Sendable {
     /// Like `complete`, but also returns MEASURED token usage (the last `.usage` event). Used by the
     /// observability + cost layers. Usage is `.zero` if the provider doesn't report it — the caller
     /// decides whether to fall back to an estimate.
+    public struct RoutedCompletion: Sendable {
+        public let text: String
+        public let usage: TokenUsage
+        public let providerId: String
+        public let model: String
+        public let usedFallback: Bool
+    }
+
     public func completeWithUsage(providerId: String, model: String? = nil, messages: [ChatMessage],
                                   settings: ModelSettings = ModelSettings(),
-                                  allowFallback: Bool = true,
-                                  allowModelResolution: Bool = true) async throws -> (text: String, usage: TokenUsage) {
-        guard let provider = provider(id: providerId) else { throw AIProviderError.configuration("unknown provider \(providerId)") }
-        let candidates = allowFallback
+                                  allowFallback: Bool = false,
+                                  allowModelResolution: Bool = true,
+                                  routePolicy: ProviderRoutePolicy? = nil,
+                                  requestBudget: ProviderRequestBudget? = nil) async throws -> (text: String, usage: TokenUsage) {
+        let routed = try await completeWithRoute(providerId: providerId, model: model, messages: messages,
+                                                 settings: settings, allowFallback: allowFallback,
+                                                 allowModelResolution: allowModelResolution,
+                                                 routePolicy: routePolicy,
+                                                 requestBudget: requestBudget)
+        return (routed.text, routed.usage)
+    }
+
+    /// Opt-in fallback with explicit route identity. Existing callers keep the tuple API above; callers that
+    /// permit cross-provider fallback can use this result to prove which provider/model produced the answer.
+    public func completeWithRoute(providerId: String, model: String? = nil, messages: [ChatMessage],
+                                  settings: ModelSettings = ModelSettings(),
+                                  allowFallback: Bool = false,
+                                  allowModelResolution: Bool = true,
+                                  routePolicy: ProviderRoutePolicy? = nil,
+                                  requestBudget: ProviderRequestBudget? = nil) async throws -> RoutedCompletion {
+        guard let provider = provider(id: providerId) else {
+            BuilderTrustedTelemetry.recordTool(
+                name: "provider-routing", argumentsDigest: BuilderEvidenceDigest.sha256(providerId),
+                success: false, elapsedMilliseconds: 1)
+            throw AIProviderError.configuration("unknown provider \(providerId)")
+        }
+        let policy = routePolicy ?? ProviderRoutePolicy(
+            allowFallback: allowFallback,
+            allowModelResolution: allowModelResolution,
+            allowModelDiscovery: allowModelResolution)
+        let candidates = policy.allowFallback
             ? streamCandidates(primary: provider, providerId: providerId, requestedModel: model)
             : [StreamCandidate(provider: provider,
                                model: provider.resolvedModel(model),
@@ -253,14 +472,33 @@ public final class ProviderRegistry: Sendable {
             var currentModel = candidate.model
             var resolvedModelOnce = false
             while !Task.isCancelled {
+                let attemptStarted = DispatchTime.now().uptimeNanoseconds
+                var admittedOrdinal: Int?
+                var attemptRecorded = false
+                var attemptText = ""
+                var attemptUsage = TokenUsage.zero
                 do {
+                    let resolution = Self.resolveEffort(candidate: candidate, model: currentModel,
+                                                        settings: healedSettings)
+                    do {
+                        admittedOrdinal = try await requestBudget?.admit()
+                    } catch {
+                        BuilderTrustedTelemetry.recordTool(
+                            name: "provider-admission",
+                            argumentsDigest: BuilderEvidenceDigest.sha256(
+                                "completion:\(candidate.provider.id):\(currentModel)"),
+                            success: false, elapsedMilliseconds: 1)
+                        throw error
+                    }
                     let stream = try await candidate.provider.stream(messages: messages, model: currentModel,
-                                                                     settings: healedSettings, apiKey: candidate.apiKey)
+                                                                     settings: resolution.settings, apiKey: candidate.apiKey)
+                    try Task.checkCancellation()
                     var text = ""
                     var usage = TokenUsage.zero
                     var sawReasoning = false
                     var finishReason: String?
                     for try await event in stream {
+                        try Task.checkCancellation()
                         switch event {
                         case .delta(let d): text += d
                         case .reasoning: sawReasoning = true
@@ -269,6 +507,9 @@ public final class ProviderRegistry: Sendable {
                         default: break
                         }
                     }
+                    try Task.checkCancellation()
+                    attemptText = text
+                    attemptUsage = usage
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmed.isEmpty {
                         // SELF-HEAL: an empty answer because the model spent its budget on hidden reasoning
@@ -280,6 +521,13 @@ public final class ProviderRegistry: Sendable {
                             let bumped = min(max(healedSettings.maxTokens, Self.selfHealFloorTokens) * 2,
                                              Self.selfHealCeilingTokens)
                             if bumped > healedSettings.maxTokens {
+                                Self.recordProviderAttempt(
+                                    candidate: candidate, model: currentModel,
+                                    mechanism: "completion-self-heal",
+                                    ordinal: admittedOrdinal, messages: messages,
+                                    text: text, usage: usage, success: false,
+                                    started: attemptStarted)
+                                attemptRecorded = true
                                 selfHeals += 1
                                 healedSettings.maxTokens = bumped
                                 continue
@@ -290,20 +538,53 @@ public final class ProviderRegistry: Sendable {
                         // same-provider attempt-retries a deterministic empty would otherwise trigger
                         // (Codex HIGH). No fallback candidate ⇒ surface honestly.
                         lastError = AIProviderError.transport("empty completion from \(candidate.provider.id):\(currentModel)")
-                        if candidateIndex < candidates.count - 1 { break }
+                        if candidateIndex < candidates.count - 1 {
+                            Self.recordProviderAttempt(
+                                candidate: candidate, model: currentModel,
+                                mechanism: "completion-empty", ordinal: admittedOrdinal,
+                                messages: messages, text: text, usage: usage,
+                                success: false, started: attemptStarted)
+                            attemptRecorded = true
+                            break
+                        }
                         throw lastError ?? AIProviderError.transport("empty completion")
                     }
-                    return (text, usage)
+                    try Task.checkCancellation()
+                    Self.recordProviderAttempt(
+                        candidate: candidate, model: currentModel, mechanism: "completion",
+                        ordinal: admittedOrdinal, messages: messages, text: text,
+                        usage: usage, success: true, started: attemptStarted)
+                    attemptRecorded = true
+                    return RoutedCompletion(text: text, usage: usage, providerId: candidate.provider.id,
+                                            model: currentModel, usedFallback: candidateIndex > 0)
                 } catch is CancellationError {
+                    if !attemptRecorded, admittedOrdinal != nil || requestBudget == nil {
+                        Self.recordProviderAttempt(
+                            candidate: candidate, model: currentModel,
+                            mechanism: "completion-cancelled", ordinal: admittedOrdinal,
+                            messages: messages, text: attemptText, usage: attemptUsage,
+                            success: false, started: attemptStarted)
+                    }
                     throw AIProviderError.transport("completion cancelled")
                 } catch {
+                    if !attemptRecorded, admittedOrdinal != nil || requestBudget == nil {
+                        Self.recordProviderAttempt(
+                            candidate: candidate, model: currentModel,
+                            mechanism: "completion-attempt", ordinal: admittedOrdinal,
+                            messages: messages, text: attemptText, usage: attemptUsage,
+                            success: false, started: attemptStarted,
+                            errorType: String(reflecting: type(of: error)))
+                        attemptRecorded = true
+                    }
                     if Task.isCancelled { throw AIProviderError.transport("completion cancelled") }
                     lastError = error
                     // Layer B: a model-not-found (dead/renamed id like grok-2-latest) is healed by resolving
                     // a VALID id on the SAME provider and retrying — NOT by silently switching providers.
                     // Once per candidate, reactive (only fetches /models on this error path).
-                    if allowModelResolution, !resolvedModelOnce, ModelResolver.isModelNotFound(error),
-                       let resolved = await resolveValidModel(for: candidate.provider, apiKey: candidate.apiKey, current: currentModel) {
+                    if policy.allowModelResolution, !resolvedModelOnce, ModelResolver.isModelNotFound(error),
+                       let resolved = try await resolveValidModel(
+                        for: candidate.provider, apiKey: candidate.apiKey, current: currentModel,
+                        routePolicy: policy, requestBudget: requestBudget) {
                         resolvedModelOnce = true
                         currentModel = resolved
                         continue   // retry SAME provider with a valid model
@@ -331,14 +612,34 @@ public final class ProviderRegistry: Sendable {
     /// Stream WITH native tool definitions, resolving the key. Falls back to the text path for
     /// providers that don't override `streamTools`.
     public func streamTools(providerId: String, model: String?, messages: [ChatMessage], settings: ModelSettings, tools: [ToolSpec],
-                            allowFallback: Bool = true) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        guard let provider = provider(id: providerId) else { throw AIProviderError.configuration("unknown provider \(providerId)") }
+                            allowFallback: Bool = false,
+                            allowModelResolution: Bool = true,
+                            routePolicy: ProviderRoutePolicy? = nil,
+                            requestBudget: ProviderRequestBudget? = nil) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        guard let provider = provider(id: providerId) else {
+            BuilderTrustedTelemetry.recordTool(
+                name: "provider-routing", argumentsDigest: BuilderEvidenceDigest.sha256(providerId),
+                success: false, elapsedMilliseconds: 1)
+            throw AIProviderError.configuration("unknown provider \(providerId)")
+        }
         // History-repair at the native encode boundary: strict providers (Gemini/Anthropic) 400 on
         // an orphan tool result. The loop builds valid transcripts, but resumed/edited ones may not.
         let safeMessages = TranscriptRepair.repairForNativeTools(messages)
-        let candidates = streamCandidates(primary: provider, providerId: providerId, requestedModel: model, allowFallback: allowFallback)
-        return retryingCandidateStream(candidates) { candidate, resolvedModel in
-            try await candidate.provider.streamTools(messages: safeMessages, model: resolvedModel, settings: settings, apiKey: candidate.apiKey, tools: tools)
+        let policy = routePolicy ?? ProviderRoutePolicy(
+            allowFallback: allowFallback,
+            allowModelResolution: allowModelResolution,
+            allowModelDiscovery: allowModelResolution)
+        let candidates = streamCandidates(primary: provider, providerId: providerId, requestedModel: model,
+                                          allowFallback: policy.allowFallback)
+        return retryingCandidateStream(candidates, routePolicy: policy,
+                                       mechanism: "stream-tools",
+                                       inputTokenUpperBound: Self.tokenUpperBound(safeMessages),
+                                       requestBudget: requestBudget) { candidate, resolvedModel in
+            let resolution = Self.resolveEffort(candidate: candidate, model: resolvedModel, settings: settings)
+            let stream = try await candidate.provider.streamTools(messages: safeMessages, model: resolvedModel,
+                                                                  settings: resolution.settings,
+                                                                  apiKey: candidate.apiKey, tools: tools)
+            return Self.annotate(stream, record: resolution.record)
         }
     }
 
@@ -346,6 +647,48 @@ public final class ProviderRegistry: Sendable {
         let provider: any ChatProvider
         let model: String
         let apiKey: String?
+    }
+
+    private static func resolveEffort(candidate: StreamCandidate, model: String,
+                                      settings: ModelSettings) -> ProviderEffortResolution {
+        guard let requested = settings.reasoningEffort else {
+            return ProviderEffortResolution(settings: settings,
+                record: ProviderEffortRecord(providerID: candidate.provider.id, modelID: model,
+                                             requested: settings.disableThinking ? .none : .deep,
+                                             application: .providerManaged,
+                                             note: "legacy settings; no explicit neutral effort request"))
+        }
+        return ProviderEffortMapper.resolve(providerID: candidate.provider.id, modelID: model,
+                                            requested: requested,
+                                            support: candidate.provider.capabilities(forModel: model).reasoningEffortSupport,
+                                            base: settings)
+    }
+
+    private static func annotate(_ stream: AsyncThrowingStream<StreamEvent, Error>,
+                                 record: ProviderEffortRecord) -> AsyncThrowingStream<StreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                continuation.yield(.effortResolution(record))
+                do {
+                    for try await event in stream {
+                        if case .reasoningHandle(let handle) = event {
+                            continuation.yield(.reasoningHandle(OpaqueProviderReasoningHandle(
+                                id: handle.id,
+                                providerID: record.providerID,
+                                modelID: record.modelID,
+                                kind: handle.kind,
+                                reference: handle.reference,
+                                expiresAt: handle.expiresAt,
+                                associationID: handle.associationID)))
+                        } else {
+                            continuation.yield(event)
+                        }
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     private func streamCandidates(primary: any ChatProvider, providerId: String, requestedModel: String?,
@@ -376,6 +719,10 @@ public final class ProviderRegistry: Sendable {
     /// streamed call, so streamed reasoning models already get headroom up front.)
     private func retryingCandidateStream(
         _ candidates: [StreamCandidate],
+        routePolicy: ProviderRoutePolicy,
+        mechanism: String,
+        inputTokenUpperBound: Int,
+        requestBudget: ProviderRequestBudget? = nil,
         build: @escaping @Sendable (_ candidate: StreamCandidate, _ model: String) async throws -> AsyncThrowingStream<StreamEvent, Error>
     ) -> AsyncThrowingStream<StreamEvent, Error> {
         let delays = retryDelaysNanoseconds
@@ -383,6 +730,10 @@ public final class ProviderRegistry: Sendable {
         return AsyncThrowingStream { continuation in
             let task = Task { [self] in
                 guard !candidates.isEmpty else {
+                    BuilderTrustedTelemetry.recordTool(
+                        name: "provider-routing",
+                        argumentsDigest: BuilderEvidenceDigest.sha256("no-provider-candidates"),
+                        success: false, elapsedMilliseconds: 1)
                     continuation.finish(throwing: AIProviderError.configuration("no provider candidates"))
                     return
                 }
@@ -393,29 +744,107 @@ public final class ProviderRegistry: Sendable {
                     var resolvedModelOnce = false
                     while !Task.isCancelled {
                         var yieldedAny = false
+                        let telemetryStarted = DispatchTime.now().uptimeNanoseconds
+                        var admittedOrdinal: Int?
+                        var telemetryHasher = SHA256()
+                        var outputByteUpperBound = 0
+                        var promptTokens = 0
+                        var completionTokens = 0
                         do {
+                            do {
+                                admittedOrdinal = try await requestBudget?.admit()
+                            } catch {
+                                BuilderTrustedTelemetry.recordTool(
+                                    name: "provider-admission",
+                                    argumentsDigest: BuilderEvidenceDigest.sha256(
+                                        "\(mechanism):\(candidate.provider.id):\(currentModel)"),
+                                    success: false, elapsedMilliseconds: 1)
+                                throw error
+                            }
                             let stream = try await build(candidate, currentModel)
                             for try await event in stream {
-                                yieldedAny = true
+                                if case .effortResolution = event { } else { yieldedAny = true }
+                                let eventData = Data(String(describing: event).utf8)
+                                telemetryHasher.update(data: eventData)
+                                outputByteUpperBound += eventData.count
+                                switch event {
+                                case .usage(let prompt, let completion):
+                                    promptTokens = prompt; completionTokens = completion
+                                default: break
+                                }
                                 continuation.yield(event)
                             }
+                            let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
+                            let digest = telemetryHasher.finalize().map {
+                                String(format: "%02x", $0)
+                            }.joined()
+                            BuilderTrustedTelemetry.recordProvider(
+                                providerID: candidate.provider.id, modelID: currentModel,
+                                inputTokens: promptTokens > 0 ? promptTokens : inputTokenUpperBound,
+                                outputTokens: completionTokens > 0
+                                    ? completionTokens : max(1, outputByteUpperBound),
+                                elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)),
+                                outputDigest: BuilderEvidenceDigest.sha256(
+                                    "\(admittedOrdinal ?? 0):\(digest)"),
+                                mechanism: mechanism)
                             continuation.finish()
                             return
                         } catch is CancellationError {
+                            let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
+                            if admittedOrdinal != nil || requestBudget == nil {
+                                let digest = telemetryHasher.finalize().map {
+                                    String(format: "%02x", $0)
+                                }.joined()
+                                BuilderTrustedTelemetry.recordProvider(
+                                    providerID: candidate.provider.id, modelID: currentModel,
+                                    inputTokens: promptTokens > 0 ? promptTokens : inputTokenUpperBound,
+                                    outputTokens: completionTokens > 0
+                                        ? completionTokens : outputByteUpperBound,
+                                    elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)),
+                                    outputDigest: BuilderEvidenceDigest.sha256(
+                                        "\(admittedOrdinal ?? 0):cancelled:\(digest)"),
+                                    success: false, mechanism: mechanism)
+                            }
                             continuation.finish(throwing: AIProviderError.transport("stream cancelled"))
                             return
                         } catch {
+                            let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
+                            if admittedOrdinal != nil || requestBudget == nil {
+                                let digest = telemetryHasher.finalize().map {
+                                    String(format: "%02x", $0)
+                                }.joined()
+                                BuilderTrustedTelemetry.recordProvider(
+                                    providerID: candidate.provider.id, modelID: currentModel,
+                                    inputTokens: promptTokens > 0 ? promptTokens : inputTokenUpperBound,
+                                    outputTokens: completionTokens > 0
+                                        ? completionTokens : outputByteUpperBound,
+                                    elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)),
+                                    outputDigest: BuilderEvidenceDigest.sha256(
+                                        "\(admittedOrdinal ?? 0):\(String(reflecting: type(of: error))):\(digest)"),
+                                    success: false, mechanism: mechanism)
+                            }
                             if Task.isCancelled {
                                 continuation.finish(throwing: AIProviderError.transport("stream cancelled"))
                                 return
                             }
                             lastError = error
                             // Layer B: only safe to re-issue if NOTHING was yielded yet (else we'd double-emit).
-                            if !yieldedAny, !resolvedModelOnce, ModelResolver.isModelNotFound(error),
-                               let resolved = await resolveValidModel(for: candidate.provider, apiKey: candidate.apiKey, current: currentModel) {
-                                resolvedModelOnce = true
-                                currentModel = resolved
-                                continue
+                            if routePolicy.allowModelResolution, !yieldedAny, !resolvedModelOnce,
+                               ModelResolver.isModelNotFound(error) {
+                                do {
+                                    if let resolved = try await resolveValidModel(
+                                        for: candidate.provider, apiKey: candidate.apiKey,
+                                        current: currentModel, routePolicy: routePolicy,
+                                        requestBudget: requestBudget
+                                    ) {
+                                        resolvedModelOnce = true
+                                        currentModel = resolved
+                                        continue
+                                    }
+                                } catch {
+                                    continuation.finish(throwing: error)
+                                    return
+                                }
                             }
                             // Codex HIGH: once partial output has been forwarded, NEITHER a same-candidate
                             // retry NOR a cross-provider fallback is safe — re-issuing would append a second
@@ -446,6 +875,28 @@ public final class ProviderRegistry: Sendable {
         }
     }
 
+    private static func tokenUpperBound(_ messages: [ChatMessage]) -> Int {
+        if let encoded = try? JSONEncoder().encode(messages) { return max(1, encoded.count) }
+        return max(1, messages.reduce(0) { $0 + $1.content.utf8.count + $1.role.rawValue.utf8.count })
+    }
+
+    private static func recordProviderAttempt(
+        candidate: StreamCandidate, model: String, mechanism: String,
+        ordinal: Int?, messages: [ChatMessage], text: String, usage: TokenUsage,
+        success: Bool, started: UInt64, errorType: String? = nil
+    ) {
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- started
+        let input = usage.promptTokens > 0 ? usage.promptTokens : tokenUpperBound(messages)
+        let output = usage.completionTokens > 0 ? usage.completionTokens : text.utf8.count
+        BuilderTrustedTelemetry.recordProvider(
+            providerID: candidate.provider.id, modelID: model,
+            inputTokens: input, outputTokens: output,
+            elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)),
+            outputDigest: BuilderEvidenceDigest.sha256(
+                "\(ordinal ?? 0):\(errorType ?? "ok"):\(text)"),
+            success: success, mechanism: mechanism)
+    }
+
     private static func shouldRetry(_ error: Error) -> Bool {
         if let providerError = error as? AIProviderError {
             return providerError.isRetryable
@@ -466,7 +917,7 @@ public final class ProviderRegistry: Sendable {
     private static func shouldFallback(_ error: Error) -> Bool {
         if let providerError = error as? AIProviderError {
             switch providerError {
-            case .missingAPIKey, .invalidAPIKey, .rateLimited, .transport:
+            case .missingAPIKey, .invalidAPIKey, .rateLimited, .transport, .streamTimedOut:
                 return true
             case .http(let status, _):
                 return status == 401 || status == 403 || status == 404 || status == 429 || (500...599).contains(status)

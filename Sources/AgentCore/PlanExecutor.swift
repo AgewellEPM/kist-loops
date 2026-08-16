@@ -1,4 +1,34 @@
 import Foundation
+import CryptoKit
+
+/// Secret-safe facts captured while the executor still owns the exact resolved arguments. The outer
+/// PlanExecute loop later binds these facts to its immutable contract and durable ordering envelope.
+public struct PlanCommandExecutionCapture: Sendable, Equatable, Codable {
+    public let executable: String
+    public let argv: [String]
+    public let workingDirectory: String?
+    public let hasStandardInput: Bool
+    public let standardInputDigest: String?
+    public let standardInputByteCount: Int
+    public var standardInputSourceKind: PlanStandardInputSourceKind = .none
+    public var standardInputRelativePath: String? = nil
+    public let allowedExitCodes: [Int]
+    public let actualExitCode: Int
+    public let wasSignalled: Bool
+    public let timedOut: Bool
+    public let semanticStatus: String
+    public let verificationEligible: Bool
+    public let success: Bool
+    public let argsFingerprint: String
+    public let commandFingerprint: String
+    public let outputDigest: String
+    public var trustedCommandReference: BuilderTrustedCommandReference? = nil
+    public let boundedRedactedOutputExcerpt: String
+    public let effectObservation: ToolEffectObservation
+    public let executionPhase: Int?
+    public let completedAt: Date
+    public let governedWorkspaceDigest: String
+}
 
 /// Result of running one plan step.
 public struct StepResult: Sendable, Equatable {
@@ -22,7 +52,40 @@ public struct StepResult: Sendable, Equatable {
     /// Fingerprint of the arguments THIS invocation actually ran. Repairs can change arguments, so the
     /// frozen plan template is only a compatibility fallback for old/manual results.
     public var argsFingerprint: String? = nil
+    public var commandExecutionCapture: PlanCommandExecutionCapture? = nil
+    public var supportingCommandReceipt: PlanSupportingCommandReceipt? = nil
+    /// Host-coordinated workspace transition for this exact invocation. PlanExecute persists this
+    /// atomically with the node receipt; ordinary standalone PlanExecutor users leave it nil.
+    public var workspaceActionReceipt: DurableWorkspaceActionCompletionReceipt? = nil
+
+    public init(stepId: String, tool: String, success: Bool, output: String, error: String?,
+                metadata: [String: String] = [:], effectObservation: ToolEffectObservation? = nil,
+                declinedAtGate: Bool = false, executionPhase: Int? = nil,
+                argsFingerprint: String? = nil) {
+        self.stepId = stepId; self.tool = tool; self.success = success; self.output = output
+        self.error = error; self.metadata = metadata; self.effectObservation = effectObservation
+        self.declinedAtGate = declinedAtGate; self.executionPhase = executionPhase
+        self.argsFingerprint = argsFingerprint
+    }
 }
+
+public struct PlanCoordinatedActionResult: Sendable {
+    public let toolResult: ToolResult
+    public let workspaceReceipt: DurableWorkspaceActionCompletionReceipt?
+
+    public init(toolResult: ToolResult,
+                workspaceReceipt: DurableWorkspaceActionCompletionReceipt? = nil) {
+        self.toolResult = toolResult
+        self.workspaceReceipt = workspaceReceipt
+    }
+}
+
+public typealias PlanActionCoordinator = @Sendable (
+    _ step: PlanStep,
+    _ resolvedArguments: [String: Any],
+    _ executionPhase: Int,
+    _ invoke: @escaping @Sendable () async -> ToolResult
+) async -> PlanCoordinatedActionResult
 
 /// Result of running a whole plan: per-step results, the captured outputs (id → text) usable for
 /// `${id}` references, and the first failing step id (nil on full success).
@@ -71,15 +134,18 @@ public struct PlanExecutor: Sendable {
     /// (`${id}` references substituted) — the repairer must diagnose what executed, not the
     /// template. nil ⇒ no repair (old behavior). Bounded to `maxStepRepairs` per plan run.
     private let repairStep: (@Sendable (PlanStep, [String: Any], StepResult) async -> [String: Any]?)?
+    private let coordinateAction: PlanActionCoordinator?
     private static let maxStepRepairs = 3
 
     public init(tools: ToolRegistry, context: ToolContext,
                 sink: RuntimeEventSink = NullEventSink(), maxOutputBytes: Int = 8_000,
                 approveDangerous: (@Sendable (String, [String: Any]) async -> Bool)? = nil,
-                repairStep: (@Sendable (PlanStep, [String: Any], StepResult) async -> [String: Any]?)? = nil) {
+                repairStep: (@Sendable (PlanStep, [String: Any], StepResult) async -> [String: Any]?)? = nil,
+                coordinateAction: PlanActionCoordinator? = nil) {
         self.tools = tools; self.context = context; self.sink = sink
         self.maxOutputBytes = maxOutputBytes; self.approveDangerous = approveDangerous
         self.repairStep = repairStep
+        self.coordinateAction = coordinateAction
     }
 
     public func execute(_ plan: ExecutablePlan) async -> PlanExecution {
@@ -141,7 +207,8 @@ public struct PlanExecutor: Sendable {
                        await approve(step.tool, args) == false {
                         let sr = StepResult(stepId: step.id, tool: step.tool, success: false,
                                             output: "", error: "declined at approval gate (dangerous step)",
-                                            effectObservation: .none, declinedAtGate: true,
+                                            effectObservation: ToolEffectObservation.none,
+                                            declinedAtGate: true,
                                             executionPhase: wavePhase,
                                             argsFingerprint: Self.fingerprint(tool: step.tool, arguments: args))
                         // Emitted INLINE (immediate feedback at the prompt); the merge loop skips
@@ -153,17 +220,32 @@ public struct PlanExecutor: Sendable {
                     }
                     sink.emit(.actionStarted(index: idx, tool: step.tool, description: step.intent))
                     group.addTask {
-                        let result = await tools.execute(name: step.tool, arguments: args, context: context)
+                        let coordinated = await coordinateAction?(step, args, wavePhase) {
+                            await tools.execute(name: step.tool, arguments: args, context: context)
+                        }
+                        let result: ToolResult
+                        if let coordinated {
+                            result = coordinated.toolResult
+                        } else {
+                            result = await tools.execute(
+                                name: step.tool, arguments: args, context: context)
+                        }
                         let body = String((result.success ? result.output : (result.error ?? result.output)).prefix(maxOutputBytes))
                         let effect = ToolEffectCatalog.observe(tool: step.tool, arguments: args,
                                                                outcomeMetadata: result.metadata)
-                        return (idx, step.id, body, StepResult(stepId: step.id, tool: step.tool,
-                                                              success: result.success, output: body, error: result.error,
-                                                              metadata: result.metadata,
-                                                              effectObservation: effect,
-                                                              executionPhase: wavePhase,
-                                                              argsFingerprint: Self.fingerprint(tool: step.tool,
-                                                                                               arguments: args)))
+                        let fingerprint = Self.fingerprint(tool: step.tool, arguments: args)
+                        var stepResult = StepResult(stepId: step.id, tool: step.tool,
+                                                    success: result.success, output: body, error: result.error,
+                                                    metadata: result.metadata,
+                                                    effectObservation: effect,
+                                                    executionPhase: wavePhase,
+                                                    argsFingerprint: fingerprint)
+                        stepResult.commandExecutionCapture = Self.commandCapture(
+                            step: step, arguments: args, result: result, effect: effect,
+                            executionPhase: wavePhase, argsFingerprint: fingerprint,
+                            projectRoot: context.projectRoot)
+                        stepResult.workspaceActionReceipt = coordinated?.workspaceReceipt
+                        return (idx, step.id, body, stepResult)
                     }
                 }
 
@@ -188,7 +270,8 @@ public struct PlanExecutor: Sendable {
             // can fail the mission (never for gate-declined steps: the user said no). Bounded per
             // plan run so a hopeless step can't loop the repairer.
             for (_, stepId, _, stepResult) in waveResults where !stepResult.success {
-                guard let repairStep, stepRepairsUsed < Self.maxStepRepairs,
+                guard coordinateAction == nil,
+                      let repairStep, stepRepairsUsed < Self.maxStepRepairs,
                       !stepResult.declinedAtGate,
                       !Task.isCancelled,
                       let step = ordered.first(where: { $0.id == stepId }) else { continue }
@@ -214,7 +297,7 @@ public struct PlanExecutor: Sendable {
                 let retryEffect = ToolEffectCatalog.observe(tool: step.tool, arguments: fixedArgs,
                                                             outcomeMetadata: retry.metadata)
                 executionPhase += 1
-                let retryResult = retry.success
+                var retryResult = retry.success
                     ? StepResult(stepId: stepId, tool: step.tool, success: true, output: body, error: nil,
                                  metadata: retry.metadata, effectObservation: retryEffect,
                                  executionPhase: executionPhase,
@@ -224,6 +307,11 @@ public struct PlanExecutor: Sendable {
                                  metadata: retry.metadata, effectObservation: retryEffect,
                                  executionPhase: executionPhase,
                                  argsFingerprint: Self.fingerprint(tool: step.tool, arguments: fixedArgs))
+                retryResult.commandExecutionCapture = Self.commandCapture(
+                    step: step, arguments: fixedArgs, result: retry, effect: retryEffect,
+                    executionPhase: executionPhase,
+                    argsFingerprint: Self.fingerprint(tool: step.tool, arguments: fixedArgs),
+                    projectRoot: context.projectRoot)
                 sink.emit(.actionFinished(index: idx, success: retry.success,
                                           output: retry.success ? body : "", error: retry.error))
                 attempts.append(retryResult)
@@ -249,5 +337,91 @@ public struct PlanExecutor: Sendable {
         tool == "run_command"
             ? ToolEffectCatalog.commandFingerprint(arguments)
             : TrajectoryAnalyzer.fingerprint(arguments)
+    }
+
+    private static func commandCapture(
+        step: PlanStep, arguments: [String: Any], result: ToolResult,
+        effect: ToolEffectObservation, executionPhase: Int?, argsFingerprint: String,
+        projectRoot: String
+    ) -> PlanCommandExecutionCapture? {
+        guard step.tool == "run_command", result.success,
+              let executable = arguments["executable"] as? String, !executable.isEmpty,
+              let actualExitCode = result.metadata["exit_code"].flatMap(Int.init),
+              let trustedCommandReference = result.trustedCommandReference,
+              trustedCommandReference.isValid,
+              trustedCommandReference.exitCode == actualExitCode,
+              trustedCommandReference.gateArgumentsDigest == AuditLog.digest(arguments).1 else {
+            return nil
+        }
+        let argv = (arguments["args"] as? [String])
+            ?? (arguments["args"] as? [Any])?.compactMap { $0 as? String } ?? []
+        let sourceKind = result.metadata["stdin_source_kind"]
+            .flatMap(PlanStandardInputSourceKind.init(rawValue:))
+            ?? (arguments["stdin"] == nil ? .none : .inline)
+        let legacyInlineData = (arguments["stdin"] as? String).map { Data($0.utf8) }
+        let stdinDigest = result.metadata["stdin_sha256"]
+            ?? legacyInlineData.map(RunCommandTool.sha256)
+        let stdinByteCount = Int(result.metadata["stdin_byte_count"] ?? "")
+            ?? legacyInlineData?.count ?? 0
+        let stdinRelativePath = result.metadata["stdin_relative_path"]
+        switch sourceKind {
+        case .none:
+            guard arguments["stdin"] == nil, arguments["stdin_path"] == nil,
+                  stdinDigest == nil, stdinByteCount == 0, stdinRelativePath == nil else { return nil }
+        case .inline:
+            guard arguments["stdin_path"] == nil,
+                  let stdin = arguments["stdin"] as? String,
+                  let stdinDigest,
+                  stdinByteCount == stdin.utf8.count,
+                  stdinDigest == RunCommandTool.sha256(Data(stdin.utf8)),
+                  stdinRelativePath == nil else { return nil }
+        case .governedPath:
+            guard arguments["stdin"] == nil, arguments["stdin_path"] is String,
+                  stdinDigest?.isEmpty == false, stdinByteCount >= 0,
+                  stdinRelativePath?.isEmpty == false else { return nil }
+        }
+        let allowedExitCodes = (result.metadata["allowed_exit_codes"] ?? "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }.sorted()
+        guard !allowedExitCodes.isEmpty, allowedExitCodes.contains(actualExitCode) else { return nil }
+        let stdout = result.metadata["stdout"] ?? result.output
+        let stderr = result.metadata["stderr"] ?? ""
+        let combined = stdout + (stderr.isEmpty ? "" : "\n" + stderr)
+        let canonical: String
+        if JSONSerialization.isValidJSONObject(arguments),
+           let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+           let value = String(data: data, encoding: .utf8) {
+            canonical = value
+        } else {
+            canonical = String(reflecting: arguments)
+        }
+        func digest(_ text: String) -> String {
+            SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        let semantic = result.metadata["semantic_status"]
+            ?? (actualExitCode == 0 ? "clean_exit" : "expected_domain_status")
+        let eligible = result.metadata["verification_eligible"]?.lowercased() == "true"
+        let sourceBinding = [sourceKind.rawValue, stdinRelativePath ?? "-", stdinDigest ?? "-",
+                             String(stdinByteCount)].joined(separator: "\u{0}")
+        return PlanCommandExecutionCapture(
+            executable: executable, argv: argv,
+            workingDirectory: arguments["cwd"] as? String,
+            hasStandardInput: sourceKind != .none,
+            standardInputDigest: stdinDigest,
+            standardInputByteCount: stdinByteCount,
+            standardInputSourceKind: sourceKind,
+            standardInputRelativePath: stdinRelativePath,
+            allowedExitCodes: allowedExitCodes, actualExitCode: actualExitCode,
+            wasSignalled: result.metadata["was_signalled"]?.lowercased() == "true",
+            timedOut: result.metadata["timed_out"]?.lowercased() == "true",
+            semanticStatus: semantic, verificationEligible: eligible,
+            success: result.success, argsFingerprint: argsFingerprint,
+            commandFingerprint: digest(step.tool + "\u{0}" + canonical + "\u{0}" + sourceBinding),
+            outputDigest: digest(stdout + "\u{0}" + stderr),
+            trustedCommandReference: trustedCommandReference,
+            boundedRedactedOutputExcerpt: sourceKind == .none
+                ? String(SecretMasker.mask(combined).prefix(2_000))
+                : SecretMasker.marker + " stdin-bearing command output suppressed",
+            effectObservation: effect, executionPhase: executionPhase, completedAt: Date(),
+            governedWorkspaceDigest: PlanExecuteLoop.governedWorkspaceDigest(projectRoot: projectRoot))
     }
 }

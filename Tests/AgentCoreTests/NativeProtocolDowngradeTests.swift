@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 @testable import AgentCore
 
 /// Pins safety-net #2: native→text downgrade fires for a tool-protocol rejection and ONLY for that.
@@ -23,8 +24,8 @@ final class NativeProtocolDowngradeTests: XCTestCase {
             from: AIProviderError.http(status: 422, body: "tools are not allowed with this request")))
     }
 
-    func testInvalidResponseNamingFunctionDowngrades() {
-        XCTAssertTrue(NativeProtocolDowngrade.shouldDowngrade(
+    func testInvalidResponseNamingFunctionDoesNotDowngrade() {
+        XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(
             from: AIProviderError.invalidResponse("functionDeclarations cannot be combined with code_execution")))
     }
 
@@ -67,17 +68,144 @@ final class NativeProtocolDowngradeTests: XCTestCase {
                        "first call: a GENERIC 5xx is a transient outage, not a schema rejection — do not downgrade")
     }
 
-    func testInitialCall5xxNamingToolsDowngrades() {
-        // A first-call 5xx that EXPLICITLY names the tool surface IS a protocol rejection → downgrade.
+    func testInitialCall5xxNamingToolsDoesNotDowngrade() {
+        // Server failures remain server failures even when their message mentions schema parsing.
         let named = AIProviderError.http(status: 500, body: "functionDeclarations could not be parsed")
-        XCTAssertTrue(NativeProtocolDowngrade.shouldDowngrade(from: named, initialToolCall: true))
+        XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(from: named, initialToolCall: true))
     }
 
-    func testInitialCallGeneric400Downgrades() {
-        // A deterministic 4xx on the first native call is almost always the tool request itself → downgrade.
+    func testInitialCallGenericClientErrorsDoNotDowngrade() {
+        // Status alone is not tool-protocol evidence: these can be context, model, endpoint, or policy errors.
         let generic = AIProviderError.http(status: 400, body: "Invalid request")
         XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(from: generic))
-        XCTAssertTrue(NativeProtocolDowngrade.shouldDowngrade(from: generic, initialToolCall: true))
+        XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(from: generic, initialToolCall: true))
+        XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(
+            from: AIProviderError.http(status: 404, body: "model not found"), initialToolCall: true))
+        XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(
+            from: AIProviderError.http(status: 422, body: "context is invalid"), initialToolCall: true))
+    }
+
+    func testGenericErrorsMentioningToolFieldsDoNotDowngrade() {
+        for (status, body) in [
+            (400, "context length exceeded while parsing tools parameter"),
+            (404, "model not found; function calling is supported by a different model"),
+            (422, "invalid image payload; see the function calling documentation"),
+        ] {
+            XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(
+                from: AIProviderError.http(status: status, body: body), initialToolCall: true),
+                "incidental tool wording is not capability-rejection evidence: \(body)")
+        }
+    }
+
+    func testStructuredCapabilityCodeDowngradesWithoutMessageGuessing() {
+        let body = #"{"error":{"code":"tool_calling_not_supported","message":"request rejected"}}"#
+        XCTAssertEqual(
+            NativeProtocolDowngrade.decision(
+                from: AIProviderError.http(status: 400, body: body), initialToolCall: true),
+            .cacheableCapabilityMismatch)
+    }
+
+    func testInitialTurnErrorWithPriorToolHistoryIsRunLocalNotCacheable() {
+        let error = AIProviderError.http(
+            status: 400, body: "tool_call history is unsupported in this request")
+
+        XCTAssertEqual(
+            NativeProtocolDowngrade.decision(
+                from: error, initialToolCall: true, hasToolProtocolHistory: false),
+            .cacheableCapabilityMismatch)
+        XCTAssertEqual(
+            NativeProtocolDowngrade.decision(
+                from: error, initialToolCall: true, hasToolProtocolHistory: true),
+            .currentRunOnly)
+    }
+
+    func testPreviouslyAcceptedSchemaIsNeverNegativeCached() {
+        let error = AIProviderError.http(
+            status: 400, body: "function calling is unsupported in this context")
+        XCTAssertEqual(
+            NativeProtocolDowngrade.decision(
+                from: error, initialToolCall: true,
+                hasToolProtocolHistory: false, capabilityAlreadyProven: true),
+            .currentRunOnly)
+    }
+
+    func testBareFunctionalityWordIsNotCacheableProtocolEvidence() {
+        let error = AIProviderError.http(
+            status: 400, body: "content policy rejected the requested functionality")
+        XCTAssertNil(
+            NativeProtocolDowngrade.decision(
+                from: error, initialToolCall: true, hasToolProtocolHistory: false))
+    }
+
+    func testPositiveCapabilityEvictsAndBlocksNegativeCache() async {
+        let cache = NativeToolCapabilityCache(ttl: 60)
+        let positive = NativeToolPositiveState(
+            providerId: "provider", model: "model", toolSchemaFingerprint: "schema")
+        await cache.recordPositive(positive)
+        await cache.record(NativeToolFallbackState(
+            providerId: "provider", model: "model", toolSchemaFingerprint: "schema"))
+
+        let cachedNegative = await cache.observation(
+            providerId: "provider", model: "model", schema: "schema")
+        let cachedPositive = await cache.hasPositive(
+            providerId: "provider", model: "model", schema: "schema")
+        XCTAssertNil(cachedNegative)
+        XCTAssertTrue(cachedPositive)
+    }
+
+    func testCapabilityCacheRejectsExpiredAndFutureObservations() async {
+        let now = Date()
+        let cache = NativeToolCapabilityCache(ttl: 60)
+        await cache.record(NativeToolFallbackState(
+            providerId: "provider", model: "model", toolSchemaFingerprint: "expired",
+            recordedAt: now.addingTimeInterval(-61)))
+        await cache.record(NativeToolFallbackState(
+            providerId: "provider", model: "model", toolSchemaFingerprint: "future",
+            recordedAt: now.addingTimeInterval(3_600)))
+
+        let expired = await cache.observation(
+            providerId: "provider", model: "model", schema: "expired", now: now)
+        let future = await cache.observation(
+            providerId: "provider", model: "model", schema: "future", now: now)
+        XCTAssertNil(expired)
+        XCTAssertNil(future)
+    }
+
+    func testCapabilityCacheIsolatedByExactSchemaFingerprint() async {
+        let cache = NativeToolCapabilityCache(ttl: 60)
+        await cache.record(NativeToolFallbackState(
+            providerId: "provider", model: "model", toolSchemaFingerprint: "schema-a"))
+
+        let exactNegative = await cache.observation(
+            providerId: "provider", model: "model", schema: "schema-a")
+        let otherSchema = await cache.observation(
+            providerId: "provider", model: "model", schema: "schema-b")
+        XCTAssertNotNil(exactNegative)
+        XCTAssertNil(otherSchema)
+        await cache.recordPositive(NativeToolPositiveState(
+            providerId: "provider", model: "model", toolSchemaFingerprint: "schema-b"))
+        let retainedNegative = await cache.observation(
+            providerId: "provider", model: "model", schema: "schema-a")
+        XCTAssertNotNil(retainedNegative,
+            "a positive for another schema must not erase this exact negative key")
+    }
+
+    func testHistoryDetectionUsesCrashRepairedEffectiveTranscript() {
+        let valid: [ChatMessage] = [
+            ChatMessage(role: .assistant, content: "",
+                        toolCalls: [ToolCallRef(id: "1", name: "read_file", argumentsJSON: "{}")]),
+            ChatMessage.toolResult(callId: "1", content: "ok"),
+        ]
+        let interrupted: [ChatMessage] = [
+            ChatMessage(role: .assistant, content: "",
+                        toolCalls: [ToolCallRef(id: "2", name: "write_file", argumentsJSON: "{}")]),
+            ChatMessage(role: .user, content: "interrupted; verify before retrying"),
+        ]
+
+        XCTAssertTrue(NativeProtocolDowngrade.hasToolProtocolHistory(
+            TranscriptRepair.repairForNativeTools(valid)))
+        XCTAssertFalse(NativeProtocolDowngrade.hasToolProtocolHistory(
+            TranscriptRepair.repairForNativeTools(interrupted)))
     }
 
     func testInitialCallStillDoesNotDowngradeAuthOrQuota() {
@@ -92,9 +220,8 @@ final class NativeProtocolDowngradeTests: XCTestCase {
             from: AIProviderError.rateLimited, initialToolCall: true))
     }
 
-    func testMidRun5xxNamingToolsDowngrades() {
-        // Mid-run, a 5xx that EXPLICITLY names the tool surface is a protocol issue worth a text retry.
-        XCTAssertTrue(NativeProtocolDowngrade.shouldDowngrade(
+    func testMidRun5xxNamingToolsDoesNotDowngrade() {
+        XCTAssertFalse(NativeProtocolDowngrade.shouldDowngrade(
             from: AIProviderError.http(status: 503, body: "functionDeclarations rejected by backend")))
     }
 

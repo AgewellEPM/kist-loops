@@ -108,14 +108,19 @@ public final class ResearchRunStore: @unchecked Sendable {
         manifest.status = "gathering"
         manifest.updatedAt = now().timeIntervalSince1970
         let sequence = evidenceSequence
+        let safeEvidenceText = Self.safeText(text)
+        var boundMetadata = metadata
+        if kind == "fetch_url" {
+            boundMetadata["content_sha256"] = BuilderEvidenceDigest.sha256(safeEvidenceText)
+        }
         let evidence = ResearchEvidence(sequence: sequence,
                                         id: "E\(String(format: "%03d", sequence))",
                                         kind: kind,
                                         title: Self.safeText(title),
                                         url: url,
                                         path: path,
-                                        text: Self.safeText(text),
-                                        metadata: metadata,
+                                        text: safeEvidenceText,
+                                        metadata: boundMetadata,
                                         at: now().timeIntervalSince1970)
         try? persistManifestLocked()
         try appendJSONLocked(evidence, to: evidencePath)
@@ -127,16 +132,19 @@ public final class ResearchRunStore: @unchecked Sendable {
         let evidence = Self.loadEvidence(projectRoot: manifest.projectRoot, runID: manifest.runID)
         // A plan/heartbeat is bookkeeping, not research. Refuse to manufacture a polished dossier when
         // every real gatherer failed: downstream council text must never turn "zero sources" into success.
-        let groundedKinds: Set<String> = [
-            "web_search", "fetch_url", "browse", "visual_verify", "context_brain", "estate_search",
+        // Estate matches and symbolic PEEL are supplemental analysis, not source evidence for the
+        // research question. Requiring a primary gatherer prevents an empty web/repo run from being
+        // laundered into a successful dossier by unrelated estate files or a proof template.
+        let usableKinds: Set<String> = [
+            "web_search", "fetch_url", "browse", "visual_verify", "context_brain",
         ]
         let grounded = evidence.filter {
-            groundedKinds.contains($0.kind)
+            usableKinds.contains($0.kind)
                 && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         guard !grounded.isEmpty else {
             throw ToolError.execution(
-                "research has no grounded evidence; a search/fetch/browse/context/visual/estate gatherer must succeed before synthesis")
+                "research has no grounded evidence: no usable primary evidence; a search/fetch/browse/context/visual gatherer must succeed before synthesis")
         }
         var lines: [String] = [
             "# Research Dossier",
@@ -152,6 +160,11 @@ public final class ResearchRunStore: @unchecked Sendable {
             var row = "- [\(item.id)] \(item.kind): \(item.title)"
             if let url = item.url { row += " · \(url)" }
             if let path = item.path { row += " · \(path)" }
+            if item.kind == "fetch_url", let status = item.metadata["status"],
+               let digest = item.metadata["content_sha256"],
+               let fetchStatus = item.metadata["fetch_status"] {
+                row += " · HTTP \(status) · \(fetchStatus) · SHA-256 \(digest)"
+            }
             lines.append(row)
         }
         lines += ["", "## Evidence Notes"]

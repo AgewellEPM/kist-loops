@@ -3,6 +3,27 @@ import XCTest
 
 final class ReviewTargetResolverTests: XCTestCase {
 
+    func testFoundationGlobFallbackPrunesCachesAndHonorsWalkBudget() throws {
+        let root = NSTemporaryDirectory() + "review-glob-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        func write(_ relative: String) throws {
+            let path = root + "/" + relative
+            try FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true)
+            try "let marker = true\n".write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        try write("Sources/App.swift")
+        try write(".cache/toolchain/Hidden.swift")
+        try write("Library/Mobile Documents/Hidden.swift")
+
+        XCTAssertEqual(
+            GitRipgrepReviewSources.fallbackGlob("**/*.swift", root: root),
+            ["Sources/App.swift"])
+        XCTAssertTrue(GitRipgrepReviewSources.fallbackGlob(
+            "**/*.swift", root: root, maxWalkEntries: 1).count <= 1)
+    }
+
     /// Stub sources: deterministic, no git/ripgrep needed.
     private struct Stub: ReviewSources {
         var changed: [String] = []

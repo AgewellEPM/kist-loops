@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 
 /// Run a command — the highest-risk tool. Two modes, structured-first:
 ///
@@ -26,10 +27,15 @@ import Foundation
 /// openat/O_NOFOLLOW for file tools).
 public struct RunCommandTool: AgentTool {
     public let name = "run_command"
-    public let description = "Run a command. Prefer executable+args (safe); use command+shell:true for pipes/globs (needs approval)."
+    public let description = "Run one executable directly. Use executable, args, cwd, stdin or stdin_path, and allowed_exit_codes; never working_directory. stdin_path is a governed regular file relative to cwd/project root and is passed byte-for-byte without a shell. allowed_exit_codes defaults to [0]; allowed nonzero exits are domain statuses, not build/test proof. Raw command is a manual escape hatch requiring shell:true and approval, and is rejected by PlanExecute."
     public let parameters = [
         ToolParameter(name: "executable", type: "string", description: "Program to run (absolute path or bare name resolved on PATH). Preferred.", required: false),
         ToolParameter(name: "args", type: "array", description: "Arguments for `executable` (no shell interpretation)", required: false),
+        ToolParameter(name: "stdin", type: "string", description: "Optional UTF-8 stdin payload passed directly, byte-for-byte (max 1 MiB; unavailable for background jobs)", required: false),
+        ToolParameter(name: "stdin_path", type: "string", description: "Optional governed regular file relative to cwd/project root, passed byte-for-byte as stdin (max 1 MiB; mutually exclusive with stdin; unavailable for raw shell/background jobs)", required: false),
+        ToolParameter(name: "expected_stdin_sha256", type: "string", description: "Replay-only SHA-256 binding for stdin_path; mismatch refuses execution before spawn", required: false),
+        ToolParameter(name: "expected_stdin_byte_count", type: "integer", description: "Replay-only byte-count binding for stdin_path; mismatch refuses execution before spawn", required: false),
+        ToolParameter(name: "allowed_exit_codes", type: "array", description: "Accepted exit codes: unique integers 0...255, max 32 (default [0]). Accepted nonzero codes never count as build/test verification.", required: false),
         ToolParameter(name: "command", type: "string", description: "Raw shell command — requires shell:true and approval", required: false),
         ToolParameter(name: "shell", type: "boolean", description: "Run `command` via /bin/sh -c (enables pipes/globs). Default false.", required: false),
         ToolParameter(name: "cwd", type: "string", description: "Working dir relative to project root (default: root)", required: false),
@@ -44,11 +50,143 @@ public struct RunCommandTool: AgentTool {
     /// Max bytes retained PER stream. Worst-case memory ~2×; combined output truncated
     /// to this on return.
     static let maxOutputBytes = 100_000
+    static let maxStdinBytes = 1_048_576
+    static let maxAllowedExitCodes = 32
     static let envAllowlist: Set<String> = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "SHELL", "PWD"]
 
+    private static func integerExitCode(_ value: Any) -> Int? {
+        guard let number = value as? NSNumber else { return nil }
+        let encoding = String(cString: number.objCType)
+        guard encoding != "c", encoding != "B" else { return nil } // Bool / JSON boolean
+        let numeric = number.doubleValue
+        guard numeric.isFinite, numeric.rounded() == numeric, (0...255).contains(numeric) else { return nil }
+        return Int(numeric)
+    }
+
+    private static func integerValue(_ value: Any?) -> Int? {
+        guard let value else { return nil }
+        if value is Bool { return nil }
+        if let value = value as? Int { return value }
+        guard let number = value as? NSNumber else { return nil }
+        let encoding = String(cString: number.objCType)
+        guard encoding != "c", encoding != "B" else { return nil }
+        let numeric = number.doubleValue
+        guard numeric.isFinite, numeric.rounded() == numeric,
+              numeric >= Double(Int.min), numeric <= Double(Int.max) else { return nil }
+        return Int(numeric)
+    }
+
+    /// Shared by PlanExecute preflight and live execution. Plans are intentionally stricter than
+    /// direct/manual calls: arbitrary shell text is never repaired by tokenizing it into argv.
+    static func argumentValidationIssue(_ arguments: [String: Any], planPreflight: Bool) -> String? {
+        if arguments["working_directory"] != nil {
+            return "'working_directory' is not supported; use 'cwd'"
+        }
+        if planPreflight {
+            let canonicalKeys: Set<String> = [
+                "executable", "args", "cwd", "stdin", "stdin_path", "allowed_exit_codes", "command", "shell",
+                "timeout", "cpu_limit", "file_size_limit_mb", "memory_limit_mb", "background",
+            ]
+            let unsupported = arguments.keys.filter { !canonicalKeys.contains($0) }.sorted()
+            if !unsupported.isEmpty {
+                return "unsupported run_command argument key(s): \(unsupported.joined(separator: ", ")); aliases and casing variants are rejected; use canonical keys such as executable, args, cwd, stdin_path, and allowed_exit_codes"
+            }
+        }
+        if let cwd = arguments["cwd"], !(cwd is String) {
+            return "'cwd' must be a string"
+        }
+        if let executable = arguments["executable"], !(executable is String) {
+            return "'executable' must be a string"
+        }
+        if let args = arguments["args"], !(args is [String]) {
+            return "'args' must be an array of strings"
+        }
+        if let rawStdin = arguments["stdin"] {
+            guard let stdin = rawStdin as? String else { return "'stdin' must be a string" }
+            if stdin.utf8.count > maxStdinBytes {
+                return "'stdin' exceeds the \(maxStdinBytes)-byte limit"
+            }
+        }
+        if arguments["stdin"] != nil, arguments["stdin_path"] != nil {
+            return "'stdin' and 'stdin_path' are mutually exclusive"
+        }
+        if let rawPath = arguments["stdin_path"] {
+            guard let path = rawPath as? String else { return "'stdin_path' must be a string" }
+            guard !path.isEmpty else { return "'stdin_path' must not be empty" }
+            guard !path.utf8.contains(0) else { return "'stdin_path' must not contain NUL" }
+            guard !path.hasPrefix("/") else { return "'stdin_path' must be relative to cwd/project root" }
+            let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+            if parts.contains(where: { $0 == ".." }) {
+                return "'stdin_path' must not contain '..' components"
+            }
+            if arguments["command"] != nil || (arguments["shell"] as? Bool) == true {
+                return "'stdin_path' is unavailable for raw shell commands"
+            }
+        }
+        if let rawDigest = arguments["expected_stdin_sha256"] {
+            guard arguments["stdin_path"] != nil else { return "'expected_stdin_sha256' requires 'stdin_path'" }
+            guard let digest = rawDigest as? String,
+                  digest.utf8.count == 64,
+                  digest.utf8.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }) else {
+                return "'expected_stdin_sha256' must be a 64-character hexadecimal SHA-256"
+            }
+        }
+        if arguments["expected_stdin_byte_count"] != nil {
+            guard arguments["stdin_path"] != nil else { return "'expected_stdin_byte_count' requires 'stdin_path'" }
+            guard let count = integerValue(arguments["expected_stdin_byte_count"]),
+                  (0...maxStdinBytes).contains(count) else {
+                return "'expected_stdin_byte_count' must be an integer from 0 through \(maxStdinBytes)"
+            }
+        }
+        if let rawCodes = arguments["allowed_exit_codes"] {
+            guard let values = rawCodes as? [Any] else {
+                return "'allowed_exit_codes' must be an array of integers"
+            }
+            if values.isEmpty { return "'allowed_exit_codes' must not be empty" }
+            if values.count > maxAllowedExitCodes {
+                return "'allowed_exit_codes' may contain at most \(maxAllowedExitCodes) values"
+            }
+            var seen = Set<Int>()
+            for value in values {
+                guard let code = integerExitCode(value) else {
+                    return "'allowed_exit_codes' values must be integers"
+                }
+                guard seen.insert(code).inserted else {
+                    return "'allowed_exit_codes' values must be unique"
+                }
+            }
+        }
+        if arguments["background"] as? Bool == true {
+            if arguments["stdin"] != nil { return "'stdin' is unavailable for background jobs" }
+            if arguments["stdin_path"] != nil { return "'stdin_path' is unavailable for background jobs" }
+            if arguments["allowed_exit_codes"] != nil {
+                return "'allowed_exit_codes' is unavailable for background jobs"
+            }
+        }
+        if planPreflight {
+            if arguments["command"] != nil {
+                return "raw 'command' is forbidden in plans; use 'executable' and an 'args' array (never working_directory)"
+            }
+            guard let executable = arguments["executable"] as? String,
+                  !executable.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "run_command plans require a non-empty 'executable' and optional 'args' array"
+            }
+        }
+        return nil
+    }
+
+    private static func allowedExitCodes(in arguments: [String: Any]) -> Set<Int> {
+        guard let values = arguments["allowed_exit_codes"] as? [Any] else { return [0] }
+        return Set(values.compactMap(Self.integerExitCode))
+    }
+
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        if let issue = Self.argumentValidationIssue(arguments, planPreflight: false) {
+            return .failure("run_command: \(issue)")
+        }
         let cwd = try context.resolvedPath((arguments["cwd"] as? String) ?? ".", mustExist: true)
         let timeout = min(max(optionalInt("timeout", from: arguments) ?? 120, 1), 600)
+        let allowedExitCodes = Self.allowedExitCodes(in: arguments)
 
         // One invocation has one execution shape. Accepting both and silently preferring
         // `executable` made audit/proof consumers vulnerable to classifying the unused shell text.
@@ -68,6 +206,9 @@ public struct RunCommandTool: AgentTool {
                 return .failure("executable not found or not executable: \(exe)")
             }
             let exeArgs = (arguments["args"] as? [String]) ?? []
+            if let reason = Self.interpreterRefusalReason(resolvedPath: resolved, args: exeArgs) {
+                throw ToolError.shellDenied(reason)
+            }
             // Gate on the FULL argv line so argument-bearing deny entries fire.
             if let reason = await context.shell.binaryRefusalReason(resolvedPath: resolved, args: exeArgs) {
                 throw ToolError.shellDenied(reason)
@@ -75,42 +216,34 @@ public struct RunCommandTool: AgentTool {
             launchPath = resolved
             launchArgs = exeArgs
         } else if let command = arguments["command"] as? String, !command.isEmpty {
-            // SAFE PROMOTION: a `command` with NO shell metacharacters needs no shell, so run it as
-            // STRUCTURED executable+args — identical safety to the `executable` path (nothing for /bin/sh
-            // to reinterpret), and it needs no interactive approval. This unblocks a headless loop that
-            // typed `swift build` / `git status` as a raw command: without this, the no-approval refusal
-            // ("raw shell requires interactive approval") kills every such cycle and burns the budget.
-            if let (exe, exeArgs) = Self.promoteRawToStructured(command) {
-                guard let resolved = Self.resolveExecutable(exe, env: Self.scrubbedEnvironment(), cwd: cwd) else {
-                    return .failure("executable not found or not executable: \(exe)")
-                }
-                if let reason = await context.shell.binaryRefusalReason(resolvedPath: resolved, args: exeArgs) {
-                    throw ToolError.shellDenied(reason)
-                }
-                launchPath = resolved
-                launchArgs = exeArgs
-            } else {
-                // GENUINE RAW SHELL — the command uses shell operators (| && ; > $ ` glob …). Only when
-                // explicitly opted in, and only with approval (the deny-list is advisory against arbitrary
-                // shell text, so this path can never auto-approve).
-                guard (arguments["shell"] as? Bool) == true else {
-                    return .failure("raw 'command' with shell operators requires shell:true — or split it into "
-                        + "separate run_command calls using executable+args (e.g. run `swift build`, then `swift test`).")
-                }
-                if let reason = await context.shell.shellStringRefusalReason(for: command) {
-                    throw ToolError.shellDenied(reason)
-                }
-                // Defense-in-depth: raw shell auto-approves ONLY under the sandbox. If the policy said
-                // sandboxed but the context's OS sandbox is not actually enabled (a mis-wire), FAIL
-                // CLOSED — never run a hands-off raw shell string unconfined.
-                if context.shell.sandboxed && !context.sandbox.enabled {
-                    throw ToolError.shellDenied("raw shell was auto-approved for the OS sandbox, but the sandbox is not active — refusing")
-                }
-                launchPath = "/bin/sh"
-                launchArgs = ["-c", command]
+            // RAW SHELL is explicit only. Even simple-looking strings are never split on whitespace and
+            // silently promoted to argv: quoting and intent belong to the caller's structured arguments.
+            guard (arguments["shell"] as? Bool) == true else {
+                return .failure("raw 'command' requires shell:true — use executable+args for structured execution")
             }
+            if let reason = await context.shell.shellStringRefusalReason(for: command) {
+                throw ToolError.shellDenied(reason)
+            }
+            if context.shell.sandboxed && !context.sandbox.enabled {
+                throw ToolError.shellDenied("raw shell was auto-approved for the OS sandbox, but the sandbox is not active — refusing")
+            }
+            launchPath = "/bin/sh"
+            launchArgs = ["-c", command]
         } else {
             return .failure("provide either 'executable' (+ optional 'args') or 'command' with shell:true")
+        }
+
+        // The shared ToolGate has already authorized the COMPLETE argument set before entering this
+        // body. Read only now, after command/interpreter policy also accepts the invocation, so a denied
+        // call cannot probe or consume stdin_path. The confined primitive opens every component with
+        // O_NOFOLLOW and proves the same descriptor stayed stable while reading.
+        let standardInput: ResolvedStandardInput
+        do {
+            standardInput = try Self.resolveStandardInput(arguments: arguments, context: context, cwd: cwd)
+        } catch let error as ToolError {
+            return .failure(error.description)
+        } catch {
+            return .failure(error.localizedDescription)
         }
 
         // OS-level sandbox tier (opt-in). Wraps the resolved command so the KERNEL enforces
@@ -119,11 +252,12 @@ public struct RunCommandTool: AgentTool {
         // silently runs unsandboxed when the caller asked for one.
         let finalPath: String
         let finalArgs: [String]
+        let sandboxed: Bool
         switch SeatbeltSandbox.wrap(launchPath: launchPath, args: launchArgs, root: context.projectRoot, policy: context.sandbox, cwd: cwd) {
         case .passthrough:
-            finalPath = launchPath; finalArgs = launchArgs
+            finalPath = launchPath; finalArgs = launchArgs; sandboxed = false
         case .wrapped(let p, let a):
-            finalPath = p; finalArgs = a
+            finalPath = p; finalArgs = a; sandboxed = true
         case .unavailable(let reason):
             return .failure("OS sandbox required but unavailable: \(reason)")
         }
@@ -154,31 +288,69 @@ public struct RunCommandTool: AgentTool {
             }
             return ToolResult(success: true,
                               output: "started background job \(id) — poll it with job(action=\"output\", id=\"\(id)\"), stop with job(action=\"kill\", id=\"\(id)\")",
-                              metadata: ["job_id": id, "background": "true"])
+                              metadata: ["job_id": id, "background": "true",
+                                         "sandboxed": String(sandboxed),
+                                         "builder_os_sandboxed": "false"])
         }
 
-        return await Self.spawnAndCollect(
-            launchPath: limited.launchPath, launchArgs: limited.launchArgs, cwd: cwd, timeout: timeout
+        let collected = await Self.spawnAndCollect(
+            launchPath: limited.launchPath, launchArgs: limited.launchArgs, cwd: cwd, timeout: timeout,
+            standardInput: standardInput, allowedExitCodes: allowedExitCodes,
+            requestedLaunchPath: launchPath, requestedLaunchArgs: launchArgs
         )
+        var metadata = collected.metadata
+        metadata["sandboxed"] = String(sandboxed)
+        return ToolResult(success: collected.success, output: collected.output,
+                          error: collected.error, metadata: metadata,
+                          trustedCommandReference: collected.trustedCommandReference)
     }
 
     // MARK: - Spawn + bounded collection
 
-    static func spawnAndCollect(launchPath: String, launchArgs: [String], cwd: String, timeout: Int) async -> ToolResult {
+    static func spawnAndCollect(launchPath: String, launchArgs: [String], cwd: String, timeout: Int,
+                                stdinData: Data? = nil, allowedExitCodes: Set<Int> = [0]) async -> ToolResult {
+        let standardInput: ResolvedStandardInput
+        if let stdinData {
+            standardInput = ResolvedStandardInput(data: stdinData, sourceKind: "inline", relativePath: nil,
+                                                  byteCount: stdinData.count, sha256: sha256(stdinData))
+        } else {
+            standardInput = .none
+        }
+        return await spawnAndCollect(launchPath: launchPath, launchArgs: launchArgs, cwd: cwd,
+                                     timeout: timeout, standardInput: standardInput,
+                                     allowedExitCodes: allowedExitCodes)
+    }
+
+    static func spawnAndCollect(launchPath: String, launchArgs: [String], cwd: String, timeout: Int,
+                                standardInput: ResolvedStandardInput,
+                                allowedExitCodes: Set<Int> = [0],
+                                requestedLaunchPath: String? = nil,
+                                requestedLaunchArgs: [String]? = nil) async -> ToolResult {
         // ProcessGroupRunner.run blocks (posix_spawn + group teardown + reap), so run it on
         // a background queue and await the outcome.
+        let telemetrySink = BuilderTrustedTelemetry.captureCommandSink()
+        let requestedDigest = Self.requestedCommandDigest(
+            launchPath: requestedLaunchPath ?? launchPath,
+            launchArgs: requestedLaunchArgs ?? launchArgs,
+            cwd: cwd, timeout: timeout, standardInput: standardInput,
+            allowedExitCodes: allowedExitCodes)
         let outcome: ProcessGroupRunner.Outcome = await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 let o = ProcessGroupRunner.run(
                     launchPath: launchPath, launchArgs: launchArgs, cwd: cwd,
-                    env: scrubbedEnvironment(), timeoutSeconds: timeout, capPerStream: maxOutputBytes
+                    env: scrubbedEnvironment(), timeoutSeconds: timeout, capPerStream: maxOutputBytes,
+                    stdinData: standardInput.data, stdinByteLimit: maxStdinBytes,
+                    telemetrySink: telemetrySink,
+                    requestedArgumentsDigest: requestedDigest
                 )
                 cont.resume(returning: o)
             }
         }
 
         let combined = outcome.combined
-        let success = !outcome.timedOut && outcome.exitCode == 0
+        let cleanExit = !outcome.timedOut && !outcome.wasSignalled && outcome.exitCode >= 0
+        let success = cleanExit && allowedExitCodes.contains(Int(outcome.exitCode))
+        let verificationEligible = success && outcome.exitCode == 0
         // Never leave the agent blind on failure: if a command failed with NO captured output, say WHY it's
         // empty (sandbox/resource kill, or it wrote nothing) and how to see the real error — instead of a
         // bare "exit code N" that gives nothing to diagnose.
@@ -196,7 +368,7 @@ public struct RunCommandTool: AgentTool {
         else if outcome.exitCode < 0 {
             failError = combined.isEmpty ? "the command could not be launched (internal error)" : combined
         }
-        else if combined.isEmpty {
+        else if cleanExit && combined.isEmpty {
             // A CLEAN non-zero exit with no output is a NORMAL result for many tools — `which`/`type`
             // (not found), `grep`/`rg` (no match), `test`/`[`/`cmp`/`diff` (false/differ), `find` (none).
             // Report it plainly and let the agent read the exit code; do NOT cry "sandbox/resource kill"
@@ -204,13 +376,124 @@ public struct RunCommandTool: AgentTool {
             failError = "exit code \(outcome.exitCode), no output — commonly a NORMAL non-zero result "
                 + "(e.g. `which`/`grep`/`test` when nothing matched or a file was absent), not necessarily an error."
         }
-        else { failError = "exit code \(outcome.exitCode)" }
+        else if cleanExit {
+            failError = "exit code \(outcome.exitCode); allowed exit codes: \(allowedExitCodes.sorted())"
+        }
+        else { failError = "command failed with exit code \(outcome.exitCode)" }
+        var metadata = [
+            "exit_code": String(outcome.exitCode),
+            "timed_out": String(outcome.timedOut),
+            "was_signalled": String(outcome.wasSignalled),
+            "stdout": outcome.stdout,
+            "stderr": outcome.stderr,
+            "stdout_truncated": String(outcome.stdoutTruncated),
+            "stderr_truncated": String(outcome.stderrTruncated),
+            "output_truncated": String(outcome.outputTruncated),
+            "allowed_exit_codes": allowedExitCodes.sorted().map(String.init).joined(separator: ","),
+            "exit_code_allowed": String(success),
+            "verification_eligible": String(verificationEligible),
+            "builder_os_sandboxed": String(
+                outcome.sandboxProfileDigest?.isEmpty == false
+                    && !outcome.effectiveEnvironmentDigest.isEmpty),
+        ]
+        if success && outcome.exitCode != 0 {
+            metadata["semantic_status"] = "expected_domain_status"
+        } else if verificationEligible {
+            metadata["semantic_status"] = "clean_exit"
+        }
+        metadata["stdin_source_kind"] = standardInput.sourceKind
+        metadata["stdin_byte_count"] = String(standardInput.byteCount)
+        if let digest = standardInput.sha256 { metadata["stdin_sha256"] = digest }
+        if let relativePath = standardInput.relativePath {
+            metadata["stdin_relative_path"] = relativePath
+        }
         return ToolResult(
             success: success,
             output: combined.isEmpty ? (success ? "(no output)" : "(no output, exit \(outcome.exitCode))") : combined,
             error: failError,
-            metadata: ["exit_code": String(outcome.exitCode), "timed_out": String(outcome.timedOut)]
+            metadata: metadata,
+            trustedCommandReference: outcome.trustedCommandReference
         )
+    }
+
+    private static func requestedCommandDigest(
+        launchPath: String, launchArgs: [String], cwd: String, timeout: Int,
+        standardInput: ResolvedStandardInput, allowedExitCodes: Set<Int>
+    ) -> String {
+        BuilderEvidenceDigest.sha256(
+            (["kist.builder.requested-command.v1", launchPath] + launchArgs
+             + [cwd, String(timeout), standardInput.sourceKind,
+                standardInput.relativePath ?? "-", standardInput.sha256 ?? "-",
+                String(standardInput.byteCount),
+                allowedExitCodes.sorted().map(String.init).joined(separator: ",")])
+                .joined(separator: "\u{0}"))
+    }
+
+    struct ResolvedStandardInput: Sendable, Equatable {
+        let data: Data?
+        let sourceKind: String
+        let relativePath: String?
+        let byteCount: Int
+        let sha256: String?
+
+        static let none = ResolvedStandardInput(data: nil, sourceKind: "none", relativePath: nil,
+                                                byteCount: 0, sha256: nil)
+    }
+
+    static func resolveStandardInput(arguments: [String: Any], context: ToolContext,
+                                     cwd: String) throws -> ResolvedStandardInput {
+        if let inline = arguments["stdin"] as? String {
+            let data = Data(inline.utf8)
+            return ResolvedStandardInput(data: data, sourceKind: "inline", relativePath: nil,
+                                         byteCount: data.count, sha256: sha256(data))
+        }
+        guard let requested = arguments["stdin_path"] as? String else { return .none }
+
+        let confined = try context.confinedRoot()
+        let relativePath = try normalizedGovernedStdinPath(requested, cwd: cwd,
+                                                           projectRoot: confined.rootPath)
+        let data = try confined.readStableData(relativePath, maxBytes: maxStdinBytes)
+        let digest = sha256(data)
+        if let expected = arguments["expected_stdin_sha256"] as? String,
+           expected.lowercased() != digest {
+            throw ToolError.execution("stdin_path changed since validation (SHA-256 mismatch): \(relativePath)")
+        }
+        if let expected = integerValue(arguments["expected_stdin_byte_count"]),
+           expected != data.count {
+            throw ToolError.execution("stdin_path changed since validation (byte-count mismatch): \(relativePath)")
+        }
+        return ResolvedStandardInput(data: data, sourceKind: "governed_path",
+                                     relativePath: relativePath, byteCount: data.count, sha256: digest)
+    }
+
+    static func normalizedGovernedStdinPath(_ requested: String, cwd: String,
+                                            projectRoot: String) throws -> String {
+        guard !requested.isEmpty, !requested.hasPrefix("/"), !requested.utf8.contains(0) else {
+            throw ToolError.invalidParameter("stdin_path must be a nonempty relative path without NUL")
+        }
+        let requestedParts = requested.split(separator: "/", omittingEmptySubsequences: false)
+        guard !requestedParts.contains(where: { $0 == ".." }) else {
+            throw ToolError.pathEscape(path: requested, root: projectRoot)
+        }
+        let rootPrefix = projectRoot == "/" ? "/" : projectRoot + "/"
+        let cwdRelative: String
+        if cwd == projectRoot {
+            cwdRelative = ""
+        } else if cwd.hasPrefix(rootPrefix) {
+            cwdRelative = String(cwd.dropFirst(rootPrefix.count))
+        } else {
+            throw ToolError.pathEscape(path: cwd, root: projectRoot)
+        }
+        let parts = (cwdRelative.split(separator: "/") + requestedParts)
+            .filter { !$0.isEmpty && $0 != "." }
+        guard !parts.isEmpty else {
+            throw ToolError.invalidParameter("stdin_path must name a regular file")
+        }
+        return parts.map(String.init).joined(separator: "/")
+    }
+
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     struct ResourceLimits: Sendable, Equatable {
@@ -230,9 +513,9 @@ public struct RunCommandTool: AgentTool {
             "ulimit -f \(limits.fileSizeMB * 2048)",
         ]
         if let memoryMB = limits.memoryMB {
-            // `ulimit -v` is supported by Linux `/bin/sh`; some Darwin shells ignore/refuse it.
-            // When the user explicitly requests it, fail closed if the platform cannot apply it.
+            #if !canImport(Darwin)
             lines.append("ulimit -v \(memoryMB * 1024)")
+            #endif
         }
         lines.append("exec \"$@\"")
         return ("/bin/sh", ["-c", lines.joined(separator: "\n"), "agentcore-resource-limits", launchPath] + launchArgs)
@@ -279,27 +562,50 @@ public struct RunCommandTool: AgentTool {
     /// unattended runs is the launcher's call (the wrapper adds it to PATH), not a baked-in default.
     static let wellKnownFallbackDirs = ["/opt/homebrew/bin", "/usr/local/bin"]
 
-    /// Shell metacharacters whose presence means the command NEEDS a real shell (so it can't be safely
-    /// promoted to structured execution): pipes, redirects, sequencing, subshells, expansion, quoting,
-    /// globs, home/expansion, comments, and newlines. NOTE: `=` is deliberately NOT here — it's not a
-    /// shell operator inside an argument (`--filter=X`, `--configuration=release` are common build flags),
-    /// and env-assignment (`FOO=bar cmd`) is handled separately by rejecting a first token that contains `=`.
-    static let shellMetacharacters = CharacterSet(charactersIn: "|&;<>()$`\\\"'*?[]{}~#!\n\r")
+    /// Structured argv is normally literal, but an interpreter's command/eval switch creates a second
+    /// parser and recreates raw-shell injection. Block those shapes before the ordinary substring policy.
+    /// `env` is blocked entirely because it is an indirect executable launcher that would otherwise make
+    /// the resolved-binary allowlist describe `/usr/bin/env`, not the program that actually runs.
+    static func interpreterRefusalReason(resolvedPath: String, args: [String]) -> String? {
+        let base = (resolvedPath as NSString).lastPathComponent.lowercased()
+        if base == "env" {
+            return "the env command launcher is not permitted in structured execution; invoke the resolved executable directly"
+        }
 
-    /// If `command` has NO shell metacharacters, tokenize it on whitespace into (executable, args) so it
-    /// can run DIRECTLY (no /bin/sh). Returns nil when a real shell is required — the caller then keeps
-    /// the raw-shell path (opt-in + approval). Whitespace-splitting is exactly correct here precisely
-    /// BECAUSE there are no quotes/metacharacters to honor.
-    static func promoteRawToStructured(_ command: String) -> (String, [String])? {
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard trimmed.rangeOfCharacter(from: shellMetacharacters) == nil else { return nil }
-        let tokens = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        guard let exe = tokens.first else { return nil }
-        // `FOO=bar cmd` is a shell env-assignment prefix — the first token isn't an executable. Keep it on
-        // the raw-shell path (needs a real shell to apply the assignment) rather than trying to exec `FOO=bar`.
-        guard !exe.contains("=") else { return nil }
-        return (exe, Array(tokens.dropFirst()))
+        let shells: Set<String> = ["sh", "bash", "zsh", "dash", "fish", "ksh"]
+        if shells.contains(base) {
+            let hasCommandString = args.contains { argument in
+                let flag = argument.lowercased()
+                if flag == "--command" || flag.hasPrefix("--command=") { return true }
+                return flag.hasPrefix("-") && !flag.hasPrefix("--") && flag.dropFirst().contains("c")
+            }
+            if hasCommandString {
+                return "shell interpreter '\(base)' with a command-string flag must use the raw-shell approval path"
+            }
+        }
+
+        let isPython = base == "python" || base.hasPrefix("python2") || base.hasPrefix("python3")
+        let evalFlags: Set<String>
+        if isPython { evalFlags = ["-c"] }
+        else if ["node", "nodejs", "ruby", "perl", "swift", "deno", "bun", "osascript"].contains(base) {
+            evalFlags = ["-e", "--eval"]
+        } else if ["powershell", "pwsh"].contains(base) {
+            evalFlags = ["-c", "-command", "-encodedcommand"]
+        } else if base == "php" {
+            evalFlags = ["-r"]
+        } else {
+            return nil
+        }
+        if args.contains(where: { argument in
+            let lower = argument.lowercased()
+            return evalFlags.contains(lower) || evalFlags.contains(where: { flag in
+                lower.hasPrefix(flag + "=")
+                    || (flag.count == 2 && lower.hasPrefix(flag) && lower.count > flag.count)
+            })
+        }) {
+            return "interpreter '\(base)' command/eval mode is not permitted in structured execution"
+        }
+        return nil
     }
 
     static func scrubbedEnvironment() -> [String: String] {
@@ -317,6 +623,12 @@ final class BoundedOutputCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var out = Data()
     private var err = Data()
+    private var outTruncated = false
+    private var errTruncated = false
+    private var outHasher = SHA256()
+    private var errHasher = SHA256()
+    private var outByteCount = 0
+    private var errByteCount = 0
     private let cap: Int
     private var capFired = false
     private let onCapExceeded: () -> Void
@@ -326,16 +638,32 @@ final class BoundedOutputCollector: @unchecked Sendable {
         self.onCapExceeded = onCapExceeded
     }
 
-    func appendOut(_ data: Data) { append(data, to: \.out) }
-    func appendErr(_ data: Data) { append(data, to: \.err) }
+    func appendOut(_ data: Data) {
+        append(data, to: \.out, truncated: \.outTruncated, hasher: \.outHasher,
+               byteCount: \.outByteCount)
+    }
+    func appendErr(_ data: Data) {
+        append(data, to: \.err, truncated: \.errTruncated, hasher: \.errHasher,
+               byteCount: \.errByteCount)
+    }
 
-    private func append(_ data: Data, to keyPath: ReferenceWritableKeyPath<BoundedOutputCollector, Data>) {
+    private func append(_ data: Data,
+                        to keyPath: ReferenceWritableKeyPath<BoundedOutputCollector, Data>,
+                        truncated truncatedKeyPath: ReferenceWritableKeyPath<BoundedOutputCollector, Bool>,
+                        hasher hasherKeyPath: ReferenceWritableKeyPath<BoundedOutputCollector, SHA256>,
+                        byteCount byteCountKeyPath: ReferenceWritableKeyPath<BoundedOutputCollector, Int>) {
         guard !data.isEmpty else { return }
         var fire = false
         lock.lock()
+        self[keyPath: hasherKeyPath].update(data: data)
+        self[keyPath: byteCountKeyPath] += data.count
         let current = self[keyPath: keyPath]
         if current.count < cap {
-            self[keyPath: keyPath].append(data.prefix(cap - current.count))
+            let remaining = cap - current.count
+            self[keyPath: keyPath].append(data.prefix(remaining))
+            if data.count >= remaining { self[keyPath: truncatedKeyPath] = true }
+        } else {
+            self[keyPath: truncatedKeyPath] = true
         }
         if (out.count >= cap || err.count >= cap), !capFired {
             capFired = true
@@ -361,5 +689,24 @@ final class BoundedOutputCollector: @unchecked Sendable {
     func stderrText() -> String {
         lock.lock(); defer { lock.unlock() }
         return String(data: err, encoding: .utf8) ?? ""
+    }
+
+    func truncationState() -> (stdout: Bool, stderr: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (outTruncated, errTruncated)
+    }
+
+    func byteCounts() -> (stdout: Int, stderr: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (outByteCount, errByteCount)
+    }
+
+    func fullDigests() -> (stdout: String, stderr: String) {
+        lock.lock(); defer { lock.unlock() }
+        let outCopy = outHasher
+        let errCopy = errHasher
+        return (
+            outCopy.finalize().map { String(format: "%02x", $0) }.joined(),
+            errCopy.finalize().map { String(format: "%02x", $0) }.joined())
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -27,7 +28,7 @@ import Glibc
 /// or a PID-namespace whose PID 1 is reaped (future hardening tier).
 enum ProcessGroupRunner {
 
-    struct Outcome {
+    struct Outcome: Sendable {
         let combined: String     // stdout then stderr, each capped per-stream
         let exitCode: Int32      // process exit code, or 128+signal if signalled
         let timedOut: Bool
@@ -36,10 +37,28 @@ enum ProcessGroupRunner {
         // compiling unchanged; only the success path fills them in.
         var stdout: String = ""
         var stderr: String = ""
+        /// Raw captured counts survive invalid UTF-8 conversion.
+        var stdoutByteCount: Int = 0
+        var stderrByteCount: Int = 0
         /// True when the child was terminated BY A SIGNAL (WIFSIGNALED) — `exitCode` is then 128+signal.
         /// This is the real signature of an OS-sandbox / resource-limit kill (SIGKILL/SIGXCPU/SIGSEGV/…),
         /// distinct from a clean non-zero exit like `which`/`grep`/`test` returning 1 with no output.
         var wasSignalled: Bool = false
+        /// Per-stream capture truth. Reaching a stream cap is reported conservatively as truncation,
+        /// even when the cap callback tears the process group down before another byte is observed.
+        var stdoutTruncated: Bool = false
+        var stderrTruncated: Bool = false
+        /// True when either stream reached its cap or the joined stdout+stderr view exceeded the
+        /// aggregate output budget and was shortened.
+        var outputTruncated: Bool = false
+        var stdoutDigest: String = BuilderEvidenceDigest.sha256("")
+        var stderrDigest: String = BuilderEvidenceDigest.sha256("")
+        var effectiveLauncherDigest: String = BuilderEvidenceDigest.sha256("")
+        var effectiveEnvironmentDigest: String = BuilderEvidenceDigest.sha256("")
+        var sandboxProfileDigest: String? = nil
+        var trustedCommandReference: BuilderTrustedCommandReference? = nil
+        /// The caller revoked the invocation while it was running. Distinct from a wall timeout.
+        var cancelled: Bool = false
     }
 
     /// Blocking — call OFF the main actor (RunCommandTool wraps it in a continuation on a
@@ -56,12 +75,66 @@ enum ProcessGroupRunner {
                     capPerStream: Int,
                     graceSeconds: Int = 2,
                     stdinData: Data? = nil,
-                    stdinByteLimit: Int = 16 * 1_024 * 1_024) -> Outcome {
+                    stdinByteLimit: Int = 16 * 1_024 * 1_024,
+                    telemetrySink: BuilderTrustedCommandSink? = nil,
+                    requestedArgumentsDigest: String? = nil,
+                    cancellationCheck: @Sendable () -> Bool = { false }) -> Outcome {
+
+        let telemetryStarted = DispatchTime.now().uptimeNanoseconds
+        let inputDigest = stdinData.map {
+            SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined()
+        } ?? SHA256.hash(data: Data()).map { String(format: "%02x", $0) }.joined()
+        let requestedDigest = requestedArgumentsDigest ?? BuilderEvidenceDigest.sha256(
+            ([launchPath] + launchArgs + [cwd, inputDigest, String(stdinData?.count ?? 0)])
+                .joined(separator: "\u{0}"))
+        var effectiveLaunchPath = launchPath
+        var effectiveLaunchArgs = launchArgs
+        var effectiveCWD = cwd
+        var effectiveEnvironment = env
+        var effectiveEnvironmentDigest = environmentDigest(env)
+        var sandboxProfileDigest: String?
+        func launcherDigest() -> String {
+            return BuilderEvidenceDigest.sha256(
+                (["kist.builder.effective-launch.v1", effectiveLaunchPath]
+                 + effectiveLaunchArgs
+                 + [effectiveCWD, effectiveEnvironmentDigest,
+                    sandboxProfileDigest ?? "unsandboxed", String(timeoutSeconds),
+                    String(capPerStream), String(graceSeconds), String(stdinByteLimit)])
+                    .joined(separator: "\u{0}"))
+        }
+        func observed(_ original: Outcome) -> Outcome {
+            var outcome = original
+            let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
+            outcome.effectiveLauncherDigest = launcherDigest()
+            outcome.effectiveEnvironmentDigest = effectiveEnvironmentDigest
+            outcome.sandboxProfileDigest = sandboxProfileDigest
+            outcome.trustedCommandReference = BuilderTrustedTelemetry.recordCommand(
+                sink: telemetrySink, requestedArgumentsDigest: requestedDigest,
+                outcome: outcome, elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)))
+            return outcome
+        }
+
+        let prepared: BuilderSandboxPreparedLaunch?
+        do {
+            prepared = try BuilderOSProcessSandboxAttestor.preparedLaunch(
+                launchPath: launchPath, launchArgs: launchArgs, cwd: cwd,
+                environment: env)
+        } catch {
+            return observed(Outcome(combined: "Builder OS sandbox refused subprocess: \(error.localizedDescription)",
+                                    exitCode: -1, timedOut: false))
+        }
+        effectiveLaunchPath = prepared?.launchPath ?? launchPath
+        effectiveLaunchArgs = prepared?.launchArgs ?? launchArgs
+        effectiveCWD = prepared?.cwd ?? cwd
+        effectiveEnvironment = prepared?.environment ?? env
+        effectiveEnvironmentDigest = prepared?.environmentDigest
+            ?? environmentDigest(effectiveEnvironment)
+        sandboxProfileDigest = prepared?.sandboxProfileDigest
 
         // --- staged stdin (before any pipe so one defer covers every exit path) ---
         guard let stdinFD = Self.stagedInputDescriptor(stdinData, byteLimit: stdinByteLimit) else {
-            return Outcome(combined: "stdin exceeds its byte limit or could not be staged",
-                           exitCode: -1, timedOut: false)
+            return observed(Outcome(combined: "stdin exceeds its byte limit or could not be staged",
+                                    exitCode: -1, timedOut: false))
         }
         defer { if stdinFD >= 0 { close(stdinFD) } }
 
@@ -70,7 +143,9 @@ enum ProcessGroupRunner {
         var outFds: [Int32] = [-1, -1]
         var errFds: [Int32] = [-1, -1]
         var stopFds: [Int32] = [-1, -1]   // self-pipe to wake drain poll() on shutdown
-        func pipeFailure() -> Outcome { Outcome(combined: "could not create pipe: \(Self.strerr())", exitCode: -1, timedOut: false) }
+        func pipeFailure() -> Outcome { observed(Outcome(
+            combined: "could not create pipe: \(Self.strerr())",
+            exitCode: -1, timedOut: false)) }
         guard pipe(&outFds) == 0 else { return pipeFailure() }
         guard pipe(&errFds) == 0 else {
             close(outFds[0]); close(outFds[1]); return pipeFailure()
@@ -117,7 +192,7 @@ enum ProcessGroupRunner {
             chk(posix_spawn_file_actions_addclosefrom_np(&fa, 3))
             #endif
             // Confined cwd (validated by the caller). addchdir_np: macOS 10.15+, glibc 2.29+.
-            chk(cwd.withCString { posix_spawn_file_actions_addchdir_np(&fa, $0) })
+            chk(effectiveCWD.withCString { posix_spawn_file_actions_addchdir_np(&fa, $0) })
         }
 
         // --- attributes: new process group, leader == child PID ---
@@ -142,9 +217,9 @@ enum ProcessGroupRunner {
         }
 
         // --- argv / envp (NULL-terminated C arrays) ---
-        var argv: [UnsafeMutablePointer<CChar>?] = ([launchPath] + launchArgs).map { strdup($0) }
+        var argv: [UnsafeMutablePointer<CChar>?] = ([effectiveLaunchPath] + effectiveLaunchArgs).map { strdup($0) }
         argv.append(nil)
-        var envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") }
+        var envp: [UnsafeMutablePointer<CChar>?] = effectiveEnvironment.map { strdup("\($0.key)=\($0.value)") }
         envp.append(nil)
         defer {
             for p in argv where p != nil { free(p) }
@@ -157,18 +232,18 @@ enum ProcessGroupRunner {
         guard setupErr == 0 else {
             close(outFds[0]); close(outFds[1]); close(errFds[0]); close(errFds[1])
             close(stopFds[0]); close(stopFds[1])
-            return Outcome(combined: "spawn setup failed: \(String(cString: strerror(setupErr)))",
-                           exitCode: -1, timedOut: false)
+            return observed(Outcome(combined: "spawn setup failed: \(String(cString: strerror(setupErr)))",
+                                    exitCode: -1, timedOut: false))
         }
 
         var pid: pid_t = 0
-        let rc = posix_spawn(&pid, launchPath, &fa, &attr, argv, envp)   // returns errno DIRECTLY
+        let rc = posix_spawn(&pid, effectiveLaunchPath, &fa, &attr, argv, envp)   // returns errno DIRECTLY
         // Parent must close its copy of the write ends or reads never see EOF.
         close(outFds[1]); close(errFds[1])
         guard rc == 0 else {
             close(outFds[0]); close(errFds[0]); close(stopFds[0]); close(stopFds[1])
-            return Outcome(combined: "could not launch \(launchPath): \(String(cString: strerror(rc)))",
-                           exitCode: -1, timedOut: false)
+            return observed(Outcome(combined: "could not launch \(effectiveLaunchPath): \(String(cString: strerror(rc)))",
+                                    exitCode: -1, timedOut: false))
         }
         let pgid = pid   // we made the child its own group leader
 
@@ -208,8 +283,20 @@ enum ProcessGroupRunner {
         }
 
         var timedOut = false
-        if exited.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut {
-            timedOut = true
+        var cancelled = false
+        let wallDeadline = DispatchTime.now() + .seconds(timeoutSeconds)
+        while true {
+            if exited.wait(timeout: .now() + .milliseconds(50)) == .success { break }
+            if cancellationCheck() {
+                cancelled = true
+                break
+            }
+            if DispatchTime.now() >= wallDeadline {
+                timedOut = true
+                break
+            }
+        }
+        if timedOut || cancelled {
             // Gate each kill on the leader still reserving the PGID. For a normal host this is
             // always true here (the un-detected child is alive); the guard only matters under a
             // SIGCHLD=SIG_IGN auto-reap racing the timeout, where it avoids a recycled-PGID kill.
@@ -264,17 +351,30 @@ enum ProcessGroupRunner {
         }
         close(outFds[0]); close(errFds[0]); close(stopFds[0]); close(stopFds[1])
 
+        let streamTruncation = collector.truncationState()
+        let streamBytes = collector.byteCounts()
+        let streamDigests = collector.fullDigests()
         var combined = collector.combinedText()
-        if combined.utf8.count > capPerStream {
+        let aggregateTruncated = combined.utf8.count > capPerStream
+        if aggregateTruncated {
             combined = String(combined.prefix(capPerStream)) + "\n…[output truncated]"
         }
         // If we couldn't reap (auto-reap host config), the exit status is unknown — report a
         // non-zero/unknown code rather than a fabricated success.
         let code: Int32 = reaped ? Self.exitCode(from: status) : -1
         let signalled = reaped && (status & 0x7f) != 0    // WIFSIGNALED (matches exitCode's 128+signal path)
-        return Outcome(combined: combined, exitCode: code, timedOut: timedOut,
+        return observed(Outcome(combined: combined, exitCode: code, timedOut: timedOut,
                        stdout: collector.stdoutText(), stderr: collector.stderrText(),
-                       wasSignalled: signalled)
+                       stdoutByteCount: streamBytes.stdout,
+                       stderrByteCount: streamBytes.stderr,
+                       wasSignalled: signalled,
+                       stdoutTruncated: streamTruncation.stdout,
+                       stderrTruncated: streamTruncation.stderr,
+                       outputTruncated: streamTruncation.stdout || streamTruncation.stderr
+                            || aggregateTruncated,
+                       stdoutDigest: streamDigests.stdout,
+                       stderrDigest: streamDigests.stderr,
+                       cancelled: cancelled))
     }
 
     // MARK: - Internals
@@ -317,6 +417,12 @@ enum ProcessGroupRunner {
             return (status >> 8) & 0xff      // WEXITSTATUS
         }
         return 128 + (status & 0x7f)         // 128 + WTERMSIG
+    }
+
+    private static func environmentDigest(_ environment: [String: String]) -> String {
+        BuilderEvidenceDigest.sha256(environment.keys.sorted().map {
+            "\($0)=\(environment[$0] ?? "")"
+        }.joined(separator: "\u{0}"))
     }
 
     private static func strerr() -> String { String(cString: strerror(errno)) }

@@ -8,6 +8,14 @@ import FoundationNetworking   // Linux: URLSession lives here
 /// normalized errors) but speaks Anthropic's wire format: `x-api-key` + `anthropic-version`
 /// auth, a top-level `system` field, and `content_block_delta` / `message_delta` SSE events.
 public struct AnthropicProvider: ChatProvider {
+    static let maxErrorBodyBytes = 600
+
+    /// Preserve diagnostics for every HTTP status while bounding hostile bodies.
+    static func httpError(status: Int, bodyData: Data) -> AIProviderError {
+        var body = String(decoding: bodyData.prefix(maxErrorBodyBytes), as: UTF8.self)
+        if bodyData.count > maxErrorBodyBytes { body += "\n...[error body truncated]" }
+        return .http(status: status, body: body)
+    }
     public let id = "anthropic"
     public let name = "Claude"
     public let iconName = "brain.head.profile"
@@ -33,6 +41,14 @@ public struct AnthropicProvider: ChatProvider {
 
     public init() {}
 
+    public func capabilities(forModel model: String) -> ModelCapabilities {
+        let modelID = resolvedModel(model)
+        let meta = availableModels.first { $0.id == modelID || $0.name == modelID }
+        return ModelCapabilities(nativeTools: true, vision: meta?.isVision ?? true, reasoning: true,
+                                 reasoningEffortSupport: ProviderEffortMapper.support(providerID: id, modelID: modelID),
+                                 contextWindowTokens: meta?.contextWindowTokens)
+    }
+
     /// A user turn's `content`: a plain string when there are no images, else Anthropic image content
     /// blocks (base64) + the text. Claude takes images only — video/audio is routed to Gemini upstream.
     static func userContent(for m: ChatMessage) -> Any {
@@ -51,10 +67,18 @@ public struct AnthropicProvider: ChatProvider {
     /// Build the request body — pure/testable. Filters out `.system` role messages and
     /// hoists the system prompt to the top-level `system` field (Anthropic's contract).
     public func makeBody(messages: [ChatMessage], model: String, settings: ModelSettings, stream: Bool) -> [String: Any] {
+        let settings = settings.reasoningEffort.map {
+            ProviderEffortMapper.resolve(providerID: id, modelID: model, requested: $0,
+                                         support: capabilities(forModel: model).reasoningEffortSupport,
+                                         base: settings).settings
+        } ?? settings
         var apiMessages: [[String: Any]] = []
         for m in messages where m.role != .system {
             if m.role == .assistant {
-                apiMessages.append(["role": "assistant", "content": m.content])
+                var blocks = Self.opaqueReasoningBlocks(in: m)
+                if !m.content.isEmpty { blocks.append(["type": "text", "text": m.content]) }
+                apiMessages.append(["role": "assistant",
+                                    "content": blocks.isEmpty ? m.content : blocks])
             } else {
                 apiMessages.append(["role": "user", "content": Self.userContent(for: m)])
             }
@@ -73,6 +97,7 @@ public struct AnthropicProvider: ChatProvider {
             "top_p": settings.topP
         ]
         if !settings.systemPrompt.isEmpty { body["system"] = settings.systemPrompt }
+        Self.applyReasoningControl(&body, settings: settings)
         return body
     }
 
@@ -93,9 +118,13 @@ public struct AnthropicProvider: ChatProvider {
                 out.append(.usage(promptTokens: inTokens, completionTokens: 0))
             }
         case "content_block_delta":
-            if let delta = json["delta"] as? [String: Any],
-               let text = delta["text"] as? String, !text.isEmpty {
-                out.append(.delta(text))
+            if let delta = json["delta"] as? [String: Any] {
+                if delta["type"] as? String == "thinking_delta",
+                   let thinking = delta["thinking"] as? String, !thinking.isEmpty {
+                    out.append(.reasoning(thinking))
+                } else if let text = delta["text"] as? String, !text.isEmpty {
+                    out.append(.delta(text))
+                }
             }
         case "message_delta":
             if let usage = json["usage"] as? [String: Any],
@@ -130,6 +159,20 @@ public struct AnthropicProvider: ChatProvider {
         return ["type": "object", "properties": props, "required": required]
     }
 
+    private static func opaqueReasoningBlocks(in message: ChatMessage) -> [[String: Any]] {
+        message.providerReasoningHandles.compactMap { handle in
+            guard handle.providerID == "anthropic" else { return nil }
+            switch handle.kind {
+            case "anthropic.omittedThinkingSignature":
+                return ["type": "thinking", "thinking": "", "signature": handle.reference]
+            case "anthropic.redactedThinking":
+                return ["type": "redacted_thinking", "data": handle.reference]
+            default:
+                return nil
+            }
+        }
+    }
+
     /// Parse a tool call's `argumentsJSON` string back into the object Anthropic expects in a
     /// `tool_use` block's `input` field. Non-object / unparseable input degrades to `{}` rather
     /// than dropping the block (the model still sees the call, just with empty args).
@@ -145,21 +188,25 @@ public struct AnthropicProvider: ChatProvider {
     /// (Anthropic has no tool role). Adds a top-level `tools` array of `{name, description,
     /// input_schema}`. Kept separate from `makeBody` so the text-path body/tests are untouched.
     public func makeBodyTools(messages: [ChatMessage], model: String, settings: ModelSettings, tools: [ToolSpec], stream: Bool) -> [String: Any] {
+        let settings = settings.reasoningEffort.map {
+            ProviderEffortMapper.resolve(providerID: id, modelID: model, requested: $0,
+                                         support: capabilities(forModel: model).reasoningEffortSupport,
+                                         base: settings).settings
+        } ?? settings
         var apiMessages: [[String: Any]] = []
         for m in messages where m.role != .system {
             switch m.role {
             case .assistant:
+                var blocks = Self.opaqueReasoningBlocks(in: m)
+                if !m.content.isEmpty { blocks.append(["type": "text", "text": m.content]) }
                 if let calls = m.toolCalls, !calls.isEmpty {
-                    var blocks: [[String: Any]] = []
-                    if !m.content.isEmpty { blocks.append(["type": "text", "text": m.content]) }
                     for c in calls {
                         blocks.append(["type": "tool_use", "id": c.id, "name": c.name,
                                        "input": Self.parseToolInput(c.argumentsJSON)])
                     }
-                    apiMessages.append(["role": "assistant", "content": blocks])
-                } else {
-                    apiMessages.append(["role": "assistant", "content": m.content])
                 }
+                apiMessages.append(["role": "assistant",
+                                    "content": blocks.isEmpty ? m.content : blocks])
             case .tool:
                 // No tool role in Anthropic — a result rides in a user message's content block.
                 apiMessages.append(["role": "user",
@@ -184,11 +231,18 @@ public struct AnthropicProvider: ChatProvider {
             "top_p": settings.topP
         ]
         if !settings.systemPrompt.isEmpty { body["system"] = settings.systemPrompt }
+        Self.applyReasoningControl(&body, settings: settings)
         if !tools.isEmpty {
             body["tools"] = tools.map { ["name": $0.name, "description": $0.description,
                                          "input_schema": Self.inputSchema($0.parameters)] }
         }
         return body
+    }
+
+    private static func applyReasoningControl(_ body: inout [String: Any], settings: ModelSettings) {
+        guard case let .anthropic(thinking, effort)? = settings.providerReasoningControl else { return }
+        if let thinking { body["thinking"] = ["type": thinking] }
+        if let effort { body["output_config"] = ["effort": effort] }
     }
 
     /// Stateful SSE accumulator for the NATIVE tools path — pure (no network), so the streaming
@@ -197,7 +251,15 @@ public struct AnthropicProvider: ChatProvider {
     /// block and only finalize `.toolCall` at `content_block_stop`. Text blocks stream via
     /// `text_delta` → `.delta`. Usage/finish mirror the text path.
     public struct ToolStreamAccumulator {
-        private struct Block { var type: String; var id: String; var name: String; var partialJSON: String }
+        private struct Block {
+            var type: String
+            var id: String
+            var name: String
+            var partialJSON: String
+            var signature: String
+            var redactedData: String
+            var sawThinkingText: Bool
+        }
         private var blocks: [Int: Block] = [:]
 
         public init() {}
@@ -219,7 +281,9 @@ public struct AnthropicProvider: ChatProvider {
                     blocks[idx] = Block(type: cb["type"] as? String ?? "",
                                         id: cb["id"] as? String ?? "",
                                         name: cb["name"] as? String ?? "",
-                                        partialJSON: "")
+                                        partialJSON: "", signature: "",
+                                        redactedData: cb["data"] as? String ?? "",
+                                        sawThinkingText: false)
                 }
             case "content_block_delta":
                 let idx = json["index"] as? Int ?? 0
@@ -227,7 +291,28 @@ public struct AnthropicProvider: ChatProvider {
                     switch delta["type"] as? String {
                     case "input_json_delta":
                         if let frag = delta["partial_json"] as? String {
-                            blocks[idx, default: Block(type: "tool_use", id: "", name: "", partialJSON: "")].partialJSON += frag
+                            var block = blocks[idx] ?? Block(type: "tool_use", id: "", name: "",
+                                                             partialJSON: "", signature: "",
+                                                             redactedData: "", sawThinkingText: false)
+                            block.partialJSON += frag
+                            blocks[idx] = block
+                        }
+                    case "thinking_delta":
+                        if let thinking = delta["thinking"] as? String, !thinking.isEmpty {
+                            var block = blocks[idx] ?? Block(type: "thinking", id: "", name: "",
+                                                             partialJSON: "", signature: "",
+                                                             redactedData: "", sawThinkingText: false)
+                            block.sawThinkingText = true
+                            blocks[idx] = block
+                            out.append(.reasoning(thinking))
+                        }
+                    case "signature_delta":
+                        if let signature = delta["signature"] as? String {
+                            var block = blocks[idx] ?? Block(type: "thinking", id: "", name: "",
+                                                             partialJSON: "", signature: "",
+                                                             redactedData: "", sawThinkingText: false)
+                            block.signature += signature
+                            blocks[idx] = block
                         }
                     default:
                         // text_delta (or a server that omits the delta type for text).
@@ -236,9 +321,21 @@ public struct AnthropicProvider: ChatProvider {
                 }
             case "content_block_stop":
                 let idx = json["index"] as? Int ?? 0
-                if let b = blocks.removeValue(forKey: idx), b.type == "tool_use" {
-                    out.append(.toolCall(id: b.id, name: b.name,
-                                         argumentsJSON: b.partialJSON.isEmpty ? "{}" : b.partialJSON))
+                if let b = blocks.removeValue(forKey: idx) {
+                    if b.type == "tool_use" {
+                        out.append(.toolCall(id: b.id, name: b.name,
+                                             argumentsJSON: b.partialJSON.isEmpty ? "{}" : b.partialJSON))
+                    } else if b.type == "redacted_thinking", !b.redactedData.isEmpty {
+                        out.append(.reasoningHandle(OpaqueProviderReasoningHandle(
+                            providerID: "anthropic", modelID: "", kind: "anthropic.redactedThinking",
+                            reference: b.redactedData)))
+                    } else if b.type == "thinking", !b.sawThinkingText, !b.signature.isEmpty {
+                        // Safe replay only for omitted thinking. Replaying a signature for a visible/raw
+                        // thinking block would require persisting that private text, which is forbidden.
+                        out.append(.reasoningHandle(OpaqueProviderReasoningHandle(
+                            providerID: "anthropic", modelID: "",
+                            kind: "anthropic.omittedThinkingSignature", reference: b.signature)))
+                    }
                 }
             case "message_delta":
                 if let usage = json["usage"] as? [String: Any],
@@ -280,11 +377,12 @@ public struct AnthropicProvider: ChatProvider {
                 do {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                        if http.statusCode == 401 { throw AIProviderError.invalidAPIKey }
-                        if http.statusCode == 429 { throw AIProviderError.rateLimited }
-                        var body = ""
-                        for try await line in bytes.lines { body += line; if body.count > 600 { break } }
-                        throw AIProviderError.http(status: http.statusCode, body: body)
+                        var bodyData = Data()
+                        for try await byte in bytes {
+                            bodyData.append(byte)
+                            if bodyData.count > Self.maxErrorBodyBytes { break }
+                        }
+                        throw Self.httpError(status: http.statusCode, bodyData: bodyData)
                     }
                     for try await line in bytes.lines where line.hasPrefix("data:") {
                         var payload = String(line.dropFirst(5))
@@ -320,11 +418,12 @@ public struct AnthropicProvider: ChatProvider {
                 do {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                        if http.statusCode == 401 { throw AIProviderError.invalidAPIKey }
-                        if http.statusCode == 429 { throw AIProviderError.rateLimited }
-                        var body = ""
-                        for try await line in bytes.lines { body += line; if body.count > 600 { break } }
-                        throw AIProviderError.http(status: http.statusCode, body: body)
+                        var bodyData = Data()
+                        for try await byte in bytes {
+                            bodyData.append(byte)
+                            if bodyData.count > Self.maxErrorBodyBytes { break }
+                        }
+                        throw Self.httpError(status: http.statusCode, bodyData: bodyData)
                     }
                     for try await line in bytes.lines where line.hasPrefix("data:") {
                         var payload = String(line.dropFirst(5))

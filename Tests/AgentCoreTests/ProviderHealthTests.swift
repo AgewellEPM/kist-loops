@@ -132,6 +132,50 @@ final class ProviderHealthTests: XCTestCase {
         XCTAssertTrue(hung?.detail.contains("timed out") == true)
         XCTAssertEqual(fast?.state, .ready)
     }
+
+    // MARK: — Live-cooldown honesty (0.17.59): "ready" while rate-limiting was the router bug's
+    // observability half — catalog health must reflect the cross-process cooldown ledger.
+
+    func testCatalogReportShowsCoolingProviderInsteadOfReady() {
+        let registry = ProviderRegistry(
+            providers: [
+                HealthProvider(id: "gemini", requiresKey: false),
+                HealthProvider(id: "openai", requiresKey: false),
+            ],
+            keyStore: HealthKeys(keys: [:])
+        )
+
+        let report = ProviderHealthChecker.catalogReport(registry, coolingDown: { $0 == "gemini" })
+
+        XCTAssertEqual(report.rows.first { $0.providerId == "gemini" }?.state, .cooling)
+        XCTAssertTrue(report.rows.first { $0.providerId == "gemini" }?.detail.contains("cooling down") == true)
+        XCTAssertEqual(report.rows.first { $0.providerId == "openai" }?.state, .ready)
+        XCTAssertTrue(report.render().contains("~ gemini"))
+    }
+
+    func testCatalogReportMissingKeyOutranksCooling() {
+        // A cooldown must never mask the more fundamental problem (no key at all).
+        let registry = ProviderRegistry(
+            providers: [HealthProvider(id: "keyed", requiresKey: true)],
+            keyStore: HealthKeys(keys: [:])
+        )
+
+        let report = ProviderHealthChecker.catalogReport(registry, coolingDown: { _ in true })
+
+        XCTAssertEqual(report.rows.first?.state, .missingKey)
+    }
+
+    func testCoolingDoesNotFailHealthExitSemantics() {
+        // Exit-code contract lives in the runner (failed || staleCatalog) — pin the report side:
+        // cooling is neither ready nor failed, and self-recovers.
+        let registry = ProviderRegistry(
+            providers: [HealthProvider(id: "gemini", requiresKey: false)],
+            keyStore: HealthKeys(keys: [:])
+        )
+        let report = ProviderHealthChecker.catalogReport(registry, coolingDown: { _ in true })
+        XCTAssertEqual(report.readyCount, 0)
+        XCTAssertFalse(report.rows.contains { $0.state == .failed || $0.state == .staleCatalog })
+    }
 }
 
 private struct HealthKeys: KeyStore {

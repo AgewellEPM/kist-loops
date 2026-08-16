@@ -80,7 +80,7 @@ public extension DisplayGeometry {
     }
 
     /// Live enumeration of the attached displays (macOS). Integration — not unit-tested.
-    public static func liveDisplays() -> [DisplayInfo] {
+    static func liveDisplays() -> [DisplayInfo] {
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))

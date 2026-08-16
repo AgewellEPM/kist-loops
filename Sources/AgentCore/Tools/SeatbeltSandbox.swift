@@ -12,11 +12,15 @@ public struct SandboxPolicy: Sendable {
     public let denyNetwork: Bool
     /// Deny filesystem writes outside the project root (+ temp/devices).
     public let confineWrites: Bool
+    /// Exact loopback TCP proxy ports a sandboxed child may reach while all other egress stays denied.
+    public let allowedLoopbackTCPPorts: Set<UInt16>
 
-    public init(enabled: Bool, denyNetwork: Bool = true, confineWrites: Bool = true) {
+    public init(enabled: Bool, denyNetwork: Bool = true, confineWrites: Bool = true,
+                allowedLoopbackTCPPorts: Set<UInt16> = []) {
         self.enabled = enabled
         self.denyNetwork = denyNetwork
         self.confineWrites = confineWrites
+        self.allowedLoopbackTCPPorts = allowedLoopbackTCPPorts
     }
 
     /// No OS sandbox (default). In-process gates still apply.
@@ -25,6 +29,16 @@ public struct SandboxPolicy: Sendable {
     /// Kernel-enforced: deny egress + confine writes to the root.
     public static func confined(denyNetwork: Bool = true, confineWrites: Bool = true) -> SandboxPolicy {
         SandboxPolicy(enabled: true, denyNetwork: denyNetwork, confineWrites: confineWrites)
+    }
+
+    /// Preserve the caller's sandbox posture while granting one ephemeral, process-local proxy port.
+    /// This is deliberately narrower than disabling network denial for browser subprocesses.
+    public func allowingLoopbackTCPPort(_ port: UInt16) -> SandboxPolicy {
+        var ports = allowedLoopbackTCPPorts
+        ports.insert(port)
+        return SandboxPolicy(enabled: enabled, denyNetwork: denyNetwork,
+                             confineWrites: confineWrites,
+                             allowedLoopbackTCPPorts: ports)
     }
 }
 
@@ -66,6 +80,9 @@ enum SeatbeltSandbox {
         var lines = ["(version 1)", "(allow default)"]
         if policy.denyNetwork {
             lines.append("(deny network*)")
+            for port in policy.allowedLoopbackTCPPorts.sorted() {
+                lines.append("(allow network-outbound (remote ip \"localhost:\(port)\"))")
+            }
         }
         // Deny READS of well-known secret stores so a verifier running agent-authored test code cannot
         // exfiltrate credentials/keys (last-match-wins over `(allow default)`). Reads are otherwise left

@@ -19,6 +19,14 @@ public struct SelfEvolutionDecision: Sendable, Equatable {
     public let signature: String?
     /// Non-nil when the ledger guard BLOCKED a repeat/rate-capped evolution (self-deployer safety).
     public let skipped: String?
+
+    public init(category: FailureCategory, kind: RecoveryKind, brief: String, culpritTool: String?,
+                discovery: DiscoveryStep?, ownership: ToolOwnership?, foreignServer: String?,
+                signature: String?, skipped: String?) {
+        self.category = category; self.kind = kind; self.brief = brief; self.culpritTool = culpritTool
+        self.discovery = discovery; self.ownership = ownership; self.foreignServer = foreignServer
+        self.signature = signature; self.skipped = skipped
+    }
 }
 
 public enum SelfEvolutionEngine {
@@ -71,7 +79,7 @@ public enum SelfEvolutionEngine {
                 culpritTool: tool, discovery: nil, ownership: owner, foreignServer: server,
                 signature: sig, skipped: nil)
 
-        case .surfaceBlocked, .repairCode:
+        case .surfaceBlocked, .repairCode, .repairSchema, .repairEnvironment, .reverify:
             return SelfEvolutionDecision(
                 category: verdict.category, kind: plan.kind, brief: plan.brief,
                 culpritTool: verdict.culpritTool, discovery: nil, ownership: nil,

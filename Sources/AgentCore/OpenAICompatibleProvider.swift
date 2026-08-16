@@ -26,14 +26,21 @@ public struct OpenAICompatibleProvider: ChatProvider {
     /// protocol — which exposes the SAME tools (read/search/grep/run), just serialized as text — so the
     /// agent still pulls every tool, it just doesn't die on round 2. Honest fallback, not a silent break.
     public let nativeToolsSupported: Bool
+    private let session: URLSession
+    private let firstEventTimeout: TimeInterval
+    private let idleEventTimeout: TimeInterval
 
     public init(id: String, name: String, iconName: String, keyAccount: String,
                 endpoint: String, defaultModel: String, availableModels: [AIModel],
-                requiresAPIKey: Bool = true, isLocal: Bool = false, nativeToolsSupported: Bool = true) {
+                requiresAPIKey: Bool = true, isLocal: Bool = false, nativeToolsSupported: Bool = true,
+                session: URLSession = .shared, firstEventTimeout: TimeInterval = 90,
+                idleEventTimeout: TimeInterval = 120) {
         self.id = id; self.name = name; self.iconName = iconName
         self.requiresAPIKey = requiresAPIKey; self.keyAccount = keyAccount
         self.endpoint = endpoint; self.defaultModel = defaultModel; self.availableModels = availableModels
         self.isLocal = isLocal; self.nativeToolsSupported = nativeToolsSupported
+        self.session = session; self.firstEventTimeout = firstEventTimeout
+        self.idleEventTimeout = idleEventTimeout
     }
 
     /// Native tool-calling for CLOUD OpenAI-compatible providers WHOSE multi-turn tools API works; LOCAL
@@ -45,7 +52,13 @@ public struct OpenAICompatibleProvider: ChatProvider {
         return ModelCapabilities(nativeTools: !modelIsLocal && nativeToolsSupported,
                                  vision: meta?.isVision ?? false,
                                  reasoning: Self.modelLooksLikeReasoning(model),
-                                 contextWindowTokens: meta?.contextWindowTokens)
+                                 reasoningEffortSupport: ProviderEffortMapper.support(providerID: id, modelID: model),
+                                 contextWindowTokens: meta?.contextWindowTokens,
+                                 // Hosted OpenAI-compatible endpoints (OpenAI, DeepSeek, Grok, …) reliably
+                                 // honor `response_format: json_schema`. Local llama.cpp/MLX servers do not
+                                 // guarantee it, so we advertise it only for the remote, tool-capable path —
+                                 // the same honesty gate as nativeTools (label down when unproven).
+                                 structuredOutput: !modelIsLocal && nativeToolsSupported)
     }
 
     /// Heuristic: does this model id belong to a reasoning family that emits hidden `reasoning_content`
@@ -124,6 +137,11 @@ public struct OpenAICompatibleProvider: ChatProvider {
 
 
     public func makeBody(messages: [ChatMessage], model: String, settings: ModelSettings, stream: Bool) -> [String: Any] {
+        let settings = settings.reasoningEffort.map {
+            ProviderEffortMapper.resolve(providerID: id, modelID: model, requested: $0,
+                                         support: capabilities(forModel: model).reasoningEffortSupport,
+                                         base: settings).settings
+        } ?? settings
         var apiMessages: [[String: Any]] = []
         if !settings.systemPrompt.isEmpty {
             apiMessages.append(["role": "system", "content": settings.systemPrompt])
@@ -150,10 +168,11 @@ public struct OpenAICompatibleProvider: ChatProvider {
         // ignored by servers that don't support it.
         if stream { body["stream_options"] = ["include_usage": true] }
         if let seed = settings.seed { body["seed"] = seed }
-        if shouldDisableThinking(settings: settings) { body["thinking"] = ["type": "disabled"] }
+        applyReasoningControl(&body, settings: settings)
         // Forward caller-supplied stop sequences (e.g. a local model's turn-end tokens) so the server
         // halts at the real turn boundary. OpenAI caps `stop` at 4 — trim defensively.
         if !settings.stopSequences.isEmpty { body["stop"] = Array(settings.stopSequences.prefix(4)) }
+        Self.applyResponseFormat(&body, settings: settings, enabled: capabilities(forModel: model).structuredOutput)
         return body
     }
 
@@ -188,6 +207,25 @@ public struct OpenAICompatibleProvider: ChatProvider {
         (endpoint.contains("localhost") || endpoint.contains("127.0.0.1")) ? endpoint : nil
     }
 
+    /// Structured-output routing (OpenAI `response_format`). Applied ONLY when (a) the caller opted in via
+    /// `settings.jsonSchema`/`settings.jsonOutput` AND (b) the model actually advertises structured output
+    /// (`enabled`) — so normal prose / the native tool loop are byte-for-byte unchanged, AND a local
+    /// llama.cpp/MLX model that can't honor `response_format` never receives it even if a caller mistakenly
+    /// requests a schema (fail-safe: the capability flag is load-bearing, not decorative). This is the
+    /// OpenAI-compatible parallel to Gemini's `responseSchema`/`responseMimeType`: a raw JSON-schema string
+    /// pins the exact shape (`json_schema`, strict); bare `jsonOutput` asks only for valid JSON.
+    public static func applyResponseFormat(_ body: inout [String: Any], settings: ModelSettings, enabled: Bool) {
+        guard enabled else { return }
+        if let schema = settings.decodedJSONSchema() {
+            body["response_format"] = [
+                "type": "json_schema",
+                "json_schema": ["name": "response", "strict": true, "schema": schema],
+            ]
+        } else if settings.jsonOutput {
+            body["response_format"] = ["type": "json_object"]
+        }
+    }
+
     /// JSON Schema (object) for a tool's parameters, from the neutral `[ToolParameter]`.
     public static func jsonSchema(_ params: [ToolParameter]) -> [String: Any] {
         var props: [String: Any] = [:]
@@ -204,6 +242,11 @@ public struct OpenAICompatibleProvider: ChatProvider {
     /// Request body for the NATIVE path: encodes assistant `tool_calls` + `.tool` results and a
     /// `tools` array. (Kept separate from `makeBody` so the text-path body/tests are untouched.)
     public func makeBodyTools(messages: [ChatMessage], model: String, settings: ModelSettings, tools: [ToolSpec], stream: Bool) -> [String: Any] {
+        let settings = settings.reasoningEffort.map {
+            ProviderEffortMapper.resolve(providerID: id, modelID: model, requested: $0,
+                                         support: capabilities(forModel: model).reasoningEffortSupport,
+                                         base: settings).settings
+        } ?? settings
         var apiMessages: [[String: Any]] = []
         if !settings.systemPrompt.isEmpty { apiMessages.append(["role": "system", "content": settings.systemPrompt]) }
         let includeImages = capabilities(forModel: model).vision
@@ -234,18 +277,30 @@ public struct OpenAICompatibleProvider: ChatProvider {
         body[Self.tokenBudgetKey(providerId: id, model: model)] = effectiveMaxTokens(model: model, settings: settings)
         if stream { body["stream_options"] = ["include_usage": true] }
         if let seed = settings.seed { body["seed"] = seed }
-        if shouldDisableThinking(settings: settings) { body["thinking"] = ["type": "disabled"] }
+        applyReasoningControl(&body, settings: settings)
         if !tools.isEmpty {
             body["tools"] = tools.map { ["type": "function",
                                          "function": ["name": $0.name, "description": $0.description,
                                                       "parameters": Self.jsonSchema($0.parameters)]] }
         }
         if !settings.stopSequences.isEmpty { body["stop"] = Array(settings.stopSequences.prefix(4)) }
+        Self.applyResponseFormat(&body, settings: settings, enabled: capabilities(forModel: model).structuredOutput)
         return body
     }
 
     private func shouldDisableThinking(settings: ModelSettings) -> Bool {
         settings.disableThinking && id == "mimo"
+    }
+
+    private func applyReasoningControl(_ body: inout [String: Any], settings: ModelSettings) {
+        switch settings.providerReasoningControl {
+        case .openAIReasoningEffort(let effort): body["reasoning_effort"] = effort
+        case .mimoThinking(let type): body["thinking"] = ["type": type]
+        default:
+            if settings.reasoningEffort == nil, shouldDisableThinking(settings: settings) {
+                body["thinking"] = ["type": "disabled"]
+            }
+        }
     }
 
     public func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings, apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
@@ -258,10 +313,17 @@ public struct OpenAICompatibleProvider: ChatProvider {
         request.httpBody = try JSONSerialization.data(withJSONObject: makeBodyTools(messages: messages, model: model, settings: settings, tools: tools, stream: true))
 
         return AsyncThrowingStream { continuation in
+            let lifecycle = OpenAIStreamLifecycle(
+                continuation: continuation,
+                provider: id,
+                model: model,
+                firstEventTimeout: firstEventTimeout,
+                idleEventTimeout: idleEventTimeout
+            )
             let task = Task {
                 var accumulator = OpenAIToolCallAccumulator()
                 do {
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(for: request)
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                         if http.statusCode == 401 { throw AIProviderError.invalidAPIKey }
                         if http.statusCode == 429 { throw AIProviderError.rateLimited }
@@ -273,16 +335,19 @@ public struct OpenAICompatibleProvider: ChatProvider {
                         var payload = String(line.dropFirst(5))
                         if payload.hasPrefix(" ") { payload.removeFirst() }
                         if payload == "[DONE]" { break }
+                        if Self.isMeaningfulSSEFrame(payload) { lifecycle.observedFrame() }
                         for event in accumulator.consume(payload) { continuation.yield(event) }
                     }
                     // Emit the assembled tool calls (after the stream completes — buffer-then-parse).
                     for event in accumulator.finishToolCalls() { continuation.yield(event) }
-                    continuation.finish()
-                } catch is CancellationError { continuation.finish() }
-                catch let e as AIProviderError { continuation.finish(throwing: e) }
-                catch { continuation.finish(throwing: AIProviderError.transport(error.localizedDescription)) }
+                    lifecycle.finish()
+                } catch is CancellationError { lifecycle.finish() }
+                catch let e as AIProviderError { lifecycle.finish(throwing: e) }
+                catch { lifecycle.finish(throwing: AIProviderError.transport(error.localizedDescription)) }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            lifecycle.attachProducer(task)
+            continuation.onTermination = { _ in lifecycle.consumerTerminated() }
+            lifecycle.start()
         }
     }
 
@@ -300,9 +365,16 @@ public struct OpenAICompatibleProvider: ChatProvider {
         request.httpBody = try JSONSerialization.data(withJSONObject: makeBody(messages: messages, model: model, settings: settings, stream: true))
 
         return AsyncThrowingStream { continuation in
+            let lifecycle = OpenAIStreamLifecycle(
+                continuation: continuation,
+                provider: id,
+                model: model,
+                firstEventTimeout: firstEventTimeout,
+                idleEventTimeout: idleEventTimeout
+            )
             let task = Task {
                 do {
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(for: request)
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                         if http.statusCode == 401 { throw AIProviderError.invalidAPIKey }
                         if http.statusCode == 429 { throw AIProviderError.rateLimited }
@@ -313,21 +385,168 @@ public struct OpenAICompatibleProvider: ChatProvider {
                     for try await line in bytes.lines where line.hasPrefix("data:") {
                         var payload = String(line.dropFirst(5))
                         if payload.hasPrefix(" ") { payload.removeFirst() }
+                        if payload == "[DONE]" { break }
+                        if Self.isMeaningfulSSEFrame(payload) { lifecycle.observedFrame() }
                         for event in Self.events(fromSSE: payload) { continuation.yield(event) }
                     }
-                    continuation.finish()
+                    lifecycle.finish()
                 } catch is CancellationError {
-                    continuation.finish()
+                    lifecycle.finish()
                 } catch let e as AIProviderError {
-                    continuation.finish(throwing: e)
+                    lifecycle.finish(throwing: e)
                 } catch {
                     // Normalize raw Foundation/URL errors to the shared type.
-                    continuation.finish(throwing: AIProviderError.transport(error.localizedDescription))
+                    lifecycle.finish(throwing: AIProviderError.transport(error.localizedDescription))
                 }
             }
-            // Cancel the in-flight HTTP stream when the consumer stops.
-            continuation.onTermination = { _ in task.cancel() }
+            lifecycle.attachProducer(task)
+            continuation.onTermination = { _ in lifecycle.consumerTerminated() }
+            lifecycle.start()
         }
+    }
+
+    /// A frame is activity only when it contains parsed provider progress. SSE comments, malformed
+    /// payloads, and empty JSON keepalives must not keep a dead generation alive. A non-empty delta
+    /// includes partial native tool-call arguments even before the accumulator can emit a tool event.
+    private static func isMeaningfulSSEFrame(_ payload: String) -> Bool {
+        guard let data = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let root = object as? [String: Any] else { return false }
+        if root["usage"] is [String: Any] { return true }
+        guard let choices = root["choices"] as? [[String: Any]],
+              let choice = choices.first else { return false }
+        if let delta = choice["delta"] as? [String: Any], !delta.isEmpty { return true }
+        return choice["finish_reason"].map { !($0 is NSNull) } ?? false
+    }
+}
+
+/// Owns timeout, producer cancellation, and continuation completion as one atomic lifecycle.
+/// The lock is intentionally synchronous: callbacks arrive from URLSession, the watchdog task,
+/// and AsyncThrowingStream termination on unrelated executors.
+private final class OpenAIStreamLifecycle: @unchecked Sendable {
+    typealias Continuation = AsyncThrowingStream<StreamEvent, Error>.Continuation
+
+    private let lock = NSLock()
+    private let continuation: Continuation
+    private let provider: String
+    private let model: String
+    private let firstEventNanoseconds: UInt64
+    private let idleEventNanoseconds: UInt64
+    private var generation: UInt64 = 0
+    private var terminal = false
+    private var timer: Task<Void, Never>?
+    private var producer: Task<Void, Never>?
+
+    init(
+        continuation: Continuation,
+        provider: String,
+        model: String,
+        firstEventTimeout: TimeInterval,
+        idleEventTimeout: TimeInterval
+    ) {
+        self.continuation = continuation
+        self.provider = provider
+        self.model = model
+        self.firstEventNanoseconds = Self.nanoseconds(firstEventTimeout)
+        self.idleEventNanoseconds = Self.nanoseconds(idleEventTimeout)
+    }
+
+    func attachProducer(_ task: Task<Void, Never>) {
+        lock.lock()
+        if terminal {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        producer = task
+        lock.unlock()
+    }
+
+    func start() {
+        arm(phase: .firstEvent, after: firstEventNanoseconds)
+    }
+
+    func observedFrame() {
+        arm(phase: .idle, after: idleEventNanoseconds)
+    }
+
+    func finish(throwing error: Error? = nil) {
+        complete(throwing: error, cancelProducer: false)
+    }
+
+    func consumerTerminated() {
+        complete(throwing: nil, cancelProducer: true)
+    }
+
+    private func arm(phase: ProviderStreamTimeoutPhase, after delay: UInt64) {
+        lock.lock()
+        guard !terminal else {
+            lock.unlock()
+            return
+        }
+        generation &+= 1
+        let token = generation
+        let previous = timer
+        timer = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+            self?.timeout(token: token, phase: phase)
+        }
+        lock.unlock()
+        previous?.cancel()
+    }
+
+    private func timeout(token: UInt64, phase: ProviderStreamTimeoutPhase) {
+        lock.lock()
+        guard !terminal, generation == token else {
+            lock.unlock()
+            return
+        }
+        terminal = true
+        generation &+= 1
+        timer = nil
+        let task = producer
+        producer = nil
+        lock.unlock()
+
+        task?.cancel()
+        continuation.finish(throwing: AIProviderError.streamTimedOut(
+            provider: provider,
+            model: model,
+            phase: phase
+        ))
+    }
+
+    private func complete(throwing error: Error?, cancelProducer: Bool) {
+        lock.lock()
+        guard !terminal else {
+            lock.unlock()
+            return
+        }
+        terminal = true
+        generation &+= 1
+        let timeoutTask = timer
+        timer = nil
+        let producerTask = producer
+        producer = nil
+        lock.unlock()
+
+        timeoutTask?.cancel()
+        if cancelProducer { producerTask?.cancel() }
+        if let error {
+            continuation.finish(throwing: error)
+        } else {
+            continuation.finish()
+        }
+    }
+
+    private static func nanoseconds(_ seconds: TimeInterval) -> UInt64 {
+        guard seconds.isFinite else { return UInt64.max }
+        let clamped = min(max(seconds, 0.001), Double(UInt64.max) / 1_000_000_000)
+        return UInt64(clamped * 1_000_000_000)
     }
 }
 

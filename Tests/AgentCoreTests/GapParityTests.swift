@@ -64,7 +64,7 @@ final class GapParityTests: XCTestCase {
     func testRunCommandBackgroundReturnsJobId() async throws {
         // Wiring: run_command(background:true) in executable mode returns a job id immediately.
         let r = try await RunCommandTool().execute(arguments: [
-            "executable": "/bin/sh", "args": ["-c", "sleep 1"], "background": true,
+            "executable": "/bin/sleep", "args": ["1"], "background": true,
         ], context: ctx())
         XCTAssertTrue(r.success, msg(r))
         XCTAssertNotNil(r.metadata["job_id"], "background run must return a job id")

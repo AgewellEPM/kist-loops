@@ -36,10 +36,35 @@ final class CompleteWithUsageTests: XCTestCase {
         )
 
         let (text, usage) = try await registry.completeWithUsage(providerId: "primary",
-                                                                 messages: [ChatMessage(role: .user, content: "hi")])
+                                                                 messages: [ChatMessage(role: .user, content: "hi")],
+                                                                 allowFallback: true)
 
         XCTAssertEqual(text, "backup text")
         XCTAssertEqual(usage.total, 5)
+    }
+
+    func testFallbackIsOffByDefaultAndDetailedResultSurfacesRoute() async throws {
+        let registry = ProviderRegistry(
+            providers: [
+                UsageProvider(id: "primary", text: "", prompt: 1, completion: 0),
+                UsageProvider(id: "backup", text: "backup", prompt: 2, completion: 3),
+            ],
+            keyStore: UsageNullKeys(), fallbackProviderIds: ["primary": ["backup"]],
+            retryDelaysNanoseconds: [], retrySleep: { _ in })
+
+        do {
+            _ = try await registry.completeWithUsage(providerId: "primary",
+                                                      messages: [ChatMessage(role: .user, content: "hi")])
+            XCTFail("fallback must be opt-in")
+        } catch { }
+
+        let routed = try await registry.completeWithRoute(providerId: "primary",
+                                                           messages: [ChatMessage(role: .user, content: "hi")],
+                                                           allowFallback: true)
+        XCTAssertEqual(routed.text, "backup")
+        XCTAssertEqual(routed.providerId, "backup")
+        XCTAssertEqual(routed.model, "u1")
+        XCTAssertTrue(routed.usedFallback)
     }
 
     func testEmptyCompletionFailsWhenFallbackDisabled() async throws {

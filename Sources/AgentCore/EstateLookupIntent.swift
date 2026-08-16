@@ -65,7 +65,9 @@ public enum EstateLookupIntent {
         "with", "about", "that", "this", "these", "those", "it", "its", "you", "your", "find", "show",
         "me", "up", "look", "have", "has", "had", "been", "get", "got", "want", "need", "please", "can",
         "could", "would", "should", "tell", "give", "state", "status", "work", "works", "made", "make",
-        "built", "build", "recall", "remind", "search", "dig", "pull", "everything", "anything", "all"
+        "built", "build", "recall", "remind", "search", "dig", "pull", "everything", "anything", "all",
+        "hard", "coded", "hardcoded", "queue", "change", "always", "same", "research", "prior",
+        "implementation", "analyze", "analyse", "system"
     ]
 
     /// The distinctive search terms extracted from a lookup question — proper nouns / project names like
@@ -78,7 +80,10 @@ public enum EstateLookupIntent {
             .map(String.init)
         var seen = Set<String>()
         var terms: [String] = []
-        for tok in tokens where tok.count >= 3 && !stopwords.contains(tok) {
+        // Three-character typo fragments such as "que" previously matched "queue" across the entire
+        // estate and nominated unrelated repos. Project identifiers shorter than four characters need
+        // an explicit query rather than a dangerously broad automatic sweep.
+        for tok in tokens where tok.count >= 4 && !stopwords.contains(tok) {
             if seen.insert(tok).inserted { terms.append(tok) }
             if terms.count >= limit { break }
         }

@@ -74,6 +74,50 @@ final class ModelResolverTests: XCTestCase {
         XCTAssertEqual(ModelResolver.family(wrapper.modelsTried[1]), "grok")
     }
 
+    func testModelDiscoveryConsumesBudgetBeforeNetworkAndBeforeResolvedRetry() async throws {
+        func makeRegistry(_ fetches: LockedModelFetchCounter) -> (ProviderRegistry, DeadIdWrapper) {
+            let inner = OpenAICompatibleProvider(
+                id: "grok", name: "Grok", iconName: "bolt", keyAccount: "grok_api_key",
+                endpoint: "https://api.x.ai/v1/chat/completions", defaultModel: "dead-model",
+                availableModels: [AIModel(id: "dead-model")], requiresAPIKey: false)
+            let wrapper = DeadIdWrapper(inner: inner, deadModel: "dead-model")
+            let registry = ProviderRegistry(
+                providers: [wrapper], keyStore: EmptyKeyStore(), retryDelaysNanoseconds: [],
+                modelListFetch: { _, _ in
+                    fetches.increment()
+                    return .success(["live-model"])
+                })
+            return (registry, wrapper)
+        }
+
+        let deniedFetches = LockedModelFetchCounter()
+        let (deniedRegistry, deniedProvider) = makeRegistry(deniedFetches)
+        let oneSlot = ProviderRequestBudget(limit: 1)
+        do {
+            _ = try await deniedRegistry.completeWithUsage(
+                providerId: "grok", messages: [], settings: ModelSettings(),
+                requestBudget: oneSlot)
+            XCTFail("model discovery must not issue without its own slot")
+        } catch let error as ProviderRequestBudgetError {
+            XCTAssertEqual(error, .exhausted(limit: 1, consumed: 1))
+        }
+        XCTAssertEqual(deniedFetches.value, 0)
+        XCTAssertEqual(deniedProvider.modelsTried, ["dead-model"])
+
+        let allowedFetches = LockedModelFetchCounter()
+        let (allowedRegistry, allowedProvider) = makeRegistry(allowedFetches)
+        let threeSlots = ProviderRequestBudget(limit: 3)
+        let result = try await allowedRegistry.completeWithUsage(
+            providerId: "grok", messages: [], settings: ModelSettings(),
+            requestBudget: threeSlots)
+        XCTAssertEqual(result.text, "ok")
+        XCTAssertEqual(allowedFetches.value, 1)
+        XCTAssertEqual(allowedProvider.modelsTried, ["dead-model", "live-model"])
+        let consumed = await threeSlots.consumedCount()
+        XCTAssertEqual(consumed, 3,
+                       "dead request + /models discovery + resolved retry")
+    }
+
     /// Wraps an OpenAICompatibleProvider (so Layer B sees its /models endpoint) but overrides stream() to
     /// simulate the dead-id 404 → valid-id success behavior.
     private final class DeadIdWrapper: ChatProvider, @unchecked Sendable {
@@ -101,3 +145,10 @@ final class ModelResolverTests: XCTestCase {
 }
 
 private struct EmptyKeyStore: KeyStore { func key(forAccount account: String) -> String? { nil } }
+
+private final class LockedModelFetchCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}

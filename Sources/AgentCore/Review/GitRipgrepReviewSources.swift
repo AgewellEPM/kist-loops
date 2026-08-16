@@ -50,13 +50,23 @@ public struct GitRipgrepReviewSources: ReviewSources {
     }
 
     /// Pure-Foundation glob fallback when ripgrep isn't present (supports a `**/...ext` / `*.ext` shape).
-    static func fallbackGlob(_ pattern: String, root: String) -> [String] {
+    static func fallbackGlob(_ pattern: String, root: String,
+                             maxWalkEntries: Int = 25_000) -> [String] {
         let ext = (pattern as NSString).pathExtension
         guard let en = FileManager.default.enumerator(atPath: root) else { return [] }
         var out: [String] = []
-        let skip = ["/.git/", "/.build/", "/node_modules/"]
+        var walkedEntries = 0
+        let skip = ContextBrainIndex.defaultSkipDirectories
         for case let rel as String in en {
-            if skip.contains(where: { ("/" + rel).contains($0) }) { continue }
+            walkedEntries += 1
+            if walkedEntries > max(1, maxWalkEntries) { break }
+            let leaf = (rel as NSString).lastPathComponent
+            if skip.contains(leaf) {
+                // `continue` alone does not prune Foundation's descendant enumerator;
+                // it previously kept walking multi-million-entry cache/app trees.
+                en.skipDescendants()
+                continue
+            }
             if ext.isEmpty || rel.hasSuffix("." + ext) { out.append(rel) }
         }
         return out.sorted()

@@ -248,6 +248,14 @@ public enum ToolEffectCatalog {
             }
         case "run_command":
             let observed = CommandClassifier.observe(arguments: arguments)
+            // Explicitly accepting a nonzero domain status makes the invocation usable, not a verifier.
+            // Preserve mutation classification, but never let that status manufacture build/test proof.
+            if outcomeMetadata?["verification_eligible"] == "false" {
+                return ToolEffectObservation(mutation: observed.mutation,
+                                             verification: .nonVerifyingCommand,
+                                             progress: observed.progress,
+                                             mutationEvidence: observed.mutationEvidence)
+            }
             if arguments["background"] as? Bool == true {
                 return ToolEffectObservation(mutation: observed.mutation, progress: .externalState,
                                              mutationEvidence: observed.mutation == .none

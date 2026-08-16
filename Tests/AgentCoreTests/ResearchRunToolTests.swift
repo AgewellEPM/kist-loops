@@ -1,11 +1,103 @@
 import XCTest
 @testable import AgentCore
 
+private actor ResearchArgumentsLog {
+    private var values: [[String: Any]] = []
+    func record(_ value: [String: Any]) { values.append(value) }
+    func all() -> [[String: Any]] { values }
+}
+
 final class ResearchRunToolTests: XCTestCase {
     private func makeRoot() throws -> String {
         let raw = NSTemporaryDirectory() + "research-run-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: raw, withIntermediateDirectories: true)
         return ToolContext.canonicalize(raw)!
+    }
+
+    func testLimitIsDeclaredValidatedAndForwarded() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let tool = ResearchRunTool(
+            search: { args, _ in
+                guard args["limit"] as? Int == 5 else {
+                    return .failure("limit was not forwarded")
+                }
+                return ToolResult(success: true,
+                                  output: "1. Source\nURL: https://example.com")
+            },
+            fetch: { _, _ in .failure("unused") },
+            browse: { _, _ in .failure("unused") },
+            contextBrain: { _, _ in .failure("unused") }
+        )
+        XCTAssertTrue(tool.parameters.contains { $0.name == "limit" })
+        let registry = ToolRegistry([tool])
+        let context = ToolContext(projectRoot: root)
+        let start = await registry.execute(
+            name: "research_run",
+            arguments: ["action": "start", "goal": "limits", "run_id": "limits"],
+            context: context)
+        XCTAssertTrue(start.success, start.error ?? start.output)
+
+        let valid = await registry.execute(
+            name: "research_run",
+            arguments: ["action": "search", "run_id": "limits", "query": "test", "limit": 5],
+            context: context)
+        XCTAssertTrue(valid.success, valid.error ?? valid.output)
+
+        let invalid = await registry.execute(
+            name: "research_run",
+            arguments: ["action": "search", "run_id": "limits", "query": "test", "limit": 11],
+            context: context)
+        XCTAssertFalse(invalid.success)
+        XCTAssertTrue((invalid.error ?? invalid.output).contains("1 through 10"))
+    }
+
+    func testContextExactChunkRetrievalIsBoundedAndPersisted() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let calls = ResearchArgumentsLog()
+        let tool = ResearchRunTool(
+            search: { _, _ in .failure("unused") },
+            fetch: { _, _ in .failure("unused") },
+            browse: { _, _ in .failure("unused") },
+            contextBrain: { args, _ in
+                await calls.record(args)
+                return ToolResult(success: true, output: "test.sh:L1-L2\n\n#!/bin/sh\nprintf ok")
+            })
+        let registry = ToolRegistry([tool])
+        let context = ToolContext(projectRoot: root)
+        _ = await registry.execute(name: "research_run", arguments: [
+            "action": "start", "goal": "exact local evidence", "run_id": "exact-context",
+        ], context: context)
+
+        let result = await registry.execute(name: "research_run", arguments: [
+            "action": "context", "run_id": "exact-context",
+            "context_id": "test.sh:L1-L2", "max_chars": 24_000,
+        ], context: context)
+
+        XCTAssertTrue(result.success, result.error ?? result.output)
+        let recorded = await calls.all()
+        XCTAssertEqual(recorded.count, 1)
+        XCTAssertEqual(recorded[0]["action"] as? String, "get")
+        XCTAssertEqual(recorded[0]["id"] as? String, "test.sh:L1-L2")
+        XCTAssertEqual(recorded[0]["max_chars"] as? Int, 24_000)
+        let evidence = ResearchRunStore.loadEvidence(projectRoot: root, runID: "exact-context")
+        XCTAssertEqual(evidence.last?.kind, "context_brain")
+        XCTAssertTrue(evidence.last?.text.contains("printf ok") ?? false)
+    }
+
+    func testSupplementalEstateEvidenceCannotSubstituteForPrimaryResearchEvidence() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let store = try ResearchRunStore(projectRoot: root, goal: "public evidence", runID: "supplemental")
+        try store.appendEvidence(kind: "estate_search", title: "Local estate",
+                                 text: "An unrelated local file matched.")
+        try store.appendEvidence(kind: "symbolic_peel", title: "Proof template",
+                                 text: "A symbolic proof was generated.")
+
+        XCTAssertThrowsError(try store.synthesize()) { error in
+            XCTAssertTrue(String(describing: error).contains("no usable primary evidence"))
+        }
     }
 
     func testResearchRunLedgerRecordsGatherersAndSynthesizesReport() async throws {
@@ -21,7 +113,9 @@ final class ResearchRunToolTests: XCTestCase {
             },
             fetch: { args, _ in
                 await calls.record("fetch")
-                return ToolResult(success: true, output: "Fetched primary source", metadata: ["url": "\(args["url"] ?? "")"])
+                return ToolResult(success: true, output: "Fetched primary source", metadata: [
+                    "url": "\(args["url"] ?? "")", "status": "200",
+                ])
             },
             browse: { _, _ in
                 await calls.record("browse")
@@ -76,6 +170,62 @@ final class ResearchRunToolTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/.kist/research-runs/case1/report.md"))
         let status = try ResearchRunStore.renderStatus(projectRoot: root, runID: "case1")
         XCTAssertTrue(status.contains("Research case1 · synthesized"))
+    }
+
+    func testFetchNarrowsHostAndPersistsVerifiedStatusAndDigest() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let tool = ResearchRunTool(
+            search: { _, _ in .failure("unused") },
+            fetch: { args, _ in
+                XCTAssertEqual(args["allowed_hosts"] as? [String], ["docs.example.com"])
+                XCTAssertEqual(args["max_bytes"] as? Int, 64_000)
+                return ToolResult(
+                    success: true,
+                    output: "Primary manual says GnuCOBOL DISPLAY writes the requested text.",
+                    metadata: ["status": "206", "url": "https://docs.example.com/manual"])
+            },
+            browse: { _, _ in .failure("unused") },
+            contextBrain: { _, _ in .failure("unused") })
+        let registry = ToolRegistry([tool])
+        let context = ToolContext(projectRoot: root)
+        _ = await registry.execute(name: "research_run", arguments: [
+            "action": "start", "goal": "GnuCOBOL DISPLAY", "run_id": "bound-fetch",
+        ], context: context)
+
+        let fetched = await registry.execute(name: "research_run", arguments: [
+            "action": "fetch", "run_id": "bound-fetch",
+            "url": "https://docs.example.com/manual", "max_bytes": 64_000,
+        ], context: context)
+        XCTAssertTrue(fetched.success, fetched.error ?? fetched.output)
+
+        let evidence = ResearchRunStore.loadEvidence(projectRoot: root, runID: "bound-fetch")
+        let primary = try XCTUnwrap(ResearchEvidencePolicy.verifiedPrimarySources(in: evidence).first)
+        XCTAssertEqual(primary.httpStatus, 206)
+        XCTAssertEqual(primary.contentSHA256, BuilderEvidenceDigest.sha256(primary.text))
+        let report = try ResearchRunStore.open(projectRoot: root, runID: "bound-fetch").synthesize()
+        XCTAssertTrue(report.contains("HTTP 206 · partial · SHA-256 \(primary.contentSHA256)"))
+    }
+
+    func testTimedOutFetchCannotBecomePrimaryEvidence() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let registry = ToolRegistry([ResearchRunTool(
+            search: { _, _ in .failure("unused") },
+            fetch: { _, _ in .failure("public-web aggregate request timed out") },
+            browse: { _, _ in .failure("unused") },
+            contextBrain: { _, _ in .failure("unused") })])
+        let context = ToolContext(projectRoot: root)
+        _ = await registry.execute(name: "research_run", arguments: [
+            "action": "start", "goal": "primary", "run_id": "timeout-fetch",
+        ], context: context)
+        let result = await registry.execute(name: "research_run", arguments: [
+            "action": "fetch", "run_id": "timeout-fetch", "url": "https://docs.example.com",
+        ], context: context)
+
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(ResearchEvidencePolicy.verifiedPrimarySources(
+            in: ResearchRunStore.loadEvidence(projectRoot: root, runID: "timeout-fetch")).isEmpty)
     }
 
     func testRunIDTraversalIsRejected() async throws {

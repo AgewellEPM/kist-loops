@@ -26,6 +26,13 @@ public enum FailureCategory: String, Sendable, Codable, Equatable, CaseIterable 
     /// Permission / scope / authority stopped it (denied, plan-only scope, needs approval). → surface the
     /// exact authority needed; NOT a code or tool problem.
     case blocked
+    case schemaRefusal
+    case authorization
+    case toolchain
+    case infrastructure
+    case codeOrTest
+    case uncertainMutation
+    case staleProof
 }
 
 /// One failed tool observation feeding the classifier — the tool's name and the REAL error text it returned.
@@ -43,10 +50,14 @@ public struct FailureSignals: Sendable, Equatable {
     public let editedSource: Bool
     /// Did a build/test/compile actually run (cobc, swift build, run_command of a compiler/test)?
     public let ranBuildOrTest: Bool
-    public init(toolFailures: [ToolFailure], editedSource: Bool = false, ranBuildOrTest: Bool = false) {
+    /// Typed receipts from the live run. Empty preserves compatibility for callers that only have errors.
+    public let trajectory: [ActionRecord]
+    public init(toolFailures: [ToolFailure], editedSource: Bool = false, ranBuildOrTest: Bool = false,
+                trajectory: [ActionRecord] = []) {
         self.toolFailures = toolFailures
         self.editedSource = editedSource
         self.ranBuildOrTest = ranBuildOrTest
+        self.trajectory = trajectory
     }
 }
 
@@ -59,8 +70,11 @@ extension FailureSignals {
         let failures = trajectory.filter { !$0.success }
             .map { ToolFailure(tool: $0.tool, error: $0.failureDetail ?? "") }
         let edited = trajectory.contains { editTools.contains($0.tool) && $0.success }
-        let built = trajectory.contains { $0.tool == "run_command" }
-        return FailureSignals(toolFailures: failures, editedSource: edited, ranBuildOrTest: built)
+        let built = trajectory.contains {
+            $0.success && $0.observedEffects.verification == .buildOrTest
+        }
+        return FailureSignals(toolFailures: failures, editedSource: edited,
+                              ranBuildOrTest: built, trajectory: trajectory)
     }
 }
 
@@ -72,6 +86,15 @@ public enum FailureClassifier {
         public let evidence: String          // the concrete string(s) that drove the decision
         public let culpritTool: String?      // the tool at the heart of a knowledgeGap / toolLimit
         public let discoveryHint: String?    // for knowledgeGap: how the tool said to use it (drives auto-retry)
+
+        public init(category: FailureCategory, confidence: Double, evidence: String,
+                    culpritTool: String?, discoveryHint: String?) {
+            self.category = category
+            self.confidence = confidence
+            self.evidence = evidence
+            self.culpritTool = culpritTool
+            self.discoveryHint = discoveryHint
+        }
     }
 
     // MARK: - Signal vocabularies (lowercased substring matches)
@@ -104,6 +127,18 @@ public enum FailureClassifier {
         "expected ", "undeclared", "no member", "type mismatch", "test failed", "assertion", "exit code",
         "traceback", "segmentation fault", "linker",
     ]
+    static let schemaPhrases = [
+        "schema", "invalid argument", "invalid arguments", "unknown field", "unexpected field",
+        "missing required", "expected type", "malformed tool", "arguments object"
+    ]
+    static let toolchainPhrases = [
+        "command not found", "executable not found", "compiler not found", "sdk not found",
+        "toolchain", "unable to find tool", "no such module"
+    ]
+    static let infrastructurePhrases = [
+        "timed out", "timeout", "connection reset", "connection refused", "service unavailable",
+        "temporarily unavailable", "no space left", "disk full", "cancelled", "canceled"
+    ]
 
     private static func hasAny(_ text: String, _ needles: [String]) -> Bool {
         let t = text.lowercased()
@@ -132,6 +167,77 @@ public enum FailureClassifier {
     /// Classify a failed run. Priority: blocked → knowledgeGap (tool said how) → toolLimit (capability
     /// boundary, no hint / repeated) → taskBug (default; a real code/build error to repair).
     public static func classify(_ signals: FailureSignals) -> Verdict {
+        if !signals.trajectory.isEmpty {
+            let failedRecords = signals.trajectory.filter { !$0.success }
+
+            if let denied = failedRecords.first(where: {
+                hasAny($0.failureDetail ?? "", blockedPhrases)
+            }) {
+                let sameExecutableSucceeded = executableIdentity(denied).map { identity in
+                    signals.trajectory.contains {
+                        $0.success && executableIdentity($0) == identity
+                    }
+                } ?? false
+                let suffix = sameExecutableSucceeded
+                    ? "; the same executable already succeeded, so capability widening is forbidden"
+                    : ""
+                return Verdict(category: .authorization, confidence: 0.95,
+                               evidence: "actual denial — \(denied.tool): \((denied.failureDetail ?? "").prefix(180))\(suffix)",
+                               culpritTool: denied.tool, discoveryHint: nil)
+            }
+
+            if let stale = CompletionVerifier().invalidatedVerification(in: signals.trajectory) {
+                return Verdict(category: .staleProof, confidence: 0.98,
+                               evidence: stale.reason,
+                               culpritTool: stale.lastPassedTool, discoveryHint: nil)
+            }
+
+            if let uncertain = signals.trajectory.last(where: {
+                $0.observedEffects.mutation == .unknownTarget
+                    || $0.observedEffects.mutationEvidence == .mayMutate
+            }) {
+                return Verdict(category: .uncertainMutation, confidence: 0.9,
+                               evidence: "uncertain mutation receipt — \(uncertain.tool): \(uncertain.argsFingerprint.prefix(180))",
+                               culpritTool: uncertain.tool, discoveryHint: nil)
+            }
+
+            if let refusal = failedRecords.first(where: {
+                hasAny($0.failureDetail ?? "", schemaPhrases)
+            }) {
+                return Verdict(category: .schemaRefusal, confidence: 0.9,
+                               evidence: "\(refusal.tool): \((refusal.failureDetail ?? "").prefix(180))",
+                               culpritTool: refusal.tool, discoveryHint: nil)
+            }
+            if let toolchain = failedRecords.first(where: {
+                hasAny($0.failureDetail ?? "", toolchainPhrases)
+            }) {
+                return Verdict(category: .toolchain, confidence: 0.88,
+                               evidence: "\(toolchain.tool): \((toolchain.failureDetail ?? "").prefix(180))",
+                               culpritTool: toolchain.tool, discoveryHint: nil)
+            }
+            if let infrastructure = failedRecords.first(where: {
+                hasAny($0.failureDetail ?? "", infrastructurePhrases)
+            }) {
+                return Verdict(category: .infrastructure, confidence: 0.86,
+                               evidence: "\(infrastructure.tool): \((infrastructure.failureDetail ?? "").prefix(180))",
+                               culpritTool: infrastructure.tool, discoveryHint: nil)
+            }
+            if let code = failedRecords.first(where: {
+                $0.observedEffects.verification == .buildOrTest
+                    || hasAny($0.failureDetail ?? "", buildFailPhrases)
+            }) {
+                let sameExecutableSucceeded = executableIdentity(code).map { identity in
+                    signals.trajectory.contains { $0.success && executableIdentity($0) == identity }
+                } ?? false
+                let suffix = sameExecutableSucceeded
+                    ? "; same executable previously succeeded, so this is not a sandbox/capability failure"
+                    : ""
+                return Verdict(category: .codeOrTest, confidence: 0.88,
+                               evidence: "\(code.tool): \((code.failureDetail ?? "").prefix(180))\(suffix)",
+                               culpritTool: code.tool, discoveryHint: nil)
+            }
+        }
+
         // No tool ever failed → whatever went wrong is in the work itself (or an honest give-up). Repair path.
         guard !signals.toolFailures.isEmpty else {
             return Verdict(category: .taskBug, confidence: 0.4,
@@ -182,5 +288,18 @@ public enum FailureClassifier {
         return Verdict(category: .taskBug, confidence: 0.4,
                        evidence: "uncategorized tool error — \(f.tool): \(f.error.prefix(160))",
                        culpritTool: f.tool, discoveryHint: nil)
+    }
+
+    private static func executableIdentity(_ record: ActionRecord) -> String? {
+        guard record.tool == "run_command" else { return nil }
+        let fingerprint = record.argsFingerprint
+        if fingerprint.hasPrefix("executable=") {
+            return String(fingerprint.dropFirst("executable=".count).split(separator: "&", maxSplits: 1).first ?? "")
+        }
+        guard fingerprint.hasPrefix("command=") else { return nil }
+        let command = fingerprint.dropFirst("command=".count)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return command.split(whereSeparator: { $0.isWhitespace || $0 == ";" || $0 == "&" || $0 == "|" })
+            .first.map(String.init)
     }
 }

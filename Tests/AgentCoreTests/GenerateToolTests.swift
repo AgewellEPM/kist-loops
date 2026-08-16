@@ -27,9 +27,9 @@ final class GenerateToolTests: XCTestCase {
         XCTAssertEqual(result.metadata["provider"], "gen")
     }
 
-    func testTrimsWhitespace() async throws {
+    func testPreservesLeadingTrailingWhitespaceAndTerminalNewline() async throws {
         let result = try await tool("\n\n  hello  \n").execute(arguments: ["prompt": "x"], context: ToolContext(projectRoot: root))
-        XCTAssertEqual(result.output, "hello")
+        XCTAssertEqual(result.output, "\n\n  hello  \n")
     }
 
     // 2026-08-04 dogfood: generate returned ```asm\n<code>\n``` and write_file wrote the backticks,
@@ -37,17 +37,17 @@ final class GenerateToolTests: XCTestCase {
     func testStripsSoleCodeFenceSoFilesArentCorrupted() async throws {
         let fenced = "```asm\norg 100h\nmov ah, 09h\nint 21h\n```"
         let result = try await tool(fenced).execute(arguments: ["prompt": "x"], context: ToolContext(projectRoot: root))
-        XCTAssertEqual(result.output, "org 100h\nmov ah, 09h\nint 21h")
+        XCTAssertEqual(result.output, "org 100h\nmov ah, 09h\nint 21h\n")
         XCTAssertFalse(result.output.contains("```"), "no fence backticks may reach the written file")
     }
 
     func testUnwrapSoleCodeFenceEdgeCases() {
         // Plain fence, no lang tag.
-        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```\nx=1\n```"), "x=1")
+        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```\nx=1\n```"), "x=1\n")
         // Not wrapped → untouched.
         XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("just prose"), "just prose")
         // Inner backticks/content survive; only the outer fence is stripped.
-        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```bash\necho `date`\n```"), "echo `date`")
+        XCTAssertEqual(GenerateTool.unwrapSoleCodeFence("```bash\necho `date`\n```"), "echo `date`\n")
     }
 
     // 2026-08-04 VISUAL dogfood: the model returned an ESSAY wrapping the code PLUS sibling ```bash```

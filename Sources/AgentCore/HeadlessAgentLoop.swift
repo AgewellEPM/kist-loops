@@ -18,6 +18,12 @@ import Foundation
 public struct HeadlessAgentLoop: Sendable {
 
     public struct Outcome: Sendable {
+        public enum TerminalStatus: String, Sendable {
+            case completed
+            case stoppedUnverified
+            case failed
+        }
+
         public let success: Bool
         public let summary: String
         public let iterations: Int
@@ -26,9 +32,15 @@ public struct HeadlessAgentLoop: Sendable {
         /// classified from the STRUCTURED error — so the great-loop can route around that provider without
         /// regexing the summary. Default false (success, or a non-provider failure like a bad edit).
         public let providerFault: Bool
-        public init(success: Bool, summary: String, iterations: Int, checkpointId: String, providerFault: Bool = false) {
+        /// Typed terminal state for callers that need to distinguish an ordinary failure from a
+        /// mutation that deliberately stopped before deterministic verification. The latter remains
+        /// a failed generic headless outcome; only a sealed host pipeline may hand it to its verifier.
+        public let terminalStatus: TerminalStatus
+        public init(success: Bool, summary: String, iterations: Int, checkpointId: String,
+                    providerFault: Bool = false, terminalStatus: TerminalStatus? = nil) {
             self.success = success; self.summary = summary; self.iterations = iterations
             self.checkpointId = checkpointId; self.providerFault = providerFault
+            self.terminalStatus = terminalStatus ?? (success ? .completed : .failed)
         }
     }
 
@@ -46,6 +58,7 @@ public struct HeadlessAgentLoop: Sendable {
     var approvalTools: Set<String>    // tools that need human y/n before running (runtime-switchable via approving(_:))
     var planMode: Bool                // plan mode: only read-only tools may run (propose, don't execute)
     private let toolMode: ToolMode            // native / text / auto (capability-routed) tool acquisition
+    private let nativeToolCapabilityCache: NativeToolCapabilityCache
     let hooks: AgentHooks?            // user lifecycle hooks (PreToolUse/PostToolUse/Stop); nil = none
     let checkpoints: LoopCheckpointStore?
     private let maxIterations: Int
@@ -56,6 +69,8 @@ public struct HeadlessAgentLoop: Sendable {
     /// is surfaced + persisted to the replay) instead of forcing it off. Opt-in (default OFF) so the tight,
     /// low-latency tool loop is unchanged unless the user asks to think — `--think` / `/think`.
     var extendedThinking: Bool
+    /// Provider-neutral depth; initialized from `extendedThinking` when the new argument is omitted.
+    var providerReasoningEffort: ProviderReasoningEffort
     /// Hard token ceiling for this run. When the SAME ledger is injected into every fleet agent it
     /// becomes a GLOBAL cap (BudgetLedger is an actor → correct across parallel workers): one rogue
     /// agent can't blow the whole fleet's budget. nil = uncapped. The loop halts at the ceiling
@@ -130,6 +145,7 @@ public struct HeadlessAgentLoop: Sendable {
                 // stops EARLY on a genuine loop — so the budget is spent finishing real work, not spinning.
                 maxIterations: Int = 50,
                 extendedThinking: Bool = false,
+                reasoningEffort: ProviderReasoningEffort? = nil,
                 budget: BudgetLedger? = nil,
                 contextWindow: ContextWindowManager = .default,
                 compactor: ConversationCompactor = .default,
@@ -165,10 +181,12 @@ public struct HeadlessAgentLoop: Sendable {
         self.approvalTools = approvalTools
         self.planMode = planMode
         self.toolMode = toolMode
+        self.nativeToolCapabilityCache = NativeToolCapabilityCache()
         self.hooks = hooks
         self.checkpoints = checkpoints
         self.maxIterations = maxIterations
-        self.extendedThinking = extendedThinking
+        self.providerReasoningEffort = reasoningEffort ?? (extendedThinking ? .deep : .none)
+        self.extendedThinking = self.providerReasoningEffort != .none
         self.conversationWindow = ConversationWindowPreparer(contextWindow: contextWindow,
                                                              compactor: compactor)
     }
@@ -191,29 +209,45 @@ public struct HeadlessAgentLoop: Sendable {
 
     /// Resume a previously-checkpointed run from exactly where it stopped.
     public func resume(from checkpoint: LoopCheckpoint) async -> Outcome {
+        let runLease: LoopCheckpointRunLease?
+        let authoritative: LoopCheckpoint
+        if let checkpoints {
+            do {
+                let acquired = try checkpoints.acquireRunLease(id: checkpoint.id)
+                runLease = acquired
+                authoritative = try checkpoints.reconcileForResume(checkpoint)
+            } catch {
+                let summary = "checkpoint resume refused: \(error)"
+                sink.emit(.stateChanged(.failed)); sink.emit(.failed(summary))
+                return Outcome(success: false, summary: summary, iterations: checkpoint.iteration,
+                               checkpointId: checkpoint.id)
+            }
+        } else {
+            runLease = nil
+            authoritative = checkpoint
+        }
         // A finished run is not resumable — return its result rather than re-driving it.
-        guard checkpoint.status != .completed else {
-            return Outcome(success: true, summary: checkpoint.summary ?? "already completed",
-                           iterations: checkpoint.iteration, checkpointId: checkpoint.id)
+        guard authoritative.status != .completed else {
+            return Outcome(success: true, summary: authoritative.summary ?? "already completed",
+                           iterations: authoritative.iteration, checkpointId: authoritative.id)
         }
         // Restore the exact ledger, then invalidate any execution proof whose workspace state was not
         // fingerprinted across the process boundary. The synthetic may-mutate record does not erase an
         // earlier confirmed mutation, but it requires a fresh verifier after every qualifying resume.
         let mode: PromptCompiler.Mode = planMode ? .plan : .inline
-        let raw = checkpoint.rawRequest ?? Self.scopeRequestSource(for: checkpoint.goal)
-        let intent = checkpoint.intent ?? PromptCompiler.inferIntent(raw, mode: mode)
-        let expectedOutcome = checkpoint.expectedOutcome
+        let raw = authoritative.rawRequest ?? Self.scopeRequestSource(for: authoritative.goal)
+        let intent = authoritative.intent ?? PromptCompiler.inferIntent(raw, mode: mode)
+        let expectedOutcome = authoritative.expectedOutcome
             ?? PromptCompiler.expectedOutcome(intent: intent, mode: mode)
-        var restored = checkpoint.trajectory ?? []
+        var restored = authoritative.trajectory ?? []
         if let boundary = Self.resumeBoundaryRecord(for: restored, expectedOutcome: expectedOutcome) {
             restored.append(boundary)
         }
         recorder.restore(restored)
-        var cp = checkpoint
+        var cp = authoritative
         cp.trajectory = restored
         cp.status = .running
-        persist(&cp)
-        return await drive(cp).0
+        return await drive(cp, heldRunLease: runLease).0
     }
 
     /// Run ONE conversational turn (REPL): append the user input to `transcript`, drive the loop
@@ -247,10 +281,30 @@ public struct HeadlessAgentLoop: Sendable {
     /// Route to the NATIVE tool-calling loop or the universal text-protocol loop, decided by the
     /// (provider, model) CAPABILITIES and the `toolMode` override. `.auto` uses native only when the
     /// model actually supports it — local/small models fall to the text protocol (honest "all AIs").
-    private func drive(_ initial: LoopCheckpoint) async -> (Outcome, LoopCheckpoint) {
+    private func drive(
+        _ initial: LoopCheckpoint,
+        heldRunLease: LoopCheckpointRunLease? = nil
+    ) async -> (Outcome, LoopCheckpoint) {
         // Normalize old checkpoints once at the boundary. Every downstream decision then reads the
         // persisted turn contract instead of reclassifying prose independently.
         var prepared = initial
+        let runLease: LoopCheckpointRunLease?
+        if let heldRunLease {
+            runLease = heldRunLease
+        } else if let checkpoints {
+            do {
+                runLease = try checkpoints.acquireRunLease(id: prepared.id)
+            } catch {
+                let summary = "checkpoint run refused: \(error)"
+                sink.emit(.stateChanged(.failed)); sink.emit(.failed(summary))
+                return (Outcome(success: false, summary: summary, iterations: prepared.iteration,
+                                checkpointId: prepared.id), prepared)
+            }
+        } else {
+            runLease = nil
+        }
+        // Keep kernel ownership until every hidden provider attempt and final persistence has finished.
+        defer { runLease?.release() }
         let mode: PromptCompiler.Mode = planMode ? .plan : .inline
         let raw = prepared.rawRequest ?? Self.scopeRequestSource(for: prepared.goal)
         let intent = prepared.intent ?? PromptCompiler.inferIntent(raw, mode: mode)
@@ -258,26 +312,114 @@ public struct HeadlessAgentLoop: Sendable {
         prepared.intent = intent
         prepared.expectedOutcome = prepared.expectedOutcome
             ?? PromptCompiler.expectedOutcome(intent: intent, mode: mode)
+        // `maxIterations` is an absolute provider-request ceiling. Legacy checkpoints predate the
+        // dedicated counter, so seed conservatively from their iteration cursor; never grant a resume
+        // fewer consumed requests than the durable checkpoint already reports.
+        let startingRequests = max(prepared.providerRequestsConsumed ?? prepared.iteration,
+                                   prepared.iteration)
+        guard maxIterations > 0, startingRequests >= 0, startingRequests < maxIterations else {
+            let summary = "provider request limit reached (\(max(0, startingRequests))/\(max(0, maxIterations)))"
+            return finishFailed(&prepared, summary, summary)
+        }
+        prepared.providerRequestsConsumed = startingRequests
+        prepared.iteration = startingRequests
+        // Create the checkpoint before the first admission. The ledger then performs an atomic
+        // load/merge/save immediately before every concrete provider request, including hidden retries.
+        persist(&prepared)
+        let checkpointID = prepared.id
+        let requestPersistence: ProviderRequestBudget.Persistence?
+        if let checkpointStore = checkpoints {
+            requestPersistence = { minimumConsumed, limit in
+                try checkpointStore.admitProviderRequest(
+                    id: checkpointID, minimumConsumed: minimumConsumed, limit: limit)
+            }
+        } else {
+            requestPersistence = nil
+        }
+        let requestBudget = ProviderRequestBudget(limit: maxIterations,
+                                                  consumed: startingRequests,
+                                                  persistence: requestPersistence)
+        let nativeTools = surfaceRelevantSelfTools(
+            Self.conversationalToolset(tools, intent: prepared.intent), goal: prepared.goal)
+        let schemaFingerprint = Self.nativeToolSchemaFingerprint(nativeTools.toolSpecs())
+        let resolvedModel = providers.provider(id: providerId)?.resolvedModel(model)
+            ?? model ?? "unknown"
+        let now = Date()
+        let checkpointPositive = prepared.nativeToolCapability?.matches(
+            providerId: providerId, model: resolvedModel,
+            toolSchemaFingerprint: schemaFingerprint, now: now,
+            ttl: NativeToolCapabilityCache.defaultTTL) ?? false
+        if checkpointPositive, let positive = prepared.nativeToolCapability {
+            await nativeToolCapabilityCache.recordPositive(positive, now: now)
+        }
+        let cachedPositive = await nativeToolCapabilityCache.hasPositive(
+            providerId: providerId, model: resolvedModel, schema: schemaFingerprint, now: now)
+        let capabilityAlreadyProven = checkpointPositive || cachedPositive
+        let matchingCheckpointFallback = prepared.nativeToolFallback?.matches(
+            providerId: providerId, model: resolvedModel,
+            toolSchemaFingerprint: schemaFingerprint, now: now,
+            ttl: NativeToolCapabilityCache.defaultTTL) ?? false
+        let checkpointFallback = toolMode == .auto
+            && matchingCheckpointFallback
+            && (prepared.nativeToolFallback?.isCacheable == false || !capabilityAlreadyProven)
+        let cachedObservation: NativeToolFallbackState?
+        if toolMode == .auto, !capabilityAlreadyProven {
+            cachedObservation = await nativeToolCapabilityCache.observation(
+                providerId: providerId, model: resolvedModel,
+                schema: schemaFingerprint, now: now)
+        } else {
+            cachedObservation = nil
+        }
+        if checkpointFallback || cachedObservation != nil {
+            var downgraded = prepared
+            if !checkpointFallback, let cachedObservation {
+                downgraded.nativeToolFallback = cachedObservation
+            }
+            downgraded.messages = NativeProtocolDowngrade.flattenForText(prepared.messages)
+            downgraded.status = .running
+            if let observation = downgraded.nativeToolFallback {
+                await nativeToolCapabilityCache.record(observation)
+            }
+            persist(&downgraded)
+            return await driveText(downgraded, requestBudget: requestBudget)
+        }
         if providers.usesNativeTools(providerId: providerId, model: model, mode: toolMode) {
-            switch await driveNative(prepared) {
+            switch await driveNative(prepared, capabilityProviderId: providerId,
+                                     capabilityModel: resolvedModel,
+                                     schemaFingerprint: schemaFingerprint,
+                                     requestBudget: requestBudget) {
             case .finished(let result):
                 return result
-            case .downgrade(let cp):
+            case .downgrade(let cp, let cacheable):
                 // The model claimed native tool-calling but the provider REJECTED the tool request
                 // (e.g. a tool-history 400). Don't die — re-drive this same run through the universal
                 // text protocol, carrying the work done so far. Only reached in `.auto` mode.
                 sink.emit(.replanStarted(reason: "native tool-calling rejected by the provider — downgrading to the text protocol"))
                 var downgraded = cp
+                let fallback = NativeToolFallbackState(
+                    providerId: providerId, model: resolvedModel,
+                    toolSchemaFingerprint: schemaFingerprint, cacheable: cacheable)
+                downgraded.nativeToolFallback = fallback
                 downgraded.messages = NativeProtocolDowngrade.flattenForText(cp.messages)
                 downgraded.status = .running
-                // Budget is per-RUN, not per-path: cap the text continuation at the SAME ceiling the run
-                // started with (initial.iteration + maxIterations) so native iterations already spent are
-                // NOT refunded — otherwise a late downgrade would grant up to 2× the iteration budget.
-                let runLimit = Self.iterationLimit(from: prepared.iteration, budget: maxIterations)
-                return await driveText(downgraded, iterationLimitOverride: runLimit)
+                if cacheable { await nativeToolCapabilityCache.record(fallback) }
+                persist(&downgraded)
+                return await driveText(downgraded, requestBudget: requestBudget)
             }
         }
-        return await driveText(prepared)
+        return await driveText(prepared, requestBudget: requestBudget)
+    }
+
+    static func nativeToolSchemaFingerprint(_ specs: [ToolSpec]) -> String {
+        func framed(_ value: String) -> String { "\(value.utf8.count):\(value)" }
+        let canonical = specs.sorted { $0.name < $1.name }.map { spec in
+            let parameters = spec.parameters.map { parameter in
+                [parameter.name, parameter.type, parameter.description, String(parameter.required)]
+                    .map(framed).joined(separator: "")
+            }.joined(separator: "")
+            return [spec.name, spec.description, parameters].map(framed).joined(separator: "")
+        }.joined(separator: "")
+        return BuilderEvidenceDigest.sha256(canonical)
     }
 
     /// Interactive CHAT/REVIEW turns must NOT be handed `spawn_agent` — a weak model (e.g. MiMo) will
@@ -298,7 +440,26 @@ public struct HeadlessAgentLoop: Sendable {
     /// re-driven in the text protocol because the provider rejected native tool-calling mid-run.
     private enum NativeRun {
         case finished((Outcome, LoopCheckpoint))
-        case downgrade(LoopCheckpoint)
+        case downgrade(LoopCheckpoint, cacheable: Bool)
+    }
+
+    private func recordPositiveNativeCapability(
+        providerId: String, model: String, schemaFingerprint: String,
+        checkpoint cp: inout LoopCheckpoint
+    ) async {
+        let state = NativeToolPositiveState(
+            providerId: providerId, model: model,
+            toolSchemaFingerprint: schemaFingerprint)
+        cp.nativeToolCapability = state
+        cp.nativeToolFallback = nil
+        await nativeToolCapabilityCache.recordPositive(state)
+        persist(&cp)
+    }
+
+    /// Hidden requests inherit the explicit route identity. Forced native never lets compaction,
+    /// synthesis, or model healing silently use another provider/model.
+    func providerRoutePolicy(allowFallback: Bool = false) -> ProviderRoutePolicy {
+        toolMode == .native ? .exact : .adaptive(allowFallback: allowFallback)
     }
 
     /// P1: the advisory recall block for THIS turn's goal, as a system-prompt SUFFIX (empty ⇒ no-op).
@@ -331,14 +492,10 @@ public struct HeadlessAgentLoop: Sendable {
     /// Text-protocol ReAct loop — the universal fallback (model emits JSON actions as text).
     /// `iterationLimitOverride` lets a native→text downgrade impose the RUN's original ceiling instead of
     /// granting the text path a fresh per-invocation budget (see the downgrade site in `drive`).
-    private func driveText(_ initial: LoopCheckpoint, iterationLimitOverride: Int? = nil) async -> (Outcome, LoopCheckpoint) {
+    private func driveText(_ initial: LoopCheckpoint,
+                           requestBudget: ProviderRequestBudget) async -> (Outcome, LoopCheckpoint) {
         var cp = initial
-        // A checkpoint cursor comes from disk (user-writable); bound it before any arithmetic.
-        // `maxIterations` is a per-invocation step budget, not an absolute cursor ceiling: a run
-        // paused at iter 10 must resume with another N steps instead of being called corrupt.
-        guard let iterationLimit = iterationLimitOverride ?? Self.iterationLimit(from: cp.iteration, budget: maxIterations) else {
-            return finishFailed(&cp, "invalid checkpoint cursor (\(cp.iteration))", "checkpoint is corrupt or out of range")
-        }
+        _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
 
         reconcile(&cp)   // interrupted-action reconciliation (shared with the native loop)
         let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
@@ -356,7 +513,10 @@ public struct HeadlessAgentLoop: Sendable {
             system = Self.weakModelTextPrimer(tools: turnTools, shellEnabled: scopedContext.shell.enabled) + "\n\n" + system
         }
         system += await recalledLessonsSuffix(goal: cp.goal)   // P1 recall→plan read-back (no-op unless warm)
-        var settings = ModelSettings(temperature: 0.2, maxTokens: 4096, systemPrompt: system, disableThinking: !extendedThinking)
+        var settings = ModelSettings(temperature: 0.2, maxTokens: 4096, systemPrompt: system,
+                                     disableThinking: providerReasoningEffort == .none,
+                                     reasoningEffort: providerReasoningEffort)
+        applyProviderReasoningEffort(&settings, checkpoint: &cp)
         let profileStopsApplied = applyModelProfileStops(&settings)
         var parseFailures = 0
         var consecutiveFailures = 0
@@ -373,35 +533,58 @@ public struct HeadlessAgentLoop: Sendable {
         sink.emit(.stateChanged(.analyzing))
 
         let start = cp.iteration + 1
-        guard start <= iterationLimit else {
-            return finishFailed(&cp, "reached max iterations", ".failed: out of budget on resume")
+        guard start <= maxIterations else {
+            return await finishProviderRequestBudgetFailure(
+                &cp, budget: requestBudget,
+                error: .exhausted(limit: maxIterations, consumed: cp.iteration))
         }
 
-        for iteration in start...iterationLimit {
+        for _ in start...maxIterations {
             if Task.isCancelled { return finishInterrupted(&cp) }   // esc-to-interrupt
             if let halt = await budgetHalt(&cp) { return halt }
+            if let blocked = await requestBudget.blockingError() {
+                return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget,
+                                                                error: blocked)
+            }
             sink.emit(.stateChanged(.executing))
-            let outboundMessages = await prepareForProviderCall(&cp, mode: .text)
+            let outboundMessages = await prepareForProviderCall(&cp, mode: .text,
+                                                                    requestBudget: requestBudget)
+            _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
+            if let blocked = await requestBudget.blockingError() {
+                return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget,
+                                                                error: blocked)
+            }
 
             // 1) Ask the model for the next action.
-            let text: String
+            let completion: CompletionStreamResult
             do {
-                text = try await streamCompletion(messages: outboundMessages, settings: settings,
-                                                  allowFallback: !profileStopsApplied)
+                completion = try await streamCompletion(messages: outboundMessages, settings: settings,
+                                                        allowFallback: !profileStopsApplied,
+                                                        routePolicy: providerRoutePolicy(
+                                                            allowFallback: !profileStopsApplied),
+                                                        requestBudget: requestBudget)
             } catch is BudgetDeniedError {
                 return await budgetDeniedHalt(&cp)                       // atomic reserve denied this call
+            } catch let requestError as ProviderRequestBudgetError {
+                return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget,
+                                                                error: requestError)
             } catch {
+                _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
                 if Task.isCancelled { return finishInterrupted(&cp) }   // ESC mid-stream
                 return finishFailed(&cp, "provider error: \(error)", "provider '\(providerId)' error: \(error)",
                                     providerFault: ProviderFault.isProviderFault(error))
             }
+            let iteration = await synchronizeProviderRequests(&cp, budget: requestBudget)
+            let text = completion.text
+            recordProviderMetadata(completion, checkpoint: &cp)
 
             // 2) Parse the action; nudge (bounded) when the model wanders off-protocol.
             guard let action = ActionParser.parse(text) else {
                 parseFailures += 1
-                cp.messages.append(ChatMessage(role: .assistant, content: text))
+                cp.messages.append(ChatMessage(role: .assistant, content: text,
+                                               providerReasoningHandles: completion.reasoningHandles))
                 if parseFailures >= 3 {
-                    if let final = await attemptTextFinalSynthesis(&cp, iteration: iteration) {
+                    if let final = await attemptTextFinalSynthesis(&cp, requestBudget: requestBudget) {
                         return final
                     }
                     return finishFailed(&cp, "no parseable action",
@@ -414,7 +597,8 @@ public struct HeadlessAgentLoop: Sendable {
                 continue
             }
             parseFailures = 0
-            cp.messages.append(ChatMessage(role: .assistant, content: text))
+            cp.messages.append(ChatMessage(role: .assistant, content: text,
+                                           providerReasoningHandles: completion.reasoningHandles))
 
             // 3) Done?
             if action.done {
@@ -450,7 +634,9 @@ public struct HeadlessAgentLoop: Sendable {
                     cp.status = .failed; cp.summary = honest; cp.iteration = iteration; persist(&cp)
                     await fireStopHook(summary: honest, success: false)
                     sink.emit(.stateChanged(.failed)); sink.emit(.failed(honest))
-                    return (Outcome(success: false, summary: honest, iterations: iteration, checkpointId: cp.id), cp)
+                    return (Outcome(
+                        success: false, summary: honest, iterations: iteration,
+                        checkpointId: cp.id, terminalStatus: .stoppedUnverified), cp)
                 case .accept:
                     break
                 }
@@ -595,24 +781,28 @@ public struct HeadlessAgentLoop: Sendable {
                     cp.iteration = iteration; persist(&cp)
                     continue
                 }
-                if let final = await attemptTextFinalSynthesis(&cp, iteration: iteration) { return final }
+                if let final = await attemptTextFinalSynthesis(&cp, requestBudget: requestBudget) {
+                    return final
+                }
                 return finishFailed(&cp, "stopped early — \(reason)", "stopped early (stuck after recovery): \(reason)")
             }
         }
 
-        if let final = await attemptTextFinalSynthesis(&cp, iteration: iterationLimit) {
-            return final
-        }
-        return finishFailed(&cp, "reached max iterations", "reached max iterations (\(maxIterations)) without finishing")
+        return await finishProviderRequestBudgetFailure(
+            &cp, budget: requestBudget,
+            error: .exhausted(limit: maxIterations,
+                              consumed: await requestBudget.consumedCount()))
     }
 
     /// Native tool-calling loop: the model calls tools via the provider's native mechanism; we
     /// execute them and return tool-RESULT messages, until the model replies with no tool call.
-    private func driveNative(_ initial: LoopCheckpoint) async -> NativeRun {
+    private func driveNative(_ initial: LoopCheckpoint,
+                             capabilityProviderId: String,
+                             capabilityModel: String,
+                             schemaFingerprint: String,
+                             requestBudget: ProviderRequestBudget) async -> NativeRun {
         var cp = initial
-        guard let iterationLimit = Self.iterationLimit(from: cp.iteration, budget: maxIterations) else {
-            return .finished(finishFailed(&cp, "invalid checkpoint cursor (\(cp.iteration))", "checkpoint is corrupt or out of range"))
-        }
+        _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
         reconcile(&cp)
         let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard).
@@ -625,8 +815,10 @@ public struct HeadlessAgentLoop: Sendable {
         nativeSystem += await recalledLessonsSuffix(goal: cp.goal)   // P1 recall→plan read-back (no-op unless warm)
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096,
                                      systemPrompt: nativeSystem,
-                                     disableThinking: !extendedThinking)
-        let profileStopsApplied = applyModelProfileStops(&settings)
+                                     disableThinking: providerReasoningEffort == .none,
+                                     reasoningEffort: providerReasoningEffort)
+        applyProviderReasoningEffort(&settings, checkpoint: &cp)
+        _ = applyModelProfileStops(&settings)
         var consecutiveFailures = 0
         var replansUsed = 0
         var consecutiveGathering = 0
@@ -659,15 +851,35 @@ public struct HeadlessAgentLoop: Sendable {
 
         sink.emit(.stateChanged(.analyzing))
         let start = cp.iteration + 1
-        guard start <= iterationLimit else { return .finished(finishFailed(&cp, "reached max iterations", "out of budget on resume")) }
+        guard start <= maxIterations else {
+            return .finished(await finishProviderRequestBudgetFailure(
+                &cp, budget: requestBudget,
+                error: .exhausted(limit: maxIterations, consumed: cp.iteration)))
+        }
 
-        for iteration in start...iterationLimit {
+        for _ in start...maxIterations {
             if Task.isCancelled { return .finished(finishInterrupted(&cp)) }   // esc-to-interrupt (main)
             if let halt = await budgetHalt(&cp) { return .finished(halt) }
+            if let blocked = await requestBudget.blockingError() {
+                return .finished(await finishProviderRequestBudgetFailure(
+                    &cp, budget: requestBudget, error: blocked))
+            }
             // Atomic reserve BEFORE the call (C2, aplus): if this call's estimate would breach the cap,
             // halt now — under a shared fleet ledger this stops two parallel agents both overspending.
             // Prepare and estimate from the exact prompt actually sent (not the full checkpoint).
-            let outboundMessages = await prepareForProviderCall(&cp, mode: .native)
+            let outboundMessages = await prepareForProviderCall(&cp, mode: .native,
+                                                                    requestBudget: requestBudget)
+            _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
+            if let blocked = await requestBudget.blockingError() {
+                return .finished(await finishProviderRequestBudgetFailure(
+                    &cp, budget: requestBudget, error: blocked))
+            }
+            // Cacheability is stricter than "no round-trip in this turn". A fresh REPL checkpoint starts
+            // that counter at zero while carrying prior-turn history; a provider can reject that history
+            // even though the exact schema is supported. Inspect the same repaired transcript shape used
+            // by ProviderRegistry and quarantine only a genuinely clean first request.
+            let hasEffectiveToolProtocolHistory = NativeProtocolDowngrade.hasToolProtocolHistory(
+                TranscriptRepair.repairForNativeTools(outboundMessages))
             let promptChars = outboundMessages.reduce(0) { $0 + $1.content.count }
             guard let reservation = await reserveForCall(promptChars: promptChars,
                                                          maxOutputTokens: settings.maxTokens) else {
@@ -678,19 +890,32 @@ public struct HeadlessAgentLoop: Sendable {
             // summarization and hard-window trimming can only keep or omit the exchange as a whole.
             var text = ""
             var calls: [ToolCallRef] = []
+            var reasoningHandles: [OpaqueProviderReasoningHandle] = []
             var usage = TokenUsage.zero
+            var capabilityRecordedForRequest = false
             let started = Date()
             do {
                 let stream = try await providers.streamTools(providerId: providerId, model: model,
                                                              messages: outboundMessages,
                                                              settings: settings, tools: specs,
-                                                             allowFallback: !profileStopsApplied)
+                                                             routePolicy: .exact,
+                                                             requestBudget: requestBudget)
                 for try await event in stream {
                     switch event {
                     case .delta(let d):
                         text += d
                     case .reasoning(let r): sink.emit(.reasoningDelta(r))
-                    case .toolCall(let id, let name, let args): calls.append(ToolCallRef(id: id, name: name, argumentsJSON: args))
+                    case .reasoningHandle(let handle): reasoningHandles.append(handle)
+                    case .effortResolution(let record): recordProviderEffort(record, checkpoint: &cp)
+                    case .toolCall(let id, let name, let args):
+                        calls.append(ToolCallRef(id: id, name: name, argumentsJSON: args))
+                        if !capabilityRecordedForRequest {
+                            _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
+                            await recordPositiveNativeCapability(
+                                providerId: capabilityProviderId, model: capabilityModel,
+                                schemaFingerprint: schemaFingerprint, checkpoint: &cp)
+                            capabilityRecordedForRequest = true
+                        }
                     case .usage(let p, let c): usage = TokenUsage(promptTokens: p, completionTokens: c)
                     default: break
                     }
@@ -700,26 +925,51 @@ public struct HeadlessAgentLoop: Sendable {
             } catch {
                 await recordLLMSpan(usage: .zero, promptChars: promptChars,
                                     completionChars: 0, started: started, status: .error, reservation: reservation)
+                _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
+                if let requestError = error as? ProviderRequestBudgetError {
+                    return .finished(await finishProviderRequestBudgetFailure(
+                        &cp, budget: requestBudget, error: requestError))
+                }
                 if Task.isCancelled { return .finished(finishInterrupted(&cp)) }   // ESC mid-stream (main)
                 // The model was routed to native tool-calling but the provider REJECTED the tool request.
                 // In `.auto` mode, downgrade to the text protocol instead of dying. Forced `--tools native`
                 // gets the honest failure — no silent protocol switch behind the user's back.
-                // No successful tool round-trip yet ⇒ this is the FIRST native call — a rejection here is a
-                // tool-schema/support problem (not history growth), so downgrade even on a generic 5xx.
-                let noToolRoundTripYet = !cp.messages.contains { $0.role == .tool }
+                // No successful tool round-trip yet permits a run-local first-request recovery. It is only
+                // cacheable when the effective transcript above contains no older native protocol history.
+                let noToolRoundTripYet = cp.nativeToolRoundTrips.map { $0 == 0 }
+                    ?? !cp.messages.contains { $0.role == .tool }
+                let checkpointProved = cp.nativeToolCapability?.matches(
+                    providerId: capabilityProviderId, model: capabilityModel,
+                    toolSchemaFingerprint: schemaFingerprint, now: Date(),
+                    ttl: NativeToolCapabilityCache.defaultTTL) ?? false
+                let cachedProved = await nativeToolCapabilityCache.hasPositive(
+                    providerId: capabilityProviderId, model: capabilityModel,
+                    schema: schemaFingerprint)
                 if toolMode == .auto,
-                   NativeProtocolDowngrade.shouldDowngrade(from: error, initialToolCall: noToolRoundTripYet) {
-                    return .downgrade(cp)
+                   let decision = NativeProtocolDowngrade.decision(
+                    from: error, initialToolCall: noToolRoundTripYet,
+                    hasToolProtocolHistory: hasEffectiveToolProtocolHistory,
+                    capabilityAlreadyProven: checkpointProved || cachedProved) {
+                    return .downgrade(
+                        cp, cacheable: decision == .cacheableCapabilityMismatch)
                 }
                 return .finished(finishFailed(&cp, "provider error: \(error)", "provider '\(providerId)' error: \(error)",
                                               providerFault: ProviderFault.isProviderFault(error)))
             }
+            let iteration = await synchronizeProviderRequests(&cp, budget: requestBudget)
+            if !capabilityRecordedForRequest {
+                await recordPositiveNativeCapability(
+                    providerId: capabilityProviderId, model: capabilityModel,
+                    schemaFingerprint: schemaFingerprint, checkpoint: &cp)
+            }
+            recordProviderReasoningHandles(reasoningHandles, checkpoint: &cp)
 
             // No tool call → the assistant's text is the final answer.
             if calls.isEmpty {
                 let summary = text.isEmpty ? "done" : text
                 if !text.isEmpty { sink.emit(.tokenDelta(text)) }
-                cp.messages.append(ChatMessage(role: .assistant, content: text))
+                cp.messages.append(ChatMessage(role: .assistant, content: text,
+                                               providerReasoningHandles: reasoningHandles))
                 // VERIFY-BEFORE-DONE (R7, native path): same symbolic gate — an unbuilt/untested code
                 // change finishes as an honest failure after the nudge budget, never a laundered success.
                 var doneDecision = verifyBeforeDone(canRunCommands: scopedContext.shell.enabled,
@@ -750,7 +1000,9 @@ public struct HeadlessAgentLoop: Sendable {
                     cp.status = .failed; cp.summary = honest; cp.iteration = iteration; persist(&cp)
                     await fireStopHook(summary: honest, success: false)
                     sink.emit(.stateChanged(.failed)); sink.emit(.failed(honest))
-                    return .finished((Outcome(success: false, summary: honest, iterations: iteration, checkpointId: cp.id), cp))
+                    return .finished((Outcome(
+                        success: false, summary: honest, iterations: iteration,
+                        checkpointId: cp.id, terminalStatus: .stoppedUnverified), cp))
                 case .accept:
                     break
                 }
@@ -761,7 +1013,8 @@ public struct HeadlessAgentLoop: Sendable {
             }
 
             // Record the assistant turn (text + the calls it made), then execute each call.
-            cp.messages.append(ChatMessage(role: .assistant, content: text, toolCalls: calls))
+            cp.messages.append(ChatMessage(role: .assistant, content: text, toolCalls: calls,
+                                           providerReasoningHandles: reasoningHandles))
             for call in calls {
                 let args = Self.parseArgs(call.argumentsJSON)
                 if let block = planModeBlock(tool: call.name, args: args) {
@@ -830,6 +1083,7 @@ public struct HeadlessAgentLoop: Sendable {
                 }
                 if Self.readOnlyTools.contains(call.name) { consecutiveGathering += 1 } else { consecutiveGathering = 0 }
             }
+            cp.nativeToolRoundTrips = (cp.nativeToolRoundTrips ?? 0) + 1
             // Forced synthesis (same as the text path): stop endless read-only gathering, write findings.
             if Self.shouldForceSynthesis(consecutiveGathering: consecutiveGathering, iteration: iteration,
                                          lastNudge: lastSynthesisNudge, maxIterations: maxIterations) {
@@ -853,14 +1107,17 @@ public struct HeadlessAgentLoop: Sendable {
                     cp.iteration = iteration; persist(&cp)
                     continue
                 }
-                if let final = await attemptNativeFinalSynthesis(&cp, iteration: iteration) { return .finished(final) }
+                if toolMode != .native,
+                   let final = await attemptNativeFinalSynthesis(&cp, requestBudget: requestBudget) {
+                    return .finished(final)
+                }
                 return .finished(finishFailed(&cp, "stopped early — \(reason)", "stopped early (stuck after recovery): \(reason)"))
             }
         }
-        if let final = await attemptNativeFinalSynthesis(&cp, iteration: iterationLimit) {
-            return .finished(final)
-        }
-        return .finished(finishFailed(&cp, "reached max iterations", "reached max iterations (\(maxIterations)) without finishing"))
+        return .finished(await finishProviderRequestBudgetFailure(
+            &cp, budget: requestBudget,
+            error: .exhausted(limit: maxIterations,
+                              consumed: await requestBudget.consumedCount())))
     }
 
     // MARK: - Shared helpers
@@ -989,10 +1246,43 @@ public struct HeadlessAgentLoop: Sendable {
         return (Outcome(success: false, summary: "interrupted", iterations: cp.iteration, checkpointId: cp.id), cp)
     }
 
-    /// Safe absolute iteration limit for this invocation. Resume gets a fresh budget.
+    /// Convert a relative resume allowance into an absolute request limit without overflow.
     static func iterationLimit(from cursor: Int, budget: Int) -> Int? {
-        guard cursor >= 0, budget > 0, cursor <= Int.max - budget else { return nil }
-        return cursor + budget
+        guard cursor >= 0, budget > 0 else { return nil }
+        let (limit, overflow) = cursor.addingReportingOverflow(budget)
+        return overflow ? nil : limit
+    }
+
+    @discardableResult
+    private func synchronizeProviderRequests(_ cp: inout LoopCheckpoint,
+                                             budget: ProviderRequestBudget) async -> Int {
+        let consumed = await budget.consumedCount()
+        cp.providerRequestsConsumed = consumed
+        cp.iteration = consumed
+        return consumed
+    }
+
+    private func finishProviderRequestBudgetFailure(
+        _ cp: inout LoopCheckpoint,
+        budget: ProviderRequestBudget,
+        error: ProviderRequestBudgetError
+    ) async -> (Outcome, LoopCheckpoint) {
+        let consumed = await synchronizeProviderRequests(&cp, budget: budget)
+        let summary: String
+        switch error {
+        case .exhausted:
+            summary = "provider request limit reached (\(consumed)/\(maxIterations))"
+        case .persistence(let detail):
+            summary = "provider request admission failed closed: \(detail)"
+        }
+        return finishFailed(&cp, summary, summary)
+    }
+
+    /// Final synthesis is a real provider call and therefore consumes the next iteration slot.
+    /// No spare slot means no hidden call beyond the advertised ceiling.
+    static func synthesisIteration(after iteration: Int, limit: Int) -> Int? {
+        guard iteration >= 0, iteration < limit else { return nil }
+        return iteration + 1
     }
 
     /// If the token ceiling is reached, finish the run as a budget failure (checked at the top of
@@ -1006,25 +1296,50 @@ public struct HeadlessAgentLoop: Sendable {
 
     /// Last-chance answer pass. Research models can spend the whole action budget gathering; this
     /// converts "I gathered a lot and then failed" into a final synthesis without granting more tools.
-    private func attemptTextFinalSynthesis(_ cp: inout LoopCheckpoint, iteration: Int) async -> (Outcome, LoopCheckpoint)? {
+    private func attemptTextFinalSynthesis(
+        _ cp: inout LoopCheckpoint,
+        requestBudget: ProviderRequestBudget
+    ) async -> (Outcome, LoopCheckpoint)? {
         // Don't spend another model call on synthesis once the budget is already blown (this pass
         // runs after the loop, so the top-of-iteration check can't guard it).
         if let budget, await budget.isExceeded() { return nil }
+        if let blocked = await requestBudget.blockingError() {
+            return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget, error: blocked)
+        }
         cp.messages.append(ChatMessage(role: .user, content: Self.finalSynthesisSteering(textProtocol: true)))
+        persist(&cp)
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096,
                                      systemPrompt: Self.finalOnlySystemPrompt(textProtocol: true),
-                                     disableThinking: !extendedThinking)
+                                     disableThinking: providerReasoningEffort == .none,
+                                     reasoningEffort: providerReasoningEffort)
+        applyProviderReasoningEffort(&settings, checkpoint: &cp)
         let profileStopsApplied = applyModelProfileStops(&settings)
-        let text: String
+        let completion: CompletionStreamResult
         do {
             let outboundMessages = await prepareForProviderCall(&cp, mode: .text,
-                                                                reassertObjective: false)
-            text = try await streamCompletion(messages: outboundMessages, settings: settings,
-                                              allowFallback: !profileStopsApplied)
+                                                                reassertObjective: false,
+                                                                requestBudget: requestBudget)
+            _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
+            if let blocked = await requestBudget.blockingError() {
+                return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget, error: blocked)
+            }
+            completion = try await streamCompletion(messages: outboundMessages, settings: settings,
+                                                    allowFallback: !profileStopsApplied,
+                                                    routePolicy: providerRoutePolicy(
+                                                        allowFallback: !profileStopsApplied),
+                                                    requestBudget: requestBudget)
+        } catch let requestError as ProviderRequestBudgetError {
+            return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget,
+                                                            error: requestError)
         } catch {
+            _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
             return nil
         }
-        cp.messages.append(ChatMessage(role: .assistant, content: text))
+        let iteration = await synchronizeProviderRequests(&cp, budget: requestBudget)
+        recordProviderMetadata(completion, checkpoint: &cp)
+        let text = completion.text
+        cp.messages.append(ChatMessage(role: .assistant, content: text,
+                                       providerReasoningHandles: completion.reasoningHandles))
 
         if let action = ActionParser.parse(text), action.done {
             let summary = action.summary ?? action.message ?? "done"
@@ -1037,27 +1352,51 @@ public struct HeadlessAgentLoop: Sendable {
 
     /// Native equivalent of the last-chance answer pass. It deliberately uses the plain completion
     /// route (no tool specs) so the provider has one job: write the answer from gathered context.
-    private func attemptNativeFinalSynthesis(_ cp: inout LoopCheckpoint, iteration: Int) async -> (Outcome, LoopCheckpoint)? {
+    private func attemptNativeFinalSynthesis(
+        _ cp: inout LoopCheckpoint,
+        requestBudget: ProviderRequestBudget
+    ) async -> (Outcome, LoopCheckpoint)? {
         // Don't spend another model call on synthesis once the budget is already blown (this pass
         // runs after the loop, so the top-of-iteration check can't guard it).
         if let budget, await budget.isExceeded() { return nil }
+        if let blocked = await requestBudget.blockingError() {
+            return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget, error: blocked)
+        }
         cp.messages.append(ChatMessage(role: .user, content: Self.finalSynthesisSteering(textProtocol: false)))
+        persist(&cp)
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096,
                                      systemPrompt: Self.finalOnlySystemPrompt(textProtocol: false),
-                                     disableThinking: !extendedThinking)
-        let profileStopsApplied = applyModelProfileStops(&settings)
-        let text: String
+                                     disableThinking: providerReasoningEffort == .none,
+                                     reasoningEffort: providerReasoningEffort)
+        applyProviderReasoningEffort(&settings, checkpoint: &cp)
+        _ = applyModelProfileStops(&settings)
+        let completion: CompletionStreamResult
         do {
             let outboundMessages = await prepareForProviderCall(&cp, mode: .native,
-                                                                reassertObjective: false)
-            text = try await streamCompletion(messages: outboundMessages, settings: settings,
-                                              allowFallback: !profileStopsApplied)
+                                                                reassertObjective: false,
+                                                                requestBudget: requestBudget)
+            _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
+            if let blocked = await requestBudget.blockingError() {
+                return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget, error: blocked)
+            }
+            completion = try await streamCompletion(messages: outboundMessages, settings: settings,
+                                                    allowFallback: false,
+                                                    routePolicy: providerRoutePolicy(),
+                                                    requestBudget: requestBudget)
+        } catch let requestError as ProviderRequestBudgetError {
+            return await finishProviderRequestBudgetFailure(&cp, budget: requestBudget,
+                                                            error: requestError)
         } catch {
+            _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
             return nil
         }
+        let iteration = await synchronizeProviderRequests(&cp, budget: requestBudget)
+        recordProviderMetadata(completion, checkpoint: &cp)
+        let text = completion.text
         let plain = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !plain.isEmpty else { return nil }
-        cp.messages.append(ChatMessage(role: .assistant, content: plain))
+        cp.messages.append(ChatMessage(role: .assistant, content: plain,
+                                       providerReasoningHandles: completion.reasoningHandles))
         sink.emit(.tokenDelta(plain))
         return await finishCompleted(&cp, summary: plain, iteration: iteration)
     }
@@ -1081,7 +1420,16 @@ public struct HeadlessAgentLoop: Sendable {
         return (Outcome(success: true, summary: summary, iterations: iteration, checkpointId: cp.id), cp)
     }
 
-    private func streamCompletion(messages: [ChatMessage], settings: ModelSettings, allowFallback: Bool = true) async throws -> String {
+    private struct CompletionStreamResult: Sendable {
+        let text: String
+        let effortRecords: [ProviderEffortRecord]
+        let reasoningHandles: [OpaqueProviderReasoningHandle]
+    }
+
+    private func streamCompletion(messages: [ChatMessage], settings: ModelSettings,
+                                  allowFallback: Bool = true,
+                                  routePolicy: ProviderRoutePolicy? = nil,
+                                  requestBudget: ProviderRequestBudget? = nil) async throws -> CompletionStreamResult {
         let started = Date()
         let promptChars = messages.reduce(0) { $0 + $1.content.count }
         // Atomic reserve BEFORE the call (C2, aplus). Denied ⇒ throw so the caller halts without spending.
@@ -1091,12 +1439,16 @@ public struct HeadlessAgentLoop: Sendable {
         }
         var text = ""
         var usage = TokenUsage.zero
+        var effortRecords: [ProviderEffortRecord] = []
+        var reasoningHandles: [OpaqueProviderReasoningHandle] = []
         do {
             // The stream() call is INSIDE this do so that a throw HERE (unknown provider, connection
             // refused, etc.) still releases the reservation — otherwise the hold leaks and falsely
             // denies every later call, wedging the run (Codex HIGH #1).
             let stream = try await providers.stream(providerId: providerId, model: model, messages: messages,
-                                                    settings: settings, allowFallback: allowFallback)
+                                                    settings: settings, allowFallback: allowFallback,
+                                                    routePolicy: routePolicy,
+                                                    requestBudget: requestBudget)
             for try await event in stream {
                 switch event {
                 case .delta(let d):
@@ -1104,6 +1456,8 @@ public struct HeadlessAgentLoop: Sendable {
                     // or terminal consumers will print raw action JSON and tool arguments.
                     text += d
                 case .reasoning(let r): sink.emit(.reasoningDelta(r))
+                case .reasoningHandle(let handle): reasoningHandles.append(handle)
+                case .effortResolution(let record): effortRecords.append(record)
                 case .usage(let p, let c): usage = TokenUsage(promptTokens: p, completionTokens: c)
                 default: break
                 }
@@ -1120,7 +1474,44 @@ public struct HeadlessAgentLoop: Sendable {
                             started: started,
                             status: .ok,
                             reservation: reservation)
-        return text
+        return CompletionStreamResult(text: text,
+                                      effortRecords: Array(effortRecords.suffix(32)),
+                                      reasoningHandles: Array(reasoningHandles.suffix(32)))
+    }
+
+    private func applyProviderReasoningEffort(_ settings: inout ModelSettings,
+                                              checkpoint: inout LoopCheckpoint) {
+        let resolution = providers.reasoningEffortResolution(providerId: providerId, model: model,
+                                                             requested: providerReasoningEffort,
+                                                             base: settings)
+        settings = resolution.settings
+        recordProviderEffort(resolution.record, checkpoint: &checkpoint)
+    }
+
+    private func recordProviderMetadata(_ completion: CompletionStreamResult,
+                                        checkpoint: inout LoopCheckpoint) {
+        for record in completion.effortRecords { recordProviderEffort(record, checkpoint: &checkpoint) }
+        recordProviderReasoningHandles(completion.reasoningHandles, checkpoint: &checkpoint)
+    }
+
+    private func recordProviderEffort(_ record: ProviderEffortRecord,
+                                      checkpoint: inout LoopCheckpoint) {
+        var records = checkpoint.providerEffortRecords ?? []
+        if records.last != record { records.append(record) }
+        checkpoint.providerEffortRecords = Array(records.suffix(128))
+    }
+
+    private func recordProviderReasoningHandles(_ handles: [OpaqueProviderReasoningHandle],
+                                                checkpoint: inout LoopCheckpoint) {
+        var stored = checkpoint.providerReasoningHandles ?? []
+        for handle in handles {
+            stored.removeAll {
+                $0.providerID == handle.providerID && $0.modelID == handle.modelID
+                    && $0.kind == handle.kind && $0.associationID == handle.associationID
+            }
+            stored.append(handle)
+        }
+        checkpoint.providerReasoningHandles = Array(stored.suffix(128))
     }
 
     /// A held reservation. `id` is the BudgetLedger reservation id to release at commit (nil when there

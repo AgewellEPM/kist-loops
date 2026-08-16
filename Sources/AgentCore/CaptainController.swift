@@ -73,6 +73,43 @@ public enum CaptainDriveOutcome: Sendable, Equatable {
     case handedBack(reason: String, tick: Int)
 }
 
+/// Typed, capability-neutral advice requested from the Captain before BuilderRun is composed.
+/// The Captain may strengthen a route or require evidence stages; it cannot execute work, accept
+/// evidence, or waive BuilderRun's deterministic verification and independent-review gates.
+public struct CaptainControlRequest: Sendable, Equatable {
+    public let routeRequest: ReasoningRouteRequest
+    public let requestedEffort: ProviderReasoningEffort
+    public let requiresResearch: Bool
+    public let requiresSimulation: Bool
+
+    public init(routeRequest: ReasoningRouteRequest,
+                requestedEffort: ProviderReasoningEffort,
+                requiresResearch: Bool = false,
+                requiresSimulation: Bool = false) {
+        self.routeRequest = routeRequest
+        self.requestedEffort = requestedEffort
+        self.requiresResearch = requiresResearch
+        self.requiresSimulation = requiresSimulation
+    }
+}
+
+public struct CaptainControlDecision: Sendable, Equatable {
+    public let routeDecision: ReasoningRouteDecision
+    public let requestedEffort: ProviderReasoningEffort
+    public let requiresResearch: Bool
+    public let requiresSimulation: Bool
+
+    public init(routeDecision: ReasoningRouteDecision,
+                requestedEffort: ProviderReasoningEffort,
+                requiresResearch: Bool,
+                requiresSimulation: Bool) {
+        self.routeDecision = routeDecision
+        self.requestedEffort = requestedEffort
+        self.requiresResearch = requiresResearch
+        self.requiresSimulation = requiresSimulation
+    }
+}
+
 // MARK: - Injected organs (the LLM is behind these — a subordinate tool)
 
 /// Proposes the next move. The LLM adapter implements this; tests use a fake. `forcedAction == true`
@@ -90,6 +127,18 @@ public protocol CaptainPerformer: Sendable {
 // MARK: - The controller
 
 public final class CaptainController: Sendable {
+    /// Canonical pure control facade for route, effort, and simulation advice. High-risk work can
+    /// only gain evidence requirements here, never lose requirements requested by the caller.
+    public static func control(_ request: CaptainControlRequest) -> CaptainControlDecision {
+        let route = SolReasoningRoutePolicy().decide(request.routeRequest)
+        let safetyEscalation = request.routeRequest.risk >= .high
+        return CaptainControlDecision(
+            routeDecision: route,
+            requestedEffort: request.requestedEffort,
+            requiresResearch: request.requiresResearch || safetyEscalation,
+            requiresSimulation: request.requiresSimulation || safetyEscalation
+        )
+    }
 
     /// Hard upper bound on ticks. Immutable so a run can never extend itself. Clamped to ≥1.
     public let maxTicks: Int

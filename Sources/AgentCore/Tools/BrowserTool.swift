@@ -18,36 +18,79 @@ public struct BrowserTool: AgentTool {
         ToolParameter(name: "url", type: "string", description: "http(s) URL to load."),
         ToolParameter(name: "actions", type: "array", description: "Optional steps: objects with do=click/fill/wait/press/screenshot.", required: false),
         ToolParameter(name: "extract", type: "string", description: "text (default) or html.", required: false),
+        ToolParameter(name: "allowed_hosts", type: "array", description: "Optional per-call host allowlist that narrows public-web access or the configured allowlist.", required: false),
     ]
 
     private let allowedHosts: Set<String>
+    private let configuredAllowlistIsValid: Bool
     private let allowLocalhost: Bool
+    static let maxActions = 64
 
     public init(allowedHosts: [String] = [], allowLocalhost: Bool = false) {
-        self.allowedHosts = Set(allowedHosts.compactMap(WebFetchTool.normalizedHostPattern))
+        let policy = WebFetchTool.normalizedHostPatterns(allowedHosts)
+        self.allowedHosts = policy.patterns
+        self.configuredAllowlistIsValid = policy.isValid
         self.allowLocalhost = allowLocalhost
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let url = try requireString("url", from: arguments)
-        guard let parsedURL = URL(string: url), let scheme = parsedURL.scheme?.lowercased(),
-              scheme == "http" || scheme == "https", let host = parsedURL.host else {
+        guard configuredAllowlistIsValid else {
+            return .failure("refused (host allowlist): configured browser host allowlist contains an invalid pattern")
+        }
+        guard url.utf8.count <= PublicWebTransport.maxURLBytes else {
+            return .failure("browse URL exceeds the public-web byte limit")
+        }
+        guard url.utf8.allSatisfy({ $0 >= 0x20 && $0 != 0x7f }), !url.contains("\\"),
+              let parsedURL = URL(string: url), let scheme = parsedURL.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", let host = parsedURL.host,
+              parsedURL.user == nil, parsedURL.password == nil,
+              parsedURL.port.map({ (1...65_535).contains($0) }) ?? true else {
             return .failure("browse only loads http(s) URLs (got '\(url.prefix(40))')")
         }
-        let callAllowlist = (arguments["allowed_hosts"] as? [String])?
-            .compactMap(WebFetchTool.normalizedHostPattern) ?? []
-        if let reason = WebFetchTool.allowlistBlockReason(host: host, configured: allowedHosts, perCall: Set(callAllowlist)) {
+        var callAllowlist: Set<String> = []
+        if let raw = arguments["allowed_hosts"] {
+            guard let hosts = raw as? [String], !hosts.isEmpty else {
+                return .failure("refused (host allowlist): allowed_hosts must be a non-empty string array when provided")
+            }
+            let normalized = hosts.compactMap(WebFetchTool.normalizedHostPattern)
+            guard normalized.count == hosts.count else {
+                return .failure("refused (host allowlist): allowed_hosts contains an invalid host pattern")
+            }
+            callAllowlist = Set(normalized)
+        }
+        if let reason = WebFetchTool.allowlistBlockReason(host: host, configured: allowedHosts, perCall: callAllowlist) {
             return .failure("refused (host allowlist): \(reason)")
         }
         let localCaptureAllowed = allowLocalhost && Self.isAllowedLocalhostHost(host)
-        if let reason = WebFetchTool.ssrfBlockReason(host: host), !localCaptureAllowed {
-            return .failure("refused (SSRF guard): \(reason)")
+        let normalizedInitialHost = WebFetchTool.normalizedHostPattern(host)
+        if !localCaptureAllowed {
+            if normalizedInitialHost == "localhost"
+                || normalizedInitialHost?.hasSuffix(".localhost") == true {
+                return .failure("refused (SSRF guard): localhost is not allowed")
+            }
+            if let normalizedInitialHost,
+               let literal = WebFetchTool.parsedIPAddress(normalizedInitialHost),
+               !WebFetchTool.isGlobalUnicastAddress(literal) {
+                return .failure("refused (SSRF guard): target is non-global/special-purpose")
+            }
         }
-        let parsedActions: [BrowserAction] = (arguments["actions"] as? [[String: Any]] ?? []).compactMap(BrowserAction.parse)
+        let actionDictionaries: [[String: Any]]
+        if let rawActions = arguments["actions"] {
+            guard let parsed = rawActions as? [[String: Any]], parsed.count <= Self.maxActions else {
+                return .failure("actions must be an array of at most \(Self.maxActions) valid action objects")
+            }
+            actionDictionaries = parsed
+        } else {
+            actionDictionaries = []
+        }
+        let parsedActions = actionDictionaries.compactMap(BrowserAction.parse)
+        guard parsedActions.count == actionDictionaries.count else {
+            return .failure("actions contains an invalid browser action")
+        }
         let actions: [BrowserAction]
         do {
             actions = try parsedActions.map { try $0.confined(to: context) }
-            try createScreenshotParents(for: actions)
         } catch {
             return .failure("refused screenshot path: \(error)")
         }
@@ -56,17 +99,42 @@ public struct BrowserTool: AgentTool {
 
         // Playwright (node) — full interactivity with per-request network policy.
         if let node = RunCommandTool.resolveExecutable("node", env: env) {
+            let driverPath = NSTemporaryDirectory() + "kist-browser-driver-\(UUID().uuidString).js"
+            let args = [driverPath, Self.playwrightModulePath()]
+            if let reason = await context.shell.binaryRefusalReason(resolvedPath: node, args: args) {
+                return .failure("browser blocked by shell policy: \(reason) (try --allow-shell)")
+            }
+            do {
+                try createScreenshotParents(for: actions)
+            } catch {
+                return .failure("could not create screenshot directory: \(error.localizedDescription)")
+            }
             let localCaptureHost = localCaptureAllowed ? Self.normalizedLocalhostHost(host) : nil
             let localCapturePort = localCaptureAllowed ? Self.normalizedPort(parsedURL) : nil
+            let proxy: PublicWebSOCKSProxy
+            do {
+                proxy = try PublicWebSOCKSProxy.start(
+                    configuredAllowedHosts: allowedHosts,
+                    perCallAllowedHosts: callAllowlist,
+                    localCaptureScheme: localCaptureAllowed ? scheme : nil,
+                    localCaptureHost: localCaptureHost,
+                    localCapturePort: localCapturePort.flatMap(UInt16.init))
+            } catch {
+                return .failure("could not start pinned browser proxy: \(error.localizedDescription)")
+            }
+            defer { proxy.stop() }
             guard let spec = BrowserSpec.jsonString(url: url, actions: actions, extract: extract,
                                                     configuredAllowedHosts: Array(allowedHosts).sorted(),
-                                                    perCallAllowedHosts: callAllowlist.sorted(),
+                                                    perCallAllowedHosts: Array(callAllowlist).sorted(),
                                                     allowLocalhost: localCaptureAllowed,
+                                                    proxyServer: proxy.endpoint,
+                                                    proxyUsername: proxy.proxyUsername,
+                                                    proxyPassword: proxy.proxyPassword,
+                                                    localCaptureScheme: localCaptureAllowed ? scheme : nil,
                                                     localCaptureHost: localCaptureHost,
                                                     localCapturePort: localCapturePort) else {
                 return .failure("could not encode the browse spec")
             }
-            let driverPath = NSTemporaryDirectory() + "kist-browser-driver-\(UUID().uuidString).js"
             do {
                 try Self.writeDriver(at: driverPath)
             } catch {
@@ -75,12 +143,18 @@ public struct BrowserTool: AgentTool {
             defer { try? FileManager.default.removeItem(atPath: driverPath) }
             // argv[3]: absolute playwright module path, so a GLOBAL `npm i -g playwright` resolves from
             // this temp-dir driver (Node won't search global node_modules otherwise). Empty ⇒ bare require.
-            let args = [driverPath, spec, Self.playwrightModulePath()]
-            if let reason = await context.shell.binaryRefusalReason(resolvedPath: node, args: args) {
-                return .failure("browser blocked by shell policy: \(reason) (try --allow-shell)")
+            let specData = Data(spec.utf8)
+            guard specData.count <= RunCommandTool.maxStdinBytes else {
+                return .failure("browse spec exceeds the private input byte limit")
             }
-            let run = await spawnBrowser(launchPath: node, args: args, context: context, timeout: 60)
-            if run.success { return ToolResult(success: true, output: run.output, metadata: ["engine": "playwright"]) }
+            let run = await spawnBrowser(launchPath: node, args: args, context: context,
+                                         timeout: 60, stdinData: specData,
+                                         allowedProxyPort: proxy.port)
+            if run.success {
+                return ToolResult(success: true, output: run.output,
+                                  metadata: ["engine": "playwright",
+                                             "network_mode": "pinned-authenticated-http-proxy"])
+            }
             if (run.error ?? run.output).contains("Cannot find module 'playwright'") {
                 return .failure("Playwright not installed. Run: npm i -g playwright && npx playwright install chromium")
             }
@@ -116,7 +190,7 @@ public struct BrowserTool: AgentTool {
         let normalized = normalizedLocalhostHost(host)
         if normalized == "localhost" { return true }
         if normalized.hasPrefix("127.") { return true }
-        return normalized == "::" || normalized == "::1"
+        return normalized == "::1"
     }
 
     static func normalizedLocalhostHost(_ host: String) -> String {
@@ -140,10 +214,18 @@ public struct BrowserTool: AgentTool {
         }
     }
 
-    private func spawnBrowser(launchPath: String, args: [String], context: ToolContext, timeout: Int) async -> ToolResult {
+    private func spawnBrowser(launchPath: String, args: [String], context: ToolContext, timeout: Int,
+                              stdinData: Data, allowedProxyPort: UInt16) async -> ToolResult {
         let finalPath: String
         let finalArgs: [String]
-        switch SeatbeltSandbox.wrap(launchPath: launchPath, args: args, root: context.projectRoot, policy: context.sandbox) {
+        // Public browsing is never an unsandboxed subprocess capability. `--sandbox` controls ordinary
+        // commands, but BrowserTool handles hostile remote content and therefore always establishes the
+        // confined baseline itself. The only egress granted to Chromium is this invocation's exact,
+        // authenticated loopback proxy port; the proxy owns DNS, SSRF, redirect and host-allowlist policy.
+        let confinement = context.sandbox.enabled ? context.sandbox : SandboxPolicy.confined()
+        let browserSandbox = confinement.allowingLoopbackTCPPort(allowedProxyPort)
+        switch SeatbeltSandbox.wrap(launchPath: launchPath, args: args,
+                                    root: context.projectRoot, policy: browserSandbox) {
         case .passthrough:
             finalPath = launchPath; finalArgs = args
         case .wrapped(let p, let a):
@@ -152,14 +234,9 @@ public struct BrowserTool: AgentTool {
             return .failure("OS sandbox required but unavailable: \(reason)")
         }
 
-        let limited = RunCommandTool.resourceLimitedLaunch(
-            launchPath: finalPath,
-            launchArgs: finalArgs,
-            limits: RunCommandTool.ResourceLimits(cpuSeconds: timeout, fileSizeMB: 512, memoryMB: nil)
-        )
         return await RunCommandTool.spawnAndCollect(
-            launchPath: limited.launchPath, launchArgs: limited.launchArgs,
-            cwd: context.projectRoot, timeout: timeout
+            launchPath: finalPath, launchArgs: finalArgs,
+            cwd: context.projectRoot, timeout: timeout, stdinData: stdinData
         )
     }
 }

@@ -75,6 +75,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
         XCTAssertFalse(out.success, out.summary)
         XCTAssertTrue(out.summary.lowercased().contains("unverified"), out.summary)
+        XCTAssertEqual(out.terminalStatus, .stoppedUnverified)
         XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/Sources/New.swift"))
     }
 
@@ -211,7 +212,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
         XCTAssertTrue(out.success, out.summary)
         XCTAssertEqual(out.summary, "salvaged final answer")
-        XCTAssertEqual(out.iterations, 3)
+        XCTAssertEqual(out.iterations, 4)   // the synthesis provider call consumes the next slot
     }
 
     // Regression (2026-08-01 live run 1785638394-f58017fa): fixed-head compaction kept the previous
@@ -261,6 +262,29 @@ final class HeadlessAgentLoopTests: XCTestCase {
                        HeadlessAgentLoop.currentTurnObjectiveMarker + "\n" + current)
         XCTAssertFalse(prompt.last?.content.contains("next natural progression") ?? true,
                        "the stale first-turn objective must not remain controlling")
+    }
+
+    func testModelBackedCompactionConsumesOnlyProviderRequestSlot() async {
+        let provider = CompactionPromptCaptureProvider(responses: ["bounded summary"])
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        var transcript = staleTopicTranscript(count: 16)
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: provider.id, model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            maxIterations: 1,
+            contextWindow: ContextWindowManager(maxCharacters: 1_000_000),
+            compactor: ConversationCompactor(
+                triggerCharacters: 2_000, keepFirst: 2, keepRecent: 8, minMiddle: 6))
+
+        let out = await subject.turn(transcript: &transcript, userInput: "current objective",
+                                     rawRequest: "current objective", resolvedIntent: .chat)
+
+        XCTAssertFalse(out.success)
+        XCTAssertEqual(out.iterations, 1)
+        XCTAssertTrue(out.summary.contains("provider request limit"), out.summary)
+        let mainPrompts = await provider.mainPrompts()
+        XCTAssertEqual(mainPrompts.count, 0,
+                       "compaction consumed the sole slot, so the main request must not issue")
     }
 
     // The start-of-turn ContextWindowManager has a separate compaction implementation from the
@@ -367,7 +391,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertEqual(out.iterations, 4)
     }
 
-    func testFinalSynthesisRescuesBudgetExhaustedResearch() async throws {
+    func testAbsoluteIterationCeilingDoesNotGrantHiddenFinalSynthesisCall() async throws {
         try "useful facts".write(toFile: root + "/facts.txt", atomically: true, encoding: .utf8)
         let sink = RecordingEventSink()
         let out = await loop([
@@ -375,9 +399,20 @@ final class HeadlessAgentLoopTests: XCTestCase {
             #"{"thinking":"final synthesis","done":true,"summary":"The gathered facts say: useful facts"}"#,
         ], sink: sink, maxIterations: 1).run(goal: "research facts.txt and report")
 
-        XCTAssertTrue(out.success, out.summary)
+        XCTAssertFalse(out.success, "a second synthesis call must not run beyond maxIterations=1")
         XCTAssertEqual(out.iterations, 1)
-        XCTAssertTrue(out.summary.contains("useful facts"))
+    }
+
+    func testFinalSynthesisConsumesAnAvailableIterationSlot() async {
+        let sink = RecordingEventSink()
+        let out = await loop([
+            "not json 1", "not json 2", "not json 3",
+            #"{"done":true,"summary":"synthesized inside the ceiling"}"#,
+        ], sink: sink, maxIterations: 4).run(goal: "summarize the findings")
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(out.iterations, 4)
+        XCTAssertEqual(out.summary, "synthesized inside the ceiling")
     }
 
     // MARK: - Resume / checkpoint
@@ -437,7 +472,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
             ])],
                 keyStore: NullKeyStore()),
             providerId: "scripted", model: nil, tools: .headless(),
-            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 4
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 5
         ).resume(from: loaded)
 
         XCTAssertFalse(out.success, "pause/resume must not erase the unverified source mutation")
@@ -470,7 +505,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
                 #"{"done":true,"summary":"tries to reuse stale build proof"}"#])],
                 keyStore: NullKeyStore()),
             providerId: "scripted", model: nil, tools: .headless(),
-            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 2
+            context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 3
         ).resume(from: loaded)
 
         XCTAssertFalse(out.success, "pre-pause execution proof is not bound to the resumed workspace")
@@ -503,13 +538,13 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
         let out = await HeadlessAgentLoop(
             providers: ProviderRegistry(providers: [ScriptedProvider([
-                #"{"tool":"run_command","parameters":{"command":"python3 -m unittest discover -s . -p test_ok.py"}}"#,
+                #"{"tool":"run_command","parameters":{"executable":"python3","args":["-m","unittest","discover","-s",".","-p","test_ok.py"]}}"#,
                 #"{"done":true,"summary":"fresh verifier passed"}"#,
             ])], keyStore: NullKeyStore()),
             providerId: "scripted", model: nil, tools: .headless(),
             context: ToolContext(projectRoot: root,
                                  shell: ShellPolicy(enabled: true, autoApprove: true)),
-            checkpoints: store, maxIterations: 3
+            checkpoints: store, maxIterations: 4
         ).resume(from: try store.load(id: cp.id))
 
         XCTAssertTrue(out.success, out.summary)
@@ -571,7 +606,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
         let out = await HeadlessAgentLoop(
             providers: ProviderRegistry(providers: [ScriptedProvider([
-                #"{"tool":"run_command","parameters":{"command":"python3 -m unittest discover -s . -p test_ok.py"}}"#,
+                #"{"tool":"run_command","parameters":{"executable":"python3","args":["-m","unittest","discover","-s",".","-p","test_ok.py"]}}"#,
                 #"{"done":true,"summary":"fresh verifier covered the resumed workspace"}"#,
             ])], keyStore: NullKeyStore()),
             providerId: "scripted", model: nil, tools: .headless(),
@@ -616,7 +651,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertEqual(saved.trajectory?.last?.observedEffects.mutation, .nonSource)
     }
 
-    func testResumeGetsFreshIterationBudgetEvenWhenCursorExceedsDefaultMax() async throws {
+    func testResumeDoesNotRefundAbsoluteProviderRequestBudget() async throws {
         var cp = LoopCheckpoint(goal: "g", providerId: "scripted", model: nil, projectRoot: root,
                                 messages: [ChatMessage(role: .user, content: "g")], iteration: 10,
                                 status: .failed, summary: "previous run hit the budget")
@@ -631,10 +666,39 @@ final class HeadlessAgentLoopTests: XCTestCase {
             context: ToolContext(projectRoot: root), checkpoints: store, maxIterations: 2)
         let out = await l.resume(from: cp)
 
-        XCTAssertTrue(out.success, out.summary)
-        XCTAssertEqual(out.iterations, 11)
+        XCTAssertFalse(out.success)
+        XCTAssertTrue(out.summary.contains("provider request limit"), out.summary)
+        XCTAssertEqual(out.iterations, 10)
         cp = try store.load(id: cp.id)
-        XCTAssertEqual(cp.status, .completed)
+        XCTAssertEqual(cp.status, .failed)
+    }
+
+    func testStaleResumeReloadsDurableRequestCounterBeforeAnyProviderCall() async throws {
+        let directory = NSTemporaryDirectory() + "stale-provider-resume-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let store = LoopCheckpointStore(directory: directory)
+        var stale = LoopCheckpoint(
+            goal: "go", providerId: "downgrade", model: nil, projectRoot: root,
+            messages: [ChatMessage(role: .user, content: "go")], iteration: 0,
+            status: .failed)
+        stale.providerRequestsConsumed = 0
+        var durable = stale
+        durable.iteration = 1
+        durable.providerRequestsConsumed = 1
+        try store.save(durable)
+        let provider = DowngradingProvider(.generic400)
+
+        let output = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "downgrade", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), toolMode: .native,
+            checkpoints: store, maxIterations: 1).resume(from: stale)
+
+        XCTAssertFalse(output.success)
+        XCTAssertTrue(output.summary.contains("provider request limit"), output.summary)
+        XCTAssertEqual(provider.nativeCallCount, 0,
+                       "the stale caller snapshot must not refund the durable slot")
+        XCTAssertEqual(try store.load(id: stale.id).providerRequestsConsumed, 1)
     }
 
     func testCheckpointSavedEventsEmittedWithStore() async {
@@ -1011,6 +1075,260 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(provider.textCallCount, 1, "text path took over after downgrade")
     }
 
+    func testNativeToolRejectionIsQuarantinedAcrossInteractiveTurns() async {
+        let provider = DowngradingProvider(.toolProtocol400)
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: "downgrade", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, maxIterations: 5)
+        var transcript: [ChatMessage] = []
+
+        let first = await subject.turn(transcript: &transcript, userInput: "first")
+        let second = await subject.turn(transcript: &transcript, userInput: "second")
+
+        XCTAssertTrue(first.success, first.summary)
+        XCTAssertTrue(second.success, second.summary)
+        XCTAssertEqual(provider.nativeCallCount, 1,
+                       "the identical rejected native schema must not be probed on every turn")
+        XCTAssertGreaterThanOrEqual(provider.textCallCount, 2)
+    }
+
+    func testHistorySpecificFirstCallRejectionDoesNotQuarantineSchema() async {
+        let provider = HistorySensitiveDowngradeProvider()
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: "history-sensitive", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, maxIterations: 5)
+        var transcript: [ChatMessage] = []
+
+        let first = await subject.turn(transcript: &transcript, userInput: "first native turn")
+        let second = await subject.turn(transcript: &transcript, userInput: "history-sensitive turn")
+        let third = await subject.turn(transcript: &transcript, userInput: "probe native again")
+        let counts = await provider.counts()
+
+        XCTAssertTrue(first.success, first.summary)
+        XCTAssertEqual(first.summary, "first native complete")
+        XCTAssertTrue(second.success, second.summary)
+        XCTAssertEqual(second.summary, "recovered via text protocol")
+        XCTAssertTrue(third.success, third.summary)
+        XCTAssertEqual(third.summary, "native reprobed after run-local downgrade")
+        XCTAssertEqual(counts.native, 4,
+                       "a history-specific rejection must not quarantine the schema on the next turn")
+        XCTAssertEqual(counts.text, 1)
+    }
+
+    func testAcceptedNativeRequestWithoutToolCallDoesNotQuarantineLaterError() async {
+        let provider = AcceptedThenContextRejectingProvider()
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: "accepted-context", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, maxIterations: 5)
+        var transcript: [ChatMessage] = []
+
+        let first = await subject.turn(transcript: &transcript, userInput: "first")
+        let second = await subject.turn(transcript: &transcript, userInput: "second")
+        let third = await subject.turn(transcript: &transcript, userInput: "third")
+        let counts = await provider.counts()
+
+        XCTAssertTrue(first.success, first.summary)
+        XCTAssertTrue(second.success, second.summary)
+        XCTAssertTrue(third.success, third.summary)
+        XCTAssertEqual(counts.native, 3,
+                       "a prior accepted tool-bearing request must prevent later negative quarantine")
+        XCTAssertEqual(counts.text, 1)
+    }
+
+    func testOneCallBudgetIsNotRefundedByNativeDowngrade() async {
+        let provider = DowngradingProvider(.toolProtocol400)
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let out = await HeadlessAgentLoop(
+            providers: registry, providerId: "downgrade", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, maxIterations: 1).run(goal: "go")
+
+        XCTAssertFalse(out.success)
+        XCTAssertEqual(out.iterations, 1)
+        XCTAssertEqual(provider.nativeCallCount, 1)
+        XCTAssertEqual(provider.textCallCount, 0)
+    }
+
+    func testRetryAttemptsPersistAndResumeCannotRefundThem() async throws {
+        let dir = NSTemporaryDirectory() + "provider-request-ledger-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = LoopCheckpointStore(directory: dir)
+        let provider = DowngradingProvider(.serverError500)
+        let registry = ProviderRegistry(
+            providers: [provider], keyStore: NullKeyStore(),
+            retryDelaysNanoseconds: [0, 0])
+        let first = await HeadlessAgentLoop(
+            providers: registry, providerId: "downgrade", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, checkpoints: store, maxIterations: 2).run(goal: "go")
+
+        XCTAssertFalse(first.success)
+        XCTAssertEqual(first.iterations, 2)
+        XCTAssertTrue(first.summary.contains("provider request limit"), first.summary)
+        XCTAssertEqual(provider.nativeCallCount, 2)
+        let saved = try store.load(id: first.checkpointId)
+        XCTAssertEqual(saved.providerRequestsConsumed, 2)
+
+        let resumed = await HeadlessAgentLoop(
+            providers: registry, providerId: "downgrade", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, checkpoints: store, maxIterations: 2).resume(from: saved)
+        XCTAssertFalse(resumed.success)
+        XCTAssertTrue(resumed.summary.contains("provider request limit"), resumed.summary)
+        XCTAssertEqual(provider.nativeCallCount, 2,
+                       "resume at the durable ceiling must issue no provider request")
+    }
+
+    func testNativeCrashResumeRepairsIncompleteExchangeBeforeProviderCall() async throws {
+        let dir = NSTemporaryDirectory() + "native-crash-repair-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = LoopCheckpointStore(directory: dir)
+        var checkpoint = LoopCheckpoint(
+            goal: "answer after recovery", rawRequest: "answer after recovery",
+            intent: .chat, expectedOutcome: .answer,
+            providerId: "native", model: nil, projectRoot: root,
+            messages: [
+                ChatMessage(role: .user, content: "answer after recovery"),
+                ChatMessage(role: .assistant, content: "", toolCalls: [
+                    ToolCallRef(id: "crashed-call", name: "read_file", argumentsJSON: "{}")]),
+            ], iteration: 0, status: .running)
+        checkpoint.pendingAction = PendingAction(
+            tool: "read_file", argsSummary: "path: note.txt", iteration: 1,
+            predictedEffects: ToolEffectObservation.none)
+        try store.save(checkpoint)
+        let registry = ProviderRegistry(
+            providers: [NativeScriptedProvider([.answer("recovered answer")])],
+            keyStore: NullKeyStore())
+
+        let out = await HeadlessAgentLoop(
+            providers: registry, providerId: "native", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .native, checkpoints: store, maxIterations: 2).resume(from: checkpoint)
+
+        XCTAssertTrue(out.success, out.summary)
+        let saved = try store.load(id: checkpoint.id)
+        XCTAssertNil(saved.pendingAction)
+        XCTAssertFalse(TranscriptRepair.hasOrphanToolResults(saved.messages))
+        XCTAssertEqual(saved.providerRequestsConsumed, 1)
+    }
+
+    func testToolNamedServerErrorNeverDowngrades() async {
+        let provider = DowngradingProvider(.toolNamed500)
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore(),
+                                        retryDelaysNanoseconds: [])
+        let out = await HeadlessAgentLoop(
+            providers: registry, providerId: "downgrade", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, maxIterations: 2).run(goal: "go")
+        XCTAssertFalse(out.success)
+        XCTAssertTrue(out.providerFault)
+        XCTAssertEqual(provider.textCallCount, 0)
+    }
+
+    func testGenericClientErrorNeverDowngrades() async {
+        let provider = DowngradingProvider(.generic400)
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore(),
+                                        retryDelaysNanoseconds: [])
+        let out = await HeadlessAgentLoop(
+            providers: registry, providerId: "downgrade", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, maxIterations: 2).run(goal: "go")
+        XCTAssertFalse(out.success)
+        XCTAssertEqual(provider.textCallCount, 0)
+    }
+
+    func testRateAndTransportErrorsNeverDowngrade() async {
+        for kind in [DowngradingProvider.Kind.rateLimited, .transport] {
+            let provider = DowngradingProvider(kind)
+            let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore(),
+                                            retryDelaysNanoseconds: [])
+            let out = await HeadlessAgentLoop(
+                providers: registry, providerId: "downgrade", model: nil,
+                tools: .headless(), context: ToolContext(projectRoot: root),
+                toolMode: .auto, maxIterations: 2).run(goal: "go")
+            XCTAssertFalse(out.success)
+            XCTAssertEqual(provider.textCallCount, 0)
+        }
+    }
+
+    func testForcedNativeExhaustionDoesNotUsePlainOrFallbackCompletion() async {
+        let provider = ExhaustingNativeProvider()
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let out = await HeadlessAgentLoop(
+            providers: registry, providerId: "native-exhaust", model: nil,
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .native, maxIterations: 1).run(goal: "keep inspecting")
+        let counts = await provider.counts()
+
+        XCTAssertFalse(out.success)
+        XCTAssertEqual(out.iterations, 1)
+        XCTAssertEqual(counts.native, 1)
+        XCTAssertEqual(counts.text, 0, "forced native must never enter plain completion")
+    }
+
+    func testForcedNativeCompactionKeepsExactModelAndDisablesDiscovery() async {
+        let provider = ForcedNativeCompactionProvider()
+        let discovery = ForcedNativeDiscoveryCounter()
+        let registry = ProviderRegistry(
+            providers: [provider], keyStore: NullKeyStore(), retryDelaysNanoseconds: [],
+            modelListFetch: { _, _ in
+                discovery.increment()
+                return .success(["live-model"])
+            })
+        let filler = String(repeating: "x", count: 500)
+        var messages = (0..<20).map {
+            ChatMessage(role: $0.isMultiple(of: 2) ? .user : .assistant,
+                        content: "old step \($0) \(filler)")
+        }
+        messages.append(ChatMessage(role: .user, content: "answer on the exact model"))
+        let checkpoint = LoopCheckpoint(
+            goal: "answer on the exact model", rawRequest: "answer on the exact model",
+            intent: .chat, expectedOutcome: .answer,
+            providerId: provider.id, model: "dead-model", projectRoot: root,
+            messages: messages, status: .paused)
+
+        let output = await HeadlessAgentLoop(
+            providers: registry, providerId: provider.id, model: "dead-model",
+            tools: .headless(), context: ToolContext(projectRoot: root), toolMode: .native,
+            maxIterations: 3,
+            contextWindow: ContextWindowManager(maxCharacters: 3_000, keepFirst: 1, keepLast: 3),
+            compactor: ConversationCompactor(triggerCharacters: 2_000,
+                                             keepFirst: 2, keepRecent: 3, minMiddle: 2)
+        ).resume(from: checkpoint)
+        let attempts = provider.attempts
+
+        XCTAssertTrue(output.success, output.summary)
+        XCTAssertEqual(attempts.textModels, ["dead-model"],
+                       "compaction may fail, but must not heal to another model")
+        XCTAssertEqual(attempts.nativeModels, ["dead-model"])
+        XCTAssertEqual(discovery.value, 0,
+                       "forced-native route policy disables administrative model discovery")
+        XCTAssertEqual(output.iterations, 2, "failed exact compaction + native answer")
+    }
+
+    func testNativeCapabilityProbeDoesNotHealToAnUntrackedModel() async {
+        let provider = NativeModelHealingProbeProvider()
+        let registry = ProviderRegistry(
+            providers: [provider], keyStore: NullKeyStore(),
+            retryDelaysNanoseconds: [],
+            modelListFetch: { _, _ in .success(["live-model"]) })
+        let out = await HeadlessAgentLoop(
+            providers: registry, providerId: "native-model-probe", model: "dead-model",
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .auto, maxIterations: 1).run(goal: "go")
+        let models = await provider.attemptedModels()
+
+        XCTAssertFalse(out.success)
+        XCTAssertEqual(models, ["dead-model"],
+                       "native capability observations must never be attributed across model healing")
+    }
+
     // Forced `--tools native` must NOT silently downgrade — the user asked for native explicitly, so a
     // rejection is an honest failure, not a hidden protocol switch.
     func testForcedNativeModeDoesNotDowngradeOnRejection() async {
@@ -1197,13 +1515,13 @@ final class HeadlessAgentLoopTests: XCTestCase {
         let done = #"{"done":true,"summary":"tries to launder the failed mutation"}"#
         let out = await HeadlessAgentLoop(
             providers: ProviderRegistry(providers: [ScriptedProvider([
-                #"{"tool":"run_command","parameters":{"command":"python3 -m unittest discover -s . -p test_ok.py"}}"#,
+                #"{"tool":"run_command","parameters":{"executable":"python3","args":["-m","unittest","discover","-s",".","-p","test_ok.py"]}}"#,
                 done, done, done, done,
             ])], keyStore: NullKeyStore()),
             providerId: "scripted", model: nil, tools: .headless(),
             context: ToolContext(projectRoot: root,
                                  shell: ShellPolicy(enabled: true, autoApprove: true)),
-            checkpoints: store, maxIterations: 5
+            checkpoints: store, maxIterations: 8
         ).resume(from: cp)
 
         XCTAssertFalse(out.success, "a fresh verifier cannot repair a later failed mutation")
@@ -1636,6 +1954,54 @@ final class HeadlessAgentLoopTests: XCTestCase {
     }
 }
 
+private final class ForcedNativeDiscoveryCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
+private final class ForcedNativeCompactionProvider: ChatProvider, @unchecked Sendable {
+    let id = "forced-native-compaction"
+    let name = "Forced Native Compaction"
+    let requiresAPIKey = false
+    let keyAccount = "forced-native-compaction"
+    let defaultModel = "dead-model"
+    let availableModels = [AIModel(id: "dead-model"), AIModel(id: "live-model")]
+    let supportsNativeTools = true
+    var modelsListEndpoint: String? { "https://provider.invalid/models" }
+    private let lock = NSLock()
+    private var textModels: [String] = []
+    private var nativeModels: [String] = []
+
+    var attempts: (textModels: [String], nativeModels: [String]) {
+        lock.withLock { (textModels, nativeModels) }
+    }
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        lock.withLock { textModels.append(model) }
+        return AsyncThrowingStream { continuation in
+            if model == "dead-model" {
+                continuation.finish(throwing: AIProviderError.http(
+                    status: 404, body: "model not found; function calling documentation is available"))
+            } else {
+                continuation.yield(.delta("compacted"))
+                continuation.finish()
+            }
+        }
+    }
+
+    func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
+                     apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        lock.withLock { nativeModels.append(model) }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta("exact native answer"))
+            continuation.finish()
+        }
+    }
+}
+
 // MARK: - Test doubles
 
 private struct NullKeyStore: KeyStore {
@@ -1858,7 +2224,7 @@ private final class DefaultFlashPromptCaptureProvider: ChatProvider, @unchecked 
 /// text path works — exercises item #2's auto-downgrade end-to-end. `kind` selects the native error so a
 /// test can prove downgrade-worthy errors recover and non-downgrade-worthy ones (auth) still fail.
 private final class DowngradingProvider: ChatProvider, @unchecked Sendable {
-    enum Kind { case toolProtocol400, authError, serverError500 }
+    enum Kind { case toolProtocol400, authError, serverError500, toolNamed500, generic400, rateLimited, transport }
     let id = "downgrade", name = "Downgrade", iconName = "cpu"
     let requiresAPIKey = false, keyAccount = "downgrade", defaultModel = "dg1"
     let availableModels = [AIModel(id: "dg1")]
@@ -1881,6 +2247,178 @@ private final class DowngradingProvider: ChatProvider, @unchecked Sendable {
         case .authError:       throw AIProviderError.invalidAPIKey
         // A GENERIC server 500 (body names no tools) — a transient outage, NOT a schema rejection.
         case .serverError500:  throw AIProviderError.http(status: 500, body: #"{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}"#)
+        case .toolNamed500:    throw AIProviderError.http(status: 500, body: "functionDeclarations backend unavailable")
+        case .generic400:      throw AIProviderError.http(status: 400, body: "Invalid request")
+        case .rateLimited:     throw AIProviderError.rateLimited
+        case .transport:       throw AIProviderError.transport("connection reset")
         }
+    }
+}
+
+/// First turn proves the schema works through a real native tool round-trip. The next turn rejects the
+/// accumulated native history, then text recovers. A third turn must probe native again: caching the second
+/// turn's history-specific 400 would incorrectly route it straight back to text.
+private final class HistorySensitiveDowngradeProvider: ChatProvider, @unchecked Sendable {
+    let id = "history-sensitive", name = "History Sensitive", iconName = "cpu"
+    let requiresAPIKey = false, keyAccount = "history-sensitive", defaultModel = "history-1"
+    let availableModels = [AIModel(id: "history-1")]
+    var supportsNativeTools: Bool { true }
+
+    private actor State {
+        var native = 0
+        var text = 0
+        func nextNative() -> Int { native += 1; return native }
+        func nextText() { text += 1 }
+        func counts() -> (native: Int, text: Int) { (native, text) }
+    }
+    private let state = State()
+
+    func counts() async -> (native: Int, text: Int) { await state.counts() }
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        await state.nextText()
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta(#"{"done":true,"summary":"recovered via text protocol"}"#))
+            continuation.finish()
+        }
+    }
+
+    func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
+                     apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        let call = await state.nextNative()
+        switch call {
+        case 1:
+            return AsyncThrowingStream { continuation in
+                continuation.yield(.toolCall(id: "history-call", name: "list_files", argumentsJSON: "{}"))
+                continuation.finish()
+            }
+        case 2:
+            return AsyncThrowingStream { continuation in
+                continuation.yield(.delta("first native complete"))
+                continuation.finish()
+            }
+        case 3:
+            throw AIProviderError.http(
+                status: 400, body: "tool_call history is unsupported in this request")
+        default:
+            return AsyncThrowingStream { continuation in
+                continuation.yield(.delta("native reprobed after run-local downgrade"))
+                continuation.finish()
+            }
+        }
+    }
+}
+
+/// A successful tool-bearing request with no tool call still proves schema support. The following
+/// contextual 400 is run-local; the third turn must probe native again rather than hit a negative cache.
+private final class AcceptedThenContextRejectingProvider: ChatProvider, @unchecked Sendable {
+    let id = "accepted-context", name = "Accepted Context", iconName = "cpu"
+    let requiresAPIKey = false, keyAccount = "accepted-context", defaultModel = "accepted-1"
+    let availableModels = [AIModel(id: "accepted-1")]
+    var supportsNativeTools: Bool { true }
+
+    private actor State {
+        var native = 0
+        var text = 0
+        func nextNative() -> Int { native += 1; return native }
+        func nextText() { text += 1 }
+        func counts() -> (native: Int, text: Int) { (native, text) }
+    }
+    private let state = State()
+
+    func counts() async -> (native: Int, text: Int) { await state.counts() }
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        await state.nextText()
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta(#"{"done":true,"summary":"recovered via text"}"#))
+            continuation.finish()
+        }
+    }
+    func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
+                     apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        switch await state.nextNative() {
+        case 1:
+            return AsyncThrowingStream { continuation in
+                continuation.yield(.delta("accepted without calling a tool"))
+                continuation.finish()
+            }
+        case 2:
+            throw AIProviderError.http(
+                status: 400, body: "function calling is invalid for this accumulated context")
+        default:
+            return AsyncThrowingStream { continuation in
+                continuation.yield(.delta("native reprobed"))
+                continuation.finish()
+            }
+        }
+    }
+}
+
+private final class ExhaustingNativeProvider: ChatProvider, @unchecked Sendable {
+    let id = "native-exhaust", name = "Native Exhaust", iconName = "cpu"
+    let requiresAPIKey = false, keyAccount = "native-exhaust", defaultModel = "native-exhaust-1"
+    let availableModels = [AIModel(id: "native-exhaust-1")]
+    var supportsNativeTools: Bool { true }
+
+    private actor State {
+        var native = 0
+        var text = 0
+        func nextNative() -> Int { native += 1; return native }
+        func nextText() { text += 1 }
+        func counts() -> (native: Int, text: Int) { (native, text) }
+    }
+    private let state = State()
+
+    func counts() async -> (native: Int, text: Int) { await state.counts() }
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        await state.nextText()
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta("plain completion must not run"))
+            continuation.finish()
+        }
+    }
+    func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
+                     apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        let call = await state.nextNative()
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.toolCall(
+                id: "exhaust-\(call)", name: "list_files", argumentsJSON: "{}"))
+            continuation.finish()
+        }
+    }
+}
+
+private final class NativeModelHealingProbeProvider: ChatProvider, @unchecked Sendable {
+    let id = "native-model-probe", name = "Native Model Probe", iconName = "cpu"
+    let requiresAPIKey = false, keyAccount = "native-model-probe", defaultModel = "dead-model"
+    let availableModels = [AIModel(id: "dead-model"), AIModel(id: "live-model")]
+    var supportsNativeTools: Bool { true }
+    var modelsListEndpoint: String? { "https://models.invalid/v1/models" }
+
+    private actor State {
+        var models: [String] = []
+        func record(_ model: String) { models.append(model) }
+        func snapshot() -> [String] { models }
+    }
+    private let state = State()
+    func attemptedModels() async -> [String] { await state.snapshot() }
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.delta(#"{"done":true,"summary":"unexpected text"}"#))
+            continuation.finish()
+        }
+    }
+    func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
+                     apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        await state.record(model)
+        if model == "dead-model" {
+            throw AIProviderError.http(status: 404, body: "model not found")
+        }
+        throw AIProviderError.http(status: 400, body: "function calling is unsupported")
     }
 }

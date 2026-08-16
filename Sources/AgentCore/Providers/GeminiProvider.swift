@@ -53,10 +53,17 @@ public struct GeminiProvider: ChatProvider {
         if !settings.stopSequences.isEmpty { config["stopSequences"] = settings.stopSequences }
         // LIVE-VERIFIED: gemini-2.5-pro 400s on thinkingBudget:0 ("only works in thinking mode"); and
         // gemini-3 uses thinkingLevel, not a budget. So only disable thinking where the model allows it.
-        if settings.disableThinking, Self.canDisableThinking(model: model) {
-            config["thinkingConfig"] = ["thinkingBudget": 0]
-        } else if let budget = settings.thinkingBudget, budget > 0, Self.supportsThinkingBudget(model: model) {
+        switch settings.providerReasoningControl {
+        case .geminiThinkingBudget(let budget):
             config["thinkingConfig"] = ["thinkingBudget": budget]
+        case .geminiThinkingLevel(let level):
+            config["thinkingConfig"] = ["thinkingLevel": level]
+        default: if settings.reasoningEffort == nil && settings.disableThinking && Self.canDisableThinking(model: model) {
+            config["thinkingConfig"] = ["thinkingBudget": 0]
+        } else if settings.reasoningEffort == nil, let budget = settings.thinkingBudget, budget > 0,
+                  Self.supportsThinkingBudget(model: model) {
+            config["thinkingConfig"] = ["thinkingBudget": budget]
+        }
         }
     }
 
@@ -73,6 +80,11 @@ public struct GeminiProvider: ChatProvider {
     /// Consecutive same-role turns are coalesced (Gemini rejects two adjacent
     /// turns with the same role).
     public func makeBody(messages: [ChatMessage], model: String, settings: ModelSettings) -> [String: Any] {
+        let settings = settings.reasoningEffort.map {
+            ProviderEffortMapper.resolve(providerID: id, modelID: model, requested: $0,
+                                         support: capabilities(forModel: model).reasoningEffortSupport,
+                                         base: settings).settings
+        } ?? settings
         var contents: [[String: Any]] = []
         var systemTexts: [String] = []
         if !settings.systemPrompt.isEmpty { systemTexts.append(settings.systemPrompt) }
@@ -88,6 +100,10 @@ public struct GeminiProvider: ChatProvider {
                 var parts: [[String: Any]] = []
                 if !message.content.isEmpty { parts.append(["text": message.content]) }
                 parts.append(contentsOf: Self.mediaParts(for: message))   // image/video/audio/pdf
+                if role == "model", let signature = Self.unassociatedThoughtSignature(in: message) {
+                    if parts.isEmpty { parts.append(["text": "", "thoughtSignature": signature]) }
+                    else { parts[parts.count - 1]["thoughtSignature"] = signature }
+                }
                 if parts.isEmpty { parts.append(["text": ""]) }
 
                 // Coalesce consecutive same-role turns: Gemini rejects two
@@ -135,8 +151,16 @@ public struct GeminiProvider: ChatProvider {
                     // Skip Gemini "thinking" summary parts (`thought: true`): they carry the model's
                     // private reasoning (which it often headers "[CURRENT_TURN_THOUGHT]"), NOT the answer.
                     // Concatenating them leaked chain-of-thought straight into the visible reply.
-                    if (part["thought"] as? Bool) == true { continue }
-                    if let text = part["text"] as? String, !text.isEmpty { out.append(.delta(text)) }
+                    if (part["thought"] as? Bool) == true {
+                        if let text = part["text"] as? String, !text.isEmpty { out.append(.reasoning(text)) }
+                    } else if let text = part["text"] as? String, !text.isEmpty {
+                        out.append(.delta(text))
+                    }
+                    if let signature = part["thoughtSignature"] as? String, !signature.isEmpty {
+                        out.append(.reasoningHandle(OpaqueProviderReasoningHandle(
+                            providerID: "gemini", modelID: "", kind: "gemini.thoughtSignature",
+                            reference: signature)))
+                    }
                 }
             }
             if let reason = c0["finishReason"] as? String { out.append(.finish(reason: reason)) }
@@ -155,6 +179,20 @@ public struct GeminiProvider: ChatProvider {
     /// schema directly instead of the text-protocol fallback.
     public var supportsNativeTools: Bool { true }
 
+    private static func unassociatedThoughtSignature(in message: ChatMessage) -> String? {
+        message.providerReasoningHandles.first {
+            $0.providerID == "gemini" && $0.kind == "gemini.thoughtSignature"
+                && $0.associationID == nil
+        }?.reference
+    }
+
+    private static func thoughtSignature(for callID: String, in message: ChatMessage) -> String? {
+        message.providerReasoningHandles.first {
+            $0.providerID == "gemini" && $0.kind == "gemini.thoughtSignature"
+                && $0.associationID == callID
+        }?.reference
+    }
+
     public func capabilities(forModel model: String) -> ModelCapabilities {
         let modelId = resolvedModel(model)
         let meta = availableModels.first { $0.id == modelId || $0.name == modelId }
@@ -163,6 +201,8 @@ public struct GeminiProvider: ChatProvider {
         return ModelCapabilities(
             nativeTools: true,
             vision: meta?.isVision ?? true,
+            reasoning: true,
+            reasoningEffortSupport: ProviderEffortMapper.support(providerID: id, modelID: modelId),
             contextWindowTokens: isGemini3 ? 1_000_000 : meta?.contextWindowTokens,
             video: true,
             audio: true,
@@ -278,6 +318,11 @@ public struct GeminiProvider: ChatProvider {
     /// Order is preserved (a `functionResponse` turn must follow its `functionCall` turn). Kept
     /// separate from `makeBody` so the text-path body + its tests stay untouched.
     public func makeBodyTools(messages: [ChatMessage], model: String, settings: ModelSettings, tools: [ToolSpec]) -> [String: Any] {
+        let settings = settings.reasoningEffort.map {
+            ProviderEffortMapper.resolve(providerID: id, modelID: model, requested: $0,
+                                         support: capabilities(forModel: model).reasoningEffortSupport,
+                                         base: settings).settings
+        } ?? settings
         var contents: [[String: Any]] = []
         var systemTexts: [String] = []
         if !settings.systemPrompt.isEmpty { systemTexts.append(settings.systemPrompt) }
@@ -313,12 +358,27 @@ public struct GeminiProvider: ChatProvider {
 
             case .assistant:
                 var parts: [[String: Any]] = []
-                if !message.content.isEmpty { parts.append(["text": message.content]) }
+                if !message.content.isEmpty {
+                    var textPart: [String: Any] = ["text": message.content]
+                    if let signature = Self.unassociatedThoughtSignature(in: message) {
+                        textPart["thoughtSignature"] = signature
+                    }
+                    parts.append(textPart)
+                }
                 if let calls = message.toolCalls, !calls.isEmpty {
                     lastAssistantCalls = calls
                     for call in calls {
-                        parts.append(["functionCall": ["name": call.name, "args": Self.parseArgs(call.argumentsJSON)]])
+                        var part: [String: Any] = [
+                            "functionCall": ["name": call.name, "args": Self.parseArgs(call.argumentsJSON)]
+                        ]
+                        if let signature = Self.thoughtSignature(for: call.id, in: message) {
+                            part["thoughtSignature"] = signature
+                        }
+                        parts.append(part)
                     }
+                }
+                if parts.isEmpty, let signature = Self.unassociatedThoughtSignature(in: message) {
+                    parts.append(["text": "", "thoughtSignature": signature])
                 }
                 if parts.isEmpty { parts.append(["text": ""]) }
                 append(role: "model", parts: parts)
@@ -344,9 +404,7 @@ public struct GeminiProvider: ChatProvider {
         Self.augmentGeneration(&generationConfig, settings: settings, model: model)
         // Structured output: constrain to JSON when a sub-call asks for it (opt-in). A jsonSchema
         // additionally pins the exact shape (responseSchema) and implies JSON.
-        if let schemaString = settings.jsonSchema,
-           let schemaData = schemaString.data(using: .utf8),
-           let schema = try? JSONSerialization.jsonObject(with: schemaData) as? [String: Any] {
+        if let schema = settings.decodedJSONSchema() {
             generationConfig["responseMimeType"] = "application/json"
             generationConfig["responseSchema"] = schema
         } else if settings.jsonOutput {
@@ -396,7 +454,11 @@ public struct GeminiProvider: ChatProvider {
         if let candidates = json["candidates"] as? [[String: Any]], let c0 = candidates.first {
             if let content = c0["content"] as? [String: Any], let parts = content["parts"] as? [[String: Any]] {
                 for part in parts {
-                    if let text = part["text"] as? String, !text.isEmpty { out.append(.delta(text)) }
+                    if (part["thought"] as? Bool) == true {
+                        if let text = part["text"] as? String, !text.isEmpty { out.append(.reasoning(text)) }
+                    } else if let text = part["text"] as? String, !text.isEmpty {
+                        out.append(.delta(text))
+                    }
                     // Built-in CODE EXECUTION: surface the code Gemini ran + its result inline so the
                     // agent (and user) can see the computation, not just the conclusion.
                     if let ec = part["executableCode"] as? [String: Any], let code = ec["code"] as? String, !code.isEmpty {
@@ -414,7 +476,17 @@ public struct GeminiProvider: ChatProvider {
                         // would break toolCallId→name routing for the second result). The 8-hex suffix
                         // is fixed-length so `makeBodyTools` can recover the name by stripping it.
                         let uid = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
-                        out.append(.toolCall(id: "call_\(name)_\(uid)", name: name, argumentsJSON: Self.serializeArgs(args)))
+                        let callID = "call_\(name)_\(uid)"
+                        out.append(.toolCall(id: callID, name: name, argumentsJSON: Self.serializeArgs(args)))
+                        if let signature = part["thoughtSignature"] as? String, !signature.isEmpty {
+                            out.append(.reasoningHandle(OpaqueProviderReasoningHandle(
+                                providerID: "gemini", modelID: "", kind: "gemini.thoughtSignature",
+                                reference: signature, associationID: callID)))
+                        }
+                    } else if let signature = part["thoughtSignature"] as? String, !signature.isEmpty {
+                        out.append(.reasoningHandle(OpaqueProviderReasoningHandle(
+                            providerID: "gemini", modelID: "", kind: "gemini.thoughtSignature",
+                            reference: signature)))
                     }
                 }
             }

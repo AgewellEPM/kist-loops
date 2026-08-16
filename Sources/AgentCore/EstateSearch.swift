@@ -44,7 +44,8 @@ public struct EstateSearch: Sendable {
     /// Directory names never worth descending — dependency/build/cache/trash trees that add only noise + cost.
     static let ignoreDirs: Set<String> = [
         ".git", "node_modules", ".build", "DerivedData", ".Trash", "Library", "Pods", ".venv", "venv",
-        ".cache", "dist", ".next", "target", "__pycache__", ".swiftpm", "vendor", "Caches", ".npm", ".cargo"
+        ".cache", "dist", ".next", "target", "__pycache__", ".swiftpm", "vendor", "Caches", ".npm", ".cargo",
+        "FileProvider", "wharf", "tombstone"
     ]
 
     /// Extensions we'll open and content-scan. Everything else is matched by PATH only (cheap, no read),
@@ -94,7 +95,9 @@ public struct EstateSearch: Sendable {
     /// The ranked file hits for the given terms. Public for tests / callers that want the paths directly.
     public func search(terms: [String]) -> [Hit] {
         guard !Task.isCancelled else { return [] }
-        let lowered = terms.map { $0.lowercased() }
+        let lowered = terms
+            .map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 4 }
         guard !lowered.isEmpty else { return [] }
         let files = rankedFiles(terms: lowered)
         return files.prefix(maxFiles).compactMap {
@@ -145,7 +148,7 @@ public struct EstateSearch: Sendable {
                 scanned += 1
                 let ext = (name as NSString).pathExtension.lowercased()
                 let relLower = String(full.dropFirst(rootLen)).lowercased()
-                if terms.contains(where: { relLower.contains($0) }) {
+                if terms.contains(where: { Self.path(relLower, containsToken: $0) }) {
                     if !Self.binaryExtensions.contains(ext), pathHits.count < maxFiles * 4 { pathHits.append(full) }
                     // Early exit: enough strong PATH hits (the project's own tree) to rank a good top set —
                     // no need to keep walking a huge estate once the target is clearly found.
@@ -175,6 +178,12 @@ public struct EstateSearch: Sendable {
         var seen = Set<String>(); var out: [String] = []
         for p in rankedPath + rankedContent where seen.insert(p).inserted { out.append(p) }
         return out
+    }
+
+    private static func path(_ lowerPath: String, containsToken term: String) -> Bool {
+        lowerPath
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .contains { $0 == term }
     }
 
     /// A small, bounded snippet for one file: the first matching line ± 1 line of context, falling back to

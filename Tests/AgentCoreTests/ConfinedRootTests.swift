@@ -30,6 +30,17 @@ final class ConfinedRootTests: XCTestCase {
 
     private func cr() throws -> ConfinedRoot { try ConfinedRoot(root: root) }
 
+    private func lease(for projectRoot: String) throws -> WorkspaceExecutionLease {
+        let estate = URL(fileURLWithPath: external, isDirectory: true)
+            .appendingPathComponent("lease-estate-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: estate, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+        return try WorkspaceExecutionCoordinator(
+            lockDirectory: estate.appendingPathComponent("workspace-locks", isDirectory: true))
+            .acquire(projectRoot: projectRoot, missionInstanceID: UUID().uuidString)
+    }
+
     private func assertPathEscape(_ path: String, _ body: () throws -> Void) {
         XCTAssertThrowsError(try body()) { error in
             guard case .pathEscape = (error as? ToolError) else {
@@ -46,6 +57,148 @@ final class ConfinedRootTests: XCTestCase {
         XCTAssertEqual(try c.readString("a/b/c.txt"), "hello-kist")
         XCTAssertEqual(try c.fileType("a/b/c.txt").exists, true)
         XCTAssertEqual(try c.fileType("a/b").isDir, true)
+    }
+
+    func testConditionalReplacePublishesOnlyMatchingBaseline() throws {
+        let c = try cr()
+        try c.writeString("program.cbl", "old", createParents: false)
+        let baseline = try c.fileSHA256("program.cbl")
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        let published = try c.conditionalReplace(
+            "program.cbl", with: Data("new".utf8),
+            expectedSHA256: .sha256(baseline), lease: workspaceLease)
+
+        XCTAssertEqual(try c.readString("program.cbl"), "new")
+        XCTAssertEqual(published, try c.fileSHA256("program.cbl"))
+    }
+
+    func testConditionalReplaceCanAtomicallyPublishExpectedMissingTarget() throws {
+        let c = try cr()
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        let published = try c.conditionalReplace(
+            "new-program.cbl", with: Data("created".utf8),
+            expectedSHA256: .missing, lease: workspaceLease)
+
+        XCTAssertEqual(try c.readString("new-program.cbl"), "created")
+        XCTAssertEqual(published, try c.fileSHA256("new-program.cbl"))
+    }
+
+    func testConditionalReplaceRejectsStaleBaselineWithoutMutation() throws {
+        let c = try cr()
+        try c.writeString("program.cbl", "baseline", createParents: false)
+        let stale = try c.fileSHA256("program.cbl")
+        try c.writeString("program.cbl", "concurrent-change", createParents: false)
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        XCTAssertThrowsError(try c.conditionalReplace(
+            "program.cbl", with: Data("candidate".utf8),
+            expectedSHA256: .sha256(stale), lease: workspaceLease))
+        XCTAssertEqual(try c.readString("program.cbl"), "concurrent-change")
+    }
+
+    func testConditionalReplaceRejectsLeaseForDifferentCanonicalRoot() throws {
+        let c = try cr()
+        try c.writeString("program.cbl", "baseline", createParents: false)
+        let baseline = try c.fileSHA256("program.cbl")
+        let wrongLease = try lease(for: external)
+        defer { wrongLease.release() }
+
+        XCTAssertThrowsError(try c.conditionalReplace(
+            "program.cbl", with: Data("candidate".utf8),
+            expectedSHA256: .sha256(baseline), lease: wrongLease))
+        XCTAssertEqual(try c.readString("program.cbl"), "baseline")
+    }
+
+    func testConditionalReplaceRejectsSymlinkLeafWithoutTouchingTarget() throws {
+        let target = external + "/outside.cbl"
+        try "outside".write(toFile: target, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(
+            atPath: root + "/program.cbl", withDestinationPath: target)
+        let c = try cr()
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        assertPathEscape("program.cbl") {
+            _ = try c.conditionalReplace(
+                "program.cbl", with: Data("candidate".utf8),
+                expectedSHA256: .missing, lease: workspaceLease)
+        }
+        XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "outside")
+    }
+
+    func testConditionalRemoveDeletesOnlyMatchingRegularFile() throws {
+        let c = try cr()
+        try c.writeString("program.cbl", "verified", createParents: false)
+        let expected = try c.fileSHA256("program.cbl")
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        let removed = try c.conditionalRemove(
+            "program.cbl", expectedSHA256: expected, lease: workspaceLease)
+
+        XCTAssertEqual(removed, expected)
+        XCTAssertEqual(try c.fileType("program.cbl").exists, false)
+    }
+
+    func testConditionalRemoveRejectsStaleDigestWithoutMutation() throws {
+        let c = try cr()
+        try c.writeString("program.cbl", "baseline", createParents: false)
+        let stale = try c.fileSHA256("program.cbl")
+        try c.writeString("program.cbl", "concurrent-change", createParents: false)
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        XCTAssertThrowsError(try c.conditionalRemove(
+            "program.cbl", expectedSHA256: stale, lease: workspaceLease))
+        XCTAssertEqual(try c.readString("program.cbl"), "concurrent-change")
+    }
+
+    func testConditionalRemoveRejectsLeaseForDifferentCanonicalRoot() throws {
+        let c = try cr()
+        try c.writeString("program.cbl", "verified", createParents: false)
+        let expected = try c.fileSHA256("program.cbl")
+        let wrongLease = try lease(for: external)
+        defer { wrongLease.release() }
+
+        XCTAssertThrowsError(try c.conditionalRemove(
+            "program.cbl", expectedSHA256: expected, lease: wrongLease))
+        XCTAssertEqual(try c.readString("program.cbl"), "verified")
+    }
+
+    func testConditionalRemoveRejectsSymlinkLeafWithoutTouchingTarget() throws {
+        let target = external + "/outside-remove.cbl"
+        try "outside".write(toFile: target, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(
+            atPath: root + "/program.cbl", withDestinationPath: target)
+        let c = try cr()
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        assertPathEscape("program.cbl") {
+            _ = try c.conditionalRemove(
+                "program.cbl", expectedSHA256: Data(repeating: 0, count: 32),
+                lease: workspaceLease)
+        }
+        XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "outside")
+    }
+
+    func testConditionalRemoveRejectsMissingLeaf() throws {
+        let c = try cr()
+        let workspaceLease = try lease(for: root)
+        defer { workspaceLease.release() }
+
+        XCTAssertThrowsError(try c.conditionalRemove(
+            "missing.cbl", expectedSHA256: Data(repeating: 0, count: 32),
+            lease: workspaceLease)) { error in
+            guard case .notFound = (error as? ToolError) else {
+                return XCTFail("expected .notFound for missing.cbl, got \(error)")
+            }
+        }
     }
 
     // Sprint 2 (Codex): the bounded read caps on the SAME fd (fstat + length-bounded read), so a file at

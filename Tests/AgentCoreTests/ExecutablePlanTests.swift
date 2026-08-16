@@ -67,6 +67,55 @@ final class ExecutablePlanTests: XCTestCase {
         XCTAssertTrue(plan.validate().contains(.emptyTool(stepId: "E1")))
     }
 
+    func testRunCommandRejectsRawShellBeforeExecution() {
+        let plan = ExecutablePlan(goal: "g", steps: [
+            PlanStep(id: "E1", intent: "test", tool: "run_command",
+                     argumentsJSON: #"{"command":"swift test"}"#),
+        ])
+        XCTAssertEqual(plan.validate(), [
+            .invalidArguments(stepId: "E1", reason: "raw 'command' is forbidden in plans; use 'executable' and an 'args' array (never working_directory)"),
+        ])
+    }
+
+    func testRunCommandAcceptsStructuredPlanArguments() {
+        let plan = ExecutablePlan(goal: "g", steps: [
+            PlanStep(id: "E1", intent: "test", tool: "run_command",
+                     argumentsJSON: #"{"executable":"swift","args":["test"],"cwd":".","stdin":"hostile; $(ignored)","allowed_exit_codes":[0,1]}"#),
+        ])
+        XCTAssertTrue(plan.validate().isEmpty)
+    }
+
+    func testHostOwnedFinalReviewRejectsUnprovenSelfReviewTools() {
+        let plans = [
+            PlanStep(id: "G", intent: "independent final review", tool: "generate",
+                     argumentsJSON: #"{"prompt":"act as independent reviewer"}"#),
+            PlanStep(id: "A", intent: "authoritative review", tool: "grounded_answer",
+                     argumentsJSON: #"{"question":"final review"}"#),
+            PlanStep(id: "S", intent: "call Anthropic for distinct reviewer identity", tool: "run_command",
+                     argumentsJSON: #"{"executable":"python3","args":["review.py"]}"#),
+        ]
+        for step in plans {
+            let errors = ExecutablePlan(goal: "g", steps: [step])
+                .validate(hostOwnedFinalReview: true)
+            XCTAssertTrue(errors.contains {
+                if case .invalidArguments(let id, let reason) = $0 {
+                    return id == step.id && reason.contains("outer BuilderRun host")
+                }
+                return false
+            }, "host-owned review step must fail before execution: \(step)")
+        }
+    }
+
+    func testHostOwnedFinalReviewAllowsFunctionalGenerationAndCommands() {
+        let plan = ExecutablePlan(goal: "g", steps: [
+            PlanStep(id: "G", intent: "generate parser source", tool: "generate",
+                     argumentsJSON: #"{"prompt":"write parser code"}"#),
+            PlanStep(id: "T", intent: "run functional tests", tool: "run_command",
+                     argumentsJSON: #"{"executable":"swift","args":["test"]}"#),
+        ])
+        XCTAssertTrue(plan.validate(hostOwnedFinalReview: true).isEmpty)
+    }
+
     func testUnknownDependencyDetected() {
         let plan = ExecutablePlan(goal: "g", steps: [
             PlanStep(id: "E1", intent: "x", tool: "list_files", dependsOn: ["GHOST"]),

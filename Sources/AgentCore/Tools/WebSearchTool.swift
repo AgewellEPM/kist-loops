@@ -39,6 +39,8 @@ public struct WebSearchTool: AgentTool {
     ]
 
     public static let maxBytes = 512_000
+    static let maxQueryBytes = 4_096
+    static let maxSiteBytes = 253
     private let fetcher: Fetcher
     private let backends: [WebSearchBackend]?
 
@@ -50,8 +52,25 @@ public struct WebSearchTool: AgentTool {
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let rawQuery = try requireString("query", from: arguments).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawQuery.isEmpty else { return .failure("query is required") }
+        guard rawQuery.utf8.count <= Self.maxQueryBytes else {
+            return .failure("query exceeds the web-search byte limit")
+        }
         let limit = Self.clampedLimit(arguments["limit"])
-        let site = (arguments["site"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var site: String?
+        if let rawSite = arguments["site"] {
+            guard let string = rawSite as? String else {
+                return .failure("site must be a bounded exact hostname")
+            }
+            site = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let requestedSite = site, !requestedSite.isEmpty {
+            guard requestedSite.utf8.count <= Self.maxSiteBytes,
+                  let normalized = WebFetchTool.normalizedHostPattern(requestedSite),
+                  !normalized.hasPrefix("*.") else {
+                return .failure("site must be a bounded exact hostname")
+            }
+            site = normalized
+        }
         let query = (site?.isEmpty == false) ? "site:\(site!) \(rawQuery)" : rawQuery
         var diagnostics: [String] = []
         for backend in backends ?? Self.defaultBackends() {
@@ -96,6 +115,7 @@ public struct WebSearchTool: AgentTool {
     }
 
     static func searchURL(query: String, backend: WebSearchBackend = .duckDuckGoHTML, limit: Int = 5) -> URL? {
+        guard query.utf8.count <= maxQueryBytes + maxSiteBytes + 6 else { return nil }
         let base: String
         switch backend {
         case .brave:
@@ -110,14 +130,17 @@ public struct WebSearchTool: AgentTool {
         if backend == .brave {
             components?.queryItems?.append(URLQueryItem(name: "count", value: String(limit)))
         }
-        return components?.url
+        guard let url = components?.url,
+              url.absoluteString.utf8.count <= PublicWebTransport.maxURLBytes else { return nil }
+        return url
     }
 
     static func clampedLimit(_ raw: Any?) -> Int {
         let value: Int
         switch raw {
         case let n as Int: value = n
-        case let n as Double: value = Int(n)
+        case let n as Double where n.isFinite && n >= Double(Int.min) && n <= Double(Int.max):
+            value = Int(n)
         case let s as String: value = Int(s) ?? 5
         default: value = 5
         }
@@ -201,6 +224,7 @@ public struct WebSearchTool: AgentTool {
     }
 
     static func normalizeResultURL(_ raw: String) -> String? {
+        guard raw.utf8.count <= PublicWebTransport.maxURLBytes else { return nil }
         var candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if candidate.hasPrefix("//") { candidate = "https:" + candidate }
         if candidate.hasPrefix("/") { candidate = "https://duckduckgo.com" + candidate }
@@ -214,7 +238,9 @@ public struct WebSearchTool: AgentTool {
         guard let url = URL(string: candidate),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
-              url.host != nil else {
+              url.host != nil, url.user == nil, url.password == nil,
+              !candidate.contains("\\"),
+              candidate.utf8.allSatisfy({ $0 >= 0x20 && $0 != 0x7f }) else {
             return nil
         }
         return url.absoluteString
@@ -232,22 +258,21 @@ public struct WebSearchTool: AgentTool {
     }
 
     private static func defaultFetcher(url: URL) async throws -> String {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 15
-        config.httpShouldSetCookies = false
-        let session = URLSession(configuration: config)
-        defer { session.finishTasksAndInvalidate() }
-        var request = URLRequest(url: url)
-        request.setValue("Mozilla/5.0 MythosKist/1.0", forHTTPHeaderField: "User-Agent")
+        var headers: [String] = []
         if url.host?.lowercased() == "api.search.brave.com", let key = braveAPIKey() {
-            request.setValue(key, forHTTPHeaderField: "X-Subscription-Token")
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            headers.append("X-Subscription-Token: \(key)")
+            headers.append("Accept: application/json")
         }
-        let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw AIProviderError.http(status: http.statusCode, body: "web search failed")
+
+        let response = try await PublicWebTransport.fetch(
+            url: url,
+            maxBytes: Self.maxBytes,
+            headerLines: headers
+        )
+        guard (200...299).contains(response.statusCode) else {
+            throw AIProviderError.http(status: response.statusCode, body: "web search failed")
         }
-        return String(decoding: data.prefix(Self.maxBytes), as: UTF8.self)
+        return response.body
     }
 
     private static func braveAPIKey() -> String? {

@@ -51,6 +51,13 @@ final class EstateLookupIntentTests: XCTestCase {
                       "an all-filler question yields no terms → caller skips the search")
     }
 
+    func testShortAndGenericQueueFragmentsAreDropped() {
+        let terms = EstateLookupIntent.searchTerms("why is our build que always the same and hard coded")
+
+        XCTAssertTrue(terms.isEmpty)
+        XCTAssertFalse(terms.contains("que"))
+    }
+
     func testTypoedKistCanonicalizesSearchTerms() {
         let terms = EstateLookupIntent.searchTerms("tellme whastteh next naturakl pgressson for ksit")
         XCTAssertTrue(terms.contains("kist"))

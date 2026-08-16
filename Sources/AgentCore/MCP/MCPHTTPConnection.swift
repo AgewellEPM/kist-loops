@@ -25,6 +25,9 @@ actor MCPHTTPConnection: MCPConnection {
     private var sessionId: String?
     private var idCounter = 0
     private var didShutdown = false
+    /// The protocol version the server negotiated in `initialize` (starts at our offered version until
+    /// the handshake completes). Sent on every subsequent request per the 2026-07-28 stateless spec.
+    private var negotiatedVersion = MCPProtocol.offeredVersion
     private let timeout: TimeInterval
     /// The config explicitly named a loopback host (a user's own local server) — so request-time SSRF
     /// re-resolution is skipped for it (loopback is expected here; rebinding only matters for public hosts).
@@ -53,12 +56,10 @@ actor MCPHTTPConnection: MCPConnection {
     }
 
     func start() async throws {
-        let params: [String: Any] = [
-            "protocolVersion": "2025-03-26",
-            "capabilities": [:],
-            "clientInfo": ["name": "kist", "version": "1.0"],
-        ]
-        _ = try await request(method: "initialize", params: params, expectResponse: true)
+        let result = try await request(method: "initialize", params: MCPProtocol.initializeParams(), expectResponse: true)
+        // Honor the version the server negotiated back (was previously discarded) so subsequent requests
+        // speak what the server agreed to — this is what makes offering the current spec safe downlevel.
+        negotiatedVersion = MCPProtocol.negotiatedVersion(from: result)
         _ = try? await request(method: "notifications/initialized", params: [:], expectResponse: false)
     }
 
@@ -115,6 +116,12 @@ actor MCPHTTPConnection: MCPConnection {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        // Send the negotiated protocol version on every request EXCEPT initialize — on initialize the
+        // negotiated value isn't known yet, and a strict server may 4xx a header it can't honor even
+        // though the in-body negotiation would have downgraded cleanly.
+        if method != "initialize" {
+            req.setValue(negotiatedVersion, forHTTPHeaderField: MCPProtocol.versionHeader)
+        }
         if let sessionId { req.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id") }
         let bearer = await bearerProvider?()
         applyAuthHeaders(&req, bearer: bearer)
@@ -154,7 +161,15 @@ actor MCPHTTPConnection: MCPConnection {
             let raw = redactSecrets((err["message"] as? String) ?? "unknown error", bearer: bearer)
             throw MCPConnectionError.rpcError(code: (err["code"] as? Int) ?? -1, message: MCPOutputSanitizer.sanitize(raw))
         }
-        return (message["result"] as? [String: Any]) ?? [:]
+        return try Self.requiredResult(from: message, id: id)
+    }
+
+    /// Missing/scalar/null results are protocol failures, not empty success.
+    static func requiredResult(from message: [String: Any], id: Int) throws -> [String: Any] {
+        guard let result = message["result"] as? [String: Any] else {
+            throw MCPConnectionError.badResponse("response \(id) had a missing or non-object result")
+        }
+        return result
     }
 
     /// Stream the response body with a hard byte cap so a hostile server can't exhaust memory. Returns

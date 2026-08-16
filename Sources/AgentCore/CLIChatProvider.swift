@@ -15,8 +15,8 @@ import Glibc
 /// alongside this port).
 ///
 /// - No API key: the CLI already holds the auth (`requiresAPIKey == false`).
-/// - Text-protocol only (`supportsNativeTools == false`): kist sends its own tool contract in the prompt
-///   and parses the model's TEXT reply, exactly as for any non-native provider.
+/// - Normal chat remains text-protocol (`supportsNativeTools == false`): kist sends its own tool contract
+///   in the prompt. Schema-bearing subcalls use each CLI's native structured-output surface instead.
 /// - Claude runs as a pure completion: `--safe-mode` + `--tools ""` disable its agent surfaces. Codex
 ///   uses its strongest documented reduced posture (read-only sandbox, features disabled).
 ///
@@ -46,7 +46,8 @@ public struct CLIChatProvider: ChatProvider {
 
     public func capabilities(forModel model: String) -> ModelCapabilities {
         ModelCapabilities(nativeTools: false, reasoning: true,
-                          contextWindowTokens: 200_000, structuredOutput: false)
+                          contextWindowTokens: 200_000,
+                          structuredOutput: id == "claude-cli" || id == "codex-cli")
     }
 
     /// A subscription CLI is usable only when its executable is on a trusted absolute PATH entry and its
@@ -121,29 +122,292 @@ public struct CLIChatProvider: ChatProvider {
 
     public func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
                        apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        // This tree's runner has no cooperative mid-run cancellation hook: a cancelled turn stops
-        // consuming the stream immediately, but the CLI child runs on until it finishes or hits the
-        // deadline (the runner then tears down the whole process group). Bounded, documented residual.
         let prompt = Self.flatten(messages, systemPrompt: settings.systemPrompt)
         let resolvedModel = model.isEmpty ? defaultModel : model
-        let args = argsForModel(resolvedModel)
         let bin = binaryName
         let parse = parseOutput
+        let providerID = id
+        let baseArgs = argsForModel(resolvedModel)
+        let canonicalSchema = settings.jsonOutput
+            ? Self.canonicalSchema(settings.jsonSchema) : nil
+        // Task.detached does not provide an evidence boundary. Capture the host-minted telemetry
+        // session explicitly so only this concrete CLI invocation can append a CLI route receipt.
+        let trustedTelemetrySession = BuilderTrustedTelemetry.session
         return AsyncThrowingStream { continuation in
+            let cancellation = CLIProviderCancellation()
             let work = Task.detached {
                 do {
                     try Task.checkCancellation()
-                    let raw = try Self.runToCompletion(binaryName: bin, args: args, stdin: prompt)
-                    let text = parse(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let invocationStarted = DispatchTime.now().uptimeNanoseconds
+                    let result: CLIStructuredResult
+                    let executedArguments: [String]
+                    let route: String
+                    if let canonicalSchema, providerID == "claude-cli" {
+                        let args = try Self.structuredArguments(
+                            providerID: providerID, baseArguments: baseArgs,
+                            canonicalSchema: canonicalSchema,
+                            schemaPath: nil, resultPath: nil)
+                        executedArguments = args
+                        route = "native-structured"
+                        let raw = try Self.runToCompletion(
+                            binaryName: bin, args: args, stdin: prompt,
+                            cancellationCheck: { cancellation.isCancelled })
+                        result = try Self.parseClaudeStructuredResult(raw)
+                    } else if let canonicalSchema, providerID == "codex-cli" {
+                        let files = try CLIStructuredRequestFiles(
+                            canonicalSchema: canonicalSchema, needsResultFile: true)
+                        defer { files.cleanup() }
+                        let args = try Self.structuredArguments(
+                            providerID: providerID, baseArguments: baseArgs,
+                            canonicalSchema: canonicalSchema,
+                            schemaPath: files.schemaPath,
+                            resultPath: files.resultPath)
+                        executedArguments = args
+                        route = "native-structured"
+                        let eventOutput = try Self.runToCompletion(
+                            binaryName: bin, args: args, stdin: prompt,
+                            cancellationCheck: { cancellation.isCancelled })
+                        result = try Self.parseCodexStructuredResult(
+                            try files.readResult(), eventOutput: eventOutput)
+                    } else {
+                        executedArguments = baseArgs
+                        route = "text-protocol"
+                        let raw = try Self.runToCompletion(
+                            binaryName: bin, args: baseArgs, stdin: prompt,
+                            cancellationCheck: { cancellation.isCancelled })
+                        result = CLIStructuredResult(
+                            // Text-protocol output is the model payload, not presentation text. Preserve
+                            // its exact bytes so a coder response can safely flow through `generate` into
+                            // a file without losing indentation or a required terminal newline. Explicit
+                            // structured protocols are parsed in their provider-specific branches above.
+                            text: parse(raw),
+                            usage: .zero, usageReported: false)
+                    }
+                    let text = result.text
+                    let elapsed = max(1, Int((DispatchTime.now().uptimeNanoseconds
+                        - invocationStarted) / 1_000_000))
+                    BuilderTrustedTelemetry.recordCLIProviderInvocation(
+                        session: trustedTelemetrySession,
+                        providerID: providerID, modelID: resolvedModel, route: route,
+                        inputTokens: result.usage.promptTokens,
+                        outputTokens: result.usage.completionTokens,
+                        usageReported: result.usageReported,
+                        elapsedMilliseconds: elapsed,
+                        requestFingerprint: Self.requestFingerprint(
+                            providerID: providerID, modelID: resolvedModel, route: route,
+                            prompt: prompt, arguments: executedArguments,
+                            canonicalSchema: canonicalSchema),
+                        responseFingerprint: BuilderEvidenceDigest.sha256(text))
                     if !text.isEmpty { continuation.yield(.delta(text)) }
+                    if !result.usage.isZero {
+                        continuation.yield(.usage(
+                            promptTokens: result.usage.promptTokens,
+                            completionTokens: result.usage.completionTokens))
+                    }
                     continuation.yield(.finish(reason: "stop"))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in work.cancel() }
+            continuation.onTermination = { _ in
+                cancellation.cancel()
+                work.cancel()
+            }
         }
+    }
+
+    static func canonicalSchema(_ raw: String?) -> String? {
+        guard let raw, let data = raw.data(using: .utf8), data.count <= 256_000,
+              let object = try? JSONSerialization.jsonObject(with: data),
+              object is [String: Any], JSONSerialization.isValidJSONObject(object),
+              let canonical = try? JSONSerialization.data(
+                withJSONObject: object, options: [.sortedKeys]) else { return nil }
+        return String(decoding: canonical, as: UTF8.self)
+    }
+
+    static func requestFingerprint(
+        providerID: String, modelID: String, route: String, prompt: String,
+        arguments: [String], canonicalSchema: String?
+    ) -> String {
+        struct RequestIdentity: Codable {
+            let providerID: String
+            let modelID: String
+            let route: String
+            let prompt: String
+            let arguments: [String]
+            let canonicalSchema: String?
+        }
+        let identity = RequestIdentity(
+            providerID: providerID, modelID: modelID, route: route,
+            prompt: prompt, arguments: arguments, canonicalSchema: canonicalSchema)
+        guard let data = try? BuilderDurableIO.canonicalData(identity) else {
+            return BuilderEvidenceDigest.sha256("invalid-cli-request-identity")
+        }
+        return BuilderEvidenceDigest.sha256(String(decoding: data, as: UTF8.self))
+    }
+
+    static func structuredArguments(
+        providerID: String,
+        baseArguments: [String],
+        canonicalSchema: String,
+        schemaPath: String?,
+        resultPath: String?
+    ) throws -> [String] {
+        switch providerID {
+        case "claude-cli":
+            var arguments = baseArguments
+            if let format = arguments.firstIndex(of: "--output-format"),
+               arguments.indices.contains(format + 1) {
+                arguments[format + 1] = "json"
+            } else {
+                arguments += ["--output-format", "json"]
+            }
+            arguments += ["--json-schema", canonicalSchema]
+            return arguments
+        case "codex-cli":
+            guard let schemaPath, let resultPath else {
+                throw CLIProviderError.notRunnable(
+                    binary: "codex", detail: "structured request files are unavailable")
+            }
+            return baseArguments + [
+                "--output-schema", schemaPath,
+                "--output-last-message", resultPath,
+                "--json",
+            ]
+        default:
+            throw CLIProviderError.notRunnable(
+                binary: providerID, detail: "native structured output is unsupported")
+        }
+    }
+
+    static func parseClaudeStructuredResult(_ stdout: String) throws -> CLIStructuredResult {
+        let data = stdout.data(using: .utf8)
+        let envelope: [String: Any]? = data.flatMap { bytes in
+            guard bytes.count <= 4 * 1_024 * 1_024 else { return nil }
+            return try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
+        }
+        guard let envelope,
+              envelope["type"] as? String == "result",
+              envelope["subtype"] as? String == "success",
+              envelope["is_error"] as? Bool == false,
+              let structured = envelope["structured_output"] else {
+            throw CLIProviderError.invalidStructuredOutput(
+                binary: "claude", detail: claudeStructuredFailureDetail(envelope))
+        }
+        let text = try canonicalJSONString(structured, binary: "claude")
+        let usage = envelope["usage"] as? [String: Any]
+        let prompt = nonnegativeInt(usage?["input_tokens"])
+            + nonnegativeInt(usage?["cache_creation_input_tokens"])
+            + nonnegativeInt(usage?["cache_read_input_tokens"])
+        let completion = nonnegativeInt(usage?["output_tokens"])
+        return CLIStructuredResult(
+            text: text,
+            usage: TokenUsage(promptTokens: prompt, completionTokens: completion),
+            usageReported: usage != nil)
+    }
+
+    static func claudeStructuredFailureDetail(_ envelope: [String: Any]?) -> String {
+        let base = "missing successful structured_output envelope"
+        guard let envelope else { return base }
+        var fields: [String] = []
+        if let subtype = envelope["subtype"] as? String {
+            fields.append("subtype=\(boundedRedactedDiagnostic(subtype, maxBytes: 64))")
+        }
+        if let isError = envelope["is_error"] as? Bool {
+            fields.append("is_error=\(isError)")
+        }
+        if let stopReason = envelope["stop_reason"] as? String {
+            fields.append("stop_reason=\(boundedRedactedDiagnostic(stopReason, maxBytes: 64))")
+        }
+        if let errors = envelope["errors"] as? [Any] {
+            for (index, item) in errors.prefix(2).enumerated() {
+                if let message = item as? String {
+                    fields.append(
+                        "error[\(index)].message=\(boundedRedactedDiagnostic(message, maxBytes: 192))")
+                } else if let object = item as? [String: Any] {
+                    if let code = object["code"] as? String {
+                        fields.append(
+                            "error[\(index)].code=\(boundedRedactedDiagnostic(code, maxBytes: 64))")
+                    }
+                    if let message = object["message"] as? String {
+                        fields.append(
+                            "error[\(index)].message=\(boundedRedactedDiagnostic(message, maxBytes: 192))")
+                    }
+                }
+            }
+        }
+        guard !fields.isEmpty else { return base }
+        return boundedRedactedDiagnostic(
+            base + " (" + fields.joined(separator: "; ") + ")", maxBytes: 768)
+    }
+
+    static func boundedRedactedDiagnostic(_ raw: String, maxBytes: Int) -> String {
+        var text = raw.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar) ? " " : String(scalar)
+        }.joined()
+        for pattern in [
+            #"(?i)\b(?:sk|rk|pk)-[A-Za-z0-9_-]{6,}"#,
+            #"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}"#,
+            #"(?i)\b(?:api[_-]?key|access[_-]?token|token|secret|password|credential|authorization)\b\s*[:=]\s*[^,\s;]+"#,
+            #"(?i)\bprompt\b\s*[:=]\s*[^,;]+"#,
+        ] {
+            text = text.replacingOccurrences(
+                of: pattern, with: "[REDACTED]", options: .regularExpression)
+        }
+        guard text.utf8.count > maxBytes else { return text }
+        let contentLimit = max(0, maxBytes - 3)
+        var output = ""
+        var byteCount = 0
+        for character in text {
+            let value = String(character)
+            guard byteCount + value.utf8.count <= contentLimit else { break }
+            output.append(character)
+            byteCount += value.utf8.count
+        }
+        return output + "..."
+    }
+
+    static func parseCodexStructuredResult(
+        _ data: Data,
+        eventOutput: String
+    ) throws -> CLIStructuredResult {
+        guard data.count <= 4 * 1_024 * 1_024,
+              let value = try? JSONSerialization.jsonObject(with: data) else {
+            throw CLIProviderError.invalidStructuredOutput(
+                binary: "codex", detail: "final response file is not one JSON value")
+        }
+        let text = try canonicalJSONString(value, binary: "codex")
+        var usage = TokenUsage.zero
+        var usageReported = false
+        for line in eventOutput.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard line.utf8.count <= 1_048_576,
+                  let eventData = String(line).data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: eventData) as? [String: Any],
+                  event["type"] as? String == "turn.completed",
+                  let rawUsage = event["usage"] as? [String: Any] else { continue }
+            usageReported = true
+            usage = TokenUsage(
+                promptTokens: nonnegativeInt(rawUsage["input_tokens"])
+                    + nonnegativeInt(rawUsage["cached_input_tokens"]),
+                completionTokens: nonnegativeInt(rawUsage["output_tokens"]))
+        }
+        return CLIStructuredResult(text: text, usage: usage, usageReported: usageReported)
+    }
+
+    private static func canonicalJSONString(_ value: Any, binary: String) throws -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(
+                withJSONObject: value, options: [.sortedKeys]) else {
+            throw CLIProviderError.invalidStructuredOutput(
+                binary: binary, detail: "structured response is not a JSON object or array")
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func nonnegativeInt(_ value: Any?) -> Int {
+        guard let number = value as? NSNumber else { return 0 }
+        return max(0, number.intValue)
     }
 
     /// Flatten kist's message array into one prompt (the CLIs take a single prompt, not a message list).
@@ -173,7 +437,8 @@ public struct CLIChatProvider: ChatProvider {
         stdin: String,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         timeoutSeconds: Int = 600,
-        outputByteLimit: Int = 4 * 1_024 * 1_024
+        outputByteLimit: Int = 4 * 1_024 * 1_024,
+        cancellationCheck: @escaping @Sendable () -> Bool = { false }
     ) throws -> String {
         guard let executable = executableURL(binaryName: binaryName, environment: environment) else {
             throw CLIProviderError.notRunnable(binary: binaryName,
@@ -191,7 +456,9 @@ public struct CLIChatProvider: ChatProvider {
             timeoutSeconds: timeoutSeconds,
             capPerStream: max(1, min(outputByteLimit, 16 * 1_024 * 1_024)),
             graceSeconds: 2,
-            stdinData: Data(stdin.utf8))
+            stdinData: Data(stdin.utf8),
+            cancellationCheck: cancellationCheck)
+        if outcome.cancelled { throw CancellationError() }
         if outcome.timedOut {
             throw CLIProviderError.timedOut(binary: binaryName, seconds: TimeInterval(timeoutSeconds))
         }
@@ -274,8 +541,8 @@ public struct CLIChatProvider: ChatProvider {
         CLIChatProvider(
             id: "codex-cli", name: "Codex (ChatGPT subscription)",
             iconName: "chevron.left.forwardslash.chevron.right",
-            keyAccount: "", defaultModel: "gpt-5.5-codex",
-            availableModels: [AIModel(id: "gpt-5.5-codex", displayName: "GPT-5.5 Codex (subscription)")],
+            keyAccount: "", defaultModel: "gpt-5.6-sol",
+            availableModels: [AIModel(id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol (subscription)")],
             binaryName: "codex",
             argsForModel: { model in
                 var a = [
@@ -296,12 +563,9 @@ public struct CLIChatProvider: ChatProvider {
                     "--disable", "shell_tool",
                     "--disable", "unified_exec",
                 ]
-                // Do NOT force `--model` for the default: codex's API model ids (e.g. "gpt-5.5-codex")
-                // are REJECTED on a ChatGPT *subscription* account ("model is not supported when using
-                // Codex with a ChatGPT account") — the account dictates the model. Omitting `--model`
-                // uses the account default, which works. An explicit non-default override still passes
-                // through for accounts that support model selection. (Bug fix 2026-07-29.)
-                if !model.isEmpty && model != "gpt-5.5-codex" { a += ["--model", model] }
+                // Keep the reported provider identity honest: Codex CLI accepts explicit subscription
+                // model selection, while omission silently delegates to a mutable account default.
+                if !model.isEmpty { a += ["--model", model] }
                 return a
             },
             parseOutput: { raw in Self.extractCodexAnswer(raw) }
@@ -330,6 +594,7 @@ public enum CLIProviderError: Error, LocalizedError, CustomStringConvertible, Eq
     case notRunnable(binary: String, detail: String)
     case exited(binary: String, code: Int32, stderr: String)
     case timedOut(binary: String, seconds: TimeInterval)
+    case invalidStructuredOutput(binary: String, detail: String)
 
     public var description: String {
         switch self {
@@ -339,6 +604,8 @@ public enum CLIProviderError: Error, LocalizedError, CustomStringConvertible, Eq
             return "CLI provider '\(binary)' exited \(code): \(stderr.isEmpty ? "no stderr" : stderr)"
         case .timedOut(let binary, let seconds):
             return "CLI provider '\(binary)' exceeded its \(seconds)s deadline"
+        case .invalidStructuredOutput(let binary, let detail):
+            return "CLI provider '\(binary)' returned invalid structured output: \(detail)"
         }
     }
 
@@ -346,4 +613,155 @@ public enum CLIProviderError: Error, LocalizedError, CustomStringConvertible, Eq
     /// `LocalizedError`, Swift bridges this enum as an opaque `CLIProviderError error N` and discards the
     /// exit code/stderr evidence needed to diagnose provider availability.
     public var errorDescription: String? { description }
+}
+
+struct CLIStructuredResult: Sendable, Equatable {
+    let text: String
+    let usage: TokenUsage
+    let usageReported: Bool
+}
+
+private final class CLIProviderCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+}
+
+/// Owner-private structured request material for Codex CLI. Files are created with openat/O_EXCL,
+/// never follow links, and are unlinked before the private directory is fsynced and removed.
+final class CLIStructuredRequestFiles: @unchecked Sendable {
+    let directoryPath: String
+    let schemaPath: String
+    let resultPath: String?
+    private let directoryFD: Int32
+    private let lock = NSLock()
+    private var cleaned = false
+
+    init(canonicalSchema: String, needsResultFile: Bool) throws {
+        var template = Array("/tmp/kist-cli-structured.XXXXXX".utf8CString)
+        guard template.withUnsafeMutableBufferPointer({ buffer in
+            buffer.baseAddress.flatMap { mkdtemp($0) }
+        }) != nil else {
+            throw CLIProviderError.notRunnable(
+                binary: "codex", detail: "could not create private structured-output directory")
+        }
+        let directory = String(cString: template)
+        guard chmod(directory, S_IRWXU) == 0 else {
+            _ = rmdir(directory)
+            throw CLIProviderError.notRunnable(
+                binary: "codex", detail: "could not protect structured-output directory")
+        }
+        let fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else {
+            _ = rmdir(directory)
+            throw CLIProviderError.notRunnable(
+                binary: "codex", detail: "could not open structured-output directory")
+        }
+        directoryPath = directory
+        directoryFD = fd
+        schemaPath = directory + "/schema.json"
+        resultPath = needsResultFile ? directory + "/result.json" : nil
+        do {
+            try Self.createFile(
+                directoryFD: fd, name: "schema.json", data: Data(canonicalSchema.utf8))
+            if needsResultFile {
+                try Self.createFile(directoryFD: fd, name: "result.json", data: Data())
+            }
+            guard fsync(fd) == 0 else {
+                throw CLIProviderError.notRunnable(
+                    binary: "codex", detail: "could not sync structured-output directory")
+            }
+        } catch {
+            if needsResultFile { _ = unlinkat(fd, "result.json", 0) }
+            _ = unlinkat(fd, "schema.json", 0)
+            _ = fsync(fd)
+            close(fd)
+            _ = rmdir(directory)
+            throw error
+        }
+    }
+
+    deinit { cleanup() }
+
+    func readResult(maxBytes: Int = 4 * 1_024 * 1_024) throws -> Data {
+        guard resultPath != nil else {
+            throw CLIProviderError.invalidStructuredOutput(
+                binary: "codex", detail: "final response file was not configured")
+        }
+        let fd = openat(directoryFD, "result.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else {
+            throw CLIProviderError.invalidStructuredOutput(
+                binary: "codex", detail: "final response file is unavailable")
+        }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(), info.st_nlink == 1,
+              (info.st_mode & (S_IRWXG | S_IRWXO)) == 0 else {
+            throw CLIProviderError.invalidStructuredOutput(
+                binary: "codex", detail: "final response file identity or permissions drifted")
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+        while true {
+            let count = read(fd, &buffer, buffer.count)
+            if count > 0 {
+                data.append(contentsOf: buffer.prefix(count))
+                guard data.count <= maxBytes else {
+                    throw CLIProviderError.invalidStructuredOutput(
+                        binary: "codex", detail: "final response exceeds byte limit")
+                }
+                continue
+            }
+            if count < 0 && errno == EINTR { continue }
+            guard count == 0 else {
+                throw CLIProviderError.invalidStructuredOutput(
+                    binary: "codex", detail: "could not read final response")
+            }
+            return data
+        }
+    }
+
+    func cleanup() {
+        lock.lock()
+        guard !cleaned else { lock.unlock(); return }
+        cleaned = true
+        lock.unlock()
+        if resultPath != nil { _ = unlinkat(directoryFD, "result.json", 0) }
+        _ = unlinkat(directoryFD, "schema.json", 0)
+        _ = fsync(directoryFD)
+        close(directoryFD)
+        _ = rmdir(directoryPath)
+    }
+
+    private static func createFile(
+        directoryFD: Int32, name: String, data: Data
+    ) throws {
+        let fd = openat(
+            directoryFD, name,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR)
+        guard fd >= 0 else {
+            throw CLIProviderError.notRunnable(
+                binary: "codex", detail: "could not create private \(name)")
+        }
+        defer { close(fd) }
+        var offset = 0
+        let wrote = data.withUnsafeBytes { bytes -> Bool in
+            while offset < bytes.count {
+                let count = write(
+                    fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count > 0 { offset += count; continue }
+                if count < 0 && errno == EINTR { continue }
+                return false
+            }
+            return true
+        }
+        guard wrote, fchmod(fd, S_IRUSR | S_IWUSR) == 0, fsync(fd) == 0 else {
+            throw CLIProviderError.notRunnable(
+                binary: "codex", detail: "could not persist private \(name)")
+        }
+    }
 }

@@ -5,6 +5,10 @@ public enum ProviderHealthState: String, Sendable, Codable, Equatable {
     case missingKey
     case staleCatalog
     case failed
+    /// Key + catalog are fine, but a LIVE failure (rate limit / outage) was observed recently
+    /// by some kist process — the router is sitting this provider out until the cooldown ends.
+    /// Distinct from `failed`: it self-recovers and must not fail the health exit code.
+    case cooling
 }
 
 public struct ProviderHealthRow: Sendable, Equatable {
@@ -44,6 +48,7 @@ public struct ProviderHealthReport: Sendable, Equatable {
             case .missingKey: icon = "!"
             case .staleCatalog: icon = "?"
             case .failed: icon = "✗"
+            case .cooling: icon = "~"
             }
             out += "\(icon) \(row.providerId):\(row.model) · \(row.toolMode.rawValue) · \(row.detail)\n"
         }
@@ -54,7 +59,11 @@ public struct ProviderHealthReport: Sendable, Equatable {
 public enum ProviderHealthChecker {
     public static let defaultLiveProbeTimeoutNanoseconds: UInt64 = 120_000_000_000
 
-    public static func catalogReport(_ registry: ProviderRegistry) -> ProviderHealthReport {
+    /// `coolingDown` is the cross-process live-failure ledger (ProviderCooldownStore). Without it
+    /// `--health` said "ready" while a provider was actively rate-limiting every lane — health must
+    /// report keys AND the live state other kist processes just observed.
+    public static func catalogReport(_ registry: ProviderRegistry,
+                                     coolingDown: ((String) -> Bool)? = nil) -> ProviderHealthReport {
         ProviderHealthReport(rows: registry.providers.map { provider in
             let model = provider.defaultModel
             let listed = provider.availableModels.contains { $0.id == model || $0.name == model }
@@ -68,6 +77,11 @@ public enum ProviderHealthChecker {
             if !listed {
                 return ProviderHealthRow(providerId: provider.id, model: model, state: .staleCatalog,
                                          toolMode: mode, detail: "default model is not in availableModels")
+            }
+            if coolingDown?(provider.id) == true {
+                return ProviderHealthRow(providerId: provider.id, model: model, state: .cooling,
+                                         toolMode: mode,
+                                         detail: "recent live rate-limit/outage — cooling down, auto-recovers")
             }
             return ProviderHealthRow(providerId: provider.id, model: model, state: .ready,
                                      toolMode: mode, detail: caps.summaryFlags.joined(separator: ", "))

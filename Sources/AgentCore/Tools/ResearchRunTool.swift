@@ -16,7 +16,12 @@ public struct ResearchRunTool: AgentTool {
         ToolParameter(name: "goal", type: "string", description: "Research goal for action=start, or fallback goal when creating a run.", required: false),
         ToolParameter(name: "run_id", type: "string", description: "Research run id. Omit for action=start.", required: false),
         ToolParameter(name: "query", type: "string", description: "Search or context query.", required: false),
+        ToolParameter(name: "context_id", type: "string", description: "Exact chunk id returned by a prior context search.", required: false),
+        ToolParameter(name: "limit", type: "integer", description: "Result limit: 1...10 for search, 1...50 for context.", required: false),
+        ToolParameter(name: "max_chars", type: "integer", description: "Bounded exact context output size: 1000...800000.", required: false),
+        ToolParameter(name: "site", type: "string", description: "Optional public host constraint for action=search.", required: false),
         ToolParameter(name: "url", type: "string", description: "URL for action=fetch or browse.", required: false),
+        ToolParameter(name: "max_bytes", type: "integer", description: "Bounded fetch prefix size for action=fetch.", required: false),
         ToolParameter(name: "reference", type: "string", description: "Reference image path for action=visual.", required: false),
         ToolParameter(name: "candidate", type: "string", description: "Candidate image path for action=visual.", required: false),
         ToolParameter(name: "actions", type: "array", description: "Browser actions for action=browse.", required: false),
@@ -122,8 +127,19 @@ public struct ResearchRunTool: AgentTool {
                                     context: context)
         case "fetch":
             let url = try requireString("url", from: arguments)
+            guard let components = URLComponents(string: url),
+                  let host = components.host,
+                  let exactHost = WebFetchTool.normalizedHostPattern(host),
+                  !exactHost.hasPrefix("*.") else {
+                return .failure("fetch URL has no canonical exact host")
+            }
+            var fetchArguments: [String: Any] = [
+                "url": url,
+                "allowed_hosts": [exactHost],
+            ]
+            if let maxBytes = arguments["max_bytes"] { fetchArguments["max_bytes"] = maxBytes }
             return try await gather(kind: "fetch_url", title: url, runner: fetch,
-                                    runnerArgs: ["url": url], arguments: arguments, context: context,
+                                    runnerArgs: fetchArguments, arguments: arguments, context: context,
                                     url: url)
         case "browse":
             let url = try requireString("url", from: arguments)
@@ -147,12 +163,26 @@ public struct ResearchRunTool: AgentTool {
         case "context":
             var args: [String: Any] = ["action": "coverage"]
             var title = "Context coverage"
-            if let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            if let contextID = (arguments["context_id"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+               !contextID.isEmpty {
+                guard arguments["query"] == nil else {
+                    return .failure("context accepts either query or context_id, not both")
+                }
+                args = ["action": "get", "id": contextID]
+                title = "Exact context: \(contextID)"
+            } else if let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !query.isEmpty {
                 args = ["action": "search", "query": query]
                 title = "Context search: \(query)"
             }
-            if let limit = arguments["limit"] { args["limit"] = limit }
+            if let limit = try validatedLimit(arguments, maximum: 50) { args["limit"] = limit }
+            if let rawMaxChars = arguments["max_chars"] {
+                guard let maxChars = rawMaxChars as? Int, (1_000...800_000).contains(maxChars) else {
+                    throw ToolError.execution("max_chars must be an integer from 1000 through 800000")
+                }
+                args["max_chars"] = maxChars
+            }
             return try await gather(kind: "context_brain", title: title, runner: contextBrain,
                                     runnerArgs: args, arguments: arguments, context: context)
         case "estate":
@@ -208,11 +238,21 @@ public struct ResearchRunTool: AgentTool {
             _ = try? store.heartbeat(status: "blocked", message: "\(kind) failed: \(result.error ?? result.output)")
             return result
         }
+        var boundMetadata = result.metadata
+        if kind == "fetch_url" {
+            guard let rawStatus = boundMetadata["status"],
+                  let status = Int(rawStatus), (200...299).contains(status) else {
+                _ = try? store.heartbeat(
+                    status: "blocked", message: "fetch_url omitted a successful HTTP status")
+                return .failure("fetch evidence omitted a successful HTTP status")
+            }
+            boundMetadata["fetch_status"] = status == 206 ? "partial" : "complete"
+        }
         let ev = try store.appendEvidence(kind: kind, title: title, text: result.output,
-                                          url: url, metadata: result.metadata)
+                                          url: url, metadata: boundMetadata)
         var output = "Recorded \(ev.id) · \(kind): \(title)\n\n"
         output += result.output
-        var metadata = result.metadata
+        var metadata = ev.metadata
         metadata["run_id"] = store.currentManifest().runID
         metadata["evidence_id"] = ev.id
         return ToolResult(success: true, output: output, metadata: metadata)
@@ -233,9 +273,17 @@ public struct ResearchRunTool: AgentTool {
 
     private func searchArgs(_ arguments: [String: Any]) throws -> [String: Any] {
         var args: [String: Any] = ["query": try requireString("query", from: arguments)]
-        if let limit = arguments["limit"] { args["limit"] = limit }
+        if let limit = try validatedLimit(arguments, maximum: 10) { args["limit"] = limit }
         if let site = arguments["site"] { args["site"] = site }
         return args
+    }
+
+    private func validatedLimit(_ arguments: [String: Any], maximum: Int) throws -> Int? {
+        guard let raw = arguments["limit"] else { return nil }
+        guard let limit = raw as? Int, (1...maximum).contains(limit) else {
+            throw ToolError.execution("limit must be an integer from 1 through \(maximum)")
+        }
+        return limit
     }
 
     private static func defaultPlan(goal: String, runID: String) -> String {
@@ -247,7 +295,8 @@ public struct ResearchRunTool: AgentTool {
         1. Use research_run(action="search", run_id="\(runID)", query="...") for source discovery.
         2. Use research_run(action="fetch", run_id="\(runID)", url="...") for primary sources.
         3. Use research_run(action="browse", run_id="\(runID)", url="...") when JavaScript or screenshots matter.
-        4. Use research_run(action="context", run_id="\(runID)", query="...") for repo/RAG evidence.
+        4. Use research_run(action="context", run_id="\(runID)", query="...") for repo/RAG discovery, then
+           research_run(action="context", run_id="\(runID)", context_id="...") for each exact chunk used.
         5. Use research_run(action="visual", run_id="\(runID)", goal="...", candidate="...") for grounded visual evidence.
         6. Use research_run(action="synthesize", run_id="\(runID)") before council or plan-execute.
         """

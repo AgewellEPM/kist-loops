@@ -15,12 +15,19 @@ import Foundation
 public actor MCPClientManager {
     typealias ConnectionFactory =
         @Sendable (MCPServerConfig) -> any MCPConnection
+    typealias RetrySleep = @Sendable (UInt64) async throws -> Void
+
+    private static let defaultReconnectDelaysNanoseconds: [UInt64] = [
+        1_000_000_000, 2_000_000_000, 4_000_000_000, 8_000_000_000, 16_000_000_000,
+    ]
 
     /// Separator between server and tool in the namespaced id (`server__tool`), matching
     /// Claude Code's `mcp__server__tool` convention so collisions are impossible.
     public static let namespaceSeparator = "__"
 
     private var connections: [String: any MCPConnection] = [:]
+    /// Last validated recipe for replacing a dead one-shot transport.
+    private var knownConfigs: [String: MCPServerConfig] = [:]
     private struct StartupLease {
         let id: UUID
         let task: Task<any MCPConnection, Error>
@@ -38,20 +45,28 @@ public actor MCPClientManager {
     private let oauthStore = OAuthTokenStore()
     private let configuredServersOverride: [MCPServerConfig]?
     private let connectionFactoryOverride: ConnectionFactory?
+    private let reconnectDelaysNanoseconds: [UInt64]
+    private let retrySleep: RetrySleep
 
     public init() {
         configuredServersOverride = nil
         connectionFactoryOverride = nil
+        reconnectDelaysNanoseconds = Self.defaultReconnectDelaysNanoseconds
+        retrySleep = { delay in try await Task.sleep(nanoseconds: delay) }
     }
 
     /// Deterministic dependency seam for lifecycle tests. Production discovery
     /// always uses validated on-disk configuration and the concrete transports.
     init(
         serversForTesting: [MCPServerConfig],
-        connectionFactory: @escaping ConnectionFactory
+        connectionFactory: @escaping ConnectionFactory,
+        reconnectDelaysNanoseconds: [UInt64] = [0],
+        retrySleep: @escaping RetrySleep = { _ in }
     ) {
         configuredServersOverride = serversForTesting
         connectionFactoryOverride = connectionFactory
+        self.reconnectDelaysNanoseconds = reconnectDelaysNanoseconds
+        self.retrySleep = retrySleep
     }
 
     // MARK: - Discovery
@@ -78,6 +93,7 @@ public actor MCPClientManager {
 
         var wrappers: [RemoteMCPTool] = []
         for cfg in servers {
+            knownConfigs[cfg.name] = cfg
             let connection: any MCPConnection
             do {
                 connection = try await resolveConnection(for: cfg)
@@ -194,16 +210,52 @@ public actor MCPClientManager {
             : MCPServerConnection(config: config)
     }
 
+    /// Replace a dead one-shot transport with at most five production attempts,
+    /// delayed 1, 2, 4, 8, and 16 seconds. Concurrent callers share the existing
+    /// per-server startup lease.
+    private func reconnect(to config: MCPServerConfig) async throws -> any MCPConnection {
+        let generation = lifecycleGeneration
+        let delays = reconnectDelaysNanoseconds.isEmpty ? [UInt64(0)] : reconnectDelaysNanoseconds
+        var lastError: Error = MCPConnectionError.serverClosed
+        for (index, delay) in delays.enumerated() {
+            guard !shuttingDown, generation == lifecycleGeneration else {
+                throw MCPConnectionError.serverClosed
+            }
+            do {
+                if delay > 0 { try await retrySleep(delay) }
+                guard !shuttingDown, generation == lifecycleGeneration else {
+                    throw MCPConnectionError.serverClosed
+                }
+                return try await resolveConnection(for: config)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                if index + 1 < delays.count {
+                    MCPLog.warn("server '\(config.name)' reconnect attempt \(index + 1)/\(delays.count) failed")
+                }
+            }
+        }
+        throw lastError
+    }
+
     // MARK: - Tool calls
 
     /// Route a tool call to its server. `arguments` come straight from the model; the
     /// result is sanitized before return.
     public func call(server: String, tool: String, arguments: [String: Any]) async -> ToolResult {
-        guard let connection = connections[server] else {
+        guard let config = knownConfigs[server] else {
             return .failure("MCP server '\(server)' is not connected")
         }
-        guard await connection.isAlive else {
-            return .failure("MCP server '\(server)' is not alive (it may have crashed)")
+        let connection: any MCPConnection
+        if let cached = connections[server], await cached.isAlive {
+            connection = cached
+        } else {
+            do {
+                connection = try await reconnect(to: config)
+            } catch {
+                return .failure("MCP server '\(server)' reconnect failed after \(reconnectDelaysNanoseconds.count) attempt(s): \(MCPOutputSanitizer.sanitize(error.localizedDescription))")
+            }
         }
         do {
             let raw = try await connection.callTool(name: tool, arguments: arguments)
@@ -217,6 +269,11 @@ public actor MCPClientManager {
                 metadata: ["mcp_server": server, "mcp_tool": MCPOutputSanitizer.sanitize(tool)]
             )
         } catch {
+            // Never replay an ambiguous failed call: it may have executed remotely.
+            // Clearing a dead cache makes the next invocation reconnect safely.
+            if !(await connection.isAlive), connections[server] === connection {
+                connections[server] = nil
+            }
             // The error text can carry server-controlled content (rpc message / bad-response body) — it's
             // sanitized at the throw sites, but sanitize the whole surfaced string too (defense-in-depth,
             // DeepSeek M1) before it reaches the model as a failure.

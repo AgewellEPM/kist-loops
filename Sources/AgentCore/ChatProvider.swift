@@ -7,6 +7,8 @@ import Foundation
 public enum StreamEvent: Sendable, Equatable {
     case delta(String)                                   // assistant text chunk
     case reasoning(String)                               // hidden reasoning chunk (reasoning models)
+    case effortResolution(ProviderEffortRecord)          // actual provider/model effort mapping
+    case reasoningHandle(OpaqueProviderReasoningHandle)  // opaque continuation state, never raw CoT
     case toolCall(id: String, name: String, argumentsJSON: String)
     case finish(reason: String?)
     case usage(promptTokens: Int, completionTokens: Int)

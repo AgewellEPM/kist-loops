@@ -8,9 +8,8 @@ import XCTest
 /// (this adds no capability: the same binary was always reachable by absolute path, and the
 /// deny gate fires on the resolved path).
 ///
-/// Per-site discipline: BOTH resolveExecutable call sites in execute() are pinned end-to-end
-/// (structured `executable` mode AND the promoted no-metacharacter `command` mode), plus unit
-/// pins on the resolver itself.
+/// Structured execution resolves relative paths against cwd. Raw command strings are not silently
+/// tokenized into argv; callers must use the structured form or explicitly request shell mode.
 final class RunCommandRelativeExecTests: XCTestCase {
     private var root: String = ""
 
@@ -64,13 +63,13 @@ final class RunCommandRelativeExecTests: XCTestCase {
         XCTAssertTrue(r.output.contains("built-artifact-ran"), msg(r))
     }
 
-    // MARK: end-to-end site 2 — promoted no-metacharacter `command` mode
+    // MARK: raw command is not silently promoted
 
-    func testPromotedCommandModeRunsDotSlashExecutable() async throws {
+    func testRawCommandWithoutExplicitShellIsRejected() async throws {
         let r = try await RunCommandTool().execute(
             arguments: ["command": "./artifact"], context: ctx())
-        XCTAssertTrue(r.success, msg(r))
-        XCTAssertTrue(r.output.contains("built-artifact-ran"), msg(r))
+        XCTAssertFalse(r.success)
+        XCTAssertTrue(msg(r).contains("shell:true"), msg(r))
     }
 
     // MARK: the relative path honors the tool call's `cwd` argument, not just the root

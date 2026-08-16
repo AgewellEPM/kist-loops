@@ -90,4 +90,28 @@ final class CouncilPromotionVerdictTests: XCTestCase {
         XCTAssertFalse(CouncilPromotionJudge.parseVote("\tVERDICT: SHIP\n  VERDICT: HOLD").shipWorthy) // HOLD wins
         XCTAssertTrue(CouncilPromotionJudge.parseVote("  VERDICT: SHIP").shipWorthy)        // indented clean SHIP is legit
     }
+
+    func testVerificationOnlyPromptIsEvidenceRichAndNonCircular() {
+        let fingerprint = "objective-sha"
+        let command = BuilderCommandEvidenceReceipt.bound(
+            tool: "run_command", verifierStatus: .passed, exitCode: 0,
+            allowedExitCodes: "0", semanticStatus: "success", argsFingerprint: "swift test",
+            output: "8 tests passed", subjectDigestAfter: "digest",
+            contractFingerprint: fingerprint)
+        let evidence = PromotionCompletionEvidence(
+            contractID: "contract", objectiveFingerprint: fingerprint,
+            completionMode: .verificationOnly, verificationSubject: "/tmp/project",
+            baselineDigest: "digest", verifiedDigest: "digest", reviewEntryDigest: "digest",
+            verifiedAt: Date(), commandReceipts: [command],
+            hostChecks: [.init(name: "tests", passed: true, details: "8/8")],
+            producerIdentities: ["anthropic:claude"], reviewerIdentity: "gemini:review")
+        let prompt = CouncilPromotionJudge.completionEvidencePrompt(evidence)
+        XCTAssertTrue(prompt.contains("completionMode: verificationOnly"))
+        XCTAssertTrue(prompt.contains("baselineDigest: digest"))
+        XCTAssertTrue(prompt.contains("reviewEntryDigest: digest"))
+        XCTAssertTrue(prompt.contains("reviewerIdentityForThisInvocation: gemini:review"))
+        XCTAssertTrue(prompt.contains("verifier=passed"))
+        XCTAssertTrue(prompt.contains("MUST NOT be demanded as input"))
+        XCTAssertTrue(prompt.contains("no diff are success proof"))
+    }
 }

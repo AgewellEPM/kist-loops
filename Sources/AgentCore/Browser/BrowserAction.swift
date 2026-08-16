@@ -55,6 +55,10 @@ public enum BrowserSpec {
                              configuredAllowedHosts: [String] = [],
                              perCallAllowedHosts: [String] = [],
                              allowLocalhost: Bool = false,
+                             proxyServer: String = "",
+                             proxyUsername: String = "",
+                             proxyPassword: String = "",
+                             localCaptureScheme: String? = nil,
                              localCaptureHost: String? = nil,
                              localCapturePort: String? = nil) -> [String: Any] {
         ["url": url,
@@ -63,6 +67,10 @@ public enum BrowserSpec {
          "configuredAllowedHosts": configuredAllowedHosts,
          "perCallAllowedHosts": perCallAllowedHosts,
          "allowLocalhost": allowLocalhost,
+         "proxyServer": proxyServer,
+         "proxyUsername": proxyUsername,
+         "proxyPassword": proxyPassword,
+         "localCaptureScheme": localCaptureScheme ?? "",
          "localCaptureHost": localCaptureHost ?? "",
          "localCapturePort": localCapturePort ?? "",
          "timeoutMs": 30000]
@@ -72,66 +80,43 @@ public enum BrowserSpec {
                                   configuredAllowedHosts: [String] = [],
                                   perCallAllowedHosts: [String] = [],
                                   allowLocalhost: Bool = false,
+                                  proxyServer: String = "",
+                                  proxyUsername: String = "",
+                                  proxyPassword: String = "",
+                                  localCaptureScheme: String? = nil,
                                   localCaptureHost: String? = nil,
                                   localCapturePort: String? = nil) -> String? {
         guard let data = try? JSONSerialization.data(withJSONObject: build(url: url, actions: actions, extract: extract,
                                                                            configuredAllowedHosts: configuredAllowedHosts,
                                                                            perCallAllowedHosts: perCallAllowedHosts,
                                                                            allowLocalhost: allowLocalhost,
+                                                                           proxyServer: proxyServer,
+                                                                           proxyUsername: proxyUsername,
+                                                                           proxyPassword: proxyPassword,
+                                                                           localCaptureScheme: localCaptureScheme,
                                                                            localCaptureHost: localCaptureHost,
                                                                            localCapturePort: localCapturePort)) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// The CONSTANT Playwright driver. No interpolation — it reads the spec from argv[2] as JSON and
+    /// The CONSTANT Playwright driver. No interpolation — it reads the spec from private stdin as JSON and
     /// executes it. Agent input never becomes code.
     public static let driverJS = #"""
-    // argv[3] is an absolute path to the playwright module (so a globally-installed playwright resolves
+    // argv[2] is an absolute path to the playwright module (so a globally-installed playwright resolves
     // from this temp-dir driver); falls back to bare 'playwright' for a local install / NODE_PATH.
-    const { chromium } = require(process.argv[3] || 'playwright');
-    const dns = require('dns').promises;
+    const fs = require('fs');
     const net = require('net');
+    const { chromium } = require(process.argv[2] || 'playwright');
 
     function normalizeHost(raw) {
       return String(raw || '').trim().replace(/\.+$/, '').toLowerCase();
-    }
-    function hostMatches(host, patterns) {
-      return (patterns || []).some((pattern) => {
-        pattern = normalizeHost(pattern);
-        if (pattern.startsWith('*.')) {
-          const suffix = pattern.slice(1);
-          return host.endsWith(suffix) && host.length > suffix.length;
-        }
-        return host === pattern;
-      });
-    }
-    function isPrivateIPv4(ip) {
-      const parts = ip.split('.').map((p) => Number(p));
-      if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return false;
-      const [a, b] = parts;
-      return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254)
-        || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-    }
-    function isPrivateIPv6(ip) {
-      const h = ip.toLowerCase();
-      if (h === '::' || h === '::1') return true;
-      if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
-      // IPv4-mapped (::ffff:a.b.c.d) / IPv4-compatible (::a.b.c.d): block via the IPv4 rules so
-      // ::ffff:127.0.0.1 / ::ffff:169.254.169.254 don't slip past.
-      const m = h.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/);
-      if (m) return isPrivateIPv4(m[1]);
-      return false;
-    }
-    function isPrivateIP(ip) {
-      const family = net.isIP(ip);
-      return family === 4 ? isPrivateIPv4(ip) : (family === 6 ? isPrivateIPv6(ip) : false);
     }
     function isAllowedLocalhostHost(host) {
       const h = normalizeHost(host).replace(/^\[/, '').replace(/\]$/, '');
       if (h === 'localhost') return true;
       const family = net.isIP(h);
       if (family === 4) return h.startsWith('127.');
-      if (family === 6) return h === '::' || h === '::1';
+      if (family === 6) return h === '::1';
       return false;
     }
     function effectivePort(url) {
@@ -143,43 +128,47 @@ public enum BrowserSpec {
       const h = normalizeHost(url.hostname).replace(/^\[/, '').replace(/\]$/, '');
       const expectedHost = normalizeHost(spec.localCaptureHost || '').replace(/^\[/, '').replace(/\]$/, '');
       const expectedPort = String(spec.localCapturePort || '');
-      return !!expectedHost && !!expectedPort && isAllowedLocalhostHost(h)
+      const expectedScheme = String(spec.localCaptureScheme || '').toLowerCase() + ':';
+      return !!expectedHost && !!expectedPort && !!expectedScheme && isAllowedLocalhostHost(h)
+        && url.protocol === expectedScheme
         && h === expectedHost && effectivePort(url) === expectedPort;
-    }
-    async function blockReasonForURL(url, spec) {
-      const h = normalizeHost(url.hostname);
-      if (!h) return 'empty host';
-      if ((spec.configuredAllowedHosts || []).length && !hostMatches(h, spec.configuredAllowedHosts)) {
-        return h + ' is not in configured host allowlist';
-      }
-      if ((spec.perCallAllowedHosts || []).length && !hostMatches(h, spec.perCallAllowedHosts)) {
-        return h + ' is not in per-call host allowlist';
-      }
-      if (sameLocalCaptureOrigin(url, spec)) return null;
-      if (h === 'localhost') return 'localhost is not allowed';
-      let addrs = [];
-      if (net.isIP(h)) addrs = [h];
-      else {
-        try { addrs = (await dns.lookup(h, { all: true })).map((a) => a.address); } catch (_) { addrs = []; }
-      }
-      if (addrs.some(isPrivateIP)) return h + ' resolves to a private/loopback address';
-      return null;
     }
 
     (async () => {
       let spec;
-      try { spec = JSON.parse(process.argv[2]); } catch (e) { console.error('bad spec'); process.exit(2); }
-      const browser = await chromium.launch({ headless: true });
       try {
-        const page = await browser.newPage();
-        await page.route('**/*', async (route) => {
-          let u;
-          try { u = new URL(route.request().url()); } catch (_) { return route.abort(); }
-          if (u.protocol !== 'http:' && u.protocol !== 'https:') return route.abort();
-          const reason = await blockReasonForURL(u, spec);
-          if (reason) { console.error('blocked browser request: ' + reason); return route.abort(); }
-          return route.continue();
+        const input = fs.readFileSync(0);
+        if (input.length > 1048576) throw new Error('spec too large');
+        spec = JSON.parse(input.toString('utf8'));
+      } catch (e) { console.error('bad spec'); process.exit(2); }
+      if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(String(spec.proxyServer || ''))) {
+        throw new Error('missing loopback browser proxy');
+      }
+      if (!/^[A-Za-z0-9_-]{43}$/.test(String(spec.proxyUsername || ''))
+          || !/^[A-Za-z0-9_-]{43}$/.test(String(spec.proxyPassword || ''))) {
+        throw new Error('missing browser proxy credentials');
+      }
+      const browser = await chromium.launch({
+        headless: true,
+        args: [
+          '--disable-quic',
+          '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+          '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+          '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
+          '--proxy-bypass-list=<-loopback>'
+        ]
+      });
+      try {
+        const context = await browser.newContext({
+          proxy: {
+            server: spec.proxyServer,
+            username: spec.proxyUsername,
+            password: spec.proxyPassword,
+            bypass: ''
+          },
+          serviceWorkers: 'allow'
         });
+        const page = await context.newPage();
         await page.goto(spec.url, { waitUntil: 'domcontentloaded', timeout: spec.timeoutMs });
         for (const a of (spec.actions || [])) {
           if (a.do === 'click') await page.click(a.selector, { timeout: spec.timeoutMs });

@@ -15,6 +15,15 @@ extension HeadlessAgentLoop {
     public func extendedThinkingEnabled(_ on: Bool) -> HeadlessAgentLoop {
         var copy = self
         copy.extendedThinking = on
+        copy.providerReasoningEffort = on ? .deep : .none
+        return copy
+    }
+
+    /// Value-type copy with an explicit provider-neutral reasoning depth.
+    public func reasoningEffortEnabled(_ effort: ProviderReasoningEffort) -> HeadlessAgentLoop {
+        var copy = self
+        copy.providerReasoningEffort = effort
+        copy.extendedThinking = effort != .none
         return copy
     }
 

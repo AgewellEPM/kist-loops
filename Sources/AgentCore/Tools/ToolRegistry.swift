@@ -11,8 +11,18 @@ public struct ToolRegistry: Sendable {
 
     /// Build a registry from a list of tools. Later entries win on name collision.
     public init(_ tools: [AgentTool]) {
+        self.init(tools, installDelegationControls: true)
+    }
+
+    private init(_ tools: [AgentTool], installDelegationControls: Bool) {
+        var expanded = tools
+        if installDelegationControls {
+            for source in tools.compactMap({ $0 as? any AsyncDelegationRegistryProviding }) {
+                expanded.append(contentsOf: source.delegationRegistry.controlTools())
+            }
+        }
         var map: [String: AgentTool] = [:]
-        for tool in tools { map[tool.name] = tool }
+        for tool in expanded { map[tool.name] = tool }
         self.tools = map
     }
 
@@ -59,12 +69,15 @@ public struct ToolRegistry: Sendable {
     public func scoped(to allowlist: [String]?) -> ToolRegistry {
         guard let allowlist else { return self }
         let allowed = Set(allowlist)
-        return ToolRegistry(all().filter { allowed.contains($0.name) })
+        return ToolRegistry(all().filter { allowed.contains($0.name) }, installDelegationControls: false)
     }
 
     /// A copy of this registry with one more tool (later wins on a name collision). Used to inject a
     /// per-loop tool that needs runtime state the static registry can't hold (e.g. `ask_user` + interactor).
-    public func adding(_ tool: AgentTool) -> ToolRegistry { ToolRegistry(all() + [tool]) }
+    public func adding(_ tool: AgentTool) -> ToolRegistry {
+        ToolRegistry(all() + [tool],
+                     installDelegationControls: tool is any AsyncDelegationRegistryProviding)
+    }
 
     public func tool(named name: String) -> AgentTool? { tools[name] }
 
@@ -77,7 +90,12 @@ public struct ToolRegistry: Sendable {
     /// consumers do not guess independently from a truncated fingerprint.
     public func effectObservation(name: String, arguments: [String: Any],
                                   result: ToolResult? = nil) -> ToolEffectObservation {
-        ToolEffectCatalog.observe(tool: name, arguments: arguments, outcomeMetadata: result?.metadata)
+        if name == "run_command", let result,
+           BuilderVerificationCommandAuthority.consume(arguments: arguments, result: result) {
+            return ToolEffectObservation(mutation: .none, verification: .buildOrTest)
+        }
+        return ToolEffectCatalog.observe(
+            tool: name, arguments: arguments, outcomeMetadata: result?.metadata)
     }
 
     /// Neutral tool definitions for NATIVE tool-calling (providers translate to their schema).
@@ -118,33 +136,49 @@ public struct ToolRegistry: Sendable {
     /// Execute a tool by name, never throwing — unknown tools and thrown errors are
     /// normalized into a failed `ToolResult` so the agent loop can observe and recover.
     public func execute(name: String, arguments: [String: Any], context: ToolContext) async -> ToolResult {
+        let telemetryStarted = DispatchTime.now().uptimeNanoseconds
         // Audit at THE choke point (council #1): one immutable record per invocation, capturing the
         // tool + an arg DIGEST (values hashed, never logged raw) + the enforcement OUTCOME. Records
         // BLOCKED attempts too — a denied call is exactly what forensics needs to see. Best-effort.
-        let (argKeys, argsDigest) = AuditLog.digest(arguments)
+        let (rawArgKeys, rawArgsDigest) = AuditLog.digest(arguments)
         // Read the active scope ONCE — same value drives the audit field AND the block decision, so a
         // concurrent skill-load can't make them disagree (Codex LOW).
         let activeAllowlist = await context.skillTracker?.activeToolAllowlist()
         let activeScope = activeAllowlist.map { $0.sorted() }
         func audit(_ outcome: String, _ success: Bool) async {
-            await context.auditLog?.record(AuditEntry(at: Self.now(), tool: name, argKeys: argKeys,
-                                                      argsDigest: argsDigest, outcome: outcome,
+            await context.auditLog?.record(AuditEntry(at: Self.now(), tool: name, argKeys: rawArgKeys,
+                                                      argsDigest: rawArgsDigest, outcome: outcome,
                                                       success: success, scope: activeScope))
         }
 
         guard let tool = tools[name] else {
             await audit("unknown_tool", false)
+            BuilderTrustedTelemetry.recordTool(
+                name: "unknown-tool", argumentsDigest: rawArgsDigest, success: false,
+                elapsedMilliseconds: 1,
+                workspaceRootIdentity: try? BuilderWorkspaceRootIdentity.capture(
+                    rootPath: context.projectRoot))
             return .failure("unknown tool: \(name)")
         }
+        let effectiveArguments = (tool as? any ToolArgumentCanonicalizing)?
+            .canonicalizeToolArguments(arguments) ?? arguments
+        let (_, argsDigest) = AuditLog.digest(effectiveArguments)
         // Authorization scope (plan-only / needs-approval), skill capability scope, audit, secret-mask,
         // and the run are ALL the SHARED gate (ToolGate) now — the one enforcement site that composite
         // sub-actions also route through, so a research_run sub-action can't skip the action-class gate
         // (Codex HIGH). execute only owns the unknown-tool audit above. Forward the allow-list we ALREADY
         // read so the gate doesn't re-read it (one read drives both audits + the decision; DeepSeek LOW).
-        return await ToolGate.run(name: name, arguments: arguments, context: context,
-                                  precomputedAllowlist: .some(activeAllowlist)) {
-            try await tool.execute(arguments: arguments, context: context)
+        let result = await ToolGate.run(name: name, arguments: effectiveArguments, context: context,
+                                  precomputedAllowlist: .some(activeAllowlist), parameters: tool.parameters) {
+            try await tool.execute(arguments: effectiveArguments, context: context)
         }
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
+        BuilderTrustedTelemetry.recordTool(
+            name: name, argumentsDigest: argsDigest, success: result.success,
+            elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)),
+            workspaceRootIdentity: try? BuilderWorkspaceRootIdentity.capture(
+                rootPath: context.projectRoot))
+        return result
     }
 
     /// Epoch seconds without `Date()` ambiguity (kept simple + Sendable).

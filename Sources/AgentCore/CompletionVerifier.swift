@@ -23,6 +23,53 @@ public struct CompletionVerifier: Sendable {
 
     public init() {}
 
+    /// A passing check proves only the revision that existed when it ran. Any later recorded mutation,
+    /// including an uncertain/failed custom-tool effect, makes that proof stale until a fresh deterministic
+    /// check binds the final revision. Indices are one-based so terminal receipts match human-facing steps.
+    public struct InvalidatedVerification: Sendable, Equatable {
+        public let invalidatingStep: Int
+        public let invalidatingMutation: String
+        public let invalidatingMutationSucceeded: Bool
+        public let lastPassedStep: Int
+        public let lastPassedCheck: String
+        public let lastPassedTool: String
+        public let lastPassedFingerprint: String
+
+        public var reason: String {
+            let effect = invalidatingMutationSucceeded ? "mutation" : "failed or possibly-partial mutation"
+            return "verification became stale: \(effect) at step \(invalidatingStep) "
+                + "[\(invalidatingMutation)] occurred after the last passed build/test at step "
+                + "\(lastPassedStep) [\(lastPassedCheck)]; re-run that exact check against the latest "
+                + "revision before completion or independent review"
+        }
+    }
+
+    /// Returns the concrete receipt pair that made prior proof stale. This is intentionally independent of
+    /// model prose: only typed successful check and mutation/effect observations participate.
+    public func invalidatedVerification(in trajectory: [ActionRecord]) -> InvalidatedVerification? {
+        guard let lastPassed = trajectory.lastIndex(where: {
+            $0.success && $0.observedEffects.verification == .buildOrTest
+        }),
+        let invalidating = trajectory.indices.last(where: {
+            $0 > lastPassed && trajectory[$0].observedEffects.mutation != .none
+        }) else { return nil }
+        let check = trajectory[lastPassed]
+        let mutation = trajectory[invalidating]
+        return InvalidatedVerification(
+            invalidatingStep: invalidating + 1,
+            invalidatingMutation: Self.receiptLabel(mutation),
+            invalidatingMutationSucceeded: mutation.success,
+            lastPassedStep: lastPassed + 1,
+            lastPassedCheck: Self.receiptLabel(check),
+            lastPassedTool: check.tool,
+            lastPassedFingerprint: check.argsFingerprint)
+    }
+
+    private static func receiptLabel(_ record: ActionRecord) -> String {
+        let fingerprint = record.argsFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        return fingerprint.isEmpty ? record.tool : "\(record.tool): \(fingerprint.prefix(220))"
+    }
+
     /// Compatibility helper retained for internal callers/tests. The shared catalog owns classification.
     static func mutationNeedsBuild(_ r: ActionRecord) -> Bool {
         r.observedEffects.requiresBuildVerification
@@ -55,6 +102,24 @@ public struct CompletionVerifier: Sendable {
             if !(deliveredBefore && externallyProvenAfter) {
                 return .needsVerification(reason:
                     "the last mutation failed — failed work cannot be accepted as complete")
+            }
+        }
+
+        // A concrete failed mutation is more specific and more important than the stale proof it also
+        // creates, so evaluate it first. For a resumptive workspace boundary, preserve the detailed stale
+        // receipt when execution is available; when it is not, report the actual blocker instead of asking
+        // the model to run a check the current policy cannot execute.
+        if let invalidated = invalidatedVerification(in: trajectory) {
+            let externallyProvenAfter = expectedOutcome == .externalAction
+                && trajectory.dropFirst(invalidated.invalidatingStep).contains {
+                    $0.success && $0.observedEffects.progress == .externalState
+                }
+            if !externallyProvenAfter {
+                if !canRunCommands {
+                    return .needsVerification(reason:
+                        "workspace verification is stale, but shell/build execution is unavailable, so completion is unverified")
+                }
+                return .needsVerification(reason: invalidated.reason)
             }
         }
 
@@ -136,6 +201,13 @@ public struct CompletionVerifier: Sendable {
             return .accept
         }
 
+        if let failedCheck = after.last(where: {
+            !$0.success && $0.observedEffects.verification == .buildOrTest
+        }) {
+            return .needsVerification(reason:
+                "fresh build/test failed after the last source mutation [\(Self.receiptLabel(failedCheck))]")
+        }
+
         // Shell-off used to silently ACCEPT source changes because the verifier could not execute. That is
         // precisely an unverified result: disclose it rather than upgrading absence of evidence to success.
         guard canRunCommands else {
@@ -154,6 +226,14 @@ public struct CompletionVerifier: Sendable {
 
     /// The steer injected when a "done" is unverified.
     public static func steering(reason: String) -> String {
+        if reason.contains("verification became stale") {
+            return """
+            Not done yet: \(reason).
+            Re-run the exact last passed build/test named above against the latest revision. Do not make
+            another edit first, widen permissions, add accepted exit codes, skip checks, or weaken tests.
+            Finish only after that fresh deterministic receipt passes.
+            """
+        }
         if reason.contains("expected a workspace mutation") {
             return """
             Not done yet: \(reason).

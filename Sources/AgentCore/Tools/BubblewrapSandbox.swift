@@ -24,6 +24,9 @@ enum BubblewrapSandbox {
     static func wrap(launchPath: String, args: [String], root: String, cwd: String,
                      policy: SandboxPolicy) -> SeatbeltSandbox.Wrap {
         guard policy.enabled else { return .passthrough }
+        guard !policy.denyNetwork || policy.allowedLoopbackTCPPorts.isEmpty else {
+            return .unavailable(reason: "Linux bubblewrap cannot expose an exact host loopback proxy port inside an unshared network namespace; refusing to weaken network confinement")
+        }
         guard let bwrap = bwrapPath() else {
             return .unavailable(reason: "OS sandbox requires bubblewrap (bwrap); it is not installed — refusing to run unsandboxed")
         }

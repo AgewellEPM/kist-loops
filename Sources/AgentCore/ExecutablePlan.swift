@@ -27,6 +27,63 @@ public struct PlanStep: Sendable, Codable, Equatable {
         self.id = id; self.intent = intent; self.tool = tool
         self.argumentsJSON = argumentsJSON; self.dependsOn = dependsOn; self.ownerRole = ownerRole
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, intent, tool, argumentsJSON, dependsOn, ownerRole
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        intent = try values.decode(String.self, forKey: .intent)
+        tool = try values.decode(String.self, forKey: .tool)
+        let decodedArguments = try values.decode(String.self, forKey: .argumentsJSON)
+        argumentsJSON = tool == "run_command"
+            ? Self.argumentsJSONForDurableEncoding(decodedArguments)
+            : decodedArguments
+        dependsOn = try values.decodeIfPresent([String].self, forKey: .dependsOn) ?? []
+        ownerRole = try values.decodeIfPresent(String.self, forKey: .ownerRole)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(intent, forKey: .intent)
+        try values.encode(tool, forKey: .tool)
+        try values.encode(
+            tool == "run_command" ? Self.argumentsJSONForDurableEncoding(argumentsJSON) : argumentsJSON,
+            forKey: .argumentsJSON)
+        try values.encode(dependsOn, forKey: .dependsOn)
+        try values.encodeIfPresent(ownerRole, forKey: .ownerRole)
+    }
+
+    static let unavailableInlineStdinKey = "_inline_stdin_unavailable_after_resume"
+
+    /// Durable PlanExecute rejects inline stdin before accepting a plan. This serializer is the
+    /// migration/defense boundary for legacy or externally constructed checkpoints: raw values are
+    /// reduced to digest/count plus a replan sentinel and can never be reconstructed or executed.
+    static func argumentsJSONForDurableEncoding(_ raw: String) -> String {
+        guard let data = raw.data(using: .utf8),
+              var arguments = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let stdin = arguments.removeValue(forKey: "stdin") else { return raw }
+        let bytes: Data
+        if let text = stdin as? String {
+            bytes = Data(text.utf8)
+        } else if JSONSerialization.isValidJSONObject(["stdin": stdin]),
+                  let encoded = try? JSONSerialization.data(
+                    withJSONObject: ["stdin": stdin], options: [.sortedKeys]) {
+            bytes = encoded
+        } else {
+            bytes = Data(String(describing: type(of: stdin)).utf8)
+        }
+        arguments[Self.unavailableInlineStdinKey] = [
+            "sha256": RunCommandTool.sha256(bytes),
+            "byte_count": bytes.count,
+        ]
+        guard let encoded = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+              let value = String(data: encoded, encoding: .utf8) else { return "{}" }
+        return value
+    }
 }
 
 /// A typed, executable plan: a goal + a DAG of steps. Produced by the planner (parsed from the
@@ -140,13 +197,14 @@ public enum PlanValidationError: Error, Equatable, Sendable {
     case empty                                   // no steps at all
     case duplicateId(String)
     case emptyTool(stepId: String)
+    case invalidArguments(stepId: String, reason: String)
     case unknownDependency(stepId: String, missing: String)
     case cycle(involving: [String])              // ids that form / feed a cycle (sorted)
 }
 
 public extension ExecutablePlan {
     /// Collect ALL validation problems (does not throw). Empty array ⇒ the plan is runnable.
-    func validate() -> [PlanValidationError] {
+    func validate(hostOwnedFinalReview: Bool = false) -> [PlanValidationError] {
         var errors: [PlanValidationError] = []
         if steps.isEmpty { errors.append(.empty); return errors }
 
@@ -155,6 +213,23 @@ public extension ExecutablePlan {
             if seen.contains(s.id) { errors.append(.duplicateId(s.id)) }
             seen.insert(s.id)
             if s.tool.trimmingCharacters(in: .whitespaces).isEmpty { errors.append(.emptyTool(stepId: s.id)) }
+            if s.tool == "run_command" {
+                guard let data = s.argumentsJSON.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data),
+                      let arguments = object as? [String: Any] else {
+                    errors.append(.invalidArguments(stepId: s.id,
+                                                    reason: "arguments must be a JSON object"))
+                    continue
+                }
+                if let issue = RunCommandTool.argumentValidationIssue(arguments, planPreflight: true) {
+                    errors.append(.invalidArguments(stepId: s.id, reason: issue))
+                }
+            }
+            if hostOwnedFinalReview, Self.isUnprovenHostOwnedReviewStep(s) {
+                errors.append(.invalidArguments(
+                    stepId: s.id,
+                    reason: "independent/final review is owned by the outer BuilderRun host; remove this self-review step and keep only functional execution or deterministic evidence steps"))
+            }
         }
         // Dependency targets (explicit + ref) must exist.
         for s in steps {
@@ -168,6 +243,20 @@ public extension ExecutablePlan {
             errors.append(.cycle(involving: cycleParticipants()))
         }
         return errors
+    }
+
+    /// A producer may generate functional content, but it may not manufacture the host's independent
+    /// final-review receipt. Keep this narrow and intent-aware so ordinary code generation and shell
+    /// verification remain legal. The outer BuilderRun review boundary supplies the real reviewer.
+    private static func isUnprovenHostOwnedReviewStep(_ step: PlanStep) -> Bool {
+        let toolsThatCannotProveHostReview: Set<String> = ["generate", "grounded_answer", "run_command"]
+        guard toolsThatCannotProveHostReview.contains(step.tool.lowercased()) else { return false }
+        let claim = (step.intent + "\n" + step.argumentsJSON).lowercased()
+        return [
+            "independent final review", "independent review", "final independent review",
+            "final review", "distinct review", "distinct reviewer", "authoritative review",
+            "promotion review", "reviewer identity", "reviewer identities", "self-review", "self review",
+        ].contains { claim.contains($0) }
     }
 
     /// Steps in a valid run order (each step after all its effective dependencies), or throws the

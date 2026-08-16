@@ -100,11 +100,6 @@ public enum OrgFingerprint {
     public static func make(_ keyValues: [String: String]) -> String {
         let canonical = keyValues.sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }.joined(separator: ";")
-        var hash: UInt64 = 0xcbf29ce484222325            // FNV-1a offset basis
-        for byte in canonical.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x100000001b3                 // FNV prime
-        }
-        return String(hash, radix: 16)
+        return String(FNV1a.hash64(canonical), radix: 16)   // canonical FNV-1a (constants were inlined here)
     }
 }

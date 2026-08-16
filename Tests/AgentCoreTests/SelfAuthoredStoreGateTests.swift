@@ -53,8 +53,7 @@ final class SelfAuthoredStoreGateTests: XCTestCase {
         let root = tmpRoot()
         let store = SelfAuthoredToolStore(projectRoot: root)
         let home = try store.save(manifest: upperManifest(), scriptBody: upperScript)
-        let gate = ScriptCandidateGate(manifest: upperManifest(),
-                                       scriptPath: (home as NSString).appendingPathComponent("upper.sh"))
+        let gate = ScriptCandidateGate()
         let cand = CapabilityCandidate(toolName: "self__upper", workdir: home, contract: "x", authorProvider: "deepseek")
         let v = await gate.verify(cand)
         XCTAssertTrue(v.passed, v.reason)
@@ -67,7 +66,7 @@ final class SelfAuthoredStoreGateTests: XCTestCase {
         let badScript = "#!/bin/bash\necho hello\n"
         let m = upperManifest()
         let home = try store.save(manifest: m, scriptBody: badScript)
-        let gate = ScriptCandidateGate(manifest: m, scriptPath: (home as NSString).appendingPathComponent("upper.sh"))
+        let gate = ScriptCandidateGate()
         let cand = CapabilityCandidate(toolName: "self__upper", workdir: home, contract: "x", authorProvider: "deepseek")
         let v = await gate.verify(cand)
         XCTAssertFalse(v.passed, "a tool that fails its own acceptance test must not pass the gate")

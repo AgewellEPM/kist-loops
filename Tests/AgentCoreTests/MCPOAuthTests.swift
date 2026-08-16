@@ -21,20 +21,28 @@ final class MCPOAuthTests: XCTestCase {
     }
 
     func testSecureURLEnforcesHttpsExceptLoopback() {
-        XCTAssertNotNil(MCPOAuth.secureURL("https://auth.example.com/authorize"))
+        let publicResolver: (String) -> String? = { _ in nil }
+        XCTAssertNotNil(MCPOAuth.secureURL(
+            "https://example.com/authorize", ssrfBlockReason: publicResolver))
         XCTAssertNotNil(MCPOAuth.secureURL("http://127.0.0.1:9000/authorize"))   // loopback http ok
-        XCTAssertNil(MCPOAuth.secureURL("http://auth.example.com/authorize"))    // cleartext non-loopback
+        XCTAssertNil(MCPOAuth.secureURL(
+            "http://auth.example.com/authorize", ssrfBlockReason: publicResolver))
         XCTAssertNil(MCPOAuth.secureURL("https://169.254.169.254/authorize"))    // SSRF internal
     }
 
     func testParseMetadataRequiresSecureEndpoints() {
-        let good = #"{"authorization_endpoint":"https://a.example.com/auth","token_endpoint":"https://a.example.com/token","registration_endpoint":"https://a.example.com/reg"}"#.data(using: .utf8)!
-        let m = MCPOAuth.parseMetadata(good)
-        XCTAssertEqual(m?.authorizationEndpoint.absoluteString, "https://a.example.com/auth")
+        let good = #"{"authorization_endpoint":"https://example.com/auth","token_endpoint":"https://example.com/token","registration_endpoint":"https://example.com/reg"}"#.data(using: .utf8)!
+        let m = MCPOAuth.parseMetadata(good, ssrfBlockReason: { _ in nil })
+        XCTAssertEqual(m?.authorizationEndpoint.absoluteString, "https://example.com/auth")
         XCTAssertNotNil(m?.registrationEndpoint)
         // A cleartext token endpoint invalidates the whole metadata.
-        let bad = #"{"authorization_endpoint":"https://a.example.com/auth","token_endpoint":"http://a.example.com/token"}"#.data(using: .utf8)!
-        XCTAssertNil(MCPOAuth.parseMetadata(bad))
+        let bad = #"{"authorization_endpoint":"https://example.com/auth","token_endpoint":"http://example.com/token"}"#.data(using: .utf8)!
+        XCTAssertNil(MCPOAuth.parseMetadata(bad, ssrfBlockReason: { _ in nil }))
+    }
+
+    func testParseMetadataFailsClosedWhenEndpointResolutionFails() {
+        let data = #"{"authorization_endpoint":"https://example.com/auth","token_endpoint":"https://example.com/token"}"#.data(using: .utf8)!
+        XCTAssertNil(MCPOAuth.parseMetadata(data, ssrfBlockReason: { _ in "DNS unavailable" }))
     }
 
     func testAuthorizationURLHasPKCEAndState() {

@@ -34,7 +34,9 @@ final class CaptainOrchestratorTests: XCTestCase {
 
     // A recording spawner that never runs real work.
     private final class RecordingSpawner: AgentSpawner, @unchecked Sendable {
-        var calls: [(task: String, wt: GitWorktree)] = []
+        private let queue = DispatchQueue(label: "captain-tests.recording-spawner")
+        private var storedCalls: [(task: String, wt: GitWorktree)] = []
+        var calls: [(task: String, wt: GitWorktree)] { queue.sync { storedCalls } }
         let ok: (GitWorktree) -> Bool
         let onSpawn: (GitWorktree) -> Void
         init(ok: @escaping (GitWorktree) -> Bool = { _ in true },
@@ -44,17 +46,54 @@ final class CaptainOrchestratorTests: XCTestCase {
         }
         func spawn(task: String, worktree: GitWorktree) async -> Bool {
             onSpawn(worktree)
-            calls.append((task, worktree))
+            queue.sync { storedCalls.append((task, worktree)) }
             return ok(worktree)
         }
     }
 
     private final class RecordingAssignedSpawner: AssignedAgentSpawner, @unchecked Sendable {
-        var calls: [(task: String, wt: GitWorktree, assignment: ModelAssignmentDecision)] = []
+        private let queue = DispatchQueue(label: "captain-tests.recording-assigned-spawner")
+        private var storedCalls: [(
+            task: String, wt: GitWorktree, assignment: ModelAssignmentDecision
+        )] = []
+        var calls: [(task: String, wt: GitWorktree, assignment: ModelAssignmentDecision)] {
+            queue.sync { storedCalls }
+        }
         func spawn(task: String, worktree: GitWorktree) async -> Bool { false }
         func spawn(task: String, worktree: GitWorktree, assignment: ModelAssignmentDecision) async -> Bool {
-            calls.append((task, worktree, assignment))
+            queue.sync { storedCalls.append((task, worktree, assignment)) }
             return true
+        }
+    }
+
+    private actor BarrierSpawner: AgentSpawner {
+        struct Metrics: Sendable {
+            let maximumActive: Int
+            let branches: [String]
+        }
+
+        private var active = 0
+        private var maximumActive = 0
+        private var branches: [String] = []
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func spawn(task: String, worktree: GitWorktree) async -> Bool {
+            active += 1
+            maximumActive = max(maximumActive, active)
+            branches.append(worktree.branch)
+            if active >= 2 {
+                let pending = waiters
+                waiters.removeAll()
+                for waiter in pending { waiter.resume() }
+            } else {
+                await withCheckedContinuation { waiters.append($0) }
+            }
+            active -= 1
+            return true
+        }
+
+        func metrics() -> Metrics {
+            Metrics(maximumActive: maximumActive, branches: branches)
         }
     }
 
@@ -121,6 +160,24 @@ final class CaptainOrchestratorTests: XCTestCase {
         // one held baton per working agent, persisted under the per-fleet dir
         let batons = FleetBatonStore(baseDir: launch.fleetDir).all()
         XCTAssertEqual(batons.count, 3)
+        XCTAssertTrue(batons.allSatisfy { $0.state == .held })
+    }
+
+    func testDisjointPreparedWorkersActuallyOverlapAndPublishDeterministically() async {
+        let spawner = BarrierSpawner()
+        let launch = await orchestrator(spawner).launchFleet(
+            goal: "build it", repo: repo.path,
+            subtasks: [sub("parser", ["Core/*"]), sub("lexer", ["Lex/*"])],
+            maxAgents: 2, baseDir: baseDir, nowEpoch: 1000)
+
+        let metrics = await spawner.metrics()
+        XCTAssertEqual(metrics.maximumActive, 2, "two disjoint armed workers must overlap")
+        XCTAssertEqual(Set(metrics.branches), Set(["mythos/parser", "mythos/lexer"]))
+        XCTAssertEqual(launch.agents.map(\.title), ["parser", "lexer"])
+        XCTAssertEqual(launch.board.cells.map(\.status), [.working, .working])
+        XCTAssertTrue(launch.supervisionReady)
+        let batons = FleetBatonStore(baseDir: launch.fleetDir).all()
+        XCTAssertEqual(batons.count, 2)
         XCTAssertTrue(batons.allSatisfy { $0.state == .held })
     }
 

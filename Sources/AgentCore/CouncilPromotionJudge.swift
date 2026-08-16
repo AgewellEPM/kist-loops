@@ -17,11 +17,14 @@ public struct PromotionContext: Sendable, Equatable {
     public let testsPassed: Bool
     public let testSummary: String        // e.g. "1959 tests, 0 failures" — or the failure detail
     public let signoffSummary: String     // what the captain actually verified (from the signoff ledger)
+    public let completionEvidence: PromotionCompletionEvidence?
 
     public init(goal: String, diffSummary: String, testsPassed: Bool,
-                testSummary: String, signoffSummary: String) {
+                testSummary: String, signoffSummary: String,
+                completionEvidence: PromotionCompletionEvidence? = nil) {
         self.goal = goal; self.diffSummary = diffSummary; self.testsPassed = testsPassed
         self.testSummary = testSummary; self.signoffSummary = signoffSummary
+        self.completionEvidence = completionEvidence
     }
 }
 
@@ -30,9 +33,14 @@ public struct PromotionMindVote: Sendable, Codable, Equatable {
     public let shipWorthy: Bool   // SHIP (true) vs HOLD (false)
     public let reason: String
     public let failed: Bool        // the mind's LLM call errored — counts as NEITHER ship nor veto
+    /// Concrete route returned by ProviderRegistry after any same-provider model recovery.
+    public let providerID: String?
+    public let modelID: String?
 
-    public init(name: String, shipWorthy: Bool, reason: String, failed: Bool = false) {
+    public init(name: String, shipWorthy: Bool, reason: String, failed: Bool = false,
+                providerID: String? = nil, modelID: String? = nil) {
         self.name = name; self.shipWorthy = shipWorthy; self.reason = reason; self.failed = failed
+        self.providerID = providerID; self.modelID = modelID
     }
 }
 
@@ -75,13 +83,21 @@ public struct CouncilPromotionJudge: Sendable {
     private let providers: ProviderRegistry
     private let roles: RoleBindings
     private let recorder: TraceRecorder?
+    private let lensDeadlineNanoseconds: UInt64
+    private let lensDeadlineDescription: String
 
-    public init(providers: ProviderRegistry, roles: RoleBindings, recorder: TraceRecorder? = nil) {
+    public init(providers: ProviderRegistry, roles: RoleBindings, recorder: TraceRecorder? = nil,
+                lensDeadline: TimeInterval = 60) {
+        let maximumSeconds = Double(UInt64.max) / 1_000_000_000
+        let normalized = lensDeadline.isFinite && lensDeadline > 0
+            ? min(lensDeadline, maximumSeconds) : 60
         self.providers = providers; self.roles = roles; self.recorder = recorder
+        self.lensDeadlineNanoseconds = UInt64(normalized * 1_000_000_000)
+        self.lensDeadlineDescription = String(format: "%.3f seconds", normalized)
     }
 
     /// One lens = (display name, AgentRole for vendor binding, the judging brief).
-    struct Lens { let name: String; let role: AgentRole; let brief: String }
+    struct Lens: Sendable { let name: String; let role: AgentRole; let brief: String }
     static let lenses: [Lens] = [
         Lens(name: "Correctness", role: .critic, brief:
             "Judge whether the change is CORRECT and the tests genuinely cover it. HOLD if tests are weakened, missing for new behavior, or the diff looks like it games the verifier rather than solving the goal."),
@@ -97,8 +113,18 @@ public struct CouncilPromotionJudge: Sendable {
     /// 3 of the 4 lenses (with the zero-veto rule on top). The per-mind LLM call is live (not unit-tested,
     /// like `AICouncil.run`); the tally that decides ship/hold is pure and pinned.
     public func judge(_ ctx: PromotionContext, threshold: Int = 3) async -> CouncilPromotionVerdict {
-        var votes: [PromotionMindVote] = []
-        for lens in Self.lenses { votes.append(await ask(lens, ctx)) }
+        let indexedVotes = await withTaskGroup(of: IndexedPromotionVote.self) { group in
+            for (index, lens) in Self.lenses.enumerated() {
+                group.addTask {
+                    IndexedPromotionVote(index: index, vote: await ask(lens, ctx))
+                }
+            }
+            var results: [IndexedPromotionVote] = []
+            results.reserveCapacity(Self.lenses.count)
+            for await result in group { results.append(result) }
+            return results
+        }
+        let votes = indexedVotes.sorted { $0.index < $1.index }.map(\.vote)
         return CouncilPromotionVerdict.tally(votes, threshold: threshold)
     }
 
@@ -109,19 +135,43 @@ public struct CouncilPromotionJudge: Sendable {
                                      systemPrompt: Self.systemPrompt(lens: lens.name),
                                      disableThinking: true)
         let started = Date()
-        do {
-            let (text, usage) = try await providers.completeWithUsage(
-                providerId: binding.providerId, model: binding.model,
-                messages: [ChatMessage(role: .user, content: prompt)], settings: settings)
-            await record(role: "promote_\(lens.name.lowercased())", binding: binding, usage: usage,
-                         promptChars: prompt.count, completionChars: text.count, started: started, status: .ok)
-            let (ship, reason) = Self.parseVote(text)
-            return PromotionMindVote(name: lens.name, shipWorthy: ship, reason: reason)
-        } catch {
+        let race = CouncilLensDeadlineRace()
+        let result = await race.run(timeoutNanoseconds: lensDeadlineNanoseconds) {
+            do {
+                let completion = try await providers.completeWithRoute(
+                    providerId: binding.providerId, model: binding.model,
+                    messages: [ChatMessage(role: .user, content: prompt)], settings: settings)
+                guard !Task.isCancelled else {
+                    return .failure("completion cancelled")
+                }
+                return .success(completion)
+            } catch {
+                return .failure(String(describing: error))
+            }
+        }
+        switch result {
+        case .success(let completion):
+            let actualBinding = ProviderBinding(
+                providerId: completion.providerId, model: completion.model)
+            await record(role: "promote_\(lens.name.lowercased())", binding: actualBinding,
+                         usage: completion.usage, promptChars: prompt.count,
+                         completionChars: completion.text.count, started: started, status: .ok)
+            let (ship, reason) = Self.parseVote(completion.text)
+            return PromotionMindVote(
+                name: lens.name, shipWorthy: ship, reason: reason,
+                providerID: completion.providerId, modelID: completion.model)
+        case .failure(let message):
             await record(role: "promote_\(lens.name.lowercased())", binding: binding, usage: .zero,
                          promptChars: prompt.count, completionChars: 0, started: started, status: .error)
             // FAIL-CLOSED: a broken mind is `failed` (neither SHIP nor veto), shrinking the SHIP pool.
-            return PromotionMindVote(name: lens.name, shipWorthy: false, reason: "FAILED: \(error)", failed: true)
+            return PromotionMindVote(
+                name: lens.name, shipWorthy: false, reason: "FAILED: \(message)", failed: true)
+        case .deadline:
+            await record(role: "promote_\(lens.name.lowercased())", binding: binding, usage: .zero,
+                         promptChars: prompt.count, completionChars: 0, started: started, status: .error)
+            return PromotionMindVote(
+                name: lens.name, shipWorthy: false,
+                reason: "review deadline exceeded after \(lensDeadlineDescription)", failed: true)
         }
     }
 
@@ -188,6 +238,123 @@ public struct CouncilPromotionJudge: Sendable {
         """
     }
 
+    static func completionEvidencePrompt(_ evidence: PromotionCompletionEvidence?) -> String {
+        guard let evidence else {
+            return "HOST COMPLETION EVIDENCE: unavailable. HOLD because no typed packet was supplied."
+        }
+        let commands = evidence.commandReceipts.map {
+            "- tool=\($0.tool); verifier=\($0.verifierStatus.rawValue); exit=\($0.exitCode); "
+                + "allowed=\($0.allowedExitCodes); semantic=\($0.semanticStatus); "
+                + "argsFingerprint=\($0.argsFingerprint); outputSHA256=\($0.outputDigest); "
+                + "outputExcerpt=\($0.outputExcerpt); evidenceSHA256=\($0.evidenceDigest)"
+        }.joined(separator: "\n")
+        let requiredSupport = evidence.requiredSupportingObligations.map {
+            "- id=\($0.id); kind=\($0.kind.rawValue)"
+        }.joined(separator: "\n")
+        let supporting = evidence.supportingCommandReceipts
+            .sorted { $0.captureOrdinal < $1.captureOrdinal }
+            .map {
+                let executable = SecretMasker.mask($0.executable)
+                let argv = $0.argv.map(SecretMasker.mask).joined(separator: " | ")
+                let cwd = SecretMasker.mask($0.workingDirectory ?? "<default>")
+                let excerpt = SecretMasker.mask($0.boundedRedactedOutputExcerpt)
+                return "- SUPPORTING ONLY; obligations=\($0.satisfiedObligationIDs.joined(separator: ",")); "
+                    + "ordinal=\($0.captureOrdinal); frontier=\($0.mutationFrontierOrdinal.map(String.init) ?? "none"); "
+                    + "executable=\(executable); argv=[\(argv)]; cwd=\(cwd); "
+                    + "stdinProvided=\($0.hasStandardInput); stdinSHA256=\($0.standardInputDigest ?? "none"); "
+                    + "stdinBytes=\($0.standardInputByteCount); exit=\($0.actualExitCode); "
+                    + "allowed=\($0.allowedExitCodes); signalled=\($0.wasSignalled); timeout=\($0.timedOut); "
+                    + "semantic=\($0.semanticStatus); verificationEligible=\($0.verificationEligible); "
+                    + "argsFingerprint=\($0.argsFingerprint); commandFingerprint=\($0.commandFingerprint); "
+                    + "outputSHA256=\($0.outputDigest); outputExcerpt=\(excerpt); "
+                    + "policyFingerprint=\($0.executionPolicyFingerprint); manifestSHA256=\($0.workspaceManifestDigest); "
+                    + "workspaceSHA256=\($0.governedWorkspaceDigest); evidenceSHA256=\($0.evidenceDigest)"
+            }.joined(separator: "\n")
+        let finalReplay: String
+        if let final = evidence.finalVerificationReceipt {
+            let executable = SecretMasker.mask(final.invocation.executable)
+            let argv = final.invocation.argv.map(SecretMasker.mask).joined(separator: " | ")
+            finalReplay = "- FINAL VERIFIER; ordinal=\(final.captureOrdinal); "
+                + "executable=\(executable); argv=[\(argv)]; exit=\(final.actualExitCode); "
+                + "expected=\(final.expectedExitCode); outputSHA256=\(final.outputDigest); "
+                + "outputExcerpt=\(SecretMasker.mask(final.boundedRedactedOutputExcerpt)); "
+                + "workspaceSHA256=\(final.governedWorkspaceDigest); evidenceSHA256=\(final.evidenceDigest)"
+        } else {
+            finalReplay = "- unavailable"
+        }
+        let checks = evidence.hostChecks.map {
+            "- \($0.name): \($0.passed ? "PASS" : "FAIL") — \($0.details)"
+        }.joined(separator: "\n")
+        let acceptedChildSubjects = evidence.acceptedVerificationSubjectDigests.keys.sorted().map {
+            "- node=\($0); verifierSubjectSHA256=\(evidence.acceptedVerificationSubjectDigests[$0]!)"
+        }.joined(separator: "\n")
+        var mutationLines: [String] = []
+        for receipt in evidence.mutationReceipts {
+            for operation in receipt.operations {
+                let imageDigests = "preimageSHA256=\(operation.preimageSHA256 ?? "absent"); "
+                    + "postimageSHA256=\(operation.postimageSHA256 ?? "absent")"
+                mutationLines.append(
+                    "- node=\(receipt.nodeID); attempt=\(receipt.attempt); "
+                        + "kind=\(operation.kind.rawValue); path=\(operation.path); "
+                        + imageDigests + "; transactionWorkspaceSHA256=\(receipt.workspaceDigest); "
+                        + "verifierSubjectSHA256=\(receipt.verifierSubjectDigest ?? "unavailable"); "
+                        + "receiptSHA256=\(receipt.receiptDigest)")
+            }
+        }
+        let mutations = mutationLines.joined(separator: "\n")
+        return """
+        HOST COMPLETION EVIDENCE (typed host facts; packet SHA-256: \(evidence.packetDigest)):
+        contractID: \(evidence.contractID)
+        objectiveFingerprint: \(evidence.objectiveFingerprint)
+        completionMode: \(evidence.completionMode.rawValue)
+        verificationSubject: \(evidence.verificationSubject)
+        baselineDigest: \(evidence.baselineDigest)
+        verifiedDigest: \(evidence.verifiedDigest)
+        reviewEntryDigest: \(evidence.reviewEntryDigest)
+        verifiedAt: \(evidence.verifiedAt)
+        mutationPolicy: \(evidence.completionMode == .verificationOnly ? "digest equality and no workspace changes are REQUIRED" : "a governed digest change is REQUIRED")
+        producerIdentities: \(evidence.producerIdentities.joined(separator: ", "))
+        reviewerIdentityForThisInvocation: \(evidence.reviewerIdentity)
+        reviewerDistinctFromEveryProducer: true
+        hadChanges: \(evidence.hadChanges)
+        changedPaths: \(evidence.changedPaths.joined(separator: ", "))
+
+        SEALED GOVERNED MUTATION OBSERVATIONS (authoritative; git diff is advisory only):
+        \(mutations.isEmpty ? "- none observed" : mutations)
+
+        ACCEPTED PRE-MERGE CHILD VERIFIER SUBJECTS (fleet only; packet-bound):
+        \(acceptedChildSubjects.isEmpty ? "- not a fleet promotion" : acceptedChildSubjects)
+
+        REQUIRED SUPPORTING OBLIGATIONS:
+        \(requiredSupport.isEmpty ? "- none declared" : requiredSupport)
+
+        SUPPORTING FUNCTIONAL COMMAND RECEIPTS (coverage only; NEVER freshness/verifier proof):
+        \(supporting.isEmpty ? "- none supplied" : supporting)
+
+        SOLE FRESH FINAL VERIFIER:
+        \(finalReplay)
+
+        DIGEST-BOUND BUILDER COMMAND RECEIPTS:
+        \(commands)
+
+        HOST CHECKS:
+        \(checks)
+
+        REVIEW PROTOCOL:
+        - This is the pre-verdict input. Your current call CREATES the independent final review receipt.
+        - A final review receipt cannot exist yet and MUST NOT be demanded as input.
+        - For verificationOnly, unchanged baseline/verified/review-entry digests and no diff are success proof, not missing mutation proof.
+        - Planned free-form reviews and grounded_answer text are not authoritative; only typed host facts above are evidence.
+        - TEST STATUS, HOST CHECKS, sealed mutations, and digest-bound command receipts are authoritative. Generic worker/model "failed" or "unverified" self-verdict prose is not.
+        - Never infer permission errors, nonzero exits, missing files, or failed builds unless a typed command receipt or host check above explicitly records that failure.
+        - A real command whose exit is outside its allowed exits remains visible in DIGEST-BOUND BUILDER COMMAND RECEIPTS and may justify HOLD; do not suppress actual failures.
+        - Supporting receipts prove functional coverage only. Never count them as final freshness or as the deterministic verifier.
+        - An allowed nonzero exit with semantic expected_domain_status is successful domain support, not a failed build.
+        - Every required supporting obligation must have a matching receipt; missing support requires HOLD.
+        - The host will rehash the workspace after your verdict before persisting final acceptance.
+        """
+    }
+
     private static func judgePrompt(lens: Lens, ctx: PromotionContext) -> String {
         """
         Lens: \(lens.name)
@@ -201,7 +368,9 @@ public struct CouncilPromotionJudge: Sendable {
         CAPTAIN SIGN-OFF (what was verified in-process):
         \(ctx.signoffSummary)
 
-        COMMITTED DIFF (stat / summary of the integration branch):
+        \(completionEvidencePrompt(ctx.completionEvidence))
+
+        BUILD RESULT (sealed Builder mutations are authoritative; git text is optional advisory only):
         \(String(ctx.diffSummary.prefix(8000)))
 
         Decide: is this REAL and worth merging to main through YOUR lens? Output only the VERDICT/REASON shape.
@@ -218,5 +387,126 @@ public struct CouncilPromotionJudge: Sendable {
                                         promptTokens: measured.promptTokens,
                                         completionTokens: measured.completionTokens,
                                         finishReason: nil, startedAt: started, endedAt: Date(), status: status))
+    }
+}
+
+private struct IndexedPromotionVote: Sendable {
+    let index: Int
+    let vote: PromotionMindVote
+}
+
+private enum CouncilLensCallResult: Sendable {
+    case success(ProviderRegistry.RoutedCompletion)
+    case failure(String)
+    case deadline
+}
+
+/// `withTaskGroup` correctly propagates TaskLocal telemetry, but its scope must await every child even
+/// after cancellation. A provider that ignores cancellation before returning its stream could therefore
+/// hold the entire promotion gate open forever. This small non-detached race preserves TaskLocal values,
+/// cancels the real registry completion at the deadline, and resumes the lens without waiting for a
+/// non-cooperative provider. A late result cannot replace the already-sealed deadline result.
+private final class CouncilLensDeadlineRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: CouncilLensCallResult?
+    private var continuation: CheckedContinuation<CouncilLensCallResult, Never>?
+    private var operationTask: Task<Void, Never>?
+    private var timerTask: Task<Void, Never>?
+    private var operationStarted = false
+    private var operationStartContinuation: CheckedContinuation<Void, Never>?
+
+    func run(timeoutNanoseconds: UInt64,
+             operation: @escaping @Sendable () async -> CouncilLensCallResult) async
+        -> CouncilLensCallResult {
+        await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                install(continuation)
+                let operationTask = Task { [self] in
+                    markOperationStarted()
+                    guard !Task.isCancelled else { return }
+                    resolve(await operation())
+                }
+                let timerTask = Task { [self] in
+                    // Count the provider deadline from an operation that has actually been
+                    // scheduled. Under a saturated executor the timer could otherwise win
+                    // before the provider task entered at all, producing a deadline verdict
+                    // without ever exercising (or cancelling) the routed completion.
+                    await waitForOperationStart()
+                    guard !Task.isCancelled else { return }
+                    do { try await Task.sleep(nanoseconds: timeoutNanoseconds) }
+                    catch { return }
+                    resolve(.deadline)
+                }
+                install(operationTask: operationTask, timerTask: timerTask)
+            }
+        }, onCancel: { [self] in
+            resolve(.failure("completion cancelled"))
+        })
+    }
+
+    private func install(_ continuation: CheckedContinuation<CouncilLensCallResult, Never>) {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(returning: result)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    private func install(operationTask: Task<Void, Never>, timerTask: Task<Void, Never>) {
+        lock.lock()
+        if result != nil {
+            lock.unlock()
+            operationTask.cancel()
+            timerTask.cancel()
+            return
+        }
+        self.operationTask = operationTask
+        self.timerTask = timerTask
+        lock.unlock()
+    }
+
+    private func markOperationStarted() {
+        lock.lock()
+        operationStarted = true
+        let continuation = operationStartContinuation
+        operationStartContinuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    private func waitForOperationStart() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if operationStarted || result != nil {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            operationStartContinuation = continuation
+            lock.unlock()
+        }
+    }
+
+    private func resolve(_ result: CouncilLensCallResult) {
+        lock.lock()
+        guard self.result == nil else { lock.unlock(); return }
+        self.result = result
+        let continuation = self.continuation
+        let operationTask = self.operationTask
+        let timerTask = self.timerTask
+        let operationStartContinuation = self.operationStartContinuation
+        self.continuation = nil
+        self.operationTask = nil
+        self.timerTask = nil
+        self.operationStartContinuation = nil
+        lock.unlock()
+
+        operationTask?.cancel()
+        timerTask?.cancel()
+        operationStartContinuation?.resume()
+        continuation?.resume(returning: result)
     }
 }

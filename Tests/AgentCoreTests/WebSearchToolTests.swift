@@ -27,6 +27,8 @@ final class WebSearchToolTests: XCTestCase {
         XCTAssertEqual(WebSearchTool.clampedLimit(0), 1)
         XCTAssertEqual(WebSearchTool.clampedLimit(99), 10)
         XCTAssertEqual(WebSearchTool.clampedLimit("3"), 3)
+        XCTAssertEqual(WebSearchTool.clampedLimit(Double.nan), 5)
+        XCTAssertEqual(WebSearchTool.clampedLimit(Double.infinity), 5)
     }
 
     func testExecuteBuildsSiteConstrainedQueryAndReturnsResults() async throws {
@@ -62,6 +64,41 @@ final class WebSearchToolTests: XCTestCase {
 
         XCTAssertFalse(result.success)
         XCTAssertTrue((result.error ?? "").contains("query is required"))
+    }
+
+    func testExecuteRejectsOversizedQueryAndSiteBeforeFetch() async throws {
+        let capture = SearchURLCapture()
+        let tool = WebSearchTool(fetcher: { url in
+            await capture.record(url)
+            return ""
+        })
+        let queryResult = try await tool.execute(
+            arguments: ["query": String(repeating: "q", count: WebSearchTool.maxQueryBytes + 1)],
+            context: ToolContext(projectRoot: "/tmp"))
+        let siteResult = try await tool.execute(
+            arguments: ["query": "safe", "site": String(
+                repeating: "s", count: WebSearchTool.maxSiteBytes + 1)],
+            context: ToolContext(projectRoot: "/tmp"))
+        let fetchedURLs = await capture.all()
+
+        XCTAssertFalse(queryResult.success)
+        XCTAssertFalse(siteResult.success)
+        XCTAssertTrue((queryResult.error ?? "").contains("byte limit"))
+        XCTAssertTrue((siteResult.error ?? "").contains("bounded exact hostname"))
+        XCTAssertTrue(fetchedURLs.isEmpty)
+    }
+
+    func testExecuteRejectsWrongSiteTypeBeforeFetch() async throws {
+        let capture = SearchURLCapture()
+        let tool = WebSearchTool(fetcher: { url in await capture.record(url); return "" })
+        let result = try await tool.execute(
+            arguments: ["query": "safe", "site": ["example.com"]],
+            context: ToolContext(projectRoot: "/tmp"))
+
+        XCTAssertFalse(result.success)
+        XCTAssertTrue((result.error ?? "").contains("bounded exact hostname"))
+        let fetchedURLs = await capture.all()
+        XCTAssertTrue(fetchedURLs.isEmpty)
     }
 
     func testExecuteFallsBackToDuckDuckGoLiteWhenHTMLParserFindsNothing() async throws {

@@ -375,6 +375,25 @@ final class ToolsTests: XCTestCase {
         XCTAssertTrue((r.error ?? "").contains("deny-list"))
     }
 
+    func testStructuredExec_blocksInterpreterCommandAndEvalModes() {
+        let blocked: [(String, [String])] = [
+            ("/bin/sh", ["-c", "r''m -rf /tmp/example"]),
+            ("/bin/bash", ["-lc", "echo injected"]),
+            ("/bin/zsh", ["--command=echo injected"]),
+            ("/usr/bin/env", ["sh", "-c", "echo injected"]),
+            ("/usr/bin/python3", ["-c", "import os"]),
+            ("/usr/bin/python3", ["-cimport os"]),
+            ("/usr/bin/node", ["--eval=process.exit()"]),
+            ("/usr/bin/node", ["-eprocess.exit()"]),
+            ("/usr/bin/ruby", ["-e", "system('id')"]),
+            ("/usr/bin/ruby", ["-esystem('id')"]),
+        ]
+        for (path, args) in blocked {
+            XCTAssertNotNil(RunCommandTool.interpreterRefusalReason(resolvedPath: path, args: args), "must block \(path) \(args)")
+        }
+        XCTAssertNil(RunCommandTool.interpreterRefusalReason(resolvedPath: "/usr/bin/python3", args: ["script.py"]))
+    }
+
     func testStructuredExec_unknownExecutableFails() async {
         let r = await ToolRegistry.headless().execute(
             name: "run_command", arguments: ["executable": "no_such_binary_xyz_123"],
@@ -451,35 +470,18 @@ final class ToolsTests: XCTestCase {
 
     // MARK: Raw→structured promotion — a metacharacter-free `command` runs directly (no shell, no approval)
 
-    func testSimpleCommand_promotedToStructured_runsWithoutShellTrueOrApproval() async {
-        // "echo hi" has no shell metacharacters → promoted to executable+args → runs unattended (the case
-        // that unblocks a headless loop typing `swift build` as a raw command).
-        // Absolute path so it resolves regardless of the test's scrubbed PATH — the point here is promotion,
-        // not PATH lookup (which the `executable` path already covers).
+    func testSimpleRawCommand_requiresExplicitShellInsteadOfSilentPromotion() async {
         let r = await ToolRegistry.headless().execute(
             name: "run_command", arguments: ["command": "/bin/echo hi"],
-            context: ctx(shell: ShellPolicy(enabled: true, autoApprove: false))   // no handler, no autoApprove
+            context: ctx(shell: ShellPolicy(enabled: true, autoApprove: false))
         )
-        XCTAssertTrue(r.success, "a metacharacter-free command should promote and run: \(r.error ?? "")")
+        XCTAssertFalse(r.success)
+        XCTAssertTrue((r.error ?? "").contains("shell:true"))
     }
 
-    func testPromoteRawToStructured_classification() {
-        typealias RC = RunCommandTool
-        // Promoted: metacharacter-free, incl. `--flag=value` (the `=` must NOT block promotion).
-        XCTAssertEqual(RC.promoteRawToStructured("swift build").map { [$0.0] + $0.1 }, ["swift", "build"])
-        XCTAssertEqual(RC.promoteRawToStructured("git log --oneline -5").map { [$0.0] + $0.1 },
-                       ["git", "log", "--oneline", "-5"])
-        XCTAssertEqual(RC.promoteRawToStructured("swift test --filter=Foo").map { [$0.0] + $0.1 },
-                       ["swift", "test", "--filter=Foo"])
-        XCTAssertEqual(RC.promoteRawToStructured("swift\t build").map { [$0.0] + $0.1 }, ["swift", "build"])
-        // NOT promoted: shell operators, env-assignment prefix, empty.
-        XCTAssertNil(RC.promoteRawToStructured("echo hi | cat"))      // pipe
-        XCTAssertNil(RC.promoteRawToStructured("a && b"))            // sequencing
-        XCTAssertNil(RC.promoteRawToStructured("echo $HOME"))        // expansion
-        XCTAssertNil(RC.promoteRawToStructured("ls *.swift"))        // glob
-        XCTAssertNil(RC.promoteRawToStructured("FOO=bar swift build")) // env-assignment prefix
-        XCTAssertNil(RC.promoteRawToStructured("   "))               // whitespace only
-        XCTAssertNil(RC.promoteRawToStructured(""))                  // empty
+    func testPlanPreflightRefusesEvenMetacharacterFreeRawCommand() {
+        XCTAssertNotNil(RunCommandTool.argumentValidationIssue(
+            ["command": "swift build"], planPreflight: true))
     }
 
     func testRawShell_runsPipelineWithApproval() async {

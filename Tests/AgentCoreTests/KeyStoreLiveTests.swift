@@ -33,6 +33,52 @@ final class KeyStoreLiveTests: XCTestCase {
         XCTAssertEqual(store.key(forAccount: "custom_bar_api_key"), "new", "live re-read picks up the update")
     }
 
+    func testNewestFallbackRecordBeatsStalePrimary() {
+        let primary = VersionedSecretRecord.make(value: "stale-primary", updatedAtMilliseconds: 10)
+        let fallback = VersionedSecretRecord.make(value: "rotated-fallback", updatedAtMilliseconds: 11)
+        let selected = SecretVersioning.newest(primary: primary, fallback: fallback)
+        XCTAssertEqual(selected?.record.value, "rotated-fallback")
+        XCTAssertEqual(selected?.source, .fallback)
+    }
+
+    func testNewestPrimaryRecordBeatsStaleFallback() {
+        let primary = VersionedSecretRecord.make(value: "rotated-primary", updatedAtMilliseconds: 21)
+        let fallback = VersionedSecretRecord.make(value: "stale-fallback", updatedAtMilliseconds: 20)
+        let selected = SecretVersioning.newest(primary: primary, fallback: fallback)
+        XCTAssertEqual(selected?.record.value, "rotated-primary")
+        XCTAssertEqual(selected?.source, .primary)
+    }
+
+    func testLegacyFlatFileRemainsReadableAndMigratesWithoutDroppingOtherKeys() throws {
+        let path = tempPath()
+        defer {
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.removeItem(atPath: path + ".lock")
+        }
+        let legacy = #"{"first":"old","second":"preserved"}"#
+        try legacy.write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        XCTAssertEqual(FileKeyStore(path: path).key(forAccount: "second"), "preserved")
+
+        try SecretWriter.write(account: "first", key: "rotated", path: path)
+        let store = FileKeyStore(path: path)
+        XCTAssertEqual(store.key(forAccount: "first"), "rotated")
+        XCTAssertEqual(store.key(forAccount: "second"), "preserved")
+    }
+
+    func testStaleSynchronizationCannotOverwriteNewerRecord() throws {
+        let path = tempPath()
+        defer {
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.removeItem(atPath: path + ".lock")
+        }
+        let newer = VersionedSecretRecord.make(value: "new", updatedAtMilliseconds: 200)
+        let stale = VersionedSecretRecord.make(value: "old", updatedAtMilliseconds: 100)
+        try SecretWriter.writeVersioned(account: "account", record: newer, path: path)
+        try SecretWriter.writeVersioned(account: "account", record: stale, path: path)
+        XCTAssertEqual(FileKeyStore(path: path).key(forAccount: "account"), "new")
+    }
+
     func testFileKeyStoreStillRejectsGroupReadableFile() throws {
         // The owner-only perms gate must still run PER READ, not just at init.
         let path = tempPath()

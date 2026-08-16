@@ -17,19 +17,37 @@ struct CouncilMindTimeout: Error, CustomStringConvertible {
     var description: String { "mind timed out" }
 }
 
+public enum CouncilCriticDecision: String, Sendable, Codable, Equatable {
+    case accept
+    case reject
+}
+
+public struct CouncilCriticVerdict: Sendable, Codable, Equatable {
+    public let decision: CouncilCriticDecision
+    public let rationale: String
+
+    public init(decision: CouncilCriticDecision, rationale: String) {
+        self.decision = decision
+        self.rationale = rationale
+    }
+}
+
 public struct CouncilMindResult: Sendable, Codable, Equatable {
     public let name: String
     public let role: String
     public let binding: ProviderBinding?
     public let output: String
     public let failed: Bool
+    public let criticVerdict: CouncilCriticVerdict?
 
-    public init(name: String, role: String, binding: ProviderBinding?, output: String, failed: Bool = false) {
+    public init(name: String, role: String, binding: ProviderBinding?, output: String,
+                failed: Bool = false, criticVerdict: CouncilCriticVerdict? = nil) {
         self.name = name
         self.role = role
         self.binding = binding
         self.output = output
         self.failed = failed
+        self.criticVerdict = criticVerdict
     }
 }
 
@@ -79,11 +97,14 @@ public struct AICouncil: Sendable {
     /// panel ⇒ grounded findings stay `.unverified` (existence-only), as before. These cost model calls,
     /// so the caller opts in (and budget-gates) by passing refuters.
     private let refuters: [ReviewFindingRefuter]
+    /// Required research councils use a machine-readable critic decision. General advisory councils
+    /// retain their existing prose-only behavior unless the caller explicitly enables this gate.
+    private let requireStructuredCriticVerdict: Bool
 
     public init(providers: ProviderRegistry, roles: RoleBindings, memoryContext: String? = nil,
                 researchDossier: String? = nil, recorder: TraceRecorder? = nil,
                 progress: ProgressSink? = nil, budget: BudgetLedger? = nil, projectRoot: String? = nil,
-                refuters: [ReviewFindingRefuter] = []) {
+                refuters: [ReviewFindingRefuter] = [], requireStructuredCriticVerdict: Bool = false) {
         self.providers = providers
         self.roles = roles
         self.memoryContext = memoryContext
@@ -93,6 +114,7 @@ public struct AICouncil: Sendable {
         self.budget = budget
         self.projectRoot = projectRoot
         self.refuters = refuters
+        self.requireStructuredCriticVerdict = requireStructuredCriticVerdict
     }
 
     public func run(goal: String) async -> CouncilRunResult {
@@ -137,7 +159,18 @@ public struct AICouncil: Sendable {
         // The structured-finding instruction is added ONLY when we can ground against a real codebase
         // (projectRoot set). With no codebase, asking for code quotes we can't verify would be noise — and
         // it keeps the nil-projectRoot path a TRUE no-op vs. the original critic behavior (Codex MED).
-        let criticBrief = """
+        let criticBrief = (requireStructuredCriticVerdict ? """
+            Begin with exactly one machine-readable decision block before any prose:
+            <<<CRITIC_VERDICT
+            {"decision":"accept","rationale":"one concise evidence-based reason"}
+            CRITIC_VERDICT>>>
+            Replace "accept" with "reject" when rejecting. This verdict decides whether the proposal has enough
+            evidence and controls to ENTER staged execution; it does not claim the build already passed. A compile,
+            test, or byte-level fact that the frozen plan explicitly verifies after mutation is not missing pre-build
+            evidence. Reject when a required named URL was not fetched, primary evidence cannot ground the plan,
+            deterministic verification is absent for an unresolved claim, or another blocking requirement remains.
+
+            """ : "") + """
             Attack the proposal. Find failure modes, vague claims, scope creep, missing tests, and where the plan could
             become a messy clone instead of a defensible system.
             Output concise bullets and be specific.
@@ -195,8 +228,9 @@ public struct AICouncil: Sendable {
             // raw markers stripped before the planner sees them, instead of leaking through (Codex). With
             // no findings this just strips stray markers; the strategic prose is preserved.
             let sanitized = ReviewFindingVerifier.sanitizedForPlanner(minds[idx].output, verified: verified)
-            mindsForDecision[idx] = CouncilMindResult(name: minds[idx].name, role: minds[idx].role,
-                                                      binding: minds[idx].binding, output: sanitized, failed: false)
+    mindsForDecision[idx] = CouncilMindResult(name: minds[idx].name, role: minds[idx].role,
+                                              binding: minds[idx].binding, output: sanitized, failed: false,
+                                              criticVerdict: minds[idx].criticVerdict)
             groundingSection = Self.renderGroundingSection(verified)
         }
         let finalPlan = await finalDecision(goal: normalizedGoal, minds: mindsForDecision)
@@ -468,7 +502,11 @@ public struct AICouncil: Sendable {
                                      researchDossier: researchDossier,
                                      prior: prior)
         let messages = [ChatMessage(role: .user, content: prompt)]
-        let settings = ModelSettings(temperature: 0.2, maxTokens: 1400,
+        // Required critics must be able to finish their contract even when a reasoning provider
+        // spends part of the completion allowance internally. The verdict is requested first, so
+        // optional critique truncation cannot erase it.
+        let maxTokens = role == .critic && requireStructuredCriticVerdict ? 3_200 : 1_400
+        let settings = ModelSettings(temperature: 0.2, maxTokens: maxTokens,
                                      systemPrompt: Self.systemPrompt(mindName: name),
                                      disableThinking: true)
         let started = Date()
@@ -482,8 +520,13 @@ public struct AICouncil: Sendable {
                          promptChars: prompt.count, completionChars: text.count,
                          started: started, status: .ok)
             await heartbeat(status: "council", message: "\(name) completed")
-            return CouncilMindResult(name: name, role: role.rawValue, binding: binding,
-                                     output: text.trimmedOrPlaceholder())
+            return CouncilMindResult(
+                name: name,
+                role: role.rawValue,
+                binding: binding,
+                output: text.trimmedOrPlaceholder(),
+                criticVerdict: role == .critic ? Self.parseCriticVerdict(text) : nil
+            )
         } catch {
             await record(role: "council_\(name.lowercased())", binding: binding, usage: .zero,
                          promptChars: prompt.count, completionChars: 0,
@@ -603,6 +646,28 @@ public struct AICouncil: Sendable {
         shared decision before a builder acts. Do not reveal chain-of-thought, private scratchpad, or
         "the user wants..." analysis; provide conclusions and actionable bullets only.
         """
+    }
+
+    /// Decode only the delimited JSON contract. Prose such as "looks good" or "FAIL" is advisory and
+    /// cannot silently satisfy or reject a required semantic gate.
+    static func parseCriticVerdict(_ output: String) -> CouncilCriticVerdict? {
+        let open = "<<<CRITIC_VERDICT"
+        let close = "CRITIC_VERDICT>>>"
+        guard let openRange = output.range(of: open),
+              let closeRange = output.range(of: close, range: openRange.upperBound..<output.endIndex),
+              output.range(of: open, range: openRange.upperBound..<output.endIndex) == nil,
+              output.range(of: close, range: closeRange.upperBound..<output.endIndex) == nil,
+              let objectStart = output[openRange.upperBound..<closeRange.lowerBound].firstIndex(of: "{"),
+              let objectEnd = output[openRange.upperBound..<closeRange.lowerBound].lastIndex(of: "}") else {
+            return nil
+        }
+        let json = String(output[objectStart...objectEnd])
+        guard let data = json.data(using: .utf8),
+              let verdict = try? JSONDecoder().decode(CouncilCriticVerdict.self, from: data),
+              !verdict.rationale.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return verdict
     }
 
     private static func mindPrompt(name: String, brief: String, goal: String, memoryContext: String?,

@@ -69,14 +69,15 @@ final class MCPClientTests: XCTestCase {
     // A public HTTPS url with auth headers is accepted as an HTTP-transport server; ${ENV} in a header
     // value is expanded from the environment (secret stays out of the config file).
     func testConfig_httpServerAcceptedWithEnvExpandedHeader() throws {
-        setenv("KIST_TEST_MCP_TOKEN", "s3cr3t", 1)
-        defer { unsetenv("KIST_TEST_MCP_TOKEN") }
-        try writeConfig(#"{"mcpServers":{"remote":{"url":"https://api.example.com/mcp","headers":{"Authorization":"Bearer ${KIST_TEST_MCP_TOKEN}"}}}}"#)
-        let (servers, _) = MCPClientConfig.load(projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+        try writeConfig(#"{"mcpServers":{"remote":{"url":"https://example.com/mcp","headers":{"Authorization":"Bearer ${KIST_TEST_MCP_TOKEN}"}}}}"#)
+        let (servers, _) = MCPClientConfig.load(
+            projectRoot: dir, allowProjectConfig: true, includeUserConfig: false,
+            hostEnvironment: ["KIST_TEST_MCP_TOKEN": "s3cr3t"],
+            ssrfBlockReason: { _ in nil })
         XCTAssertEqual(servers.count, 1)
-        let s = servers[0]
+        guard let s = servers.first else { return }
         XCTAssertTrue(s.isHTTP)
-        XCTAssertEqual(s.url, "https://api.example.com/mcp")
+        XCTAssertEqual(s.url, "https://example.com/mcp")
         XCTAssertEqual(s.headers["Authorization"], "Bearer s3cr3t")   // env-expanded, not literal ${...}
     }
 
@@ -103,19 +104,30 @@ final class MCPClientTests: XCTestCase {
     }
 
     func testExpandEnvReplacesReferences() {
-        setenv("KIST_X", "abc", 1); defer { unsetenv("KIST_X") }
-        XCTAssertEqual(MCPClientConfig.expandEnv("Bearer ${KIST_X}"), "Bearer abc")
-        XCTAssertEqual(MCPClientConfig.expandEnv("${KIST_UNSET_ZZZ}!"), "!")   // unset → empty
-        XCTAssertEqual(MCPClientConfig.expandEnv("no vars here"), "no vars here")
+        let environment = ["KIST_X": "abc"]
+        XCTAssertEqual(MCPClientConfig.expandEnv("Bearer ${KIST_X}", environment: environment), "Bearer abc")
+        XCTAssertEqual(MCPClientConfig.expandEnv("${KIST_UNSET_ZZZ}!", environment: environment), "!")
+        XCTAssertEqual(MCPClientConfig.expandEnv("no vars here", environment: environment), "no vars here")
     }
 
     // Codex hardening: cleartext http + auth headers is refused (token would go over the wire) UNLESS
     // the host is loopback (a local server, never leaves the machine).
     func testConfig_cleartextHttpWithAuthRejected() throws {
-        try writeConfig(#"{"mcpServers":{"x":{"url":"http://api.example.com/mcp","headers":{"Authorization":"Bearer t"}}}}"#)
-        let (servers, issues) = MCPClientConfig.load(projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+        try writeConfig(#"{"mcpServers":{"x":{"url":"http://example.com/mcp","headers":{"Authorization":"Bearer t"}}}}"#)
+        let (servers, issues) = MCPClientConfig.load(
+            projectRoot: dir, allowProjectConfig: true, includeUserConfig: false,
+            hostEnvironment: [:], ssrfBlockReason: { _ in nil })
         XCTAssertTrue(servers.isEmpty)
         XCTAssertTrue(issues.contains { $0.reason.contains("cleartext") })
+    }
+
+    func testConfig_httpsResolutionFailureFailsClosed() throws {
+        try writeConfig(#"{"mcpServers":{"x":{"url":"https://example.com/mcp"}}}"#)
+        let (servers, issues) = MCPClientConfig.load(
+            projectRoot: dir, allowProjectConfig: true, includeUserConfig: false,
+            hostEnvironment: [:], ssrfBlockReason: { _ in "DNS unavailable" })
+        XCTAssertTrue(servers.isEmpty)
+        XCTAssertTrue(issues.contains { $0.reason.contains("DNS unavailable") })
     }
 
     func testConfig_loopbackHttpWithAuthAllowed() throws {

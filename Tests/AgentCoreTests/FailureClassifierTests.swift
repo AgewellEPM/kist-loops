@@ -93,4 +93,56 @@ final class FailureClassifierTests: XCTestCase {
         XCTAssertEqual(v.category, .knowledgeGap, "if ANY failure tells us how, discovery beats extension")
         XCTAssertEqual(v.culpritTool, "other_tool")
     }
+
+    func testReceiptLedgerTrajectoryIsStaleProofNotSandboxAuthorization() {
+        let source = ActionRecord(
+            tool: "edit_file", argsFingerprint: "path=Parser.swift", success: true,
+            effectObservation: ToolEffectObservation(mutation: .source))
+        let test = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=swift test", success: true,
+            effectObservation: CommandClassifier.observe("command=swift test"))
+        let build = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=swift build", success: true,
+            effectObservation: CommandClassifier.observe("command=swift build"))
+        let valid = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=.build/debug/receipt-ledger --input valid.ndjson", success: true,
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+        let expectedInvalid = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=.build/debug/receipt-ledger --input invalid.ndjson", success: false,
+            failureDetail: "exit code 1\nline 1: malformed record rejected",
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+        let helper = ActionRecord(
+            tool: "write_file", argsFingerprint: "path=stdin-helper.swift", success: true,
+            effectObservation: ToolEffectObservation(mutation: .source))
+        let helperRun = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=swift stdin-helper.swift", success: true,
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+
+        let signals = FailureSignals.from([source, test, build, valid, expectedInvalid, helper, helperRun])
+        let verdict = FailureClassifier.classify(signals)
+        XCTAssertEqual(verdict.category, .staleProof)
+        XCTAssertTrue(verdict.evidence.contains("stdin-helper.swift"), verdict.evidence)
+        XCTAssertTrue(verdict.evidence.contains("swift build"), verdict.evidence)
+
+        let decision = SelfEvolutionEngine.decide(
+            signals: signals, availableTools: ["run_command", "write_file"], now: 1_000)
+        XCTAssertEqual(decision.kind, .reverify)
+        XCTAssertTrue(decision.brief.contains("exact last passed"), decision.brief)
+        XCTAssertFalse(decision.brief.lowercased().contains("widen permissions"), decision.brief)
+        XCTAssertFalse(decision.brief.lowercased().contains("add allowed exit codes"), decision.brief)
+    }
+
+    func testExpectedApplicationExitAfterSameExecutableSuccessIsNotAuthorization() {
+        let valid = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=./receipt-ledger --input valid.ndjson", success: true,
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+        let invalid = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=./receipt-ledger --input invalid.ndjson", success: false,
+            failureDetail: "exit code 1\nline 1: negative amount rejected",
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+        let verdict = FailureClassifier.classify(FailureSignals.from([valid, invalid]))
+        XCTAssertEqual(verdict.category, .codeOrTest)
+        XCTAssertNotEqual(verdict.category, .authorization)
+        XCTAssertTrue(verdict.evidence.contains("same executable previously succeeded"), verdict.evidence)
+    }
 }

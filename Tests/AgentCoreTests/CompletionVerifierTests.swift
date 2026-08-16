@@ -435,4 +435,50 @@ final class CompletionVerifierTests: XCTestCase {
         XCTAssertFalse(v.check(trajectory: [wroteScript, failedCommand, ranInGuest],
                                canRunCommands: true).isAccept)
     }
+
+    func testReceiptLedgerHelperMutationNamesAndInvalidatesEarlierChecks() {
+        let source = ActionRecord(
+            tool: "write_file", argsFingerprint: "path=Sources/ReceiptLedger/Parser.swift", success: true,
+            effectObservation: ToolEffectObservation(mutation: .source))
+        let tests = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=swift test", success: true,
+            effectObservation: CommandClassifier.observe("command=swift test"))
+        let build = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=swift build", success: true,
+            effectObservation: CommandClassifier.observe("command=swift build"))
+        let validFixture = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=.build/debug/receipt-ledger --input valid.ndjson", success: true,
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+        let expectedInvalidFixture = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=.build/debug/receipt-ledger --input negative.ndjson", success: false,
+            failureDetail: "exit code 1\nline 1: negative amount rejected as expected",
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+        let helper = ActionRecord(
+            tool: "write_file", argsFingerprint: "path=stdin-helper.swift", success: true,
+            effectObservation: ToolEffectObservation(mutation: .source))
+        let helperRun = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=swift stdin-helper.swift", success: true,
+            effectObservation: ToolEffectObservation(verification: .nonVerifyingCommand))
+        let trajectory = [source, tests, build, validFixture, expectedInvalidFixture, helper, helperRun]
+
+        let invalidated = v.invalidatedVerification(in: trajectory)
+        XCTAssertEqual(invalidated?.invalidatingStep, 6)
+        XCTAssertTrue(invalidated?.invalidatingMutation.contains("stdin-helper.swift") == true)
+        XCTAssertTrue(invalidated?.lastPassedCheck.contains("swift build") == true)
+        guard case .needsVerification(let reason) = v.check(
+            trajectory: trajectory, canRunCommands: true,
+            expectedOutcome: .mutation, taskIntent: .build) else {
+            return XCTFail("post-proof helper mutation must invalidate prior checks")
+        }
+        XCTAssertTrue(reason.contains("stdin-helper.swift"), reason)
+        XCTAssertTrue(reason.contains("swift build"), reason)
+        XCTAssertTrue(CompletionVerifier.steering(reason: reason).contains("exact last passed"))
+
+        let freshBuild = ActionRecord(
+            tool: "run_command", argsFingerprint: "command=swift build", success: true,
+            effectObservation: CommandClassifier.observe("command=swift build"))
+        XCTAssertTrue(v.check(trajectory: trajectory + [freshBuild], canRunCommands: true,
+                              expectedOutcome: .mutation, taskIntent: .build).isAccept,
+                      "fresh proof after the helper mutation must bind the final revision; expected fixture exit stays domain evidence")
+    }
 }

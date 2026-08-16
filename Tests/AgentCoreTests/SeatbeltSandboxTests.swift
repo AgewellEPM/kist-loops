@@ -114,8 +114,11 @@ final class SeatbeltSandboxTests: XCTestCase {
     // MARK: - Profile generation + injection safety (cross-platform)
 
     func testProfileContainsExpectedRules() {
-        let p = SeatbeltSandbox.seatbeltProfile(root: "/private/var/x", policy: .confined())
+        let policy = SandboxPolicy.confined().allowingLoopbackTCPPort(49152)
+        let p = SeatbeltSandbox.seatbeltProfile(root: "/private/var/x", policy: policy)
         XCTAssertTrue(p.contains("(deny network*)"))
+        XCTAssertTrue(p.contains("(allow network-outbound (remote ip \"localhost:49152\"))"))
+        XCTAssertFalse(p.contains("localhost:*"))
         XCTAssertTrue(p.contains("(deny file-write*)"))
         XCTAssertTrue(p.contains("(allow file-write* (subpath \"/private/var/x\"))"))
     }

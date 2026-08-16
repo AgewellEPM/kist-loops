@@ -124,6 +124,56 @@ final class AICouncilTests: XCTestCase {
         XCTAssertTrue(messages.contains("council:Final Plan Agent completed"))
         XCTAssertTrue(messages.contains("council:council completed"))
     }
+
+    func testStructuredCriticVerdictParserFailsClosed() {
+        XCTAssertEqual(AICouncil.parseCriticVerdict("""
+        evidence review
+        <<<CRITIC_VERDICT
+        {"decision":"accept","rationale":"named source was fetched"}
+        CRITIC_VERDICT>>>
+        """), .init(decision: .accept, rationale: "named source was fetched"))
+
+        XCTAssertEqual(AICouncil.parseCriticVerdict("""
+        <<<CRITIC_VERDICT
+        {"decision":"reject","rationale":"no primary fetch"}
+        CRITIC_VERDICT>>>
+        """), .init(decision: .reject, rationale: "no primary fetch"))
+
+        XCTAssertNil(AICouncil.parseCriticVerdict("FAIL: no primary fetch"))
+        XCTAssertNil(AICouncil.parseCriticVerdict("""
+        <<<CRITIC_VERDICT
+        {"decision":"accept","rationale":"first"}
+        CRITIC_VERDICT>>>
+        <<<CRITIC_VERDICT
+        {"decision":"reject","rationale":"conflict"}
+        CRITIC_VERDICT>>>
+        """))
+    }
+
+    func testRequiredCriticRequestsVerdictBeforeProseForStagedExecution() async {
+        let worker = CouncilScriptedProvider(id: "workerco", responses: ["research", "ux"])
+        let planner = CouncilScriptedProvider(id: "plannerco", responses: ["architect", "Decision:\n- proceed"])
+        let coder = CouncilScriptedProvider(id: "coderco", responses: ["coder"])
+        let critic = CouncilScriptedProvider(id: "criticco", responses: ["""
+        <<<CRITIC_VERDICT
+        {"decision":"accept","rationale":"deterministic staged verification covers the remaining runtime fact"}
+        CRITIC_VERDICT>>>
+        - Run the frozen test after mutation.
+        """])
+        let registry = ProviderRegistry(providers: [worker, planner, coder, critic], keyStore: CouncilNullKeys())
+        let roles = RoleBindings(default: ProviderBinding(providerId: "plannerco"))
+            .binding(.worker, to: ProviderBinding(providerId: "workerco"))
+            .binding(.coder, to: ProviderBinding(providerId: "coderco"))
+            .binding(.critic, to: ProviderBinding(providerId: "criticco"))
+
+        let result = await AICouncil(providers: registry, roles: roles,
+                                     requireStructuredCriticVerdict: true).run(goal: "build then test")
+        let prompt = await critic.prompts().first ?? ""
+        XCTAssertLessThan(prompt.range(of: "Begin with exactly one")!.lowerBound,
+                          prompt.range(of: "Attack the proposal")!.lowerBound)
+        XCTAssertTrue(prompt.contains("ENTER staged execution"))
+        XCTAssertEqual(result.minds.first(where: { $0.name == "Critic" })?.criticVerdict?.decision, .accept)
+    }
 }
 
 private struct CouncilNullKeys: KeyStore {

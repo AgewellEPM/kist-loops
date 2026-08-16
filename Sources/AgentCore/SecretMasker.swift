@@ -28,6 +28,9 @@ public enum SecretMasker {
         regex(#"\bnpm_[A-Za-z0-9]{36}\b"#),
         // Slack incoming-webhook URL (the path IS the secret).
         regex(#"https://hooks\.slack\.com/services/[A-Za-z0-9/]{20,}"#),
+        // Standard HTTP bearer authorization. Match the whole header so opaque OAuth tokens without a
+        // provider-specific prefix are never reflected; tolerate header-name/scheme case and whitespace.
+        regex(#"(?i)\bauthorization\s*:\s*bearer\s+[^\s\"',;]+"#),
         // Assignment/header style secrets. Keep the key name, redact only the value. NOTE: deliberately
         // NOT including client_secret/private_key here — those over-match ordinary source (e.g.
         // `let privateKey = SecKeyCreateRandomKey(...)`); the actual secret material is caught precisely
@@ -50,7 +53,8 @@ public enum SecretMasker {
         ToolResult(success: result.success,
                    output: mask(result.output),
                    error: result.error.map(mask),
-                   metadata: result.metadata.mapValues(mask))
+                   metadata: result.metadata.mapValues(mask),
+                   trustedCommandReference: result.trustedCommandReference)
     }
 
     private static func replacement(for pattern: NSRegularExpression) -> String {

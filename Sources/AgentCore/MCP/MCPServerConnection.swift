@@ -120,6 +120,9 @@ actor MCPServerConnection: MCPConnection {
     private var alive = false
     private var didShutdown = false
     private var lifecycle: Lifecycle = .idle
+    /// The protocol version the server negotiated in `initialize` (previously discarded). Recorded so the
+    /// version kist actually speaks is the one the server agreed to, not a stale hardcoded guess.
+    private var negotiatedVersion = MCPProtocol.offeredVersion
     private var readBuffer = Data()
     private var stdoutGeneration: MCPOrderedPipePump.Generation?
     private var malformedLineCount = 0
@@ -231,15 +234,13 @@ actor MCPServerConnection: MCPConnection {
         // Handshake. If it fails, tear the process down before rethrowing — otherwise
         // a server that spawns but never completes `initialize` leaks as a zombie.
         do {
-            _ = try await request(
+            let result = try await request(
                 method: "initialize",
-                params: [
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": [:] as [String: Any],
-                    "clientInfo": ["name": "AgentCore", "version": "0.1.0"],
-                ],
+                params: MCPProtocol.initializeParams(),
                 timeoutSeconds: initializeTimeout
             )
+            // Honor the version the server negotiated back (previously ignored) instead of a stale guess.
+            negotiatedVersion = MCPProtocol.negotiatedVersion(from: result)
             guard alive, !didShutdown else {
                 throw MCPConnectionError.serverClosed
             }
@@ -277,7 +278,24 @@ actor MCPServerConnection: MCPConnection {
 
     /// Invoke a tool. Returns the raw result object (caller sanitizes).
     func callTool(name: String, arguments: [String: Any]) async throws -> [String: Any] {
-        try await request(method: "tools/call", params: ["name": name, "arguments": arguments], timeoutSeconds: callTimeout)
+        try await request(
+            method: "tools/call",
+            params: Self.toolCallParams(name: name, arguments: arguments, config: config),
+            timeoutSeconds: callTimeout
+        )
+    }
+
+    static func toolCallParams(
+        name: String,
+        arguments: [String: Any],
+        config: MCPServerConfig
+    ) -> [String: Any] {
+        var params: [String: Any] = ["name": name, "arguments": arguments]
+        if let token = config.env["FCA_MCP_AUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            params["_meta"] = ["authorization": "Bearer \(token)"]
+        }
+        return params
     }
 
     var isAlive: Bool { alive }
