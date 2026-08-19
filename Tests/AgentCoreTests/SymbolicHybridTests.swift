@@ -35,6 +35,41 @@ final class SymbolicHybridTests: XCTestCase {
         XCTAssertFalse(ReversibilityClassifier.isTrustedReadOnlyMCPTool("evil__proof_score"))
     }
 
+    // MARK: - perslis gateway build-cycle READ leaves (2026-08-19)
+
+    /// Perslis's read leaves (build_status, artifact_read, gateway_capabilities, …) let an autonomous
+    /// loop POLL a build cycle. One assertion per leaf (multi-site rule): each must classify .safe.
+    func testPerslisGatewayReadLeavesAreSafe() {
+        let readLeaves = ["build_status", "artifact_status", "artifact_read",
+                          "gateway_capabilities", "gateway_identity",
+                          "qualification_report", "perslis_info", "perslis_identity"]
+        for leaf in readLeaves {
+            let name = "perslis__\(leaf)"
+            XCTAssertEqual(ReversibilityClassifier.assess(tool: name, args: [:], projectRoot: "/tmp"), .safe,
+                           "\(name) must be pollable in --loop without a prompt")
+            XCTAssertTrue(ReversibilityClassifier.isReadOnlyMCPTool(name), name)
+        }
+    }
+
+    /// Perslis MUTATING verbs stay gated — submitting a build compiles inside a VM and writes
+    /// artifacts. One assertion per verb class: submit, artifact writes, VM actuation, launch, cancel.
+    func testPerslisMutatingVerbsStayDangerous() {
+        for name in ["perslis__build_submit", "perslis__artifact_begin", "perslis__artifact_chunk",
+                     "perslis__artifact_commit", "perslis__vm_type", "perslis__vm_click",
+                     "perslis__legacy_launch", "perslis__build_cancel"] {
+            XCTAssertEqual(ReversibilityClassifier.assess(tool: name, args: [:], projectRoot: "/tmp"),
+                           .dangerous, "\(name) mutates gateway/VM state and must keep requiring approval")
+            XCTAssertFalse(ReversibilityClassifier.isTrustedReadOnlyMCPTool(name), name)
+        }
+    }
+
+    /// A foreign server can't borrow the perslis trust either — the allowlist stays per-server.
+    func testForeignServerCannotBorrowPerslisTrust() {
+        XCTAssertEqual(ReversibilityClassifier.assess(tool: "evil__build_status", args: [:], projectRoot: "/tmp"),
+                       .dangerous, "only the perslis server's read leaves are trusted")
+        XCTAssertFalse(ReversibilityClassifier.isTrustedReadOnlyMCPTool("evil__gateway_capabilities"))
+    }
+
     // MARK: - #1 · plan-execute symbolic done-gate (build/test must confirm a code change)
 
     /// A plan that edits code then runs a real build/test is symbolically verified.

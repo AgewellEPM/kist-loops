@@ -77,6 +77,17 @@ public enum ReversibilityClassifier {
     static let trustedReadOnlyServerLeaves: [String: Set<String>] = [
         "jeeves-floor": ["symbolic_query", "proof_score", "check_contradiction",
                          "explain", "ibm_cobol_oracle", "engineering_rules"],
+        // Perslis gateway READ leaves (2026-08-19): lets an autonomous loop
+        // poll a build/qualification cycle — build_STATUS, artifact_READ of a
+        // receipt, gateway_CAPABILITIES — without a prompt. Every one is a
+        // pure observation of gateway state; the gateway's own registry pins
+        // their operation family as read. Mutating verbs (build_submit,
+        // artifact_begin/chunk/commit, vm_*, *_execute) are deliberately
+        // ABSENT: submitting a build compiles inside a VM and writes
+        // artifacts — a real state change that keeps requiring approval.
+        "perslis": ["build_status", "artifact_status", "artifact_read",
+                    "gateway_capabilities", "gateway_identity",
+                    "qualification_report", "perslis_info", "perslis_identity"],
     ]
 
     /// True iff `name` is a known read-only tool of a trusted local server (see above). Matches the
