@@ -213,6 +213,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
     public let planningWorkflowID: String?
     public let plannerEntrypoint: String
     public let toolReferences: [String]
+    public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
     public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
@@ -235,6 +236,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         planningWorkflowID: String?,
         plannerEntrypoint: String,
         toolReferences: [String],
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry] = [],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
         commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = [],
@@ -262,6 +264,13 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         self.planningWorkflowID = planningWorkflowID
         self.plannerEntrypoint = plannerEntrypoint
         self.toolReferences = Array(Set(toolReferences)).sorted()
+        self.skillIndex = skillIndex.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.operation.rawValue < $1.operation.rawValue
+        }
         self.decomposableUnits = decomposableUnits.sorted {
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.instructionID < $1.instructionID
@@ -284,6 +293,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         mount: SMLWorkflowRuntimeWorkflowMount?,
         planningWorkflow: SMLWorkflowRuntimePlanningWorkflow?,
         planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
         commandBindings: [SMLWorkflowRuntimePlanningCommandBinding],
@@ -312,6 +322,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             planningWorkflowID: planningWorkflowID,
             plannerEntrypoint: plannerEntrypoint,
             toolReferences: planningToolIndex.map(\.reference),
+            skillIndex: skillIndex,
             decomposableUnits: decomposableUnits,
             approvalGates: approvalGates,
             commandBindings: commandBindings,
@@ -346,6 +357,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         case planningWorkflowID
         case plannerEntrypoint
         case toolReferences
+        case skillIndex
         case decomposableUnits
         case approvalGates
         case commandBindings
@@ -374,6 +386,10 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             ),
             plannerEntrypoint: try container.decode(String.self, forKey: .plannerEntrypoint),
             toolReferences: try container.decode([String].self, forKey: .toolReferences),
+            skillIndex: try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningSkillIndexEntry].self,
+                forKey: .skillIndex
+            ) ?? [],
             decomposableUnits: try container.decode(
                 [SMLWorkflowRuntimePlanningDecompositionUnit].self,
                 forKey: .decomposableUnits
@@ -411,6 +427,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
         try container.encode(plannerEntrypoint, forKey: .plannerEntrypoint)
         try container.encode(toolReferences, forKey: .toolReferences)
+        try container.encode(skillIndex, forKey: .skillIndex)
         try container.encode(decomposableUnits, forKey: .decomposableUnits)
         try container.encode(approvalGates, forKey: .approvalGates)
         try container.encode(commandBindings, forKey: .commandBindings)
@@ -570,7 +587,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 8
+    public static let currentSchemaVersion = 9
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]
@@ -588,6 +605,7 @@ public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
         let planningByWorkflowID = Dictionary(
             uniqueKeysWithValues: planning.workflows.map { ($0.workflowID, $0) }
         )
+        let skillIndexByWorkflowID = Dictionary(grouping: planning.skillIndex, by: \.workflowID)
         let toolsByWorkflowID = Dictionary(grouping: planning.toolIndex, by: \.workflowID)
         let decomposableByWorkflowID = Dictionary(grouping: planning.decomposableUnits, by: \.workflowID)
         let approvalsByWorkflowID = Dictionary(grouping: planning.approvalGates, by: \.workflowID)
@@ -616,6 +634,7 @@ public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
                 mount: mountsByWorkflowID[descriptor.workflowID],
                 planningWorkflow: planningByWorkflowID[descriptor.workflowID],
                 planningToolIndex: toolsByWorkflowID[descriptor.workflowID] ?? [],
+                skillIndex: skillIndexByWorkflowID[descriptor.workflowID] ?? [],
                 decomposableUnits: decomposableByWorkflowID[descriptor.workflowID] ?? [],
                 approvalGates: approvalsByWorkflowID[descriptor.workflowID] ?? [],
                 commandBindings: commandsByWorkflowID[descriptor.workflowID] ?? [],

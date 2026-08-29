@@ -1645,6 +1645,92 @@ public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
     }
 }
 
+public struct SMLWorkflowRuntimePlanningSkillIndexEntry: Sendable, Codable, Equatable {
+    public let workflowID: String
+    public let workflowVersion: String
+    public let instructionID: String
+    public let kind: SMLOnyxSkillKind
+    public let operation: SMLInstructionOperation
+    public let reference: String?
+    public let prerequisites: [String]
+    public let successors: [String]
+    public let unitKind: SMLOnyxPlanningUnitKind?
+    public let statePreconditions: [String]
+    public let expectedState: SMLObject
+    public let declaredOutputs: [String]
+    public let outputSchema: String?
+    public let receiptFields: [String]
+    public let canDecomposeFurther: Bool
+    public let requiresApproval: Bool
+    public let terminal: Bool
+
+    public init(
+        workflowID: String,
+        workflowVersion: String,
+        instructionID: String,
+        kind: SMLOnyxSkillKind,
+        operation: SMLInstructionOperation,
+        reference: String?,
+        prerequisites: [String],
+        successors: [String],
+        unitKind: SMLOnyxPlanningUnitKind?,
+        statePreconditions: [String],
+        expectedState: SMLObject,
+        declaredOutputs: [String],
+        outputSchema: String?,
+        receiptFields: [String],
+        canDecomposeFurther: Bool,
+        requiresApproval: Bool,
+        terminal: Bool
+    ) {
+        self.workflowID = workflowID
+        self.workflowVersion = workflowVersion
+        self.instructionID = instructionID
+        self.kind = kind
+        self.operation = operation
+        self.reference = reference
+        self.prerequisites = prerequisites.sorted()
+        self.successors = successors.sorted()
+        self.unitKind = unitKind
+        self.statePreconditions = statePreconditions.sorted()
+        self.expectedState = expectedState
+        self.declaredOutputs = declaredOutputs.sorted()
+        self.outputSchema = outputSchema
+        self.receiptFields = receiptFields.sorted()
+        self.canDecomposeFurther = canDecomposeFurther
+        self.requiresApproval = requiresApproval
+        self.terminal = terminal
+    }
+
+    public init(
+        workflow: SMLWorkflowRuntimePlanningWorkflow,
+        node: SMLOnyxSkillNode,
+        planNode: SMLOnyxPlanNode?
+    ) {
+        self.init(
+            workflowID: workflow.workflowID,
+            workflowVersion: workflow.workflowVersion,
+            instructionID: node.id,
+            kind: node.kind,
+            operation: node.operation,
+            reference: node.reference,
+            prerequisites: node.prerequisites,
+            successors: node.successors,
+            unitKind: node.planning?.unitKind,
+            statePreconditions: node.planning?.statePreconditions ?? [],
+            expectedState: node.planning?.expectedState ?? [:],
+            declaredOutputs: node.planning?.declaredOutputs ?? [],
+            outputSchema: node.planning?.outputSchema,
+            receiptFields: node.planning?.receiptFields ?? [],
+            canDecomposeFurther: node.planning?.canDecomposeFurther ?? false,
+            requiresApproval: planNode?.requiresApproval ?? (node.operation == .waitApproval),
+            terminal: planNode?.terminal ?? [
+                .complete, .escalate, .emitReceipt,
+            ].contains(node.operation)
+        )
+    }
+}
+
 public struct SMLWorkflowRuntimePlanningToolIndexEntry: Sendable, Codable, Equatable {
     public let workflowID: String
     public let instructionID: String
@@ -1815,11 +1901,12 @@ public struct SMLWorkflowRuntimePlanningCommandBinding: Sendable, Codable, Equat
 /// intentionally descriptor-only: no actor, lease, credential, runtime handle, provider registry, or
 /// executable closure is present.
 public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
     public let workflows: [SMLWorkflowRuntimePlanningWorkflow]
+    public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
     public let toolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
@@ -1837,6 +1924,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
         self.schemaVersion = schemaVersion
         self.workflowIDs = sortedWorkflows.map(\.workflowID)
         self.workflows = sortedWorkflows
+        self.skillIndex = Self.skillIndex(for: sortedWorkflows)
         self.toolIndex = Self.toolIndex(for: sortedWorkflows)
         self.decomposableUnits = Self.decomposableUnits(for: sortedWorkflows)
         self.approvalGates = Self.approvalGates(for: sortedWorkflows)
@@ -1864,6 +1952,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
         case schemaVersion
         case workflowIDs
         case workflows
+        case skillIndex
         case toolIndex
         case decomposableUnits
         case approvalGates
@@ -1890,6 +1979,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
         try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encode(workflowIDs, forKey: .workflowIDs)
         try container.encode(workflows, forKey: .workflows)
+        try container.encode(skillIndex, forKey: .skillIndex)
         try container.encode(toolIndex, forKey: .toolIndex)
         try container.encode(decomposableUnits, forKey: .decomposableUnits)
         try container.encode(approvalGates, forKey: .approvalGates)
@@ -1984,6 +2074,30 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
             modelAllowedActions: descriptor.model.allowedActions,
             modelToolName: descriptor.model.tool.name
         )
+    }
+
+    private static func skillIndex(
+        for workflows: [SMLWorkflowRuntimePlanningWorkflow]
+    ) -> [SMLWorkflowRuntimePlanningSkillIndexEntry] {
+        workflows.flatMap { workflow in
+            var planNodesByID: [String: SMLOnyxPlanNode] = [:]
+            for planNode in workflow.plan.nodes {
+                planNodesByID[planNode.id] = planNode
+            }
+            return workflow.skillTree.map { node in
+                SMLWorkflowRuntimePlanningSkillIndexEntry(
+                    workflow: workflow,
+                    node: node,
+                    planNode: planNodesByID[node.id]
+                )
+            }
+        }.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.operation.rawValue < $1.operation.rawValue
+        }
     }
 
     private static func toolIndex(
@@ -2086,7 +2200,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 17
+    public static let currentSchemaVersion = 18
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -3593,6 +3707,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
             uniqueKeysWithValues: mountContract.workflowMounts.map { ($0.workflowID, $0) }
         )
         let planning = catalog.planningManifest
+        let skillIndexByWorkflowID = Dictionary(grouping: planning.skillIndex, by: \.workflowID)
         let toolsByWorkflowID = Dictionary(grouping: planning.toolIndex, by: \.workflowID)
         let decomposableByWorkflowID = Dictionary(grouping: planning.decomposableUnits, by: \.workflowID)
         let approvalsByWorkflowID = Dictionary(grouping: planning.approvalGates, by: \.workflowID)
@@ -3602,6 +3717,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
                 modelPromptSection(
                     descriptor: descriptor,
                     mount: mountsByWorkflowID[descriptor.workflowID],
+                    skillIndex: skillIndexByWorkflowID[descriptor.workflowID] ?? [],
                     planningToolIndex: toolsByWorkflowID[descriptor.workflowID] ?? [],
                     decomposableUnits: decomposableByWorkflowID[descriptor.workflowID] ?? [],
                     approvalGates: approvalsByWorkflowID[descriptor.workflowID] ?? [],
@@ -3617,7 +3733,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         passed, and never fabricate a receipt.
 
         Break work into small contextual workflow steps. Use the planning units, decomposable
-        units, API routes, model tools, and Onyx driver IDs below as the source of truth.
+        units, skill tree, API routes, model tools, and Onyx driver IDs below as the source of truth.
         Descriptor-only metadata is safe to inspect; mutations must use host_command_gateway
         routes and still require host authority plus replay admission.
 
@@ -3632,6 +3748,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
     private static func modelPromptSection(
         descriptor: SMLWorkflowRuntimeDescriptor,
         mount: SMLWorkflowRuntimeWorkflowMount?,
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry],
         planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
@@ -3659,6 +3776,25 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
             ? "none"
             : planningToolIndex.map {
                 "\($0.instructionID):\($0.operation.rawValue) ref:\($0.reference) unit:\($0.unitKind?.rawValue ?? "unknown")"
+            }.joined(separator: "\n")
+        let skillTree = skillIndex.isEmpty
+            ? "none"
+            : skillIndex.map {
+                let reference = $0.reference ?? "none"
+                let unit = $0.unitKind?.rawValue ?? "unknown"
+                let pre = $0.prerequisites.isEmpty ? "none" : $0.prerequisites.joined(separator: ",")
+                let next = $0.successors.isEmpty ? "none" : $0.successors.joined(separator: ",")
+                return [
+                    "\($0.instructionID):\($0.operation.rawValue)",
+                    "kind:\($0.kind.rawValue)",
+                    "unit:\(unit)",
+                    "ref:\(reference)",
+                    "pre:\(pre)",
+                    "next:\(next)",
+                    "decompose:\($0.canDecomposeFurther)",
+                    "approval:\($0.requiresApproval)",
+                    "terminal:\($0.terminal)",
+                ].joined(separator: " ")
             }.joined(separator: "\n")
         let decomposable = decomposableUnits.isEmpty
             ? "none"
@@ -3713,6 +3849,9 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
 
         API routes:
         \(routes.isEmpty ? "none" : routes)
+
+        Skill tree:
+        \(skillTree)
 
         Planning units:
         \(planningUnits)
@@ -4332,6 +4471,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "agentGuideCommandBindingCount": .number(Decimal(
                     agentGuide.workflowGuides.reduce(0) { $0 + $1.commandBindings.count }
                 )),
+                "agentGuideSkillIndexCount": .number(Decimal(
+                    agentGuide.workflowGuides.reduce(0) { $0 + $1.skillIndex.count }
+                )),
                 "hostGuideSchemaVersion": .number(Decimal(hostGuide.schemaVersion)),
                 "hostGuideWorkflowCount": .number(
                     Decimal(hostGuide.workflowBindings.count)
@@ -4340,9 +4482,15 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "hostGuideCommandBindingCount": .number(Decimal(
                     hostGuide.workflowBindings.reduce(0) { $0 + $1.commandBindings.count }
                 )),
+                "hostGuideSkillIndexCount": .number(Decimal(
+                    hostGuide.workflowBindings.reduce(0) { $0 + $1.skillIndex.count }
+                )),
                 "hostWiringSchemaVersion": .number(Decimal(hostWiring.schemaVersion)),
                 "hostWiringWorkflowCount": .number(Decimal(hostWiring.workflows.count)),
                 "hostWiringBindingCount": .number(Decimal(hostWiring.hostBindingCount)),
+                "hostWiringSkillIndexCount": .number(Decimal(
+                    hostWiring.workflows.reduce(0) { $0 + $1.skillIndex.count }
+                )),
                 "attachmentManifestCount": .number(
                     Decimal(hostWiring.attachmentManifests.count)
                 ),
@@ -4351,6 +4499,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 ),
                 "attachmentSkillTreeNodeCount": .number(Decimal(
                     hostWiring.attachmentManifests.reduce(0) { $0 + $1.skillTree.count }
+                )),
+                "attachmentSkillIndexCount": .number(Decimal(
+                    hostWiring.attachmentManifests.reduce(0) { $0 + $1.skillIndex.count }
                 )),
                 "attachmentToolBindingCount": .number(Decimal(
                     hostWiring.attachmentManifests.reduce(0) { $0 + $1.toolBindings.count }
@@ -4366,6 +4517,12 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 ),
                 "planningWorkflowIDs": .array(
                     catalog.planningManifest.workflowIDs.map { .string($0) }
+                ),
+                "planningSkillIndexCount": .number(
+                    Decimal(catalog.planningManifest.skillIndex.count)
+                ),
+                "planningSkillIndex": .array(
+                    catalog.planningManifest.skillIndex.map(planningSkill)
                 ),
                 "planningToolIndex": .array(
                     catalog.planningManifest.toolIndex.map(planningTool)
@@ -4632,6 +4789,37 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "resource": .string(endpoint.resource.rawValue),
             "summary": .string(endpoint.summary),
         ])
+    }
+
+    private static func planningSkill(
+        _ entry: SMLWorkflowRuntimePlanningSkillIndexEntry
+    ) -> SMLValue {
+        var object: SMLObject = [
+            "workflowID": .string(entry.workflowID),
+            "workflowVersion": .string(entry.workflowVersion),
+            "instructionID": .string(entry.instructionID),
+            "kind": .string(entry.kind.rawValue),
+            "operation": .string(entry.operation.rawValue),
+            "prerequisites": .array(entry.prerequisites.map { .string($0) }),
+            "successors": .array(entry.successors.map { .string($0) }),
+            "statePreconditions": .array(entry.statePreconditions.map { .string($0) }),
+            "expectedState": .object(entry.expectedState),
+            "declaredOutputs": .array(entry.declaredOutputs.map { .string($0) }),
+            "receiptFields": .array(entry.receiptFields.map { .string($0) }),
+            "canDecomposeFurther": .bool(entry.canDecomposeFurther),
+            "requiresApproval": .bool(entry.requiresApproval),
+            "terminal": .bool(entry.terminal),
+        ]
+        if let reference = entry.reference {
+            object["reference"] = .string(reference)
+        }
+        if let unitKind = entry.unitKind {
+            object["unitKind"] = .string(unitKind.rawValue)
+        }
+        if let outputSchema = entry.outputSchema {
+            object["outputSchema"] = .string(outputSchema)
+        }
+        return .object(object)
     }
 
     private static func planningTool(

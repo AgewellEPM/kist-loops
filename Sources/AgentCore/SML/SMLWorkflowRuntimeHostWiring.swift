@@ -29,6 +29,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let planningWorkflowID: String?
     public let plannerEntrypoint: String?
     public let skillTree: [SMLOnyxSkillNode]
+    public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
     public let toolBindings: [SMLOnyxToolBinding]
     public let plan: SMLOnyxPlan?
     public let toolReferences: [String]
@@ -53,6 +54,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         planningWorkflowID: String?,
         plannerEntrypoint: String?,
         skillTree: [SMLOnyxSkillNode] = [],
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry] = [],
         toolBindings: [SMLOnyxToolBinding] = [],
         plan: SMLOnyxPlan? = nil,
         toolReferences: [String],
@@ -97,6 +99,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         self.planningWorkflowID = planningWorkflowID
         self.plannerEntrypoint = plannerEntrypoint
         self.skillTree = skillTree
+        self.skillIndex = Self.sortedSkillIndex(skillIndex)
         self.toolBindings = toolBindings.sorted {
             if $0.instructionID != $1.instructionID {
                 return $0.instructionID < $1.instructionID
@@ -138,6 +141,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         case planningWorkflowID
         case plannerEntrypoint
         case skillTree
+        case skillIndex
         case toolBindings
         case plan
         case toolReferences
@@ -189,6 +193,12 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         planningWorkflowID = try container.decodeIfPresent(String.self, forKey: .planningWorkflowID)
         plannerEntrypoint = try container.decodeIfPresent(String.self, forKey: .plannerEntrypoint)
         skillTree = try container.decodeIfPresent([SMLOnyxSkillNode].self, forKey: .skillTree) ?? []
+        skillIndex = Self.sortedSkillIndex(
+            try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningSkillIndexEntry].self,
+                forKey: .skillIndex
+            ) ?? []
+        )
         toolBindings = try container.decodeIfPresent([SMLOnyxToolBinding].self, forKey: .toolBindings) ?? []
         plan = try container.decodeIfPresent(SMLOnyxPlan.self, forKey: .plan)
         toolReferences = try container.decode([String].self, forKey: .toolReferences)
@@ -206,6 +216,18 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
                 forKey: .commandBindings
             ) ?? []
         )
+    }
+
+    private static func sortedSkillIndex(
+        _ skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
+    ) -> [SMLWorkflowRuntimePlanningSkillIndexEntry] {
+        skillIndex.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.operation.rawValue < $1.operation.rawValue
+        }
     }
 
     private static func sortedCommandBindings(
@@ -255,6 +277,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
     public let planningWorkflowID: String?
     public let plannerEntrypoint: String?
     public let toolReferences: [String]
+    public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
     public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
@@ -281,6 +304,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         toolBindings: [SMLOnyxToolBinding] = [],
         plan: SMLOnyxPlan? = nil,
         toolReferences: [String],
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry] = [],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
         commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = [],
@@ -295,6 +319,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             return $0.operationID < $1.operationID
         }
         let sortedToolReferences = Array(Set(toolReferences)).sorted()
+        let sortedSkillIndex = Self.sortedSkillIndex(skillIndex)
         let sortedDecomposableUnits = decomposableUnits.sorted {
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.instructionID < $1.instructionID
@@ -326,6 +351,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         self.planningWorkflowID = planningWorkflowID
         self.plannerEntrypoint = plannerEntrypoint
         self.toolReferences = sortedToolReferences
+        self.skillIndex = sortedSkillIndex
         self.decomposableUnits = sortedDecomposableUnits
         self.approvalGates = sortedApprovalGates
         self.commandBindings = sortedCommandBindings
@@ -347,6 +373,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             planningWorkflowID: planningWorkflowID,
             plannerEntrypoint: plannerEntrypoint,
             skillTree: skillTree,
+            skillIndex: sortedSkillIndex,
             toolBindings: toolBindings,
             plan: plan,
             toolReferences: sortedToolReferences,
@@ -382,6 +409,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             toolBindings: descriptor.onyx.tools,
             plan: descriptor.onyx.plan,
             toolReferences: hostGuide?.toolReferences ?? [],
+            skillIndex: hostGuide?.skillIndex ?? [],
             decomposableUnits: hostGuide?.decomposableUnits ?? [],
             approvalGates: hostGuide?.approvalGates ?? [],
             commandBindings: SMLWorkflowRuntimePlanningManifest.commandBindings(for: descriptor),
@@ -406,6 +434,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         case planningWorkflowID
         case plannerEntrypoint
         case toolReferences
+        case skillIndex
         case decomposableUnits
         case approvalGates
         case commandBindings
@@ -437,6 +466,10 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             forKey: .plannerEntrypoint
         )
         let toolReferences = try container.decode([String].self, forKey: .toolReferences)
+        let skillIndex = try container.decodeIfPresent(
+            [SMLWorkflowRuntimePlanningSkillIndexEntry].self,
+            forKey: .skillIndex
+        ) ?? []
         let decomposableUnits = try container.decode(
             [SMLWorkflowRuntimePlanningDecompositionUnit].self,
             forKey: .decomposableUnits
@@ -470,6 +503,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             planningWorkflowID: planningWorkflowID,
             plannerEntrypoint: plannerEntrypoint,
             toolReferences: toolReferences,
+            skillIndex: skillIndex,
             decomposableUnits: decomposableUnits,
             approvalGates: approvalGates,
             commandBindings: commandBindings,
@@ -499,11 +533,24 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
         try container.encodeIfPresent(plannerEntrypoint, forKey: .plannerEntrypoint)
         try container.encode(toolReferences, forKey: .toolReferences)
+        try container.encode(skillIndex, forKey: .skillIndex)
         try container.encode(decomposableUnits, forKey: .decomposableUnits)
         try container.encode(approvalGates, forKey: .approvalGates)
         try container.encode(commandBindings, forKey: .commandBindings)
         try container.encode(hostBindings, forKey: .hostBindings)
         try container.encode(attachment, forKey: .attachment)
+    }
+
+    private static func sortedSkillIndex(
+        _ skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
+    ) -> [SMLWorkflowRuntimePlanningSkillIndexEntry] {
+        skillIndex.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.operation.rawValue < $1.operation.rawValue
+        }
     }
 
     private static func sortedCommandBindings(
@@ -520,7 +567,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 10
+    public static let currentSchemaVersion = 11
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

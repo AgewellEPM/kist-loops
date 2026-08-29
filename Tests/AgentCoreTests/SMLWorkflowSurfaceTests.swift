@@ -1034,6 +1034,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(guide.systemPrompt.contains(#"start TASK-ID {"target":"target"}"#))
         XCTAssertTrue(guide.systemPrompt.contains("API routes:"))
         XCTAssertTrue(guide.systemPrompt.contains("Onyx driver"))
+        XCTAssertTrue(guide.systemPrompt.contains("Skill tree:"))
+        XCTAssertTrue(guide.systemPrompt.contains("plan:CALL_MODEL kind:reasoning"))
         XCTAssertTrue(guide.systemPrompt.contains("Planning units:"))
         XCTAssertTrue(guide.systemPrompt.contains("Command bindings:"))
         XCTAssertTrue(guide.systemPrompt.contains(#"start: repl="start [TASK_ID] [JSON_INPUT_OBJECT]""#))
@@ -1061,6 +1063,15 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(release.replExamples.contains {
             $0.line == #"start TASK-ID {"target":"target"}"#
         })
+        XCTAssertEqual(release.skillIndex.count, 7)
+        let releaseSkill = try XCTUnwrap(release.skillIndex.first {
+            $0.instructionID == "plan"
+        })
+        XCTAssertEqual(releaseSkill.kind, .reasoning)
+        XCTAssertEqual(releaseSkill.unitKind, .modelReasoning)
+        XCTAssertEqual(releaseSkill.reference, "content.plan")
+        XCTAssertEqual(releaseSkill.successors, ["write"])
+        XCTAssertEqual(releaseSkill.outputSchema, "content.plan.v1")
         XCTAssertEqual(release.planningToolIndex.map(\.reference), [
             "content.plan", "artifact_verified", "repository.write",
         ])
@@ -1085,6 +1096,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertFalse(encoded.contains("lease_id"))
         XCTAssertTrue(encoded.contains("\"replCommands\""))
         XCTAssertTrue(encoded.contains("\"replExamples\""))
+        XCTAssertTrue(encoded.contains("\"skillIndex\""))
         XCTAssertTrue(encoded.contains("\"commandBindings\""))
 
         let encodedData = try JSONEncoder().encode(guide)
@@ -1098,6 +1110,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         for index in legacyWorkflowGuides.indices {
             legacyWorkflowGuides[index].removeValue(forKey: "replCommands")
             legacyWorkflowGuides[index].removeValue(forKey: "replExamples")
+            legacyWorkflowGuides[index].removeValue(forKey: "skillIndex")
             legacyWorkflowGuides[index].removeValue(forKey: "commandBindings")
         }
         legacyObject["workflowGuides"] = legacyWorkflowGuides
@@ -1106,6 +1119,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(legacyGuide.schemaVersion, 1)
         XCTAssertEqual(legacyGuide.workflowGuides.map(\.replCommands), [[], []])
         XCTAssertEqual(legacyGuide.workflowGuides.map(\.replExamples), [[], []])
+        XCTAssertEqual(legacyGuide.workflowGuides.map(\.skillIndex), [[], []])
         XCTAssertEqual(legacyGuide.workflowGuides.map(\.commandBindings), [[], []])
     }
 
@@ -1184,6 +1198,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(release.toolReferences, [
             "artifact_verified", "content.plan", "repository.write",
         ])
+        XCTAssertEqual(release.skillIndex.count, 7)
+        XCTAssertEqual(
+            release.skillIndex.first { $0.instructionID == "plan" }?.reference,
+            "content.plan"
+        )
         XCTAssertEqual(release.approvalGates.map(\.instructionID), ["approval"])
         XCTAssertEqual(release.commandBindings.count, 7)
         let releaseStartCommand = try XCTUnwrap(release.commandBindings.first {
@@ -1274,6 +1293,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             var hostBindings = try XCTUnwrap(
                 legacyWorkflowBindings[workflowIndex]["hostBindings"] as? [[String: Any]]
             )
+            legacyWorkflowBindings[workflowIndex].removeValue(forKey: "skillIndex")
             legacyWorkflowBindings[workflowIndex].removeValue(forKey: "commandBindings")
             for bindingIndex in hostBindings.indices {
                 hostBindings[bindingIndex].removeValue(forKey: "replExamples")
@@ -1287,7 +1307,9 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let legacyGuide = try JSONDecoder().decode(SMLWorkflowRuntimeHostGuide.self, from: legacyData)
         XCTAssertEqual(legacyGuide.schemaVersion, 3)
         XCTAssertTrue(legacyGuide.workflowBindings.allSatisfy { workflow in
-            workflow.commandBindings.isEmpty && workflow.hostBindings.allSatisfy {
+            workflow.skillIndex.isEmpty
+                && workflow.commandBindings.isEmpty
+                && workflow.hostBindings.allSatisfy {
                 $0.replExamples.isEmpty
                     && $0.apiExamples.isEmpty
                     && $0.modelToolExamples.isEmpty
@@ -1438,6 +1460,28 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(export.planning.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(export.planning.workflows.map(\.workflowID), ["content.release", "content.review"])
         XCTAssertEqual(export.planning.workflows.map(\.entrypoint), ["plan", "plan"])
+        XCTAssertEqual(export.planning.skillIndex.count, 14)
+        let releaseSkillIndex = export.planning.skillIndex.filter {
+            $0.workflowID == "content.release"
+        }
+        XCTAssertEqual(releaseSkillIndex.map(\.instructionID), [
+            "approval", "escalate", "plan", "receipt", "rollback", "verify", "write",
+        ])
+        let releasePlanningSkill = try XCTUnwrap(releaseSkillIndex.first {
+            $0.instructionID == "plan"
+        })
+        XCTAssertEqual(releasePlanningSkill.kind, .reasoning)
+        XCTAssertEqual(releasePlanningSkill.unitKind, .modelReasoning)
+        XCTAssertEqual(releasePlanningSkill.reference, "content.plan")
+        XCTAssertEqual(releasePlanningSkill.successors, ["write"])
+        XCTAssertEqual(releasePlanningSkill.outputSchema, "content.plan.v1")
+        XCTAssertFalse(releasePlanningSkill.canDecomposeFurther)
+        let releaseApprovalSkill = try XCTUnwrap(releaseSkillIndex.first {
+            $0.instructionID == "approval"
+        })
+        XCTAssertEqual(releaseApprovalSkill.unitKind, .approvalGate)
+        XCTAssertTrue(releaseApprovalSkill.requiresApproval)
+        XCTAssertFalse(releaseApprovalSkill.terminal)
         XCTAssertEqual(export.planning.toolIndex.count, 6)
         XCTAssertEqual(export.planning.decomposableUnits, [])
         XCTAssertEqual(
@@ -1501,6 +1545,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 }
         })
         XCTAssertEqual(releaseWiring.commandBindings.count, 7)
+        XCTAssertEqual(releaseWiring.skillIndex.count, 7)
+        XCTAssertEqual(
+            releaseWiring.skillIndex.first { $0.instructionID == "plan" }?.reference,
+            "content.plan"
+        )
         let releaseStartBinding = try XCTUnwrap(releaseWiring.commandBindings.first {
             $0.action == .start
         })
@@ -1540,6 +1589,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 ]
         })
         XCTAssertEqual(releaseAttachment.commandBindings, releaseWiring.commandBindings)
+        XCTAssertEqual(releaseAttachment.skillIndex, releaseWiring.skillIndex)
         XCTAssertEqual(releaseAttachment.onyxDriverID, releaseWiring.onyxDriverID)
         XCTAssertEqual(releaseAttachment.planningWorkflowID, "content.release")
         XCTAssertEqual(releaseAttachment.toolReferences, [
@@ -1827,6 +1877,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             .string(SMLWorkflowRuntimeModelAdapter.toolName)
         )
         XCTAssertEqual(runtime["agentGuideCommandBindingCount"], .number(14))
+        XCTAssertEqual(runtime["agentGuideSkillIndexCount"], .number(14))
         XCTAssertEqual(
             runtime["hostGuideSchemaVersion"],
             .number(Decimal(SMLWorkflowRuntimeHostGuide.currentSchemaVersion))
@@ -1834,18 +1885,21 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(runtime["hostGuideWorkflowCount"], .number(2))
         XCTAssertEqual(runtime["hostGuideBindingCount"], .number(14))
         XCTAssertEqual(runtime["hostGuideCommandBindingCount"], .number(14))
+        XCTAssertEqual(runtime["hostGuideSkillIndexCount"], .number(14))
         XCTAssertEqual(
             runtime["hostWiringSchemaVersion"],
             .number(Decimal(SMLWorkflowRuntimeHostWiring.currentSchemaVersion))
         )
         XCTAssertEqual(runtime["hostWiringWorkflowCount"], .number(2))
         XCTAssertEqual(runtime["hostWiringBindingCount"], .number(14))
+        XCTAssertEqual(runtime["hostWiringSkillIndexCount"], .number(14))
         XCTAssertEqual(runtime["attachmentManifestCount"], .number(2))
         XCTAssertEqual(
             try array(runtime["attachmentWorkflowIDs"]),
             [.string("content.release"), .string("content.review")]
         )
         XCTAssertEqual(runtime["attachmentSkillTreeNodeCount"], .number(14))
+        XCTAssertEqual(runtime["attachmentSkillIndexCount"], .number(14))
         XCTAssertEqual(runtime["attachmentToolBindingCount"], .number(6))
         XCTAssertEqual(runtime["attachmentCommandBindingCount"], .number(14))
         XCTAssertEqual(runtime["attachmentPlanCount"], .number(2))
@@ -1857,6 +1911,20 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             try array(runtime["planningWorkflowIDs"]),
             [.string("content.release"), .string("content.review")]
         )
+        XCTAssertEqual(runtime["planningSkillIndexCount"], .number(14))
+        let planningSkillIndex = try array(runtime["planningSkillIndex"])
+        XCTAssertEqual(planningSkillIndex.count, 14)
+        let openAPIPlanningSkill = try XCTUnwrap(
+            planningSkillIndex.compactMap { try? object($0) }.first {
+                $0["workflowID"] == .string("content.release")
+                    && $0["instructionID"] == .string("plan")
+            }
+        )
+        XCTAssertEqual(openAPIPlanningSkill["kind"], .string("reasoning"))
+        XCTAssertEqual(openAPIPlanningSkill["unitKind"], .string("model_reasoning"))
+        XCTAssertEqual(openAPIPlanningSkill["reference"], .string("content.plan"))
+        XCTAssertEqual(openAPIPlanningSkill["successors"], .array([.string("write")]))
+        XCTAssertEqual(openAPIPlanningSkill["outputSchema"], .string("content.plan.v1"))
         XCTAssertEqual(try array(runtime["planningToolIndex"]).count, 6)
         XCTAssertEqual(try array(runtime["planningDecomposableUnits"]), [])
         XCTAssertEqual(try array(runtime["planningApprovalGates"]).count, 2)
@@ -2045,6 +2113,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(nestedDecoded.mountContract, nestedDecoded.catalog.mountContract)
         XCTAssertEqual(nestedDecoded.agentGuide, nestedDecoded.catalog.agentGuide)
         XCTAssertEqual(nestedDecoded.modelRouter, nestedDecoded.catalog.modelRouter)
+        XCTAssertEqual(nestedDecoded.planning, nestedDecoded.catalog.planningManifest)
+        XCTAssertEqual(nestedDecoded.planning.skillIndex.count, 7)
         XCTAssertEqual(nestedDecoded.hostGuide, nestedDecoded.catalog.hostGuide)
         XCTAssertEqual(nestedDecoded.hostWiring, nestedDecoded.catalog.hostWiring)
         XCTAssertTrue(nestedDecoded.mountContract.apiRoutes.contains {
@@ -2078,7 +2148,9 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             $0.channel == .modelRouter
                 && !$0.modelToolExamples.isEmpty
         } ?? false)
+        XCTAssertEqual(nestedDecoded.hostWiring.workflows.first?.skillIndex.count, 7)
         XCTAssertEqual(nestedDecoded.hostWiring.workflows.first?.commandBindings.count, 7)
+        XCTAssertEqual(nestedDecoded.hostWiring.attachmentManifests.first?.skillIndex.count, 7)
         XCTAssertEqual(nestedDecoded.hostWiring.attachmentManifests.first?.commandBindings.count, 7)
         XCTAssertEqual(nestedDecoded.onyxDrivers, nestedDecoded.catalog.onyxDrivers)
         XCTAssertEqual(
@@ -2129,6 +2201,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             ]
         })
         XCTAssertEqual(workflow.commandBindings.count, 7)
+        XCTAssertEqual(workflow.skillIndex.count, 7)
+        XCTAssertEqual(workflow.attachment.skillIndex, workflow.skillIndex)
         XCTAssertEqual(workflow.attachment.commandBindings, workflow.commandBindings)
 
         let currentWorkflow = try XCTUnwrap(hostWiring.workflows.first)
@@ -2142,6 +2216,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(currentWorkflow.attachment.plan?.entrypoint, "plan")
         XCTAssertEqual(currentWorkflow.attachment.plan?.nodes.count, 7)
+        XCTAssertEqual(currentWorkflow.attachment.skillIndex, currentWorkflow.skillIndex)
         XCTAssertEqual(currentWorkflow.attachment.commandBindings.count, 7)
 
         var legacyNestedObject = try XCTUnwrap(
@@ -2156,6 +2231,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 nestedWorkflows[workflowIndex]["attachment"] as? [String: Any]
             )
             attachment.removeValue(forKey: "skillTree")
+            attachment.removeValue(forKey: "skillIndex")
             attachment.removeValue(forKey: "toolBindings")
             attachment.removeValue(forKey: "plan")
             nestedWorkflows[workflowIndex]["attachment"] = attachment
@@ -2172,6 +2248,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let legacyNestedWorkflow = try XCTUnwrap(legacyNestedDecoded.workflows.first)
         XCTAssertEqual(legacyNestedDecoded.schemaVersion, 7)
         XCTAssertEqual(legacyNestedWorkflow.attachment.skillTree, [])
+        XCTAssertEqual(legacyNestedWorkflow.attachment.skillIndex, [])
         XCTAssertEqual(legacyNestedWorkflow.attachment.toolBindings, [])
         XCTAssertNil(legacyNestedWorkflow.attachment.plan)
     }
@@ -2436,6 +2513,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             try array(planningBody["workflowIDs"]),
             [.string("content.release"), .string("content.review")]
         )
+        XCTAssertEqual(try array(planningBody["skillIndex"]).count, 14)
         XCTAssertEqual(try array(planningBody["toolIndex"]).count, 6)
         XCTAssertEqual(try array(planningBody["commandBindings"]).count, 14)
 

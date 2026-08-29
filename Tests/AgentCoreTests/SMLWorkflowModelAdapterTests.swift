@@ -274,6 +274,8 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertFalse(capture.systemPrompt.contains("help [local]"))
         XCTAssertFalse(capture.systemPrompt.contains("attachment [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("API routes:"))
+        XCTAssertTrue(capture.systemPrompt.contains("Skill tree:"))
+        XCTAssertTrue(capture.systemPrompt.contains("work:CALL_TOOL kind:action"))
         XCTAssertTrue(
             capture.systemPrompt.contains(
                 "POST /model/workflows/model.review/tasks [host_command_gateway] -> start_workflow_task_ModelReview"

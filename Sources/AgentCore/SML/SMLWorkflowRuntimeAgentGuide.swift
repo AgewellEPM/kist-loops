@@ -7,7 +7,7 @@ import Foundation
 /// model router, and Onyx exports. It carries no actor, lease, credentials, runtime handle, replay
 /// state, or host authority; mutations still have to cross the runtime command gateway.
 public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 7
 
     public let schemaVersion: Int
     public let systemPrompt: String
@@ -21,6 +21,7 @@ public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
             uniqueKeysWithValues: mountContract.workflowMounts.map { ($0.workflowID, $0) }
         )
         let planning = catalog.planningManifest
+        let skillIndexByWorkflowID = Dictionary(grouping: planning.skillIndex, by: \.workflowID)
         let toolsByWorkflowID = Dictionary(grouping: planning.toolIndex, by: \.workflowID)
         let decomposableByWorkflowID = Dictionary(grouping: planning.decomposableUnits, by: \.workflowID)
         let approvalsByWorkflowID = Dictionary(grouping: planning.approvalGates, by: \.workflowID)
@@ -29,6 +30,7 @@ public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
             SMLWorkflowRuntimeWorkflowAgentGuide(
                 descriptor: descriptor,
                 mount: mountsByWorkflowID[descriptor.workflowID],
+                skillIndex: skillIndexByWorkflowID[descriptor.workflowID] ?? [],
                 planningToolIndex: toolsByWorkflowID[descriptor.workflowID] ?? [],
                 decomposableUnits: decomposableByWorkflowID[descriptor.workflowID] ?? [],
                 approvalGates: approvalsByWorkflowID[descriptor.workflowID] ?? [],
@@ -72,9 +74,9 @@ public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
         workflow's grammar. Never call an unlisted command, never claim a capability step passed,
         and never fabricate a receipt.
 
-        Break work into small contextual workflow steps. Use the planning units, decomposable units,
-        approval gates, REPL grammar, API routes, model tools, and Onyx driver IDs below as the
-        source of truth. Descriptor-only metadata is safe to inspect; mutations must use
+        Break work into small contextual workflow steps. Use the skill tree, planning units,
+        decomposable units, approval gates, REPL grammar, API routes, model tools, and Onyx driver
+        IDs below as the source of truth. Descriptor-only metadata is safe to inspect; mutations must use
         host_command_gateway routes and still require host authority plus replay admission.
 
         Model router tool:
@@ -108,6 +110,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
     public let modelTool: SMLWorkflowModelToolDescriptor
     public let modelRouterToolName: String
     public let onyxDriverID: String
+    public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
     public let planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
@@ -132,6 +135,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         modelTool: SMLWorkflowModelToolDescriptor,
         modelRouterToolName: String,
         onyxDriverID: String,
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry] = [],
         planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
@@ -167,6 +171,12 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         self.modelTool = modelTool
         self.modelRouterToolName = modelRouterToolName
         self.onyxDriverID = onyxDriverID
+        self.skillIndex = skillIndex.sorted {
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.operation.rawValue < $1.operation.rawValue
+        }
         self.planningToolIndex = planningToolIndex.sorted {
             if $0.instructionID != $1.instructionID { return $0.instructionID < $1.instructionID }
             return $0.reference < $1.reference
@@ -183,6 +193,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
     public init(
         descriptor: SMLWorkflowRuntimeDescriptor,
         mount: SMLWorkflowRuntimeWorkflowMount?,
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry],
         planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
@@ -207,6 +218,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             modelTool: descriptor.model.tool,
             modelRouterToolName: mount?.modelRouterToolName ?? SMLWorkflowRuntimeModelAdapter.toolName,
             onyxDriverID: descriptor.onyx.driverID,
+            skillIndex: skillIndex,
             planningToolIndex: planningToolIndex,
             decomposableUnits: decomposableUnits,
             approvalGates: approvalGates,
@@ -224,6 +236,25 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             ? "none"
             : planningToolIndex.map {
                 "\($0.instructionID):\($0.operation.rawValue) ref:\($0.reference) unit:\($0.unitKind?.rawValue ?? "unknown")"
+            }.joined(separator: "\n")
+        let skillTree = skillIndex.isEmpty
+            ? "none"
+            : skillIndex.map {
+                let reference = $0.reference ?? "none"
+                let unit = $0.unitKind?.rawValue ?? "unknown"
+                let pre = $0.prerequisites.isEmpty ? "none" : $0.prerequisites.joined(separator: ",")
+                let next = $0.successors.isEmpty ? "none" : $0.successors.joined(separator: ",")
+                return [
+                    "\($0.instructionID):\($0.operation.rawValue)",
+                    "kind:\($0.kind.rawValue)",
+                    "unit:\(unit)",
+                    "ref:\(reference)",
+                    "pre:\(pre)",
+                    "next:\(next)",
+                    "decompose:\($0.canDecomposeFurther)",
+                    "approval:\($0.requiresApproval)",
+                    "terminal:\($0.terminal)",
+                ].joined(separator: " ")
             }.joined(separator: "\n")
         let decomposable = decomposableUnits.isEmpty
             ? "none"
@@ -277,6 +308,9 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         API routes:
         \(routes)
 
+        Skill tree:
+        \(skillTree)
+
         Planning units:
         \(planningUnits)
 
@@ -310,6 +344,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         case modelTool
         case modelRouterToolName
         case onyxDriverID
+        case skillIndex
         case planningToolIndex
         case decomposableUnits
         case approvalGates
@@ -343,6 +378,10 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
             onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
+            skillIndex: try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningSkillIndexEntry].self,
+                forKey: .skillIndex
+            ) ?? [],
             planningToolIndex: try container.decode(
                 [SMLWorkflowRuntimePlanningToolIndexEntry].self,
                 forKey: .planningToolIndex
@@ -382,6 +421,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         try container.encode(modelTool, forKey: .modelTool)
         try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
         try container.encode(onyxDriverID, forKey: .onyxDriverID)
+        try container.encode(skillIndex, forKey: .skillIndex)
         try container.encode(planningToolIndex, forKey: .planningToolIndex)
         try container.encode(decomposableUnits, forKey: .decomposableUnits)
         try container.encode(approvalGates, forKey: .approvalGates)
