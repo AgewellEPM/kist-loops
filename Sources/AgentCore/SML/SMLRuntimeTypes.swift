@@ -11,12 +11,14 @@ public enum SMLRuntimeCommandOperation {
     public static let taskApprove = "task.approve_request"
     public static let taskRefuse = "task.refuse_request"
     public static let taskRollback = "task.rollback"
+    public static let taskClaimCapability = "task.claim_capability"
     public static let taskRecordStep = "task.record_step"
     public static let receiptsList = "receipts.list"
 
     public static let all: Set<String> = [
         status, rolesList, workflowsList, workflowInspect, workflowRun, workflowRunMatching,
-        taskWatch, taskApprove, taskRefuse, taskRollback, taskRecordStep, receiptsList,
+        taskWatch, taskApprove, taskRefuse, taskRollback, taskClaimCapability,
+        taskRecordStep, receiptsList,
     ]
 }
 
@@ -163,6 +165,7 @@ public struct SMLRuntimeReceiptProjection: Sendable, Codable, Equatable {
     public let kind: SMLRuntimeReceiptKind
     public let taskID: String
     public let workflowID: String
+    public let workflowVersion: String?
     public let instructionID: String?
     public let actor: String
     public let createdAtEpoch: Double
@@ -173,6 +176,7 @@ public struct SMLRuntimeReceiptProjection: Sendable, Codable, Equatable {
         kind = receipt.kind
         taskID = receipt.taskID
         workflowID = receipt.workflowID
+        workflowVersion = receipt.workflowVersion
         instructionID = receipt.instructionID
         actor = receipt.actor
         createdAtEpoch = receipt.createdAtEpoch
@@ -183,6 +187,7 @@ public struct SMLRuntimeReceiptProjection: Sendable, Codable, Equatable {
         case id, kind
         case taskID = "task_id"
         case workflowID = "workflow_id"
+        case workflowVersion = "workflow_version"
         case instructionID = "instruction_id"
         case actor
         case createdAtEpoch = "created_at_epoch"
@@ -195,10 +200,12 @@ public struct SMLTaskProjection: Sendable, Codable, Equatable {
     public let role: String
     public let workflowID: String
     public let workflowVersion: String
+    public let taskRevision: Int
     public let status: SMLTaskStatus
     public let currentInstructionID: String
     public let currentOperation: SMLInstructionOperation?
     public let waitingApprovalOwner: String?
+    public let capabilityDispatchID: String?
     public let state: SMLObject
     public let receiptIDs: [String]
 
@@ -207,10 +214,12 @@ public struct SMLTaskProjection: Sendable, Codable, Equatable {
         role: String,
         workflowID: String,
         workflowVersion: String,
+        taskRevision: Int = 0,
         status: SMLTaskStatus,
         currentInstructionID: String,
         currentOperation: SMLInstructionOperation?,
         waitingApprovalOwner: String?,
+        capabilityDispatchID: String? = nil,
         state: SMLObject,
         receiptIDs: [String]
     ) {
@@ -218,10 +227,12 @@ public struct SMLTaskProjection: Sendable, Codable, Equatable {
         self.role = role
         self.workflowID = workflowID
         self.workflowVersion = workflowVersion
+        self.taskRevision = taskRevision
         self.status = status
         self.currentInstructionID = currentInstructionID
         self.currentOperation = currentOperation
         self.waitingApprovalOwner = waitingApprovalOwner
+        self.capabilityDispatchID = capabilityDispatchID
         self.state = state
         self.receiptIDs = receiptIDs
     }
@@ -231,12 +242,43 @@ public struct SMLTaskProjection: Sendable, Codable, Equatable {
         case role
         case workflowID = "workflow_id"
         case workflowVersion = "workflow_version"
+        case taskRevision = "task_revision"
         case status
         case currentInstructionID = "current_instruction_id"
         case currentOperation = "current_operation"
         case waitingApprovalOwner = "waiting_approval_owner"
+        case capabilityDispatchID = "capability_dispatch_id"
         case state
         case receiptIDs = "receipt_ids"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        taskID = try container.decode(String.self, forKey: .taskID)
+        role = try container.decode(String.self, forKey: .role)
+        workflowID = try container.decode(String.self, forKey: .workflowID)
+        workflowVersion = try container.decode(String.self, forKey: .workflowVersion)
+        taskRevision = try container.decodeIfPresent(Int.self, forKey: .taskRevision) ?? 0
+        guard taskRevision >= 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .taskRevision,
+                in: container,
+                debugDescription: "SML task revision cannot be negative"
+            )
+        }
+        status = try container.decode(SMLTaskStatus.self, forKey: .status)
+        currentInstructionID = try container.decode(String.self, forKey: .currentInstructionID)
+        currentOperation = try container.decodeIfPresent(
+            SMLInstructionOperation.self, forKey: .currentOperation
+        )
+        waitingApprovalOwner = try container.decodeIfPresent(
+            String.self, forKey: .waitingApprovalOwner
+        )
+        capabilityDispatchID = try container.decodeIfPresent(
+            String.self, forKey: .capabilityDispatchID
+        )
+        state = try container.decode(SMLObject.self, forKey: .state)
+        receiptIDs = try container.decode([String].self, forKey: .receiptIDs)
     }
 }
 
@@ -277,14 +319,23 @@ public enum SMLRuntimeError: Error, Sendable, Equatable, CustomStringConvertible
     case missingArgument(String)
     case invalidArgument(String)
     case workflowNotInstalled(String)
+    case workflowVersionConflict(id: String, version: String)
+    case workflowAdmissionNotBound(id: String, version: String)
+    case workflowBindingMismatch(String)
     case ambiguousWorkflowMatch([String])
     case taskAlreadyExists(String)
     case taskNotFound(String)
     case commandRoleMismatch(expected: String, actual: String)
+    case approvalAuthorityDenied(String)
     case taskWorkflowMissing(String)
     case invalidTaskState(String)
     case currentInstructionCannotBeAdvanced(String)
     case statePatchRejected(String)
+    case missingRequiredInput(String)
+    case inputFieldDenied(String)
+    case expectedStateMismatch(String)
+    case capabilityAlreadyClaimed(String)
+    case capabilityClaimMismatch
     case executionLimitExceeded
 
     public var description: String {
@@ -299,6 +350,12 @@ public enum SMLRuntimeError: Error, Sendable, Equatable, CustomStringConvertible
             return "invalid SML runtime command argument: \(reason)"
         case .workflowNotInstalled(let id):
             return "workflow is not installed: \(id)"
+        case .workflowVersionConflict(let id, let version):
+            return "workflow \(id) version \(version) conflicts with its installed revision"
+        case .workflowAdmissionNotBound(let id, let version):
+            return "workflow \(id) version \(version) has no live host admission binding"
+        case .workflowBindingMismatch(let reason):
+            return "workflow-scoped command binding mismatch: \(reason)"
         case .ambiguousWorkflowMatch(let ids):
             return "workflow match is ambiguous: \(ids.joined(separator: ", "))"
         case .taskAlreadyExists(let id):
@@ -307,6 +364,8 @@ public enum SMLRuntimeError: Error, Sendable, Equatable, CustomStringConvertible
             return "task not found: \(id)"
         case .commandRoleMismatch(let expected, let actual):
             return "command role \(actual) does not match task role \(expected)"
+        case .approvalAuthorityDenied(let owner):
+            return "active command authority does not grant approval owner \(owner)"
         case .taskWorkflowMissing(let id):
             return "task references a missing workflow: \(id)"
         case .invalidTaskState(let reason):
@@ -315,6 +374,16 @@ public enum SMLRuntimeError: Error, Sendable, Equatable, CustomStringConvertible
             return "current instruction cannot be advanced by this command: \(id)"
         case .statePatchRejected(let reason):
             return "state patch rejected: \(reason)"
+        case .missingRequiredInput(let field):
+            return "required workflow input is missing: \(field)"
+        case .inputFieldDenied(let field):
+            return "initial state field is not exposed by the workflow interface: \(field)"
+        case .expectedStateMismatch(let path):
+            return "task state no longer matches expected_state at \(path)"
+        case .capabilityAlreadyClaimed(let dispatchID):
+            return "task capability is already claimed by dispatch \(dispatchID)"
+        case .capabilityClaimMismatch:
+            return "capability completion does not match the durable dispatch claim"
         case .executionLimitExceeded:
             return "SML runtime execution limit exceeded"
         }

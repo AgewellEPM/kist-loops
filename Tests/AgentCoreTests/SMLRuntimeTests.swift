@@ -2,6 +2,183 @@ import XCTest
 @testable import AgentCore
 
 final class SMLRuntimeTests: XCTestCase {
+    func testStoreLoadRejectsSymlinkRuntimePath() async throws {
+        let directory = temporaryDirectory("sml-runtime-symlink-load")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let targetURL = directory.appendingPathComponent("attacker.json")
+        let runtimeURL = directory.appendingPathComponent("runtime.json")
+        try JSONEncoder().encode(SMLRuntimeSnapshot()).write(to: targetURL)
+        try FileManager.default.createSymbolicLink(
+            at: runtimeURL,
+            withDestinationURL: targetURL
+        )
+        let store = SMLRuntimeStore(fileURL: runtimeURL)
+
+        do {
+            _ = try await store.load()
+            XCTFail("runtime store loads must not follow symbolic links")
+        } catch let error as SMLRuntimeStoreError {
+            guard case .io = error else {
+                return XCTFail("expected an I/O refusal, got \(error)")
+            }
+        }
+    }
+
+    func testSchemaV2MissingAuthoritativeFieldsFailsClosed() async throws {
+        let task = SMLRuntimeTask(
+            taskID: "TASK-STRICT",
+            role: "strict-role",
+            workflowID: "strict.workflow",
+            workflowVersion: "1.0.0",
+            revision: 7,
+            currentInstructionID: "work",
+            createdAtEpoch: 1_000,
+            updatedAtEpoch: 1_000
+        )
+        let encoded = try JSONEncoder().encode(
+            SMLRuntimeSnapshot(tasks: [task.taskID: task], replayClaims: ["claim": 2_000])
+        )
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+
+        var missingActive = root
+        missingActive.removeValue(forKey: "active_workflow_versions")
+        var missingReplay = root
+        missingReplay.removeValue(forKey: "replay_claims")
+        var missingRevision = root
+        var tasks = try XCTUnwrap(missingRevision["tasks"] as? [String: Any])
+        var taskObject = try XCTUnwrap(tasks[task.taskID] as? [String: Any])
+        taskObject.removeValue(forKey: "task_revision")
+        tasks[task.taskID] = taskObject
+        missingRevision["tasks"] = tasks
+
+        for (name, object) in [
+            ("active", missingActive),
+            ("replay", missingReplay),
+            ("revision", missingRevision),
+        ] {
+            let directory = temporaryDirectory("sml-runtime-strict-v2-\(name)")
+            defer { try? FileManager.default.removeItem(at: directory) }
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true
+            )
+            let fileURL = directory.appendingPathComponent("runtime.json")
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+                .write(to: fileURL)
+            let store = SMLRuntimeStore(fileURL: fileURL)
+
+            do {
+                _ = try await store.load()
+                XCTFail("schema v2 must require \(name)")
+            } catch let error as SMLRuntimeStoreError {
+                guard case .decoding = error else {
+                    return XCTFail("expected a decoding refusal for \(name), got \(error)")
+                }
+            }
+        }
+    }
+
+    func testLiteralSchemaV1MigrationCreatesExactOwnerOnlyRollbackBackup() async throws {
+        let directory = temporaryDirectory("sml-runtime-schema-v1-migration")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent("runtime.json")
+        let fixtureBytes = Data(Self.literalSchemaV1Snapshot.utf8)
+        try fixtureBytes.write(to: fileURL)
+
+        let store = SMLRuntimeStore(fileURL: fileURL, clock: { 1_000 })
+        XCTAssertEqual(
+            store.schemaV1BackupURL,
+            directory.appendingPathComponent("runtime.json.schema-v1.backup")
+        )
+
+        let migrated = try await store.load()
+        XCTAssertEqual(migrated.schemaVersion, 2)
+        XCTAssertEqual(migrated.activeWorkflowVersions["legacy.workflow"], "1.0.0")
+        XCTAssertNotNil(migrated.workflows["legacy.workflow#1.0.0"])
+        XCTAssertEqual(migrated.tasks["TASK-LEGACY"]?.revision, 0)
+
+        try await store.save(migrated)
+
+        XCTAssertEqual(try Data(contentsOf: store.schemaV1BackupURL), fixtureBytes)
+        let backupAttributes = try FileManager.default.attributesOfItem(
+            atPath: store.schemaV1BackupURL.path
+        )
+        let backupMode = try XCTUnwrap(backupAttributes[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(backupMode.intValue & 0o777, 0o600)
+
+        let published = try JSONDecoder().decode(
+            SMLRuntimeSnapshot.self,
+            from: Data(contentsOf: fileURL)
+        )
+        XCTAssertEqual(published.schemaVersion, 2)
+    }
+
+    func testSchemaV1RollbackBackupIsWriteOnceAndRestoresExactOriginalBytes() async throws {
+        let directory = temporaryDirectory("sml-runtime-schema-v1-restore")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent("runtime.json")
+        let originalBytes = Data(Self.literalSchemaV1Snapshot.utf8)
+        try originalBytes.write(to: fileURL)
+        let store = SMLRuntimeStore(fileURL: fileURL, clock: { 1_000 })
+
+        try await store.save(try await store.load())
+        XCTAssertEqual(try Data(contentsOf: store.schemaV1BackupURL), originalBytes)
+
+        let replacementText = Self.literalSchemaV1Snapshot.replacingOccurrences(
+            of: "\"legacy-command\": 2000",
+            with: "\"legacy-command\": 3000"
+        )
+        let replacementBytes = Data(replacementText.utf8)
+        XCTAssertNotEqual(replacementBytes, originalBytes)
+        try replacementBytes.write(to: fileURL, options: .atomic)
+        try await store.save(try await store.load())
+
+        XCTAssertEqual(
+            try Data(contentsOf: store.schemaV1BackupURL),
+            originalBytes,
+            "a later schema-v1 publication must never replace the first rollback backup"
+        )
+
+        try await store.restoreSchemaV1Backup()
+        XCTAssertEqual(try Data(contentsOf: fileURL), originalBytes)
+        XCTAssertEqual(try Data(contentsOf: store.schemaV1BackupURL), originalBytes)
+        let restored = try await store.load()
+        XCTAssertEqual(restored.replayClaims["legacy-command"], 2_000)
+    }
+
+    func testStoreDurablyReplacesSnapshotAndKeepsOwnerOnlyMode() async throws {
+        let directory = temporaryDirectory("sml-runtime-durable-save")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("runtime.json")
+        let store = SMLRuntimeStore(fileURL: fileURL, clock: { 1_000 })
+
+        let first = SMLRuntimeSnapshot(replayClaims: ["first": 2_000])
+        try await store.save(first)
+        let firstBytes = try Data(contentsOf: fileURL)
+
+        let firstAttributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let firstMode = try XCTUnwrap(firstAttributes[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(firstMode.intValue & 0o777, 0o600)
+
+        let second = SMLRuntimeSnapshot(replayClaims: ["second": 3_000])
+        try await store.save(second)
+
+        let loaded = try await store.load()
+        XCTAssertEqual(loaded, second)
+        XCTAssertNotEqual(try Data(contentsOf: fileURL), firstBytes)
+        let secondAttributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let secondMode = try XCTUnwrap(secondAttributes[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(secondMode.intValue & 0o777, 0o600)
+        XCTAssertFalse(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                .contains { $0.hasSuffix(".tmp") }
+        )
+    }
+
     func testCommandBusCreatesWatchesApprovesAndPersistsTask() async throws {
         let directory = temporaryDirectory("sml-runtime-approval")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -23,6 +200,7 @@ final class SMLRuntimeTests: XCTestCase {
         XCTAssertEqual(run.task?.status, .waitingApproval)
         XCTAssertEqual(run.task?.currentInstructionID, "approval")
         XCTAssertEqual(run.task?.waitingApprovalOwner, "production_approver")
+        XCTAssertEqual(run.task?.taskRevision, 1)
 
         let watch = try await runtime.submit(try await admitted(
             commandID: "command-watch",
@@ -41,17 +219,22 @@ final class SMLRuntimeTests: XCTestCase {
             ))
             XCTFail("record_step must not advance an approval gate")
         } catch let error as SMLRuntimeError {
-            XCTAssertEqual(error, .currentInstructionCannotBeAdvanced("approval"))
+            XCTAssertEqual(
+                error,
+                .unsupportedOperation(SMLRuntimeCommandOperation.taskRecordStep)
+            )
         }
 
         let approve = try await runtime.submit(try await admitted(
             commandID: "command-approve",
             task: "TASK-1842",
             op: SMLRuntimeCommandOperation.taskApprove,
+            expectedState: ["task_revision": .number(1)],
             store: store
         ))
         XCTAssertEqual(approve.task?.status, .completed)
         XCTAssertEqual(approve.task?.currentOperation, .emitReceipt)
+        XCTAssertEqual(approve.task?.taskRevision, 2)
 
         let snapshot = try await store.load()
         XCTAssertEqual(snapshot.tasks["TASK-1842"]?.status, .completed)
@@ -75,7 +258,7 @@ final class SMLRuntimeTests: XCTestCase {
         }
     }
 
-    func testRecordStepAdvancesExternalInstructionsAndRejectsBadStatePatch() async throws {
+    func testRawRecordStepCannotBypassClaimedCapabilityPath() async throws {
         let directory = temporaryDirectory("sml-runtime-steps")
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = SMLRuntimeStore(
@@ -96,53 +279,29 @@ final class SMLRuntimeTests: XCTestCase {
         XCTAssertEqual(run.task?.status, .waitingCapability)
         XCTAssertEqual(run.task?.currentInstructionID, "patch")
 
-        let patched = try await runtime.submit(try await admitted(
-            commandID: "repair-patch",
-            task: "TASK-200",
-            op: SMLRuntimeCommandOperation.taskRecordStep,
-            arguments: [
-                "outcome": .string("passed"),
-                "state_patch": .object(["verification_status": .string("patched")]),
-            ],
-            store: store
-        ))
-        XCTAssertEqual(patched.task?.status, .waitingCapability)
-        XCTAssertEqual(patched.task?.currentInstructionID, "verify")
-        XCTAssertEqual(patched.task?.state["verification_status"], .string("patched"))
-
-        let failed = try await runtime.submit(try await admitted(
-            commandID: "repair-verify",
-            task: "TASK-200",
-            op: SMLRuntimeCommandOperation.taskRecordStep,
-            arguments: ["outcome": .string("failed")],
-            store: store
-        ))
-        XCTAssertEqual(failed.task?.status, .escalated)
-        let snapshot = try await store.load()
-        XCTAssertTrue(snapshot.receipts.values.contains { $0.kind == .rollback })
-        XCTAssertTrue(snapshot.receipts.values.contains { $0.kind == .escalated })
-
-        _ = try await runtime.submit(try await admitted(
-            commandID: "bad-run",
-            task: "TASK-201",
-            op: SMLRuntimeCommandOperation.workflowRun,
-            arguments: ["workflow_id": .string("website.repair")],
-            store: store
-        ))
         do {
             _ = try await runtime.submit(try await admitted(
-                commandID: "bad-patch",
-                task: "TASK-201",
+                commandID: "repair-patch",
+                task: "TASK-200",
                 op: SMLRuntimeCommandOperation.taskRecordStep,
-                arguments: ["state_patch": .object(["undeclared": .string("nope")])],
+                arguments: [
+                    "outcome": .string("passed"),
+                    "state_patch": .object(["verification_status": .string("patched")]),
+                    "evidence": .object(["forged": .bool(true)]),
+                ],
                 store: store
             ))
-            XCTFail("state patches must stay inside the workflow state schema")
+            XCTFail("raw record_step must never bypass the opaque dispatch proof")
         } catch let error as SMLRuntimeError {
-            guard case .statePatchRejected = error else {
-                return XCTFail("expected statePatchRejected, got \(error)")
-            }
+            XCTAssertEqual(
+                error,
+                .unsupportedOperation(SMLRuntimeCommandOperation.taskRecordStep)
+            )
         }
+        let snapshot = try await store.load()
+        XCTAssertEqual(snapshot.tasks["TASK-200"]?.currentInstructionID, "patch")
+        XCTAssertNil(snapshot.tasks["TASK-200"]?.state["verification_status"])
+        XCTAssertFalse(snapshot.receipts.values.contains { $0.kind == .stepRecorded })
     }
 
     func testRunMatchingUsesTypedFiltersAndFailsClosedOnAmbiguity() async throws {
@@ -197,9 +356,10 @@ final class SMLRuntimeTests: XCTestCase {
         XCTAssertEqual(run.task, "TASK-1842")
         XCTAssertEqual(run.arguments["workflow_id"], .string("website.performance_repair"))
 
-        let approve = try compiler.compile("approve TASK-1842", issuedAtEpoch: 4_001)
+        let approve = try compiler.compile("approve TASK-1842 7", issuedAtEpoch: 4_001)
         XCTAssertEqual(approve.op, SMLRuntimeCommandOperation.taskApprove)
         XCTAssertEqual(approve.task, "TASK-1842")
+        XCTAssertEqual(approve.expectedState["task_revision"], .number(7))
 
         let output = SMLREPLRenderer.render(SMLCommandResult(
             kind: .status,
@@ -226,7 +386,7 @@ final class SMLRuntimeTests: XCTestCase {
         let runtime = SMLRuntime(store: store, clock: { 5_000 })
 
         try await install(repairWorkflow(), role: "digital-presence-manager", runtime: runtime)
-        _ = try await runtime.submit(try await admitted(
+        let run = try await runtime.submit(try await admitted(
             commandID: "rollback-run",
             task: "TASK-ROLLBACK",
             op: SMLRuntimeCommandOperation.workflowRun,
@@ -238,9 +398,32 @@ final class SMLRuntimeTests: XCTestCase {
             commandID: "rollback-now",
             task: "TASK-ROLLBACK",
             op: SMLRuntimeCommandOperation.taskRollback,
+            expectedState: [
+                "task_revision": .number(Decimal(try XCTUnwrap(run.task?.taskRevision))),
+            ],
             store: store
         ))
         XCTAssertEqual(rolledBack.task?.status, .rolledBack)
+
+        do {
+            _ = try await runtime.submit(try await admitted(
+                commandID: "rollback-again",
+                task: "TASK-ROLLBACK",
+                op: SMLRuntimeCommandOperation.taskRollback,
+                expectedState: [
+                    "task_revision": .number(
+                        Decimal(try XCTUnwrap(rolledBack.task?.taskRevision))
+                    ),
+                ],
+                store: store
+            ))
+            XCTFail("a terminal rollback must not append another receipt")
+        } catch let error as SMLRuntimeError {
+            XCTAssertEqual(
+                error,
+                .invalidTaskState("terminal task cannot be rolled back again")
+            )
+        }
 
         let status = try await runtime.status()
         XCTAssertEqual(status.status?.activeTaskCount, 0)
@@ -252,6 +435,7 @@ final class SMLRuntimeTests: XCTestCase {
         op: String,
         role: String = "digital-presence-manager",
         arguments: SMLObject = [:],
+        expectedState: SMLObject = [:],
         store: SMLRuntimeStore
     ) async throws -> SMLAdmittedCommand {
         let command = SMLCommandEnvelope(
@@ -261,6 +445,7 @@ final class SMLRuntimeTests: XCTestCase {
             task: task,
             op: op,
             arguments: arguments,
+            expectedState: expectedState,
             issuedAtEpoch: 1_000
         )
         return try await SMLCommandAdmission.admit(
@@ -271,6 +456,7 @@ final class SMLRuntimeTests: XCTestCase {
                 roles: [role],
                 tasks: [task],
                 operations: SMLRuntimeCommandOperation.all,
+                approvalAuthorities: ["production_approver"],
                 scope: [:]
             ),
             nowEpoch: 1_000,
@@ -358,4 +544,59 @@ final class SMLRuntimeTests: XCTestCase {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
     }
+
+    /// Hand-authored output from the schema-v1 runtime shape. Keeping this literal prevents the
+    /// current schema-v2 encoder from accidentally making the migration regression self-fulfilling.
+    private static let literalSchemaV1Snapshot = """
+    {
+      "schema_version": 1,
+      "workflows": {
+        "legacy.workflow": {
+          "role": "operator-role",
+          "workflow": {
+            "ir_version": 1,
+            "id": "legacy.workflow",
+            "version": "1.0.0",
+            "name": "Legacy workflow",
+            "source": {
+              "kind": "native",
+              "reference": "literal-v1-fixture"
+            },
+            "trigger": {
+              "kind": "manual"
+            },
+            "state_schema": [],
+            "entrypoint": "done",
+            "instructions": [
+              {
+                "id": "done",
+                "op": "COMPLETE"
+              }
+            ]
+          },
+          "installed_at_epoch": 900
+        }
+      },
+      "tasks": {
+        "TASK-LEGACY": {
+          "schema_version": 1,
+          "task_id": "TASK-LEGACY",
+          "role": "operator-role",
+          "workflow_id": "legacy.workflow",
+          "workflow_version": "1.0.0",
+          "current_instruction_id": "done",
+          "status": "completed",
+          "created_at_epoch": 900,
+          "updated_at_epoch": 901,
+          "state": {},
+          "retry_counts": {},
+          "receipt_ids": []
+        }
+      },
+      "receipts": {},
+      "replay_claims": {
+        "legacy-command": 2000
+      }
+    }
+    """
 }

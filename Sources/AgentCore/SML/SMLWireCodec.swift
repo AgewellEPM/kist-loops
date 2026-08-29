@@ -109,6 +109,29 @@ public enum SMLWireCodec {
         return SMLCommandCandidate(command: command, validationReport: report)
     }
 
+    /// Strict ingress for an open SML object such as a generated REPL state payload or a native
+    /// model-tool argument object. Resource limits and duplicate-key rejection are identical to the
+    /// command/workflow wire boundary; only the object's application-specific member names remain open.
+    public static func decodeOpenObject(
+        from data: Data,
+        limits: Limits = .standard
+    ) throws -> SMLObject {
+        let tree = try preflight(data, limits: limits)
+        guard case .object = tree else {
+            throw SMLWireCodecError.decodingFailed("expected a JSON object")
+        }
+        let object: SMLObject = try decode(SMLObject.self, from: data)
+        var nodes = 0
+        let diagnostics = SMLValidationSupport.inspectObject(
+            object, path: "$", nodes: &nodes
+        )
+        let report = SMLValidationReport(diagnostics: diagnostics)
+        guard report.isValid else {
+            throw SMLWireCodecError.structuralValidationFailed(report)
+        }
+        return object
+    }
+
     private static func preflight(_ data: Data, limits: Limits) throws -> SMLWireJSONNode {
         guard limits.maximumBytes > 0, limits.maximumDepth > 0, limits.maximumNodes > 0 else {
             throw SMLWireCodecError.invalidLimits
@@ -151,7 +174,7 @@ public enum SMLWireCodec {
             path: "$",
             keys: [
                 "ir_version", "id", "version", "name", "source", "trigger",
-                "state_schema", "entrypoint", "instructions",
+                "state_schema", "interface", "entrypoint", "instructions",
             ]
         ) else { return }
 
@@ -169,6 +192,20 @@ public enum SMLWireCodec {
                     path: "$.state_schema[\(index)]",
                     keys: ["name", "type", "required", "nullable", "description"]
                 )
+            }
+        }
+        if let interfaceNode = root["interface"],
+           let interface = try knownObject(
+               interfaceNode,
+               path: "$.interface",
+               keys: ["input_fields", "output_fields"]
+           ) {
+            for key in ["input_fields", "output_fields"] {
+                if let fields = interface[key] {
+                    _ = try boundedArray(
+                        fields, path: "$.interface.\(key)", maximum: 512
+                    )
+                }
             }
         }
         if let instructions = root["instructions"],

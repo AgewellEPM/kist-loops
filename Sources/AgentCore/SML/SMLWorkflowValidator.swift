@@ -34,6 +34,12 @@ public enum SMLWorkflowValidator {
     public static let maximumInstructions = 4_096
     public static let maximumStateFields = 512
     public static let maximumDiagnostics = 256
+    /// Runtime concurrency tokens occupy the command `expected_state` namespace. Workflows may not
+    /// shadow them with user state because doing so would make stale-state checks ambiguous.
+    public static let reservedStateFields: Set<String> = [
+        "task_status", "task_revision", "instruction_id", "workflow_version",
+        "capability_state_digest",
+    ]
 
     public static func validate(_ workflow: SMLWorkflow) -> SMLValidationReport {
         var diagnostics: [SMLDiagnostic] = []
@@ -125,6 +131,12 @@ public enum SMLWorkflowValidator {
             if !SMLValidationSupport.identifierIsValid(field.name, allowDot: false) {
                 error("invalid_state_field", "\(path).name", "state field is not a valid identifier")
             }
+            if reservedStateFields.contains(field.name) {
+                error(
+                    "reserved_state_field", "\(path).name",
+                    "state field '\(field.name)' is reserved for runtime concurrency control"
+                )
+            }
             if !stateNames.insert(field.name).inserted {
                 error("duplicate_state_field", "\(path).name", "state field '\(field.name)' is duplicated")
             }
@@ -134,6 +146,18 @@ public enum SMLWorkflowValidator {
                 error("description_too_large", "\(path).description", "description is too large")
             }
         }
+        validateInterfaceFields(
+            workflow.interface.inputFields,
+            label: "input_fields",
+            stateFields: stateFields,
+            error: error
+        )
+        validateInterfaceFields(
+            workflow.interface.outputFields,
+            label: "output_fields",
+            stateFields: stateFields,
+            error: error
+        )
 
         if workflow.instructions.isEmpty {
             error("empty_workflow", "instructions", "workflow requires at least one instruction")
@@ -169,6 +193,16 @@ public enum SMLWorkflowValidator {
             )
             validateInstruction(
                 instruction, path: path, present: present, error: error, warning: warning
+            )
+        }
+        let emittedFields = Set(workflow.instructions
+            .filter { $0.op == .emitReceipt }
+            .flatMap(\.receiptFields))
+        for (index, field) in workflow.interface.outputFields.enumerated()
+            where !emittedFields.contains(field) {
+            error(
+                "unpublished_output_field", "interface.output_fields[\(index)]",
+                "output field '\(field)' is not bound to an EMIT_RECEIPT instruction"
             )
         }
 
@@ -212,6 +246,34 @@ public enum SMLWorkflowValidator {
         }
 
         return SMLValidationReport(diagnostics: diagnostics)
+    }
+
+    private static func validateInterfaceFields(
+        _ fields: [String],
+        label: String,
+        stateFields: [String: SMLStateField],
+        error: (_ code: String, _ path: String, _ message: String) -> Void
+    ) {
+        if fields.count > maximumStateFields {
+            error(
+                "workflow_interface_too_large", "interface.\(label)",
+                "workflow interface exceeds \(maximumStateFields) fields"
+            )
+            return
+        }
+        var seen = Set<String>()
+        for (index, field) in fields.enumerated() {
+            let path = "interface.\(label)[\(index)]"
+            if !SMLValidationSupport.identifierIsValid(field, allowDot: false) {
+                error("invalid_interface_field", path, "interface field is not a valid identifier")
+            }
+            if !seen.insert(field).inserted {
+                error("duplicate_interface_field", path, "interface field '\(field)' is duplicated")
+            }
+            if stateFields[field] == nil {
+                error("unknown_interface_field", path, "interface field '\(field)' is not in state_schema")
+            }
+        }
     }
 
     public static func requireValidForImport(_ workflow: SMLWorkflow) throws -> SMLWorkflowCandidate {

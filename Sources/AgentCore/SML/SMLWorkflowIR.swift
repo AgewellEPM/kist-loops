@@ -78,6 +78,33 @@ public struct SMLStateField: Sendable, Codable, Equatable {
     }
 }
 
+/// The explicit callable boundary of a workflow.
+///
+/// State fields are not implicitly inputs or outputs: many workflows have required fields that are
+/// produced by a tool or verifier after the task starts. Importers must name the fields an operator,
+/// API, or model may supply and the fields the workflow deliberately publishes. This keeps generated
+/// surfaces from guessing authority from a state schema.
+public struct SMLWorkflowInterface: Sendable, Codable, Equatable {
+    public let inputFields: [String]
+    public let outputFields: [String]
+
+    public init(inputFields: [String] = [], outputFields: [String] = []) {
+        self.inputFields = inputFields
+        self.outputFields = outputFields
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case inputFields = "input_fields"
+        case outputFields = "output_fields"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        inputFields = try container.decodeIfPresent([String].self, forKey: .inputFields) ?? []
+        outputFields = try container.decodeIfPresent([String].self, forKey: .outputFields) ?? []
+    }
+}
+
 public enum SMLConditionOperator: String, Sendable, Codable, Equatable {
     case equals
     case notEquals = "not_equals"
@@ -365,6 +392,7 @@ public struct SMLWorkflow: Sendable, Codable, Equatable {
     public let source: SMLWorkflowSource
     public let trigger: SMLTrigger
     public let stateSchema: [SMLStateField]
+    public let interface: SMLWorkflowInterface
     public let entrypoint: String
     public let instructions: [SMLInstruction]
 
@@ -376,6 +404,7 @@ public struct SMLWorkflow: Sendable, Codable, Equatable {
         source: SMLWorkflowSource,
         trigger: SMLTrigger,
         stateSchema: [SMLStateField],
+        interface: SMLWorkflowInterface = SMLWorkflowInterface(),
         entrypoint: String,
         instructions: [SMLInstruction]
     ) {
@@ -386,6 +415,7 @@ public struct SMLWorkflow: Sendable, Codable, Equatable {
         self.source = source
         self.trigger = trigger
         self.stateSchema = stateSchema
+        self.interface = interface
         self.entrypoint = entrypoint
         self.instructions = instructions
     }
@@ -394,6 +424,23 @@ public struct SMLWorkflow: Sendable, Codable, Equatable {
         case irVersion = "ir_version"
         case id, version, name, source, trigger
         case stateSchema = "state_schema"
+        case interface
         case entrypoint, instructions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        irVersion = try container.decode(Int.self, forKey: .irVersion)
+        id = try container.decode(String.self, forKey: .id)
+        version = try container.decode(String.self, forKey: .version)
+        name = try container.decode(String.self, forKey: .name)
+        source = try container.decode(SMLWorkflowSource.self, forKey: .source)
+        trigger = try container.decode(SMLTrigger.self, forKey: .trigger)
+        stateSchema = try container.decode([SMLStateField].self, forKey: .stateSchema)
+        interface = try container.decodeIfPresent(
+            SMLWorkflowInterface.self, forKey: .interface
+        ) ?? SMLWorkflowInterface()
+        entrypoint = try container.decode(String.self, forKey: .entrypoint)
+        instructions = try container.decode([SMLInstruction].self, forKey: .instructions)
     }
 }

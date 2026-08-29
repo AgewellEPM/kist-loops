@@ -5,6 +5,7 @@ public enum SMLREPLCompileError: Error, Sendable, Equatable, CustomStringConvert
     case unknownCommand(String)
     case missingArgument(String)
     case invalidIdentifier(String)
+    case invalidTaskRevision(String)
 
     public var description: String {
         switch self {
@@ -16,6 +17,8 @@ public enum SMLREPLCompileError: Error, Sendable, Equatable, CustomStringConvert
             return "missing SML REPL argument: \(name)"
         case .invalidIdentifier(let value):
             return "invalid SML REPL identifier: \(value)"
+        case .invalidTaskRevision(let value):
+            return "invalid SML task revision: \(value)"
         }
     }
 }
@@ -98,21 +101,27 @@ public struct SMLREPLCompiler: Sendable {
                 issuedAtEpoch: issuedAtEpoch
             )
         case "approve":
+            let revision = try taskRevision(parts)
             envelope = command(
                 op: SMLRuntimeCommandOperation.taskApprove,
                 task: try identifier(try required(parts, index: 1, name: "task_id")),
+                expectedState: ["task_revision": .number(Decimal(revision))],
                 issuedAtEpoch: issuedAtEpoch
             )
         case "refuse":
+            let revision = try taskRevision(parts)
             envelope = command(
                 op: SMLRuntimeCommandOperation.taskRefuse,
                 task: try identifier(try required(parts, index: 1, name: "task_id")),
+                expectedState: ["task_revision": .number(Decimal(revision))],
                 issuedAtEpoch: issuedAtEpoch
             )
         case "rollback":
+            let revision = try taskRevision(parts)
             envelope = command(
                 op: SMLRuntimeCommandOperation.taskRollback,
                 task: try identifier(try required(parts, index: 1, name: "task_id")),
+                expectedState: ["task_revision": .number(Decimal(revision))],
                 issuedAtEpoch: issuedAtEpoch
             )
         case "receipts":
@@ -136,6 +145,7 @@ public struct SMLREPLCompiler: Sendable {
         op: String,
         task: String,
         arguments: SMLObject = [:],
+        expectedState: SMLObject = [:],
         issuedAtEpoch: Double
     ) -> SMLCommandEnvelope {
         SMLCommandEnvelope(
@@ -145,6 +155,7 @@ public struct SMLREPLCompiler: Sendable {
             task: task,
             op: op,
             arguments: arguments,
+            expectedState: expectedState,
             issuedAtEpoch: issuedAtEpoch
         )
     }
@@ -159,6 +170,14 @@ public struct SMLREPLCompiler: Sendable {
             throw SMLREPLCompileError.invalidIdentifier(value)
         }
         return value
+    }
+
+    private func taskRevision(_ parts: [String]) throws -> Int {
+        let raw = try required(parts, index: 2, name: "task_revision")
+        guard let revision = Int(raw), revision >= 0 else {
+            throw SMLREPLCompileError.invalidTaskRevision(raw)
+        }
+        return revision
     }
 }
 
@@ -198,6 +217,7 @@ public enum SMLREPLRenderer {
             var lines = [
                 "\(task.taskID) \(task.status.rawValue)",
                 "workflow: \(task.workflowID) \(task.workflowVersion)",
+                "revision: \(task.taskRevision)",
                 "next: \(task.currentInstructionID) \(op)",
             ]
             if let owner = task.waitingApprovalOwner {

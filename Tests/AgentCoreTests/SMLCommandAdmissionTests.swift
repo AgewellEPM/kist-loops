@@ -85,6 +85,27 @@ final class SMLCommandAdmissionTests: XCTestCase {
         }
     }
 
+    func testAdmissionRejectsMalformedApprovalAuthorityGrant() async {
+        let malformed = SMLCommandAuthority(
+            authenticatedActor: "operator.luke",
+            leaseID: "lease-77",
+            roles: ["manager"],
+            tasks: ["TASK-1842"],
+            operations: ["workflow.run"],
+            approvalAuthorities: ["not a valid owner"],
+            scope: ["repository": .string("staging")]
+        )
+        do {
+            _ = try await SMLCommandAdmission.admit(
+                candidate(), authority: malformed, nowEpoch: 1_010,
+                replayGuard: TestSMLReplayGuard()
+            )
+            XCTFail("malformed host grants must fail before replay admission")
+        } catch {
+            XCTAssertEqual(error as? SMLCommandAdmissionError, .invalidHostAuthority)
+        }
+    }
+
     private func candidate(issuedAt: Double = 1_000) -> SMLCommandCandidate {
         let command = SMLCommandEnvelope(
             commandID: "command-1842",

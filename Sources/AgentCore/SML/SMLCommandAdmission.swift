@@ -8,6 +8,9 @@ public struct SMLCommandAuthority: Sendable {
     public let roles: Set<String>
     public let tasks: Set<String>
     public let operations: Set<String>
+    /// Workflow approval-owner identifiers granted to this authenticated lease by the host.
+    /// These are distinct from roles: a role may operate a task without owning its human gate.
+    public let approvalAuthorities: Set<String>
     public let scope: SMLObject
     public let maximumCommandAgeSeconds: Double
     public let maximumFutureSkewSeconds: Double
@@ -18,6 +21,7 @@ public struct SMLCommandAuthority: Sendable {
         roles: Set<String>,
         tasks: Set<String>,
         operations: Set<String>,
+        approvalAuthorities: Set<String> = [],
         scope: SMLObject,
         maximumCommandAgeSeconds: Double = 300,
         maximumFutureSkewSeconds: Double = 30
@@ -27,6 +31,7 @@ public struct SMLCommandAuthority: Sendable {
         self.roles = roles
         self.tasks = tasks
         self.operations = operations
+        self.approvalAuthorities = approvalAuthorities
         self.scope = scope
         self.maximumCommandAgeSeconds = maximumCommandAgeSeconds
         self.maximumFutureSkewSeconds = maximumFutureSkewSeconds
@@ -73,6 +78,7 @@ public enum SMLCommandAdmissionError: Error, Sendable, Equatable, CustomStringCo
 public struct SMLAdmittedCommand: Sendable {
     let command: SMLCommandEnvelope
     let leaseID: String
+    let approvalAuthorities: Set<String>
     let admittedAtEpoch: Double
 
     public var commandID: String { command.commandID }
@@ -81,6 +87,38 @@ public struct SMLAdmittedCommand: Sendable {
 }
 
 public enum SMLCommandAdmission {
+    /// Checks structural, authenticated authority, scope, and clock gates without claiming a replay
+    /// ID. Capability coordinators use this to prove completion authority before external actuation.
+    public static func preflight(
+        _ command: SMLCommandEnvelope,
+        authority: SMLCommandAuthority,
+        nowEpoch: Double
+    ) throws {
+        guard command.validate().isValid else {
+            throw SMLCommandAdmissionError.invalidCandidate
+        }
+        try validateAuthority(command, authority: authority, nowEpoch: nowEpoch)
+    }
+
+    /// Typed-host convenience. Generated REPL/API/model adapters already hold an envelope value rather
+    /// than wire JSON; they still cross the identical structural, authority, clock, and replay gates.
+    public static func admit(
+        _ command: SMLCommandEnvelope,
+        authority: SMLCommandAuthority,
+        nowEpoch: Double,
+        replayGuard: any SMLCommandReplayGuard
+    ) async throws -> SMLAdmittedCommand {
+        try await admit(
+            SMLCommandCandidate(
+                command: command,
+                validationReport: command.validate()
+            ),
+            authority: authority,
+            nowEpoch: nowEpoch,
+            replayGuard: replayGuard
+        )
+    }
+
     public static func admit(
         _ candidate: SMLCommandCandidate,
         authority: SMLCommandAuthority,
@@ -91,12 +129,44 @@ public enum SMLCommandAdmission {
         guard candidate.validationReport.isValid else {
             throw SMLCommandAdmissionError.invalidCandidate
         }
+        try validateAuthority(command, authority: authority, nowEpoch: nowEpoch)
+
+        let expiresAt = command.issuedAtEpoch
+            + authority.maximumCommandAgeSeconds
+            + authority.maximumFutureSkewSeconds
+        let claimed: Bool
+        do {
+            claimed = try await replayGuard.claim(
+                commandID: command.commandID, expiresAtEpoch: expiresAt
+            )
+        } catch {
+            throw SMLCommandAdmissionError.replayGuardFailed(String(describing: error))
+        }
+        guard claimed else { throw SMLCommandAdmissionError.replayedCommand }
+
+        return SMLAdmittedCommand(
+            command: command,
+            leaseID: authority.leaseID,
+            approvalAuthorities: authority.approvalAuthorities,
+            admittedAtEpoch: nowEpoch
+        )
+    }
+
+    private static func validateAuthority(
+        _ command: SMLCommandEnvelope,
+        authority: SMLCommandAuthority,
+        nowEpoch: Double
+    ) throws {
         guard nowEpoch.isFinite, nowEpoch >= 0,
               authority.maximumCommandAgeSeconds.isFinite,
               (0...86_400).contains(authority.maximumCommandAgeSeconds),
               authority.maximumCommandAgeSeconds > 0,
               authority.maximumFutureSkewSeconds.isFinite,
               (0...300).contains(authority.maximumFutureSkewSeconds),
+              authority.approvalAuthorities.count <= 256,
+              authority.approvalAuthorities.allSatisfy({
+                SMLValidationSupport.identifierIsValid($0)
+              }),
               SMLValidationSupport.identifierIsValid(authority.authenticatedActor),
               SMLValidationSupport.identifierIsValid(authority.leaseID) else {
             throw SMLCommandAdmissionError.invalidHostAuthority
@@ -122,23 +192,6 @@ public enum SMLCommandAdmission {
         guard command.issuedAtEpoch >= nowEpoch - authority.maximumCommandAgeSeconds else {
             throw SMLCommandAdmissionError.commandExpired
         }
-
-        let expiresAt = command.issuedAtEpoch
-            + authority.maximumCommandAgeSeconds
-            + authority.maximumFutureSkewSeconds
-        let claimed: Bool
-        do {
-            claimed = try await replayGuard.claim(
-                commandID: command.commandID, expiresAtEpoch: expiresAt
-            )
-        } catch {
-            throw SMLCommandAdmissionError.replayGuardFailed(String(describing: error))
-        }
-        guard claimed else { throw SMLCommandAdmissionError.replayedCommand }
-
-        return SMLAdmittedCommand(
-            command: command, leaseID: authority.leaseID, admittedAtEpoch: nowEpoch
-        )
     }
 
     private static func firstScopeViolation(
