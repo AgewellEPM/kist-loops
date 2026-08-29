@@ -52,6 +52,8 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertEqual(capture.toolChoice, .any)
         XCTAssertFalse(capture.geminiBuiltins)
         XCTAssertTrue(capture.systemPrompt.contains("prose is advisory"))
+        XCTAssertTrue(capture.systemPrompt.contains("Workflow graph:"))
+        XCTAssertTrue(capture.systemPrompt.contains("work CALL_TOOL [tool.execute] -> receipt"))
     }
 
     func testMultipleWrongAndMalformedCallsAreAtomicNoOps() async throws {

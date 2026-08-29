@@ -9,6 +9,55 @@ public enum SMLOnyxSkillKind: String, Sendable, Codable, Equatable {
     case governance
 }
 
+public enum SMLOnyxPlanningUnitKind: String, Sendable, Codable, Equatable {
+    case atomic
+    case control
+    case externalCapability = "external_capability"
+    case modelReasoning = "model_reasoning"
+    case nestedWorkflow = "nested_workflow"
+    case pluginContract = "plugin_contract"
+    case approvalGate = "approval_gate"
+    case boundedRetry = "bounded_retry"
+    case terminal
+}
+
+public struct SMLOnyxPlanningContract: Sendable, Codable, Equatable {
+    public let unitKind: SMLOnyxPlanningUnitKind
+    public let statePreconditions: [String]
+    public let condition: SMLCondition?
+    public let expectedState: SMLObject
+    public let declaredOutputs: [String]
+    public let outputSchema: String?
+    public let receiptFields: [String]
+    public let retryPolicy: SMLRetryPolicy?
+    public let plugin: SMLPluginContract?
+    public let canDecomposeFurther: Bool
+
+    public init(
+        unitKind: SMLOnyxPlanningUnitKind,
+        statePreconditions: [String],
+        condition: SMLCondition?,
+        expectedState: SMLObject,
+        declaredOutputs: [String],
+        outputSchema: String?,
+        receiptFields: [String],
+        retryPolicy: SMLRetryPolicy?,
+        plugin: SMLPluginContract?,
+        canDecomposeFurther: Bool
+    ) {
+        self.unitKind = unitKind
+        self.statePreconditions = statePreconditions
+        self.condition = condition
+        self.expectedState = expectedState
+        self.declaredOutputs = declaredOutputs
+        self.outputSchema = outputSchema
+        self.receiptFields = receiptFields
+        self.retryPolicy = retryPolicy
+        self.plugin = plugin
+        self.canDecomposeFurther = canDecomposeFurther
+    }
+}
+
 public struct SMLOnyxSkillNode: Sendable, Codable, Equatable {
     public let id: String
     public let kind: SMLOnyxSkillKind
@@ -16,6 +65,7 @@ public struct SMLOnyxSkillNode: Sendable, Codable, Equatable {
     public let reference: String?
     public let prerequisites: [String]
     public let successors: [String]
+    public let planning: SMLOnyxPlanningContract?
 
     public init(
         id: String,
@@ -23,7 +73,8 @@ public struct SMLOnyxSkillNode: Sendable, Codable, Equatable {
         operation: SMLInstructionOperation,
         reference: String?,
         prerequisites: [String],
-        successors: [String]
+        successors: [String],
+        planning: SMLOnyxPlanningContract? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -31,6 +82,7 @@ public struct SMLOnyxSkillNode: Sendable, Codable, Equatable {
         self.reference = reference
         self.prerequisites = prerequisites
         self.successors = successors
+        self.planning = planning
     }
 }
 
@@ -181,7 +233,8 @@ public enum SMLOnyxDriverCompiler {
                 operation: instruction.op,
                 reference: reference(of: instruction),
                 prerequisites: (predecessors[instruction.id] ?? []).sorted(),
-                successors: (successorsByID[instruction.id] ?? []).sorted()
+                successors: (successorsByID[instruction.id] ?? []).sorted(),
+                planning: planningContract(instruction)
             )
         }
         let tools = workflow.instructions.compactMap(toolBinding).sorted {
@@ -239,6 +292,66 @@ public enum SMLOnyxDriverCompiler {
         case .branch, .retry: return .control
         case .checkpoint, .waitApproval, .rollback, .escalate, .commit,
              .emitReceipt, .complete: return .governance
+        }
+    }
+
+    private static func planningContract(
+        _ instruction: SMLInstruction
+    ) -> SMLOnyxPlanningContract {
+        let conditionFields = instruction.condition?.clauses.map(\.field) ?? []
+        let statePreconditions = Array(Set(
+            conditionFields + Array(instruction.expectedState.keys)
+        )).sorted()
+        var declaredOutputs = Set<String>()
+        declaredOutputs.formUnion(instruction.receiptFields)
+        if let plugin = instruction.plugin {
+            declaredOutputs.formUnion(plugin.writes)
+        }
+        return SMLOnyxPlanningContract(
+            unitKind: planningUnitKind(instruction.op),
+            statePreconditions: statePreconditions,
+            condition: instruction.condition,
+            expectedState: instruction.expectedState,
+            declaredOutputs: Array(declaredOutputs).sorted(),
+            outputSchema: instruction.outputSchema,
+            receiptFields: instruction.receiptFields,
+            retryPolicy: instruction.retryPolicy,
+            plugin: instruction.plugin,
+            canDecomposeFurther: canDecomposeFurther(instruction.op)
+        )
+    }
+
+    private static func planningUnitKind(
+        _ operation: SMLInstructionOperation
+    ) -> SMLOnyxPlanningUnitKind {
+        switch operation {
+        case .observe, .retrieve, .callTool, .invokeVCard, .verify, .commit:
+            return .externalCapability
+        case .callModel:
+            return .modelReasoning
+        case .runPlugin:
+            return .pluginContract
+        case .runWorkflow:
+            return .nestedWorkflow
+        case .branch, .assert, .checkpoint:
+            return .control
+        case .waitApproval:
+            return .approvalGate
+        case .retry:
+            return .boundedRetry
+        case .rollback, .escalate, .emitReceipt, .complete:
+            return .terminal
+        }
+    }
+
+    private static func canDecomposeFurther(_ operation: SMLInstructionOperation) -> Bool {
+        switch operation {
+        case .runPlugin, .runWorkflow:
+            return true
+        case .observe, .retrieve, .callTool, .callModel, .invokeVCard, .branch,
+             .assert, .verify, .checkpoint, .waitApproval, .retry, .rollback,
+             .escalate, .commit, .emitReceipt, .complete:
+            return false
         }
     }
 

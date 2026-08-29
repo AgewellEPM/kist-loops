@@ -10,6 +10,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(surface.inputs.map(\.name), ["target"])
         XCTAssertEqual(surface.outputs.map(\.name), ["artifact"])
         XCTAssertTrue(surface.grammar().contains("start [TASK_ID] [JSON_INPUT_OBJECT]"))
+        XCTAssertTrue(surface.graphSummary.contains("plan CALL_MODEL [content.plan] -> write"))
+        XCTAssertTrue(surface.graphSummary.contains("verify VERIFY [artifact_verified] -> pass:approval failure:rollback"))
 
         let modelTool = surface.modelCommandTool()
         XCTAssertEqual(modelTool.name, SMLWorkflowModelAdapter.toolName)
@@ -19,6 +21,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
 
         let api = SMLWorkflowAPICatalog(surface: surface)
         XCTAssertEqual(api.endpoints.count, 7)
+        XCTAssertEqual(api.endpoints.first { $0.action == .start }?.bodyKind, .startTask)
+        XCTAssertEqual(api.endpoints.first { $0.action == .approve }?.bodyKind, .expectedState)
         XCTAssertEqual(api.endpoints.first { $0.action == .start }?.bodyFields.map(\.name), ["target"])
 
         let onyx = SMLOnyxDriverCompiler.compile(surface: surface)
@@ -27,6 +31,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(onyx.tools.map(\.reference), ["content.plan", "artifact_verified", "repository.write"])
         XCTAssertEqual(onyx.skillTree.first { $0.id == "write" }?.prerequisites, ["plan"])
         XCTAssertEqual(onyx.skillTree.first { $0.id == "verify" }?.successors, ["approval", "rollback"])
+        XCTAssertEqual(onyx.skillTree.first { $0.id == "plan" }?.planning?.unitKind, .modelReasoning)
+        XCTAssertEqual(onyx.skillTree.first { $0.id == "plan" }?.planning?.outputSchema, "content.plan.v1")
+        XCTAssertEqual(onyx.skillTree.first { $0.id == "verify" }?.planning?.unitKind, .externalCapability)
+        XCTAssertEqual(onyx.skillTree.first { $0.id == "receipt" }?.planning?.declaredOutputs, ["artifact", "task"])
         XCTAssertFalse(onyx.modelActions.contains(.approve))
     }
 
@@ -145,6 +153,22 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(watch.op, SMLRuntimeCommandOperation.taskWatch)
         XCTAssertEqual(watch.expectedState["workflow_version"], .string("1.0.0"))
 
+        let approve = try api.compile(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/v1/workflows/content.release/tasks/TASK-API/approve",
+                body: [
+                    "task_revision": .number(1),
+                    "instruction_id": .string("approval"),
+                    "workflow_version": .string("1.0.0"),
+                ]
+            ),
+            issuedAtEpoch: 2_002
+        )
+        XCTAssertEqual(approve.op, SMLRuntimeCommandOperation.taskApprove)
+        XCTAssertEqual(approve.expectedState["task_revision"], .number(1))
+        XCTAssertEqual(approve.expectedState["instruction_id"], .string("approval"))
+
         XCTAssertThrowsError(try api.compile(
             SMLWorkflowAPIRequest(
                 method: .post,
@@ -155,17 +179,17 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                     "actor": .string("forged"),
                 ]
             ),
-            issuedAtEpoch: 2_002
+            issuedAtEpoch: 2_003
         )) {
             XCTAssertEqual($0 as? SMLWorkflowAPIError, .unknownBodyField("actor"))
         }
         XCTAssertThrowsError(try api.compile(
             SMLWorkflowAPIRequest(method: .get, path: "/v1/workflows/other/tasks/TASK-API"),
-            issuedAtEpoch: 2_003
+            issuedAtEpoch: 2_004
         ))
         XCTAssertThrowsError(try api.compile(
             SMLWorkflowAPIRequest(method: .get, path: "/v1/workflows/content.release/%2e%2e"),
-            issuedAtEpoch: 2_004
+            issuedAtEpoch: 2_005
         )) {
             guard case .invalidPath = $0 as? SMLWorkflowAPIError else {
                 return XCTFail("expected invalid path, got \($0)")
@@ -176,10 +200,120 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 method: .get,
                 path: "/v1/workflows/content.release/tasks/runtime/receipts"
             ),
-            issuedAtEpoch: 2_005
+            issuedAtEpoch: 2_006
         )) {
             XCTAssertEqual($0 as? SMLWorkflowSurfaceError, .invalidTask("runtime"))
         }
+        XCTAssertThrowsError(try api.compile(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/v1/workflows/content.release/tasks/TASK-API/refuse",
+                body: ["task_revision": .number(1)],
+                expectedState: ["task_revision": .number(2)]
+            ),
+            issuedAtEpoch: 2_007
+        )) {
+            XCTAssertEqual($0 as? SMLWorkflowAPIError, .invalidBodyField("expected_state"))
+        }
+    }
+
+    func testOldAPIEndpointCatalogsDecodeWithNoBodyKind() throws {
+        let data = Data(
+            #"{"method":"GET","pathTemplate":"/v1/workflows/x","operationID":"describe","action":"describe","summary":"old"}"#.utf8
+        )
+
+        let endpoint = try JSONDecoder().decode(SMLWorkflowAPIEndpoint.self, from: data)
+
+        XCTAssertEqual(endpoint.bodyKind, .none)
+        XCTAssertTrue(endpoint.bodyFields.isEmpty)
+    }
+
+    func testOnyxPlanningContractsExposeControlsRetryPluginsAndNestedWorkflows() throws {
+        let condition = SMLCondition(clauses: [
+            .init(field: "ready", op: .equals, value: .bool(true)),
+        ])
+        let plugin = SMLPluginContract(
+            id: "invoice_processor",
+            reads: ["invoice"],
+            writes: ["status"],
+            sideEffectLevel: .reversibleInternal,
+            preconditions: ["invoice_present"],
+            postconditions: ["status_written"],
+            rollback: "invoice_rollback",
+            verifier: "invoice_verified"
+        )
+        let workflow = SMLWorkflow(
+            id: "ops.invoice",
+            version: "1.0.0",
+            name: "Invoice operation",
+            source: .init(kind: .langGraph, reference: "graphs/invoice.py"),
+            trigger: .init(kind: .manual),
+            stateSchema: [
+                .init(name: "ready", type: .boolean),
+                .init(name: "invoice", type: .object),
+                .init(name: "status", type: .string, required: false),
+            ],
+            interface: .init(inputFields: ["ready", "invoice"], outputFields: ["status"]),
+            entrypoint: "decide",
+            instructions: [
+                .init(id: "decide", op: .branch, condition: condition,
+                      trueTarget: "plugin", falseTarget: "nested"),
+                .init(id: "plugin", op: .runPlugin,
+                      expectedState: ["ready": .bool(true)],
+                      plugin: plugin, next: "retry"),
+                .init(id: "retry", op: .retry,
+                      retryPolicy: .init(target: "plugin", maximumAttempts: 2, backoffSeconds: 1),
+                      onFailure: "receipt"),
+                .init(id: "nested", op: .runWorkflow, workflow: "ops.fallback", next: "receipt"),
+                .init(id: "receipt", op: .emitReceipt, receiptFields: ["status"]),
+            ]
+        )
+        let admitted = try SMLWorkflowAdmission.admitForExecution(
+            SMLWorkflowValidator.requireValidForImport(workflow),
+            catalog: SMLExecutionAdmissionCatalog(
+                workflows: ["ops.fallback"],
+                verifiers: ["invoice_verified"],
+                rollbackProcedures: ["invoice_rollback"],
+                plugins: [
+                    plugin.id: SMLPluginAttestation(
+                        contract: plugin,
+                        trustLevel: .contracted,
+                        isolation: .sandboxed,
+                        attestedBy: "test"
+                    ),
+                ]
+            )
+        )
+        let surface = try SMLWorkflowSurface.compile(admitted: admitted, role: "ops-role")
+        let manifest = SMLOnyxDriverCompiler.compile(surface: surface)
+
+        let decide: SMLOnyxSkillNode = try XCTUnwrap(
+            manifest.skillTree.first { $0.id == "decide" }
+        )
+        XCTAssertEqual(decide.planning?.unitKind, .control)
+        XCTAssertEqual(decide.planning?.statePreconditions, ["ready"])
+        XCTAssertEqual(decide.planning?.condition, condition)
+
+        let pluginNode: SMLOnyxSkillNode = try XCTUnwrap(
+            manifest.skillTree.first { $0.id == "plugin" }
+        )
+        XCTAssertEqual(pluginNode.planning?.unitKind, .pluginContract)
+        XCTAssertEqual(pluginNode.planning?.statePreconditions, ["ready"])
+        XCTAssertEqual(pluginNode.planning?.declaredOutputs, ["status"])
+        XCTAssertEqual(pluginNode.planning?.plugin, plugin)
+        XCTAssertEqual(pluginNode.planning?.canDecomposeFurther, true)
+
+        let retry: SMLOnyxSkillNode = try XCTUnwrap(
+            manifest.skillTree.first { $0.id == "retry" }
+        )
+        XCTAssertEqual(retry.planning?.unitKind, .boundedRetry)
+        XCTAssertEqual(retry.planning?.retryPolicy?.maximumAttempts, 2)
+
+        let nested: SMLOnyxSkillNode = try XCTUnwrap(
+            manifest.skillTree.first { $0.id == "nested" }
+        )
+        XCTAssertEqual(nested.planning?.unitKind, .nestedWorkflow)
+        XCTAssertEqual(nested.planning?.canDecomposeFurther, true)
     }
 
     func testInterfaceValidationRejectsUnknownDuplicateAndUnpublishedFields() throws {

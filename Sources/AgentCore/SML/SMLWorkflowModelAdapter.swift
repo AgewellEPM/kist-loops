@@ -232,6 +232,9 @@ public struct SMLWorkflowModelAdapter: Sendable {
 
         \(surface.schemaSummary)
 
+        Workflow graph:
+        \(surface.graphSummary)
+
         Allowed grammar:
         \(surface.grammar(allowedActions: allowedActions))
         """

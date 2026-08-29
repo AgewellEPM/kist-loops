@@ -5,12 +5,19 @@ public enum SMLWorkflowAPIMethod: String, Sendable, Codable, Equatable {
     case post = "POST"
 }
 
+public enum SMLWorkflowAPIRequestBodyKind: String, Sendable, Codable, Equatable {
+    case none
+    case startTask = "start_task"
+    case expectedState = "expected_state"
+}
+
 public struct SMLWorkflowAPIEndpoint: Sendable, Codable, Equatable {
     public let method: SMLWorkflowAPIMethod
     public let pathTemplate: String
     public let operationID: String
     public let action: SMLWorkflowControlAction
     public let summary: String
+    public let bodyKind: SMLWorkflowAPIRequestBodyKind
     public let bodyFields: [SMLWorkflowFieldDescriptor]
 
     public init(
@@ -19,6 +26,7 @@ public struct SMLWorkflowAPIEndpoint: Sendable, Codable, Equatable {
         operationID: String,
         action: SMLWorkflowControlAction,
         summary: String,
+        bodyKind: SMLWorkflowAPIRequestBodyKind = .none,
         bodyFields: [SMLWorkflowFieldDescriptor] = []
     ) {
         self.method = method
@@ -26,7 +34,27 @@ public struct SMLWorkflowAPIEndpoint: Sendable, Codable, Equatable {
         self.operationID = operationID
         self.action = action
         self.summary = summary
+        self.bodyKind = bodyKind
         self.bodyFields = bodyFields
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case method, pathTemplate, operationID, action, summary, bodyKind, bodyFields
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        method = try container.decode(SMLWorkflowAPIMethod.self, forKey: .method)
+        pathTemplate = try container.decode(String.self, forKey: .pathTemplate)
+        operationID = try container.decode(String.self, forKey: .operationID)
+        action = try container.decode(SMLWorkflowControlAction.self, forKey: .action)
+        summary = try container.decode(String.self, forKey: .summary)
+        bodyKind = try container.decodeIfPresent(
+            SMLWorkflowAPIRequestBodyKind.self, forKey: .bodyKind
+        ) ?? .none
+        bodyFields = try container.decodeIfPresent(
+            [SMLWorkflowFieldDescriptor].self, forKey: .bodyFields
+        ) ?? []
     }
 }
 
@@ -52,19 +80,23 @@ public struct SMLWorkflowAPICatalog: Sendable, Codable, Equatable {
             .init(method: .post, pathTemplate: "\(workflowPath)/tasks",
                   operationID: "start_workflow_task", action: .start,
                   summary: "Start a task; body requires task_id and accepts input",
+                  bodyKind: .startTask,
                   bodyFields: surface.inputs),
             .init(method: .get, pathTemplate: taskPath,
                   operationID: "watch_workflow_task", action: .watch,
                   summary: "Read a task projection"),
             .init(method: .post, pathTemplate: "\(taskPath)/approve",
                   operationID: "approve_workflow_task", action: .approve,
-                  summary: "Approve the current task gate"),
+                  summary: "Approve the current task gate",
+                  bodyKind: .expectedState),
             .init(method: .post, pathTemplate: "\(taskPath)/refuse",
                   operationID: "refuse_workflow_task", action: .refuse,
-                  summary: "Refuse the current task gate"),
+                  summary: "Refuse the current task gate",
+                  bodyKind: .expectedState),
             .init(method: .post, pathTemplate: "\(taskPath)/rollback",
                   operationID: "rollback_workflow_task", action: .rollback,
-                  summary: "Request terminal operator rollback"),
+                  summary: "Request terminal operator rollback",
+                  bodyKind: .expectedState),
             .init(method: .get, pathTemplate: "\(taskPath)/receipts",
                   operationID: "list_workflow_task_receipts", action: .receipts,
                   summary: "List task receipts"),
@@ -197,24 +229,40 @@ public struct SMLWorkflowAPICompiler: Sendable {
             )
         }
         let task = tail[3]
-        try requireEmptyBody(request.body)
         let action: SMLWorkflowControlAction
         switch (request.method, Array(tail.dropFirst(4))) {
-        case (.get, []): action = .watch
-        case (.post, ["approve"]): action = .approve
-        case (.post, ["refuse"]): action = .refuse
-        case (.post, ["rollback"]): action = .rollback
-        case (.get, ["receipts"]): action = .receipts
+        case (.get, []):
+            try requireEmptyBody(request.body)
+            action = .watch
+        case (.post, ["approve"]):
+            action = .approve
+        case (.post, ["refuse"]):
+            action = .refuse
+        case (.post, ["rollback"]):
+            action = .rollback
+        case (.get, ["receipts"]):
+            try requireEmptyBody(request.body)
+            action = .receipts
         default:
             throw SMLWorkflowAPIError.routeNotFound(
                 method: request.method.rawValue, path: request.path
             )
         }
+        let expectedState: SMLObject
+        switch action {
+        case .approve, .refuse, .rollback:
+            expectedState = try expectedStateObject(
+                from: request.body,
+                fallback: request.expectedState
+            )
+        case .describe, .start, .watch, .receipts:
+            expectedState = request.expectedState
+        }
         return try compiler.compile(
             action: action,
             task: task,
             scope: request.scope,
-            expectedState: request.expectedState,
+            expectedState: expectedState,
             issuedAtEpoch: issuedAtEpoch
         )
     }
@@ -239,6 +287,17 @@ public struct SMLWorkflowAPICompiler: Sendable {
         if let unknown = body.keys.filter({ !allowed.contains($0) }).sorted().first {
             throw SMLWorkflowAPIError.unknownBodyField(unknown)
         }
+    }
+
+    private func expectedStateObject(
+        from body: SMLObject,
+        fallback: SMLObject
+    ) throws -> SMLObject {
+        guard !body.isEmpty else { return fallback }
+        guard fallback.isEmpty || fallback == body else {
+            throw SMLWorkflowAPIError.invalidBodyField("expected_state")
+        }
+        return body
     }
 
     private static func validBasePath(_ path: String) -> Bool {

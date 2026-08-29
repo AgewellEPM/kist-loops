@@ -224,8 +224,73 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
         ].joined(separator: "\n")
     }
 
+    public var graphSummary: String {
+        workflow.instructions.map(Self.describeInstruction).joined(separator: "\n")
+    }
+
     private static func describeField(_ field: SMLWorkflowFieldDescriptor) -> String {
         "\(field.name):\(field.type.rawValue)\(field.required ? "" : "?")"
+    }
+
+    private static func describeInstruction(_ instruction: SMLInstruction) -> String {
+        var parts = ["\(instruction.id) \(instruction.op.rawValue)"]
+        if let reference = instructionReference(instruction) {
+            parts.append("[\(reference)]")
+        }
+        let transitions = transitionSummary(instruction)
+        if !transitions.isEmpty {
+            parts.append("-> \(transitions)")
+        }
+        if let retry = instruction.retryPolicy {
+            parts.append("retry(max:\(retry.maximumAttempts),backoff:\(retry.backoffSeconds))")
+        }
+        if let owner = instruction.owner {
+            parts.append("owner:\(owner)")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private static func instructionReference(_ instruction: SMLInstruction) -> String? {
+        switch instruction.op {
+        case .observe, .retrieve: return instruction.source
+        case .callTool, .invokeVCard: return instruction.capability
+        case .callModel: return instruction.purpose
+        case .runPlugin: return instruction.plugin?.id
+        case .runWorkflow: return instruction.workflow
+        case .verify, .commit: return instruction.verifier
+        case .waitApproval, .rollback, .escalate: return instruction.reason
+        case .branch, .assert, .checkpoint, .retry, .emitReceipt, .complete:
+            return nil
+        }
+    }
+
+    private static func transitionSummary(_ instruction: SMLInstruction) -> String {
+        switch instruction.op {
+        case .branch:
+            return [
+                instruction.trueTarget.map { "true:\($0)" },
+                instruction.falseTarget.map { "false:\($0)" },
+            ].compactMap { $0 }.joined(separator: " ")
+        case .assert, .verify:
+            return [
+                instruction.onPass.map { "pass:\($0)" },
+                instruction.onFailure.map { "failure:\($0)" },
+            ].compactMap { $0 }.joined(separator: " ")
+        case .waitApproval:
+            return [
+                instruction.next.map { "approved:\($0)" },
+                instruction.onFailure.map { "refused:\($0)" },
+            ].compactMap { $0 }.joined(separator: " ")
+        case .retry:
+            return [
+                instruction.retryPolicy.map { "retry:\($0.target)" },
+                instruction.onFailure.map { "exhausted:\($0)" },
+            ].compactMap { $0 }.joined(separator: " ")
+        case .escalate, .emitReceipt, .complete:
+            return ""
+        default:
+            return instruction.next ?? ""
+        }
     }
 
     private static func value(_ value: SMLValue, matches type: SMLStateType, nullable: Bool) -> Bool {

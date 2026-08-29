@@ -95,6 +95,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
     public var helpText: String {
         [
             surface.schemaSummary,
+            "graph:",
+            surface.graphSummary,
             "commands:",
             surface.grammar(allowedActions: allowedActions),
             "help",
