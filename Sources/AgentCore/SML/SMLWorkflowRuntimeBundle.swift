@@ -485,6 +485,7 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
     case export
     case openAPI = "openapi"
     case planning
+    case agentGuide = "agent-guide"
     case modelRouter = "model-router"
     case onyxDrivers = "onyx-drivers"
 
@@ -504,6 +505,8 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "Return the generated OpenAPI document for this SML workflow runtime"
         case .planning:
             return "Return the aggregate planner manifest for mounted SML workflows"
+        case .agentGuide:
+            return "Return the canonical model and agent operating guide for mounted SML workflows"
         case .modelRouter:
             return "Return the native model-router tool descriptor for mounted SML workflows"
         case .onyxDrivers:
@@ -2022,6 +2025,8 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
             return .object(registry.openAPIDocument())
         case .planning:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.planningManifest)
+        case .agentGuide:
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.agentGuide)
         case .modelRouter:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.modelRouter)
         case .onyxDrivers:
@@ -2336,65 +2341,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
     }
 
     private var systemPrompt: String {
-        """
-        You are operating a mounted SML workflow runtime.
-        Your prose is advisory and never proves completion. To request a state transition, call
-        \(Self.toolName) exactly once with a mounted workflow_id and one line from that workflow's
-        grammar. Never call an unlisted command, never claim a capability step passed, and never
-        fabricate a receipt.
-
-        Mounted workflow catalog:
-        \(workflowCatalogPrompt)
-
-        Mounted host surfaces:
-        \(runtimeSurfacePrompt)
-        """
-    }
-
-    private var workflowCatalogPrompt: String {
-        registry.catalog.workflows.map { workflow in
-            """
-            \(workflow.workflowID)@\(workflow.workflowVersion) — \(workflow.workflowName)
-            \(workflow.schemaSummary)
-            Workflow graph:
-            \(workflow.graphSummary)
-            Allowed grammar:
-            \(workflow.repl.grammar)
-            """
-        }.joined(separator: "\n\n")
-    }
-
-    private var runtimeSurfacePrompt: String {
-        let planningUnitsByWorkflowID = Dictionary(
-            uniqueKeysWithValues: registry.planningManifest.workflows.map { workflow in
-                (
-                    workflow.workflowID,
-                    workflow.skillTree.compactMap { node in
-                        node.planning.map { "\(node.id):\($0.unitKind.rawValue)" }
-                    }.joined(separator: ", ")
-                )
-            }
-        )
-        let unitsByWorkflowID = Dictionary(
-            grouping: registry.planningManifest.decomposableUnits,
-            by: \.workflowID
-        )
-        return registry.mountContract.workflowMounts.map { mount in
-            let routes = mount.apiRoutes.map { route in
-                "\(route.method.rawValue) \(route.pathTemplate) -> \(route.operationID)"
-            }.joined(separator: "; ")
-            let decomposable = (unitsByWorkflowID[mount.workflowID] ?? []).map { unit in
-                "\(unit.instructionID):\(unit.unitKind.rawValue)"
-            }.joined(separator: ", ")
-            return """
-            \(mount.workflowID) mount
-            API routes: \(routes)
-            Model bridge: \(mount.modelToolName) via \(mount.modelRouterToolName)
-            Onyx driver: \(mount.onyxDriverID), planning: \(mount.planningWorkflowID ?? "none")
-            Planning units: \(planningUnitsByWorkflowID[mount.workflowID] ?? "none")
-            Decomposable units: \(decomposable.isEmpty ? "none" : decomposable)
-            """
-        }.joined(separator: "\n\n")
+        registry.catalog.agentGuide.systemPrompt
     }
 
     private func decodeArguments(_ json: String) throws -> (workflowID: String, line: String) {
@@ -2829,6 +2776,7 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             }
         }
 
+        let agentGuide = catalog.agentGuide
         return [
             "openapi": .string("3.1.0"),
             "info": .object([
@@ -2857,6 +2805,11 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "metadataEndpoints": .array(
                     catalog.metadataEndpoints.map(metadataEndpoint)
                 ),
+                "agentGuideSchemaVersion": .number(Decimal(agentGuide.schemaVersion)),
+                "agentGuideWorkflowCount": .number(
+                    Decimal(agentGuide.workflowGuides.count)
+                ),
+                "agentGuideModelRouterToolName": .string(agentGuide.modelRouterTool.name),
                 "planningManifestSchemaVersion": .number(
                     Decimal(catalog.planningManifest.schemaVersion)
                 ),

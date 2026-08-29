@@ -129,6 +129,16 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.onyxDrivers.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.onyxDrivers.first?.plan.entrypoint, "plan")
         XCTAssertEqual(package.runtime.planning.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(package.runtime.agentGuide.workflowGuides.map(\.workflowID), ["langgraph.review"])
+        XCTAssertTrue(
+            package.runtime.agentGuide.systemPrompt.contains(
+                "Break work into small contextual workflow steps"
+            )
+        )
+        XCTAssertEqual(
+            package.runtime.agentGuide.modelRouterTool.name,
+            SMLWorkflowRuntimeModelAdapter.toolName
+        )
 
         let summary = try XCTUnwrap(package.sourceSummaries.first)
         XCTAssertEqual(summary.workflowID, "langgraph.review")
@@ -142,6 +152,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
 
         let openAPIPaths = try object(package.runtime.openAPI["paths"])
         XCTAssertNotNil(openAPIPaths["/source/workflows/langgraph.review/tasks"])
+        XCTAssertNotNil(openAPIPaths["/source/runtime/agent-guide"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/model-router"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/onyx-drivers"])
 

@@ -236,18 +236,23 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertTrue(capture.systemPrompt.contains("mounted workflow_id"))
         XCTAssertTrue(capture.systemPrompt.contains("model.workflow@1.0.0"))
         XCTAssertTrue(capture.systemPrompt.contains("model.review@1.0.0"))
-        XCTAssertTrue(capture.systemPrompt.contains("Allowed grammar:"))
+        XCTAssertTrue(capture.systemPrompt.contains("Allowed REPL grammar:"))
         XCTAssertTrue(capture.systemPrompt.contains("start [TASK_ID] [JSON_INPUT_OBJECT]"))
-        XCTAssertTrue(capture.systemPrompt.contains("Mounted host surfaces:"))
+        XCTAssertTrue(capture.systemPrompt.contains("API routes:"))
         XCTAssertTrue(
             capture.systemPrompt.contains(
-                "POST /model/workflows/model.review/tasks -> start_workflow_task_ModelReview"
+                "POST /model/workflows/model.review/tasks [host_command_gateway] -> start_workflow_task_ModelReview"
             )
         )
-        XCTAssertTrue(capture.systemPrompt.contains("Model bridge: propose_sml_command via propose_sml_runtime_command"))
-        XCTAssertTrue(capture.systemPrompt.contains("Onyx driver: onyx.model.review."))
-        XCTAssertTrue(capture.systemPrompt.contains("Planning units: work:external_capability"))
-        XCTAssertTrue(capture.systemPrompt.contains("Decomposable units: none"))
+        XCTAssertTrue(capture.systemPrompt.contains("model tool: propose_sml_command via propose_sml_runtime_command"))
+        XCTAssertTrue(capture.systemPrompt.contains("onyx driver: onyx.model.review."))
+        XCTAssertTrue(
+            capture.systemPrompt.contains(
+                "work:CALL_TOOL ref:tool.execute unit:external_capability"
+            )
+        )
+        XCTAssertTrue(capture.systemPrompt.contains("Decomposable units:"))
+        XCTAssertTrue(capture.systemPrompt.contains("\nnone\n"))
     }
 
     func testRuntimeModelRouterFailsClosedOnUnknownWorkflowAndLocalCommands() async throws {
