@@ -35,6 +35,33 @@ extension KistRunner {
         }
     }
 
+    struct SMLRuntimeHostLaunchDescriptor: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let launchEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostLaunchDescriptor.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            launchEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.launchEndpoint = launchEndpoint
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
     struct SMLRuntimeHostAttachments: Sendable, Codable, Equatable {
         static let currentSchemaVersion = 4
 
@@ -246,7 +273,7 @@ extension KistRunner {
         var description: String {
             switch self {
             case .missingSourcePath:
-                return "--sml-runtime-export/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
+                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
             case .missingREPLLine:
                 return "--sml-runtime-repl requires --sml-line <line>"
             case .missingAPIPath:
@@ -276,6 +303,26 @@ extension KistRunner {
         do {
             let json = try await renderSMLRuntimeHostExport(
                 sourcePath: opts.smlRuntimeExport,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeLaunch(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostLaunchDescriptor(
+                sourcePath: opts.smlRuntimeLaunch,
                 projectRoot: opts.project,
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
@@ -410,6 +457,31 @@ extension KistRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return String(decoding: try encoder.encode(export), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostLaunchDescriptor(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let launch = try await makeSMLRuntimeHostLaunchDescriptor(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(launch), as: UTF8.self)
     }
 
     static func renderSMLRuntimeHostREPLCommand(
@@ -556,6 +628,39 @@ extension KistRunner {
                 sourceFormat: host.sourceFormat,
                 runtimePackage: host.runtimePackage,
                 hostWiring: host.runtimePackage.runtime.hostWiring,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostLaunchDescriptor(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostLaunchDescriptor {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostLaunchDescriptor(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                launchEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .launch
+                },
                 launchDescriptor: launchDescriptor
             )
         }

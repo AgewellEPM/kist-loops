@@ -581,7 +581,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 12
+    public static let currentSchemaVersion = 13
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

@@ -143,6 +143,7 @@ struct KistOptions {
     var modelRunStage: String?      // --model-run <stage> <manifest.json>: execute verified manifest stage
     var modelRunManifest: String?
     var smlRuntimeExport: String?   // --sml-runtime-export <source.json>: offline source/package -> REPL/API/model/Onyx/planning JSON
+    var smlRuntimeLaunch: String?   // --sml-runtime-launch <source.json>: emit offline launch descriptor/receipt
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/attachments
@@ -206,6 +207,9 @@ struct KistOptions {
             case "--sml-runtime-export":
                                             if let v = next() { o.smlRuntimeExport = v }
                                             else { o.optionErrors.append("--sml-runtime-export requires <source.json>") }
+            case let flag where ["--sml-runtime-launch", "--sml-launch"].contains(flag):
+                                            if let v = next() { o.smlRuntimeLaunch = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-attachments", "--sml-attachments"].contains(flag):
                                             if let v = next() { o.smlRuntimeAttachments = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
@@ -470,6 +474,9 @@ struct KistOptions {
         if o.smlRuntimeExport != nil && o.smlRuntimeREPL != nil {
             o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-repl")
         }
+        if o.smlRuntimeExport != nil && o.smlRuntimeLaunch != nil {
+            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-launch")
+        }
         if o.smlRuntimeExport != nil && o.smlRuntimeAttachments != nil {
             o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-attachments")
         }
@@ -478,6 +485,18 @@ struct KistOptions {
         }
         if o.smlRuntimeExport != nil && o.smlRuntimeModel != nil {
             o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-model")
+        }
+        if o.smlRuntimeLaunch != nil && o.smlRuntimeAttachments != nil {
+            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-attachments")
+        }
+        if o.smlRuntimeLaunch != nil && o.smlRuntimeREPL != nil {
+            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-repl")
+        }
+        if o.smlRuntimeLaunch != nil && o.smlRuntimeAPI != nil {
+            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-api")
+        }
+        if o.smlRuntimeLaunch != nil && o.smlRuntimeModel != nil {
+            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-model")
         }
         if o.smlRuntimeAttachments != nil && o.smlRuntimeREPL != nil {
             o.optionErrors.append("--sml-runtime-attachments conflicts with --sml-runtime-repl")
@@ -739,6 +758,10 @@ struct KistOptions {
                                     runtime source package into a host JSON payload containing the
                                     generated custom REPL mount, API/OpenAPI routes, native model-router
                                     tool, Onyx driver manifests, planning graph, and launch descriptor.
+          --sml-runtime-launch <json>
+                                    Launch the wrapped source offline and emit the exact launch
+                                    descriptor/receipt for mounted REPL, API, model, Onyx, and
+                                    planning adapters.
           --sml-runtime-attachments <json> [--sml-workflow <id>]
                                     Emit the per-workflow attachment manifests for generated REPL,
                                     API, model-router, Onyx driver, and planning adapters; optionally

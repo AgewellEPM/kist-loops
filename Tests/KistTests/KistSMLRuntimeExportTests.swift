@@ -6,6 +6,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
     func testRuntimeExportAndREPLDispatchBeforeProviderRegistryStartup() throws {
         let source = kistRunnerFamilySource()
         let apiDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAPI != nil"))
+        let launchDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeLaunch != nil"))
         let attachmentsDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAttachments != nil"))
         let replDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeREPL != nil"))
         let exportDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeExport != nil"))
@@ -17,6 +18,11 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             apiDispatch.lowerBound,
             configLoad.lowerBound,
             "offline SML runtime API must not initialize providers, keychain, MCP, tools, or REPL"
+        )
+        XCTAssertLessThan(
+            launchDispatch.lowerBound,
+            configLoad.lowerBound,
+            "offline SML runtime launch descriptor must not initialize providers, keychain, MCP, tools, or REPL"
         )
         XCTAssertLessThan(
             attachmentsDispatch.lowerBound,
@@ -207,6 +213,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertNotNil(paths["/source/workflows/langgraph.review/tasks"])
         XCTAssertNotNil(paths["/source/runtime/model-router"])
         XCTAssertNotNil(paths["/source/runtime/onyx-drivers"])
+        XCTAssertNotNil(paths["/source/runtime/launch"])
         XCTAssertNotNil(paths["/source/runtime/planning"])
         XCTAssertNotNil(paths["/source/runtime/host-wiring"])
         XCTAssertNotNil(paths["/source/runtime/attachments"])
@@ -344,6 +351,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(metadataPaths.contains("/source/runtime/onyx-drivers"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/host-guide"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/host-wiring"))
+        XCTAssertTrue(metadataPaths.contains("/source/runtime/launch"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/attachments"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/attachments/{workflow_id}"))
 
@@ -446,6 +454,63 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         })
         XCTAssertEqual(wiring.attachment.onyxDriverID, wiring.onyxDriverID)
 
+        XCTAssertFalse(json.contains("operator.test"))
+        XCTAssertFalse(json.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(json.contains("authenticatedActor"))
+    }
+
+    func testLangGraphManifestLaunchPrintsLaunchDescriptor() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifestURL = directory.appendingPathComponent("review.langgraph.json")
+        try langGraphReviewManifest().write(to: manifestURL)
+
+        let json = try await KistRunner.renderSMLRuntimeHostLaunchDescriptor(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let launch = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostLaunchDescriptor.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(launch.schemaVersion, KistRunner.SMLRuntimeHostLaunchDescriptor.currentSchemaVersion)
+        XCTAssertEqual(launch.sourcePath, manifestURL.path)
+        XCTAssertEqual(launch.sourceFormat, .langGraphManifest)
+        XCTAssertEqual(launch.apiBasePaths, ["/source"])
+        XCTAssertEqual(launch.launchEndpoint?.pathTemplate, "/source/runtime/launch")
+        XCTAssertEqual(launch.launchEndpoint?.resource, .launch)
+        XCTAssertEqual(
+            launch.launchDescriptor.sourcePackageSchemaVersion,
+            SMLWorkflowRuntimeSourcePackage.currentSchemaVersion
+        )
+        XCTAssertEqual(
+            launch.launchDescriptor.runtimeExportSchemaVersion,
+            SMLWorkflowRuntimeExport.currentSchemaVersion
+        )
+        XCTAssertEqual(launch.launchDescriptor.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(launch.launchDescriptor.installedWorkflowIDs, ["langgraph.review"])
+        XCTAssertEqual(launch.launchDescriptor.missingInstalledWorkflowIDs, [])
+        XCTAssertEqual(launch.launchDescriptor.unexpectedInstalledWorkflowIDs, [])
+        XCTAssertTrue(launch.launchDescriptor.launchComplete)
+        XCTAssertEqual(launch.launchDescriptor.apiBasePaths, ["/source"])
+        XCTAssertEqual(launch.launchDescriptor.metadataEndpoints.count, 13)
+        XCTAssertEqual(
+            launch.launchDescriptor.metadataEndpoints.first { $0.resource == .launch }?.pathTemplate,
+            "/source/runtime/launch"
+        )
+        XCTAssertEqual(launch.launchDescriptor.workflows.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(launch.launchDescriptor.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(launch.launchDescriptor.planningWorkflowIDs, ["langgraph.review"])
+        XCTAssertFalse(launch.launchDescriptor.requiredHostServices.isEmpty)
+        XCTAssertFalse(launch.launchDescriptor.launchSteps.isEmpty)
+        XCTAssertEqual(launch.launchDescriptor.sourceSummaries.map(\.workflowID), ["langgraph.review"])
         XCTAssertFalse(json.contains("operator.test"))
         XCTAssertFalse(json.contains("sml-runtime-export-lease"))
         XCTAssertFalse(json.contains("authenticatedActor"))
@@ -612,6 +677,36 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(api.launchDescriptor.apiBasePaths, ["/source"])
         XCTAssertEqual(api.launchDescriptor.hostWiring.apiBasePaths, ["/source"])
         XCTAssertEqual(api.launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
+
+        let launchJSON = try await KistRunner.renderSMLRuntimeHostAPIExchange(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            method: .get,
+            path: "/source/runtime/launch",
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08"
+        )
+        let launchAPI = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostAPIExchange.self,
+            from: Data(launchJSON.utf8)
+        )
+        XCTAssertEqual(launchAPI.statusCode, 200)
+        XCTAssertEqual(launchAPI.kind, .metadata)
+        XCTAssertEqual(launchAPI.metadataResource, .launch)
+        XCTAssertEqual(launchAPI.route?.operationID, SMLWorkflowRuntimeMetadataResource.launch.operationID)
+        XCTAssertNil(launchAPI.command)
+        XCTAssertNil(launchAPI.result)
+        let launchBody = try object(launchAPI.responseBody)
+        XCTAssertEqual(launchBody["launchComplete"], .bool(true))
+        XCTAssertEqual(try array(launchBody["workflowIDs"]), [.string("langgraph.review")])
+        XCTAssertEqual(try array(launchBody["installedWorkflowIDs"]), [.string("langgraph.review")])
+        XCTAssertTrue(try array(launchBody["missingInstalledWorkflowIDs"]).isEmpty)
+        XCTAssertEqual(try array(launchBody["workflows"]).count, 1)
+        XCTAssertFalse(launchJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(launchJSON.contains("authenticatedActor"))
 
         let wiringJSON = try await KistRunner.renderSMLRuntimeHostAPIExchange(
             sourcePath: "review.langgraph.json",

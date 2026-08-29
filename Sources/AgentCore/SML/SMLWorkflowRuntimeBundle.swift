@@ -703,6 +703,7 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
 public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equatable, CaseIterable {
     case catalog
     case mount
+    case launch
     case export
     case openAPI = "openapi"
     case planning
@@ -725,7 +726,7 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
         switch self {
         case .workflowAttachment:
             return "attachments/{workflow_id}"
-        case .catalog, .mount, .export, .openAPI, .planning, .agentGuide,
+        case .catalog, .mount, .launch, .export, .openAPI, .planning, .agentGuide,
              .hostGuide, .hostWiring, .attachments, .modelRouter, .onyxDrivers:
             return rawValue
         }
@@ -737,6 +738,8 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "List the mounted SML workflow runtime catalog"
         case .mount:
             return "Return the host mount contract for this SML workflow runtime"
+        case .launch:
+            return "Return the launch receipt for mounted SML workflow runtime adapters"
         case .export:
             return "Return the complete authority-neutral SML workflow runtime export"
         case .openAPI:
@@ -1240,7 +1243,7 @@ public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
 /// to expose and which handler to call, but it carries no actor identity, authority lease,
 /// credential, runtime handle, provider registry, or executable closure.
 public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 9
+    public static let currentSchemaVersion = 10
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -2200,7 +2203,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 20
+    public static let currentSchemaVersion = 21
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -2721,12 +2724,14 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
     public func makeAPI(
         gateway: SMLCommandGateway,
         authorityResolver: @escaping SMLWorkflowRuntimeAPI.AuthorityResolver,
+        launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor? = nil,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) -> SMLWorkflowRuntimeAPI {
         SMLWorkflowRuntimeAPI(
             registry: self,
             gateway: gateway,
             authorityResolver: authorityResolver,
+            launchDescriptor: launchDescriptor,
             clock: clock
         )
     }
@@ -2734,12 +2739,14 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
     public func makeApp(
         gateway: SMLCommandGateway,
         authorityResolver: @escaping SMLWorkflowRuntimeAPI.AuthorityResolver,
+        launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor? = nil,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) -> SMLWorkflowRuntimeApp {
         SMLWorkflowRuntimeApp(
             registry: self,
             gateway: gateway,
             authorityResolver: authorityResolver,
+            launchDescriptor: launchDescriptor,
             clock: clock
         )
     }
@@ -2853,17 +2860,20 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
     public let registry: SMLWorkflowRuntimeRegistry
     private let gateway: SMLCommandGateway
     private let authorityResolver: AuthorityResolver
+    public let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor?
     private let clock: @Sendable () -> Double
 
     public init(
         registry: SMLWorkflowRuntimeRegistry,
         gateway: SMLCommandGateway,
         authorityResolver: @escaping AuthorityResolver,
+        launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor? = nil,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
         self.registry = registry
         self.gateway = gateway
         self.authorityResolver = authorityResolver
+        self.launchDescriptor = launchDescriptor
         self.clock = clock
     }
 
@@ -2983,6 +2993,13 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog)
         case .mount:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.mountContract)
+        case .launch:
+            return try SMLWorkflowRuntimePayloadCodec.encode(
+                launchDescriptor ?? SMLWorkflowRuntimeLaunchDescriptor(
+                    registry: registry,
+                    installedWorkflows: []
+                )
+            )
         case .export:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.export())
         case .openAPI:
@@ -3352,7 +3369,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 13
+    public static let currentSchemaVersion = 14
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -4072,17 +4089,20 @@ public struct SMLWorkflowRuntimeApp: Sendable {
     public let registry: SMLWorkflowRuntimeRegistry
     private let gateway: SMLCommandGateway
     private let authorityResolver: AuthorityResolver
+    public let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor?
     private let clock: @Sendable () -> Double
 
     public init(
         registry: SMLWorkflowRuntimeRegistry,
         gateway: SMLCommandGateway,
         authorityResolver: @escaping AuthorityResolver,
+        launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor? = nil,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
         self.registry = registry
         self.gateway = gateway
         self.authorityResolver = authorityResolver
+        self.launchDescriptor = launchDescriptor
         self.clock = clock
     }
 
@@ -4098,9 +4118,15 @@ public struct SMLWorkflowRuntimeApp: Sendable {
             try requireSourcePackage(sourcePackage, matches: registry)
         }
         let installed = try await registry.installAll(into: runtime)
+        let launchDescriptor = SMLWorkflowRuntimeLaunchDescriptor(
+            registry: registry,
+            installedWorkflows: installed,
+            sourcePackage: sourcePackage
+        )
         let app = registry.makeApp(
             gateway: SMLCommandGateway(runtime: runtime, replayGuard: replayGuard),
             authorityResolver: authorityResolver,
+            launchDescriptor: launchDescriptor,
             clock: clock
         )
         return SMLWorkflowRuntimeLaunch(
@@ -4298,6 +4324,7 @@ public struct SMLWorkflowRuntimeApp: Sendable {
         registry.makeAPI(
             gateway: gateway,
             authorityResolver: authorityResolver,
+            launchDescriptor: launchDescriptor,
             clock: clock
         )
     }

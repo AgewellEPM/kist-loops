@@ -114,6 +114,32 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(KistOptions.helpText.contains("--sml-api-base <path>"))
     }
 
+    func testSMLRuntimeLaunchFlags() {
+        let o = KistOptions.parse([
+            "--sml-runtime-launch", "graphs/review.langgraph.json",
+            "--sml-role", "reviewer",
+            "--sml-actor", "operator.test",
+            "--sml-api-base", "/source",
+            "--sml-title", "Source Runtime",
+            "--sml-version", "2026.08",
+            "--sml-model-rounds", "3",
+        ])
+        XCTAssertEqual(o.smlRuntimeLaunch, "graphs/review.langgraph.json")
+        XCTAssertEqual(o.smlRuntimeRole, "reviewer")
+        XCTAssertEqual(o.smlRuntimeActor, "operator.test")
+        XCTAssertEqual(o.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(o.smlRuntimeTitle, "Source Runtime")
+        XCTAssertEqual(o.smlRuntimeVersion, "2026.08")
+        XCTAssertEqual(o.smlRuntimeModelRounds, 3)
+        XCTAssertNil(o.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-launch <json>"))
+
+        let alias = KistOptions.parse([
+            "--sml-launch", "graphs/review.langgraph.json",
+        ])
+        XCTAssertEqual(alias.smlRuntimeLaunch, "graphs/review.langgraph.json")
+    }
+
     func testSMLRuntimeAttachmentsFlags() {
         let o = KistOptions.parse([
             "--sml-runtime-attachments", "graphs/review.langgraph.json",
@@ -247,6 +273,12 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(export.optionErrors.contains { $0.contains("--sml-runtime-export requires") })
         XCTAssertNil(export.smlRuntimeExport)
 
+        let launch = KistOptions.parse(["--sml-runtime-launch"])
+        XCTAssertTrue(launch.optionErrors.contains {
+            $0.contains("--sml-runtime-launch requires <source.json>")
+        })
+        XCTAssertNil(launch.smlRuntimeLaunch)
+
         let role = KistOptions.parse(["--sml-role"])
         XCTAssertTrue(role.optionErrors.contains { $0.contains("--sml-role requires") })
 
@@ -271,6 +303,14 @@ final class KistOptionsTests: XCTestCase {
         ])
         XCTAssertTrue(exportConflict.optionErrors.contains {
             $0.contains("--sml-runtime-export conflicts with --sml-runtime-attachments")
+        })
+
+        let launchConflict = KistOptions.parse([
+            "--sml-runtime-launch", "graphs/review.langgraph.json",
+            "--sml-runtime-attachments", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(launchConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-launch conflicts with --sml-runtime-attachments")
         })
 
         let replConflict = KistOptions.parse([
@@ -323,6 +363,13 @@ final class KistOptionsTests: XCTestCase {
             "--sml-line", "help",
         ])
         XCTAssertTrue(conflict.optionErrors.contains { $0.contains("--sml-runtime-export conflicts") })
+
+        let launchConflict = KistOptions.parse([
+            "--sml-runtime-launch", "graphs/review.langgraph.json",
+            "--sml-runtime-repl", "graphs/review.langgraph.json",
+            "--sml-line", "help",
+        ])
+        XCTAssertTrue(launchConflict.optionErrors.contains { $0.contains("--sml-runtime-launch conflicts") })
     }
 
     func testSMLRuntimeAPIFlagsRequireRunnableMode() {
@@ -356,6 +403,13 @@ final class KistOptionsTests: XCTestCase {
         ])
         XCTAssertTrue(exportConflict.optionErrors.contains { $0.contains("--sml-runtime-export conflicts with --sml-runtime-api") })
 
+        let launchConflict = KistOptions.parse([
+            "--sml-runtime-launch", "graphs/review.langgraph.json",
+            "--sml-runtime-api", "graphs/review.langgraph.json",
+            "--sml-path", "/source/runtime/planning",
+        ])
+        XCTAssertTrue(launchConflict.optionErrors.contains { $0.contains("--sml-runtime-launch conflicts with --sml-runtime-api") })
+
         let replConflict = KistOptions.parse([
             "--sml-runtime-repl", "graphs/review.langgraph.json",
             "--sml-line", "help",
@@ -382,6 +436,13 @@ final class KistOptionsTests: XCTestCase {
             "--sml-prompt", "start it",
         ])
         XCTAssertTrue(exportConflict.optionErrors.contains { $0.contains("--sml-runtime-export conflicts with --sml-runtime-model") })
+
+        let launchConflict = KistOptions.parse([
+            "--sml-runtime-launch", "graphs/review.langgraph.json",
+            "--sml-runtime-model", "graphs/review.langgraph.json",
+            "--sml-prompt", "start it",
+        ])
+        XCTAssertTrue(launchConflict.optionErrors.contains { $0.contains("--sml-runtime-launch conflicts with --sml-runtime-model") })
 
         let replConflict = KistOptions.parse([
             "--sml-runtime-repl", "graphs/review.langgraph.json",
