@@ -168,6 +168,11 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
             equal: expectedWorkflowIDs,
             field: "runtime.planning.workflows"
         )
+        try Self.requireWorkflowIDs(
+            runtime.hostWiring.workflows.map(\.workflowID),
+            equal: expectedWorkflowIDs,
+            field: "runtime.hostWiring.workflows"
+        )
         try Self.requireDerivedRuntimePayloadsMatch(runtime)
         try Self.requireRuntimeWorkflowFields(
             workflows: orderedWorkflows,
@@ -369,6 +374,11 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
         guard runtime.hostGuide == runtime.catalog.hostGuide else {
             throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
                 field: "runtime.hostGuide"
+            )
+        }
+        guard runtime.hostWiring == runtime.catalog.hostWiring else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.hostWiring"
             )
         }
     }

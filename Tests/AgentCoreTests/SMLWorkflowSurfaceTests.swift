@@ -14,6 +14,34 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(surface.graphSummary.contains("plan CALL_MODEL [content.plan] -> write"))
         XCTAssertTrue(surface.graphSummary.contains("verify VERIFY [artifact_verified] -> pass:approval failure:rollback"))
 
+        let replCommands = surface.replCommandDescriptors()
+        XCTAssertEqual(
+            Set(replCommands.map(\.verb)),
+            ["approve", "describe", "exit", "help", "receipts", "refuse", "rollback", "schema", "start", "watch"]
+        )
+        let replStart = try XCTUnwrap(replCommands.first { $0.verb == "start" })
+        XCTAssertEqual(replStart.kind, .runtime)
+        XCTAssertEqual(replStart.action, .start)
+        XCTAssertEqual(replStart.aliases, ["run"])
+        XCTAssertEqual(replStart.usage, "start [TASK_ID] [JSON_INPUT_OBJECT]")
+        XCTAssertFalse(replStart.requiresTask)
+        XCTAssertTrue(replStart.changesTaskState)
+        XCTAssertEqual(replStart.jsonBodyKind, .workflowInput)
+        XCTAssertEqual(replStart.jsonFields.map(\.name), ["target"])
+        let replApprove = try XCTUnwrap(replCommands.first { $0.verb == "approve" })
+        XCTAssertEqual(replApprove.jsonBodyKind, .expectedState)
+        XCTAssertEqual(replApprove.jsonFields.map(\.name), ["task_revision"])
+        let replExit = try XCTUnwrap(replCommands.first { $0.verb == "exit" })
+        XCTAssertEqual(replExit.kind, .local)
+        XCTAssertEqual(replExit.aliases, ["quit"])
+        let replExamples = surface.replExamples()
+        XCTAssertTrue(replExamples.contains {
+            $0.verb == "start" && $0.line == #"start TASK-ID {"target":"target"}"#
+        })
+        XCTAssertTrue(replExamples.contains {
+            $0.verb == "approve" && $0.line == #"approve TASK-ID {"task_revision":0}"#
+        })
+
         let modelTool = surface.modelCommandTool()
         XCTAssertEqual(modelTool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(modelTool.parameters.map(\.name), ["line"])
@@ -73,6 +101,15 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(bundle.descriptor.sourceReference, "graphs/content_release.py")
         XCTAssertTrue(bundle.descriptor.graphSummary.contains("plan CALL_MODEL [content.plan] -> write"))
         XCTAssertTrue(bundle.descriptor.repl.helpText.contains("graph:"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("examples:"))
+        XCTAssertTrue(bundle.descriptor.repl.commands.contains {
+            $0.verb == "start"
+                && $0.jsonBodyKind == .workflowInput
+                && $0.jsonFields.map(\.name) == ["target"]
+        })
+        XCTAssertTrue(bundle.descriptor.repl.examples.contains {
+            $0.line == #"start TASK-ID {"target":"target"}"#
+        })
         XCTAssertEqual(bundle.descriptor.api.basePath, "/automation")
         XCTAssertEqual(
             bundle.descriptor.api.endpoints.first { $0.action == .start }?.bodyKind,
@@ -169,6 +206,15 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertFalse(encoded.contains("leaseID"))
         XCTAssertFalse(encoded.contains("lease_id"))
         XCTAssertFalse(encoded.contains("model-lease"))
+        XCTAssertTrue(encoded.contains("\"commands\""))
+        XCTAssertTrue(encoded.contains("\"examples\""))
+        XCTAssertEqual(
+            decoded.repl.commands.first { $0.verb == "start" }?.jsonFields.map(\.name),
+            ["target"]
+        )
+        XCTAssertTrue(decoded.repl.examples.contains {
+            $0.line == #"start TASK-ID {"target":"target"}"#
+        })
         XCTAssertEqual(
             decoded.onyx.skillTree.first { $0.id == "plan" }?.planning?.unitKind,
             .modelReasoning
@@ -177,6 +223,18 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             decoded.api.endpoints.first { $0.action == .approve }?.bodyKind,
             .expectedState
         )
+
+        var descriptorObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        var replObject = try XCTUnwrap(descriptorObject["repl"] as? [String: Any])
+        replObject.removeValue(forKey: "commands")
+        replObject.removeValue(forKey: "examples")
+        descriptorObject["repl"] = replObject
+        let legacyData = try JSONSerialization.data(withJSONObject: descriptorObject, options: [.sortedKeys])
+        let legacyDecoded = try JSONDecoder().decode(SMLWorkflowRuntimeDescriptor.self, from: legacyData)
+        XCTAssertEqual(legacyDecoded.repl.commands, [])
+        XCTAssertEqual(legacyDecoded.repl.examples, [])
     }
 
     func testRuntimeRegistryMountsAdmittedWorkflowsAndRoutesGeneratedSurfaces() async throws {
@@ -527,6 +585,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(launch.mountContract.workflowMounts.map(\.workflowID), [
             "content.release", "content.review",
         ])
+        XCTAssertEqual(launch.hostWiring, launch.registry.hostWiring)
+        XCTAssertEqual(launch.app.hostWiring, launch.hostWiring)
+        XCTAssertEqual(launch.hostWiring.workflows.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
         XCTAssertEqual(
             try launch.app.resolveWorkflowMount(workflowID: "content.review").apiRoutes.count,
             7
@@ -549,7 +612,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(launchDescriptor.unexpectedInstalledWorkflowIDs.isEmpty)
         XCTAssertTrue(launchDescriptor.launchComplete)
         XCTAssertEqual(launchDescriptor.apiBasePaths, ["/automation"])
-        XCTAssertEqual(launchDescriptor.metadataEndpoints.count, 9)
+        XCTAssertEqual(launchDescriptor.metadataEndpoints.count, 10)
+        XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)
         XCTAssertEqual(
             launchDescriptor.modelRouter.tool.name,
             SMLWorkflowRuntimeModelAdapter.toolName
@@ -652,7 +716,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(mount.replMounts.map(\.modelRouterToolName), [
             SMLWorkflowRuntimeModelAdapter.toolName,
         ])
-        XCTAssertEqual(mount.apiRoutes.count, 16)
+        XCTAssertEqual(mount.apiRoutes.count, 17)
         XCTAssertEqual(mount.workflowMounts.map(\.workflowID), ["content.release"])
         XCTAssertEqual(mount.workflowMounts.first?.apiRoutes.count, 7)
         XCTAssertEqual(mount.workflowMounts.first?.modelToolName, SMLWorkflowModelAdapter.toolName)
@@ -679,6 +743,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 "/automation/runtime/planning",
                 "/automation/runtime/agent-guide",
                 "/automation/runtime/host-guide",
+                "/automation/runtime/host-wiring",
                 "/automation/runtime/model-router",
                 "/automation/runtime/onyx-drivers",
             ]
@@ -710,8 +775,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(guide.modelRouterTool.parameters.map(\.name), ["workflow_id", "line"])
         XCTAssertEqual(guide.workflowGuides.map(\.workflowID), ["content.release", "content.review"])
         XCTAssertEqual(guide.metadataEndpoints.map(\.resource), [
-            .agentGuide, .catalog, .export, .hostGuide, .modelRouter, .mount, .onyxDrivers,
-            .openAPI, .planning,
+            .agentGuide, .catalog, .export, .hostGuide, .hostWiring, .modelRouter, .mount,
+            .onyxDrivers, .openAPI, .planning,
         ])
         XCTAssertTrue(guide.systemPrompt.contains("Break work into small contextual workflow steps"))
         XCTAssertTrue(guide.systemPrompt.contains("host_command_gateway"))
@@ -791,7 +856,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(
             guide.metadataEndpoints.map(\.resource),
             [
-                .agentGuide, .catalog, .export, .hostGuide, .modelRouter, .mount,
+                .agentGuide, .catalog, .export, .hostGuide, .hostWiring, .modelRouter, .mount,
                 .onyxDrivers, .openAPI, .planning,
             ]
         )
@@ -867,7 +932,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             SMLWorkflowRuntimeModelAdapter.toolName,
             SMLWorkflowRuntimeModelAdapter.toolName,
         ])
-        XCTAssertEqual(export.mountContract.apiRoutes.count, 23)
+        XCTAssertEqual(export.mountContract.apiRoutes.count, 24)
         XCTAssertEqual(export.mountContract.workflowMounts.map(\.workflowID), [
             "content.release", "content.review",
         ])
@@ -960,6 +1025,31 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             "content.release", "content.review",
         ])
         XCTAssertEqual(export.hostGuide.hostBindingCount, 14)
+        XCTAssertEqual(export.hostWiring.schemaVersion, SMLWorkflowRuntimeHostWiring.currentSchemaVersion)
+        XCTAssertEqual(export.hostWiring.apiBasePaths, ["/automation"])
+        XCTAssertEqual(export.hostWiring.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(export.hostWiring.modelRouter.workflowIDs, [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(export.hostWiring.onyxDriverIDs, export.mountContract.onyxDriverIDs)
+        XCTAssertEqual(export.hostWiring.planningWorkflowIDs, [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(export.hostWiring.workflows.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(export.hostWiring.hostBindingCount, 14)
+        XCTAssertEqual(export.hostWiring.workflows.map(\.apiRoutes.count), [7, 7])
+        XCTAssertEqual(export.hostWiring.workflows.map(\.modelRouterToolName), [
+            SMLWorkflowRuntimeModelAdapter.toolName,
+            SMLWorkflowRuntimeModelAdapter.toolName,
+        ])
+        XCTAssertTrue(export.hostWiring.workflows.allSatisfy {
+            Set($0.hostBindings.map(\.channel)) == [
+                .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
+                .onyxDriver, .planningWorkflow,
+            ]
+        })
 
         let info = try object(export.openAPI["info"])
         XCTAssertEqual(info["title"], .string("Automation"))
@@ -1000,6 +1090,15 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(runtimeHostGuide["x-sml-runtime-resource"], .string("host-guide"))
         XCTAssertEqual(runtimeHostGuide["x-sml-read-only"], .bool(true))
         XCTAssertEqual(runtimeHostGuide["x-sml-authority"], .string("descriptor-only"))
+        let runtimeHostWiringPath = try object(paths["/automation/runtime/host-wiring"])
+        let runtimeHostWiring = try object(runtimeHostWiringPath["get"])
+        XCTAssertEqual(
+            runtimeHostWiring["operationId"],
+            .string(SMLWorkflowRuntimeMetadataResource.hostWiring.operationID)
+        )
+        XCTAssertEqual(runtimeHostWiring["x-sml-runtime-resource"], .string("host-wiring"))
+        XCTAssertEqual(runtimeHostWiring["x-sml-read-only"], .bool(true))
+        XCTAssertEqual(runtimeHostWiring["x-sml-authority"], .string("descriptor-only"))
 
         let releasePath = try object(paths["/automation/workflows/content.release"])
         let describe = try object(releasePath["get"])
@@ -1043,7 +1142,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             runtime["mountContractSchemaVersion"],
             .number(Decimal(SMLWorkflowRuntimeMountContract.currentSchemaVersion))
         )
-        XCTAssertEqual(runtime["mountAPIRouteCount"], .number(23))
+        XCTAssertEqual(runtime["mountAPIRouteCount"], .number(24))
         XCTAssertEqual(runtime["mountREPLCount"], .number(2))
         XCTAssertEqual(
             try array(runtime["modelToolNames"]),
@@ -1059,7 +1158,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let routerParameters = try array(routerTool["parameters"])
         XCTAssertEqual(routerParameters.count, 2)
         let metadataEndpoints = try array(runtime["metadataEndpoints"])
-        XCTAssertEqual(metadataEndpoints.count, 9)
+        XCTAssertEqual(metadataEndpoints.count, 10)
         let metadataPlanningEndpoint = try object(metadataEndpoints.first {
             if case .object(let object) = $0 {
                 return object["resource"] == .string("planning")
@@ -1087,6 +1186,17 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             .string("/automation/runtime/host-guide")
         )
         XCTAssertEqual(metadataHostGuideEndpoint["resource"], .string("host-guide"))
+        let metadataHostWiringEndpoint = try object(metadataEndpoints.first {
+            if case .object(let object) = $0 {
+                return object["resource"] == .string("host-wiring")
+            }
+            return false
+        })
+        XCTAssertEqual(
+            metadataHostWiringEndpoint["pathTemplate"],
+            .string("/automation/runtime/host-wiring")
+        )
+        XCTAssertEqual(metadataHostWiringEndpoint["resource"], .string("host-wiring"))
         XCTAssertEqual(
             runtime["agentGuideSchemaVersion"],
             .number(Decimal(SMLWorkflowRuntimeAgentGuide.currentSchemaVersion))
@@ -1102,6 +1212,12 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(runtime["hostGuideWorkflowCount"], .number(2))
         XCTAssertEqual(runtime["hostGuideBindingCount"], .number(14))
+        XCTAssertEqual(
+            runtime["hostWiringSchemaVersion"],
+            .number(Decimal(SMLWorkflowRuntimeHostWiring.currentSchemaVersion))
+        )
+        XCTAssertEqual(runtime["hostWiringWorkflowCount"], .number(2))
+        XCTAssertEqual(runtime["hostWiringBindingCount"], .number(14))
         XCTAssertEqual(
             runtime["planningManifestSchemaVersion"],
             .number(Decimal(SMLWorkflowRuntimePlanningManifest.currentSchemaVersion))
@@ -1121,6 +1237,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(decoded, export)
         XCTAssertTrue(encoded.contains("\"agentGuide\""))
         XCTAssertTrue(encoded.contains("\"hostGuide\""))
+        XCTAssertTrue(encoded.contains("\"hostWiring\""))
         XCTAssertFalse(encoded.contains("operator.luke"))
         XCTAssertFalse(encoded.contains("leaseID"))
         XCTAssertFalse(encoded.contains("lease_id"))
@@ -1140,6 +1257,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         legacyObject["schemaVersion"] = 2
         legacyObject.removeValue(forKey: "agentGuide")
         legacyObject.removeValue(forKey: "hostGuide")
+        legacyObject.removeValue(forKey: "hostWiring")
         let legacyData = try JSONSerialization.data(withJSONObject: legacyObject, options: [.sortedKeys])
 
         let decoded = try JSONDecoder().decode(SMLWorkflowRuntimeExport.self, from: legacyData)
@@ -1148,8 +1266,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(decoded.catalog.workflowIDs, ["content.release"])
         XCTAssertEqual(decoded.agentGuide, decoded.catalog.agentGuide)
         XCTAssertEqual(decoded.hostGuide, decoded.catalog.hostGuide)
+        XCTAssertEqual(decoded.hostWiring, decoded.catalog.hostWiring)
         XCTAssertEqual(decoded.agentGuide.workflowGuides.map(\.workflowID), ["content.release"])
         XCTAssertEqual(decoded.hostGuide.workflowBindings.map(\.workflowID), ["content.release"])
+        XCTAssertEqual(decoded.hostWiring.workflows.map(\.workflowID), ["content.release"])
     }
 
     func testRuntimeMountContractResolvesRequestsToExactMountedRoutes() throws {
@@ -1346,16 +1466,21 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(app.catalog.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(app.planningManifest.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(app.planningManifest.toolIndex.count, 6)
-        XCTAssertEqual(app.mountContract.apiRoutes.count, 23)
+        XCTAssertEqual(app.mountContract.apiRoutes.count, 24)
         XCTAssertEqual(app.mountContract.replMounts.map(\.workflowID), [
             "content.release", "content.review",
         ])
-        XCTAssertEqual(app.metadataEndpoints.count, 9)
+        XCTAssertEqual(app.metadataEndpoints.count, 10)
         XCTAssertEqual(app.runtimeAPI.catalog.workflowIDs, ["content.release", "content.review"])
-        XCTAssertEqual(app.runtimeAPI.mountContract.apiRoutes.count, 23)
+        XCTAssertEqual(app.runtimeAPI.mountContract.apiRoutes.count, 24)
+        XCTAssertEqual(app.hostWiring, registry.hostWiring)
+        XCTAssertEqual(app.runtimeAPI.hostWiring, registry.hostWiring)
+        XCTAssertEqual(app.hostWiring.workflows.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
         XCTAssertEqual(app.runtimeAPI.metadataEndpoints.map(\.resource), [
             .catalog, .mount, .export, .openAPI, .planning, .agentGuide, .hostGuide,
-            .modelRouter, .onyxDrivers,
+            .hostWiring, .modelRouter, .onyxDrivers,
         ])
         XCTAssertEqual(try app.descriptor(workflowID: "content.review").workflowName, "Content review")
         XCTAssertEqual(try app.onyxDriver(workflowID: "content.release").plan.entrypoint, "plan")
@@ -1412,7 +1537,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(try array(mountBody["workflowIDs"]), [
             .string("content.release"), .string("content.review"),
         ])
-        XCTAssertEqual(try array(mountBody["apiRoutes"]).count, 23)
+        XCTAssertEqual(try array(mountBody["apiRoutes"]).count, 24)
         XCTAssertEqual(try array(mountBody["replMounts"]).count, 2)
 
         let guideMetadata = try app.handleMetadata(
@@ -1451,6 +1576,34 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(try array(hostGuideBody["workflowBindings"]).count, 2)
         XCTAssertEqual(try array(hostGuideBody["launchSteps"]).count, 7)
 
+        let hostWiringMetadata = try app.handleMetadata(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/host-wiring")
+        )
+        XCTAssertEqual(hostWiringMetadata.statusCode, 200)
+        XCTAssertEqual(hostWiringMetadata.resource, .hostWiring)
+        let hostWiringBody = try object(hostWiringMetadata.body)
+        XCTAssertEqual(
+            hostWiringBody["schemaVersion"],
+            .number(Decimal(SMLWorkflowRuntimeHostWiring.currentSchemaVersion))
+        )
+        XCTAssertEqual(
+            try object(hostWiringBody["modelRouter"])["maximumCommandRounds"],
+            .number(4)
+        )
+        XCTAssertEqual(try array(hostWiringBody["workflows"]).count, 2)
+        let hostWiringWorkflows = try array(hostWiringBody["workflows"])
+        let releaseWiring = try object(hostWiringWorkflows.first {
+            if case .object(let object) = $0 {
+                return object["workflowID"] == .string("content.release")
+            }
+            return false
+        })
+        XCTAssertEqual(releaseWiring["apiBasePath"], .string("/automation"))
+        XCTAssertEqual(try array(releaseWiring["apiRoutes"]).count, 7)
+        XCTAssertEqual(releaseWiring["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
+        XCTAssertNotNil(releaseWiring["onyxDriverID"])
+        XCTAssertEqual(releaseWiring["planningWorkflowID"], .string("content.release"))
+
         let routedPlanning = try await app.handleRuntimeAPI(
             SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/planning")
         )
@@ -1474,7 +1627,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(routedMount.route?.operationID, SMLWorkflowRuntimeMetadataResource.mount.operationID)
         XCTAssertNil(routedMount.command)
         XCTAssertNil(routedMount.result)
-        XCTAssertEqual(try array(try object(routedMount.body)["apiRoutes"]).count, 23)
+        XCTAssertEqual(try array(try object(routedMount.body)["apiRoutes"]).count, 24)
 
         let routedGuide = try await app.handleRuntimeAPI(
             SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/agent-guide")
@@ -1499,6 +1652,19 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertNil(routedHostGuide.command)
         XCTAssertNil(routedHostGuide.result)
+
+        let routedHostWiring = try await app.handleRuntimeAPI(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/host-wiring")
+        )
+        XCTAssertEqual(routedHostWiring.kind, .metadata)
+        XCTAssertEqual(routedHostWiring.metadataResource, .hostWiring)
+        XCTAssertEqual(
+            routedHostWiring.route?.operationID,
+            SMLWorkflowRuntimeMetadataResource.hostWiring.operationID
+        )
+        XCTAssertNil(routedHostWiring.command)
+        XCTAssertNil(routedHostWiring.result)
+        XCTAssertEqual(try array(try object(routedHostWiring.body)["workflows"]).count, 2)
 
         let appResolvedWatch = try app.resolveMount(
             for: SMLWorkflowAPIRequest(

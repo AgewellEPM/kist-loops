@@ -15,7 +15,7 @@ extension KistRunner {
         let sourcePath: String
         let sourceFormat: SMLRuntimeHostExportSourceFormat
         let runtimePackage: SMLWorkflowRuntimeSourcePackage
-        let hostWiring: SMLRuntimeHostWiring
+        let hostWiring: SMLWorkflowRuntimeHostWiring
         let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
 
         init(
@@ -23,7 +23,7 @@ extension KistRunner {
             sourcePath: String,
             sourceFormat: SMLRuntimeHostExportSourceFormat,
             runtimePackage: SMLWorkflowRuntimeSourcePackage,
-            hostWiring: SMLRuntimeHostWiring,
+            hostWiring: SMLWorkflowRuntimeHostWiring,
             launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
         ) {
             self.schemaVersion = schemaVersion
@@ -32,83 +32,6 @@ extension KistRunner {
             self.runtimePackage = runtimePackage
             self.hostWiring = hostWiring
             self.launchDescriptor = launchDescriptor
-        }
-    }
-
-    struct SMLRuntimeHostWorkflowWiring: Sendable, Codable, Equatable {
-        let workflowID: String
-        let workflowVersion: String
-        let role: String
-        let apiBasePath: String
-        let replMount: SMLWorkflowRuntimeREPLMount
-        let apiRoutes: [SMLWorkflowRuntimeAPIMount]
-        let modelToolName: String
-        let modelRouterToolName: String
-        let onyxDriverID: String
-        let planningWorkflowID: String?
-        let toolReferences: [String]
-        let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
-        let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
-        let hostBindings: [SMLWorkflowRuntimeHostBinding]
-
-        init(
-            launchWorkflow: SMLWorkflowRuntimeLaunchWorkflow,
-            hostGuide: SMLWorkflowRuntimeWorkflowHostGuide?
-        ) {
-            workflowID = launchWorkflow.workflowID
-            workflowVersion = launchWorkflow.workflowVersion
-            role = launchWorkflow.role
-            apiBasePath = launchWorkflow.apiBasePath
-            replMount = launchWorkflow.replMount
-            apiRoutes = launchWorkflow.apiRoutes
-            modelToolName = launchWorkflow.modelToolName
-            modelRouterToolName = launchWorkflow.modelRouterToolName
-            onyxDriverID = launchWorkflow.onyxDriverID
-            planningWorkflowID = launchWorkflow.planningWorkflowID
-            toolReferences = hostGuide?.toolReferences ?? []
-            decomposableUnits = hostGuide?.decomposableUnits ?? []
-            approvalGates = hostGuide?.approvalGates ?? []
-            hostBindings = hostGuide?.hostBindings ?? []
-        }
-    }
-
-    struct SMLRuntimeHostWiring: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 1
-
-        let schemaVersion: Int
-        let apiBasePaths: [String]
-        let metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
-        let requiredHostServices: [String]
-        let launchSteps: [SMLWorkflowRuntimeHostLaunchStep]
-        let modelRouter: SMLWorkflowRuntimeModelRouterDescriptor
-        let onyxDriverIDs: [String]
-        let planningWorkflowIDs: [String]
-        let workflows: [SMLRuntimeHostWorkflowWiring]
-
-        init(
-            schemaVersion: Int = SMLRuntimeHostWiring.currentSchemaVersion,
-            runtimePackage: SMLWorkflowRuntimeSourcePackage,
-            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
-        ) {
-            let hostGuidesByWorkflowID = Dictionary(
-                uniqueKeysWithValues: runtimePackage.runtime.hostGuide.workflowBindings.map {
-                    ($0.workflowID, $0)
-                }
-            )
-            self.schemaVersion = schemaVersion
-            apiBasePaths = launchDescriptor.apiBasePaths
-            metadataEndpoints = launchDescriptor.metadataEndpoints
-            requiredHostServices = launchDescriptor.requiredHostServices
-            launchSteps = launchDescriptor.launchSteps
-            modelRouter = launchDescriptor.modelRouter
-            onyxDriverIDs = launchDescriptor.onyxDriverIDs
-            planningWorkflowIDs = launchDescriptor.planningWorkflowIDs
-            workflows = launchDescriptor.workflows.map {
-                SMLRuntimeHostWorkflowWiring(
-                    launchWorkflow: $0,
-                    hostGuide: hostGuidesByWorkflowID[$0.workflowID]
-                )
-            }
         }
     }
 
@@ -545,10 +468,7 @@ extension KistRunner {
                 sourcePath: host.sourcePath,
                 sourceFormat: host.sourceFormat,
                 runtimePackage: host.runtimePackage,
-                hostWiring: SMLRuntimeHostWiring(
-                    runtimePackage: host.runtimePackage,
-                    launchDescriptor: launchDescriptor
-                ),
+                hostWiring: host.runtimePackage.runtime.hostWiring,
                 launchDescriptor: launchDescriptor
             )
         }

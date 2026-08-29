@@ -20,19 +20,118 @@ public struct SMLWorkflowModelToolDescriptor: Sendable, Codable, Equatable {
     }
 }
 
+public enum SMLWorkflowREPLCommandKind: String, Sendable, Codable, Equatable {
+    case local
+    case runtime
+}
+
+public enum SMLWorkflowREPLJSONBodyKind: String, Sendable, Codable, Equatable {
+    case none
+    case workflowInput = "workflow_input"
+    case expectedState = "expected_state"
+}
+
+public struct SMLWorkflowREPLCommandDescriptor: Sendable, Codable, Equatable {
+    public let kind: SMLWorkflowREPLCommandKind
+    public let action: SMLWorkflowControlAction?
+    public let verb: String
+    public let aliases: [String]
+    public let usage: String
+    public let summary: String
+    public let requiresTask: Bool
+    public let changesTaskState: Bool
+    public let jsonBodyKind: SMLWorkflowREPLJSONBodyKind
+    public let jsonFields: [SMLWorkflowFieldDescriptor]
+
+    public init(
+        kind: SMLWorkflowREPLCommandKind,
+        action: SMLWorkflowControlAction?,
+        verb: String,
+        aliases: [String] = [],
+        usage: String,
+        summary: String,
+        requiresTask: Bool,
+        changesTaskState: Bool,
+        jsonBodyKind: SMLWorkflowREPLJSONBodyKind = .none,
+        jsonFields: [SMLWorkflowFieldDescriptor] = []
+    ) {
+        self.kind = kind
+        self.action = action
+        self.verb = verb
+        self.aliases = Array(Set(aliases)).sorted()
+        self.usage = usage
+        self.summary = summary
+        self.requiresTask = requiresTask
+        self.changesTaskState = changesTaskState
+        self.jsonBodyKind = jsonBodyKind
+        self.jsonFields = jsonFields.sorted {
+            if $0.required != $1.required { return $0.required && !$1.required }
+            return $0.name < $1.name
+        }
+    }
+}
+
+public struct SMLWorkflowREPLExample: Sendable, Codable, Equatable {
+    public let verb: String
+    public let line: String
+    public let summary: String
+
+    public init(verb: String, line: String, summary: String) {
+        self.verb = verb
+        self.line = line
+        self.summary = summary
+    }
+}
+
 public struct SMLWorkflowREPLDescriptor: Sendable, Codable, Equatable {
     public let allowedActions: [SMLWorkflowControlAction]
     public let grammar: String
     public let helpText: String
+    public let commands: [SMLWorkflowREPLCommandDescriptor]
+    public let examples: [SMLWorkflowREPLExample]
 
     public init(
         allowedActions: [SMLWorkflowControlAction],
         grammar: String,
-        helpText: String
+        helpText: String,
+        commands: [SMLWorkflowREPLCommandDescriptor] = [],
+        examples: [SMLWorkflowREPLExample] = []
     ) {
         self.allowedActions = allowedActions
         self.grammar = grammar
         self.helpText = helpText
+        self.commands = commands.sorted {
+            if $0.kind.rawValue != $1.kind.rawValue { return $0.kind.rawValue < $1.kind.rawValue }
+            return $0.verb < $1.verb
+        }
+        self.examples = examples.sorted {
+            if $0.verb != $1.verb { return $0.verb < $1.verb }
+            return $0.line < $1.line
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case allowedActions, grammar, helpText, commands, examples
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            allowedActions: try container.decode(
+                [SMLWorkflowControlAction].self,
+                forKey: .allowedActions
+            ),
+            grammar: try container.decode(String.self, forKey: .grammar),
+            helpText: try container.decode(String.self, forKey: .helpText),
+            commands: try container.decodeIfPresent(
+                [SMLWorkflowREPLCommandDescriptor].self,
+                forKey: .commands
+            ) ?? [],
+            examples: try container.decodeIfPresent(
+                [SMLWorkflowREPLExample].self,
+                forKey: .examples
+            ) ?? []
+        )
     }
 }
 
@@ -200,7 +299,9 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             repl: SMLWorkflowREPLDescriptor(
                 allowedActions: replCompiler.allowedActions.stableOrder,
                 grammar: surface.grammar(allowedActions: replCompiler.allowedActions),
-                helpText: replCompiler.helpText
+                helpText: replCompiler.helpText,
+                commands: surface.replCommandDescriptors(allowedActions: replCompiler.allowedActions),
+                examples: surface.replExamples(allowedActions: replCompiler.allowedActions)
             ),
             api: apiCompiler.catalog,
             model: SMLWorkflowModelDescriptor(
@@ -487,6 +588,7 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
     case planning
     case agentGuide = "agent-guide"
     case hostGuide = "host-guide"
+    case hostWiring = "host-wiring"
     case modelRouter = "model-router"
     case onyxDrivers = "onyx-drivers"
 
@@ -510,6 +612,8 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "Return the canonical model and agent operating guide for mounted SML workflows"
         case .hostGuide:
             return "Return the canonical host wiring guide for mounting SML workflow runtimes"
+        case .hostWiring:
+            return "Return the compact host adapter wiring map for mounted SML workflow runtimes"
         case .modelRouter:
             return "Return the native model-router tool descriptor for mounted SML workflows"
         case .onyxDrivers:
@@ -1354,7 +1458,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -1366,6 +1470,7 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
     public let planning: SMLWorkflowRuntimePlanningManifest
     public let agentGuide: SMLWorkflowRuntimeAgentGuide
     public let hostGuide: SMLWorkflowRuntimeHostGuide
+    public let hostWiring: SMLWorkflowRuntimeHostWiring
 
     public init(
         schemaVersion: Int = SMLWorkflowRuntimeExport.currentSchemaVersion,
@@ -1377,7 +1482,8 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         onyxDrivers: [SMLOnyxDriverManifest],
         planning: SMLWorkflowRuntimePlanningManifest,
         agentGuide: SMLWorkflowRuntimeAgentGuide? = nil,
-        hostGuide: SMLWorkflowRuntimeHostGuide? = nil
+        hostGuide: SMLWorkflowRuntimeHostGuide? = nil,
+        hostWiring: SMLWorkflowRuntimeHostWiring? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.catalog = catalog
@@ -1389,11 +1495,12 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         self.planning = planning
         self.agentGuide = agentGuide ?? catalog.agentGuide
         self.hostGuide = hostGuide ?? catalog.hostGuide
+        self.hostWiring = hostWiring ?? catalog.hostWiring
     }
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion, catalog, mountContract, openAPI, modelTools, modelRouter,
-             onyxDrivers, planning, agentGuide, hostGuide
+             onyxDrivers, planning, agentGuide, hostGuide, hostWiring
     }
 
     public init(from decoder: Decoder) throws {
@@ -1420,6 +1527,9 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         hostGuide = try container.decodeIfPresent(
             SMLWorkflowRuntimeHostGuide.self, forKey: .hostGuide
         ) ?? catalog.hostGuide
+        hostWiring = try container.decodeIfPresent(
+            SMLWorkflowRuntimeHostWiring.self, forKey: .hostWiring
+        ) ?? catalog.hostWiring
     }
 }
 
@@ -1473,7 +1583,8 @@ public extension SMLWorkflowRuntimeCatalog {
             onyxDrivers: onyxDrivers,
             planning: planningManifest,
             agentGuide: agentGuide,
-            hostGuide: hostGuide
+            hostGuide: hostGuide,
+            hostWiring: hostWiring
         )
     }
 }
@@ -1645,6 +1756,10 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
 
     public var mountContract: SMLWorkflowRuntimeMountContract {
         catalog.mountContract
+    }
+
+    public var hostWiring: SMLWorkflowRuntimeHostWiring {
+        catalog.hostWiring
     }
 
     public var metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint] {
@@ -1946,6 +2061,10 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
         registry.mountContract
     }
 
+    public var hostWiring: SMLWorkflowRuntimeHostWiring {
+        registry.hostWiring
+    }
+
     public var metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint] {
         registry.metadataEndpoints
     }
@@ -2046,6 +2165,8 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.agentGuide)
         case .hostGuide:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostGuide)
+        case .hostWiring:
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostWiring)
         case .modelRouter:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.modelRouter)
         case .onyxDrivers:
@@ -2239,7 +2360,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -2251,6 +2372,7 @@ public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
     public let launchComplete: Bool
     public let apiBasePaths: [String]
     public let metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
+    public let hostWiring: SMLWorkflowRuntimeHostWiring
     public let workflows: [SMLWorkflowRuntimeLaunchWorkflow]
     public let modelRouter: SMLWorkflowRuntimeModelRouterDescriptor
     public let onyxDriverIDs: [String]
@@ -2270,6 +2392,7 @@ public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
         launchComplete: Bool,
         apiBasePaths: [String],
         metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint],
+        hostWiring: SMLWorkflowRuntimeHostWiring,
         workflows: [SMLWorkflowRuntimeLaunchWorkflow],
         modelRouter: SMLWorkflowRuntimeModelRouterDescriptor,
         onyxDriverIDs: [String],
@@ -2291,6 +2414,7 @@ public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
             if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
             return $0.operationID < $1.operationID
         }
+        self.hostWiring = hostWiring
         self.workflows = workflows.sorted {
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.workflowVersion < $1.workflowVersion
@@ -2344,6 +2468,7 @@ public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
             launchComplete: missingInstalled.isEmpty && unexpectedInstalled.isEmpty,
             apiBasePaths: mountContract.apiBasePaths,
             metadataEndpoints: catalog.metadataEndpoints,
+            hostWiring: catalog.hostWiring,
             workflows: mountContract.workflowMounts.compactMap { mount in
                 guard let descriptor = descriptorsByWorkflowID[mount.workflowID] else {
                     return nil
@@ -2416,6 +2541,10 @@ public struct SMLWorkflowRuntimeLaunch: Sendable {
 
     public var mountContract: SMLWorkflowRuntimeMountContract {
         registry.mountContract
+    }
+
+    public var hostWiring: SMLWorkflowRuntimeHostWiring {
+        registry.hostWiring
     }
 
     public var launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor {
@@ -2956,6 +3085,10 @@ public struct SMLWorkflowRuntimeApp: Sendable {
         registry.mountContract
     }
 
+    public var hostWiring: SMLWorkflowRuntimeHostWiring {
+        registry.hostWiring
+    }
+
     public var metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint] {
         registry.metadataEndpoints
     }
@@ -3149,6 +3282,7 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
 
         let agentGuide = catalog.agentGuide
         let hostGuide = catalog.hostGuide
+        let hostWiring = catalog.hostWiring
         return [
             "openapi": .string("3.1.0"),
             "info": .object([
@@ -3187,6 +3321,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                     Decimal(hostGuide.workflowBindings.count)
                 ),
                 "hostGuideBindingCount": .number(Decimal(hostGuide.hostBindingCount)),
+                "hostWiringSchemaVersion": .number(Decimal(hostWiring.schemaVersion)),
+                "hostWiringWorkflowCount": .number(Decimal(hostWiring.workflows.count)),
+                "hostWiringBindingCount": .number(Decimal(hostWiring.hostBindingCount)),
                 "planningManifestSchemaVersion": .number(
                     Decimal(catalog.planningManifest.schemaVersion)
                 ),

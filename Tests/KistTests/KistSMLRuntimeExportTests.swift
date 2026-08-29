@@ -76,18 +76,26 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             export.runtimePackage.runtime.mountContract.onyxDriverIDs
         )
         XCTAssertEqual(export.runtimePackage.runtime.planning.workflowIDs, ["langgraph.review"])
+        let runtimeWorkflow = try XCTUnwrap(export.runtimePackage.runtime.catalog.workflows.first)
+        XCTAssertEqual(runtimeWorkflow.repl.commands.first { $0.verb == "start" }?.jsonBodyKind, .workflowInput)
+        XCTAssertEqual(runtimeWorkflow.repl.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        XCTAssertTrue(runtimeWorkflow.repl.examples.contains {
+            $0.line == #"start TASK-ID {"topic":"topic"}"#
+        })
 
         let paths = try object(export.runtimePackage.runtime.openAPI["paths"])
         XCTAssertNotNil(paths["/source/workflows/langgraph.review/tasks"])
         XCTAssertNotNil(paths["/source/runtime/model-router"])
         XCTAssertNotNil(paths["/source/runtime/onyx-drivers"])
         XCTAssertNotNil(paths["/source/runtime/planning"])
+        XCTAssertNotNil(paths["/source/runtime/host-wiring"])
 
         XCTAssertEqual(export.launchDescriptor.sourcePackageSchemaVersion, SMLWorkflowRuntimeSourcePackage.currentSchemaVersion)
         XCTAssertEqual(export.launchDescriptor.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(export.launchDescriptor.installedWorkflowIDs, ["langgraph.review"])
         XCTAssertTrue(export.launchDescriptor.launchComplete)
         XCTAssertEqual(export.launchDescriptor.apiBasePaths, ["/source"])
+        XCTAssertEqual(export.launchDescriptor.hostWiring, export.hostWiring)
         XCTAssertEqual(export.launchDescriptor.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(export.launchDescriptor.planningWorkflowIDs, ["langgraph.review"])
         let launched = try XCTUnwrap(export.launchDescriptor.workflows.first)
@@ -103,7 +111,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(export.hostWiring.schemaVersion, KistRunner.SMLRuntimeHostWiring.currentSchemaVersion)
+        XCTAssertEqual(export.hostWiring.schemaVersion, SMLWorkflowRuntimeHostWiring.currentSchemaVersion)
+        XCTAssertEqual(export.hostWiring, export.runtimePackage.runtime.hostWiring)
         XCTAssertEqual(export.hostWiring.apiBasePaths, ["/source"])
         XCTAssertEqual(export.hostWiring.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(export.hostWiring.modelRouter.workflowIDs, ["langgraph.review"])
@@ -119,6 +128,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(metadataPaths.contains("/source/runtime/planning"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/onyx-drivers"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/host-guide"))
+        XCTAssertTrue(metadataPaths.contains("/source/runtime/host-wiring"))
 
         let wiring = try XCTUnwrap(export.hostWiring.workflows.first)
         XCTAssertEqual(wiring.workflowID, "langgraph.review")
@@ -192,6 +202,43 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let planning = try object(api.responseBody)
         XCTAssertEqual(planning["workflowIDs"], .array([.string("langgraph.review")]))
         XCTAssertEqual(api.launchDescriptor.apiBasePaths, ["/source"])
+        XCTAssertEqual(api.launchDescriptor.hostWiring.apiBasePaths, ["/source"])
+        XCTAssertEqual(api.launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
+
+        let wiringJSON = try await KistRunner.renderSMLRuntimeHostAPIExchange(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            method: .get,
+            path: "/source/runtime/host-wiring",
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08"
+        )
+        let wiringAPI = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostAPIExchange.self,
+            from: Data(wiringJSON.utf8)
+        )
+        XCTAssertEqual(wiringAPI.statusCode, 200)
+        XCTAssertEqual(wiringAPI.kind, .metadata)
+        XCTAssertEqual(wiringAPI.metadataResource, .hostWiring)
+        XCTAssertEqual(wiringAPI.route?.operationID, SMLWorkflowRuntimeMetadataResource.hostWiring.operationID)
+        XCTAssertNil(wiringAPI.command)
+        XCTAssertNil(wiringAPI.result)
+        let wiringBody = try object(wiringAPI.responseBody)
+        XCTAssertEqual(
+            wiringBody["schemaVersion"],
+            .number(Decimal(SMLWorkflowRuntimeHostWiring.currentSchemaVersion))
+        )
+        XCTAssertEqual(wiringBody["apiBasePaths"], .array([.string("/source")]))
+        if case .array(let workflows) = wiringBody["workflows"] {
+            XCTAssertEqual(workflows.count, 1)
+        } else {
+            XCTFail("expected host-wiring workflows array")
+        }
+        XCTAssertFalse(wiringJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(wiringJSON.contains("authenticatedActor"))
 
         XCTAssertFalse(json.contains("sml-runtime-export-lease"))
         XCTAssertFalse(json.contains("authenticatedActor"))
@@ -252,6 +299,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let response = try object(api.responseBody)
         XCTAssertEqual(response["kind"], .string("task"))
         XCTAssertEqual(api.launchDescriptor.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(api.launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
 
         XCTAssertFalse(json.contains("sml-runtime-export-lease"))
         XCTAssertFalse(json.contains("authenticatedActor"))
@@ -325,6 +373,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(task.currentOperation, .callModel)
         XCTAssertEqual(model.taskIDsByWorkflowID["langgraph.review"], "TASK-MODEL")
         XCTAssertEqual(model.launchDescriptor.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(model.launchDescriptor.hostWiring.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(model.launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
 
         let capture = provider.capture()
         XCTAssertEqual(capture.toolNames, [SMLWorkflowRuntimeModelAdapter.toolName])
@@ -395,6 +445,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(repl.output.contains("workflow: langgraph.review 1.0.0"))
         XCTAssertEqual(repl.launchDescriptor.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(repl.launchDescriptor.apiBasePaths, ["/source"])
+        XCTAssertEqual(repl.launchDescriptor.hostWiring.apiBasePaths, ["/source"])
+        XCTAssertEqual(repl.launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
 
         XCTAssertFalse(json.contains("sml-runtime-export-lease"))
         XCTAssertFalse(json.contains("authenticatedActor"))
@@ -478,6 +530,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(export.launchDescriptor.sourceSummaries.map(\.apiBasePath), ["/override"])
         XCTAssertEqual(export.launchDescriptor.workflows.map(\.role), ["override-reviewer"])
         XCTAssertEqual(export.launchDescriptor.modelRouter.maximumCommandRounds, 2)
+        XCTAssertEqual(export.launchDescriptor.hostWiring, export.hostWiring)
         XCTAssertEqual(export.hostWiring.apiBasePaths, ["/override"])
         XCTAssertEqual(export.hostWiring.workflows.map(\.role), ["override-reviewer"])
         XCTAssertEqual(export.hostWiring.modelRouter.maximumCommandRounds, 2)

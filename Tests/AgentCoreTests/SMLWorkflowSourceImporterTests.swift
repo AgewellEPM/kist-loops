@@ -60,6 +60,8 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(launch.installedWorkflows.map(\.id), ["langgraph.review"])
         XCTAssertEqual(launch.sourcePackage?.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(launch.launchDescriptor.sourceSummaries.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(launch.launchDescriptor.hostWiring, launch.hostWiring)
+        XCTAssertEqual(launch.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(
             launch.launchDescriptor.sourcePackageSchemaVersion,
             SMLWorkflowRuntimeSourcePackage.currentSchemaVersion
@@ -145,6 +147,18 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.planning.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(package.runtime.agentGuide.workflowGuides.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.hostGuide.workflowBindings.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(package.runtime.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(package.runtime.hostWiring.apiBasePaths, ["/source"])
+        let workflowWiring = try XCTUnwrap(package.runtime.hostWiring.workflows.first)
+        XCTAssertEqual(workflowWiring.apiRoutes.count, 7)
+        XCTAssertEqual(workflowWiring.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(
+            Set(workflowWiring.hostBindings.map(\.channel)),
+            Set([
+                .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
+                .onyxDriver, .planningWorkflow,
+            ])
+        )
         XCTAssertEqual(package.runtime.hostGuide.launchSteps.map(\.id), [
             "decode_source_package",
             "fresh_host_admission",
@@ -179,6 +193,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertNotNil(openAPIPaths["/source/workflows/langgraph.review/tasks"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/agent-guide"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/host-guide"])
+        XCTAssertNotNil(openAPIPaths["/source/runtime/host-wiring"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/model-router"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/onyx-drivers"])
 
@@ -186,6 +201,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         let encodedString = String(decoding: encoded, as: UTF8.self)
         XCTAssertTrue(encodedString.contains("\"agentGuide\""))
         XCTAssertTrue(encodedString.contains("\"hostGuide\""))
+        XCTAssertTrue(encodedString.contains("\"hostWiring\""))
         XCTAssertFalse(encodedString.contains("operator.luke"))
         XCTAssertFalse(encodedString.contains("source-lease"))
         XCTAssertFalse(encodedString.contains("authenticatedActor"))
@@ -253,6 +269,8 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(launchDescriptor.sourceSummaries.first?.sourceKind, .langGraph)
         XCTAssertEqual(launchDescriptor.sourceSummaries.first?.apiBasePath, "/source")
+        XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)
+        XCTAssertEqual(launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
         let launchedWorkflow = try XCTUnwrap(launchDescriptor.workflows.first)
         XCTAssertTrue(launchedWorkflow.installed)
         XCTAssertEqual(launchedWorkflow.installedInstructionCount, 3)
@@ -341,6 +359,8 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertTrue(launchDescriptor.launchComplete)
         XCTAssertEqual(launchDescriptor.apiBasePaths, ["/override"])
         XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.apiBasePath), ["/override"])
+        XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)
+        XCTAssertEqual(launchDescriptor.hostWiring.apiBasePaths, ["/override"])
 
         let launchedWorkflow = try XCTUnwrap(launchDescriptor.workflows.first)
         XCTAssertEqual(launchedWorkflow.role, "override-reviewer")
@@ -348,6 +368,10 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(launchedWorkflow.replMount.apiBasePath, "/override")
         XCTAssertEqual(launchedWorkflow.installedInstructionCount, 3)
         XCTAssertEqual(launchDescriptor.modelRouter.maximumCommandRounds, 2)
+        let hostWiringWorkflow = try XCTUnwrap(launchDescriptor.hostWiring.workflows.first)
+        XCTAssertEqual(hostWiringWorkflow.role, "override-reviewer")
+        XCTAssertEqual(hostWiringWorkflow.apiBasePath, "/override")
+        XCTAssertEqual(hostWiringWorkflow.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(
             try launch.app.resolveWorkflowMount(workflowID: "langgraph.review").apiBasePath,
             "/override"
@@ -544,6 +568,31 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
             XCTAssertEqual(
                 $0 as? SMLWorkflowRuntimeSourcePackageError,
                 .runtimeDerivedPayloadMismatch(field: "runtime.hostGuide")
+            )
+        }
+
+        let wrongHostWiringRuntime = SMLWorkflowRuntimeExport(
+            schemaVersion: runtime.schemaVersion,
+            catalog: runtime.catalog,
+            mountContract: runtime.mountContract,
+            openAPI: runtime.openAPI,
+            modelTools: runtime.modelTools,
+            modelRouter: runtime.modelRouter,
+            onyxDrivers: runtime.onyxDrivers,
+            planning: runtime.planning,
+            agentGuide: runtime.agentGuide,
+            hostGuide: runtime.hostGuide,
+            hostWiring: driftedRegistry.catalog.hostWiring
+        )
+        XCTAssertThrowsError(
+            try SMLWorkflowRuntimeSourcePackage(
+                normalizedWorkflows: [workflow],
+                runtime: wrongHostWiringRuntime
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeSourcePackageError,
+                .runtimeDerivedPayloadMismatch(field: "runtime.hostWiring")
             )
         }
     }

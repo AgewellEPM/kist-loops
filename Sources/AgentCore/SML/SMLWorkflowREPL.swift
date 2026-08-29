@@ -93,7 +93,11 @@ public struct SMLWorkflowREPLCompiler: Sendable {
     }
 
     public var helpText: String {
-        [
+        let examples = surface.replExamples(allowedActions: allowedActions)
+        let exampleLines = examples.isEmpty
+            ? []
+            : ["examples:"] + examples.map { "\($0.line) - \($0.summary)" }
+        return ([
             surface.schemaSummary,
             "graph:",
             surface.graphSummary,
@@ -102,8 +106,9 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "help",
             "schema",
             "exit",
+        ] + exampleLines + [
             "Approve, refuse, and rollback require the task_revision returned by watch.",
-        ].joined(separator: "\n")
+        ]).joined(separator: "\n")
     }
 
     private func require(_ action: SMLWorkflowControlAction, verb: String) throws {

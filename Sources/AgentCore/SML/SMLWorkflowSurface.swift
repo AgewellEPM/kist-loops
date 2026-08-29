@@ -193,6 +193,86 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
         return lines.joined(separator: "\n")
     }
 
+    public func replCommandDescriptors(
+        allowedActions: Set<SMLWorkflowControlAction>? = nil
+    ) -> [SMLWorkflowREPLCommandDescriptor] {
+        let allowed = allowedActions ?? Set(commands.map(\.action))
+        let runtimeCommands = commands.compactMap { descriptor -> SMLWorkflowREPLCommandDescriptor? in
+            guard allowed.contains(descriptor.action) else { return nil }
+            return SMLWorkflowREPLCommandDescriptor(
+                kind: .runtime,
+                action: descriptor.action,
+                verb: descriptor.verb,
+                aliases: replAliases(for: descriptor.action),
+                usage: replUsage(for: descriptor.action),
+                summary: descriptor.summary,
+                requiresTask: descriptor.requiresTask,
+                changesTaskState: descriptor.changesTaskState,
+                jsonBodyKind: replJSONBodyKind(for: descriptor.action),
+                jsonFields: replJSONFields(for: descriptor.action)
+            )
+        }
+        return localREPLCommands + runtimeCommands
+    }
+
+    public func replExamples(
+        allowedActions: Set<SMLWorkflowControlAction>? = nil
+    ) -> [SMLWorkflowREPLExample] {
+        let allowed = allowedActions ?? Set(commands.map(\.action))
+        var examples: [SMLWorkflowREPLExample] = [
+            SMLWorkflowREPLExample(
+                verb: "help",
+                line: "help",
+                summary: "Show this workflow's generated grammar and examples."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "schema",
+                line: "schema",
+                summary: "Print the workflow input/output summary."
+            ),
+        ]
+        if allowed.contains(.describe) {
+            examples.append(SMLWorkflowREPLExample(
+                verb: "describe",
+                line: "describe",
+                summary: "Inspect the exact mounted workflow revision."
+            ))
+        }
+        if allowed.contains(.start) {
+            let input = sampleInputObject()
+            let line = input.isEmpty
+                ? "start TASK-ID"
+                : "start TASK-ID \(Self.renderJSONObject(input))"
+            examples.append(SMLWorkflowREPLExample(
+                verb: "start",
+                line: line,
+                summary: "Start a task with the workflow's declared input fields."
+            ))
+        }
+        if allowed.contains(.watch) {
+            examples.append(SMLWorkflowREPLExample(
+                verb: "watch",
+                line: "watch TASK-ID",
+                summary: "Read the current task projection."
+            ))
+        }
+        if allowed.contains(.approve) {
+            examples.append(SMLWorkflowREPLExample(
+                verb: "approve",
+                line: #"approve TASK-ID {"task_revision":0}"#,
+                summary: "Approve the current gate with the latest task revision."
+            ))
+        }
+        if allowed.contains(.receipts) {
+            examples.append(SMLWorkflowREPLExample(
+                verb: "receipts",
+                line: "receipts TASK-ID",
+                summary: "List receipts emitted for the task."
+            ))
+        }
+        return examples
+    }
+
     /// The only model-facing function needed for this workflow. Its payload is the same bounded
     /// language the human REPL uses; the model never receives a direct runtime or ToolRegistry handle.
     public func modelCommandTool(
@@ -230,6 +310,149 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
 
     private static func describeField(_ field: SMLWorkflowFieldDescriptor) -> String {
         "\(field.name):\(field.type.rawValue)\(field.required ? "" : "?")"
+    }
+
+    private var localREPLCommands: [SMLWorkflowREPLCommandDescriptor] {
+        [
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "help",
+                usage: "help",
+                summary: "Show this workflow's generated grammar, schema, graph, and examples.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "schema",
+                usage: "schema",
+                summary: "Print this workflow's input and output schema summary.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "exit",
+                aliases: ["quit"],
+                usage: "exit",
+                summary: "Leave this workflow REPL session.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+        ]
+    }
+
+    private func replAliases(for action: SMLWorkflowControlAction) -> [String] {
+        switch action {
+        case .start: return ["run"]
+        case .describe, .watch, .approve, .refuse, .rollback, .receipts:
+            return []
+        }
+    }
+
+    private func replUsage(for action: SMLWorkflowControlAction) -> String {
+        switch action {
+        case .describe: return "describe"
+        case .start: return "start [TASK_ID] [JSON_INPUT_OBJECT]"
+        case .watch: return "watch TASK_ID"
+        case .approve: return #"approve TASK_ID {"task_revision":N}"#
+        case .refuse: return #"refuse TASK_ID {"task_revision":N}"#
+        case .rollback: return #"rollback TASK_ID {"task_revision":N}"#
+        case .receipts: return "receipts TASK_ID"
+        }
+    }
+
+    private func replJSONBodyKind(for action: SMLWorkflowControlAction) -> SMLWorkflowREPLJSONBodyKind {
+        switch action {
+        case .start: return .workflowInput
+        case .approve, .refuse, .rollback: return .expectedState
+        case .describe, .watch, .receipts: return .none
+        }
+    }
+
+    private func replJSONFields(for action: SMLWorkflowControlAction) -> [SMLWorkflowFieldDescriptor] {
+        switch action {
+        case .start:
+            return inputs
+        case .approve, .refuse, .rollback:
+            return [
+                SMLWorkflowFieldDescriptor(SMLStateField(
+                    name: "task_revision",
+                    type: .integer,
+                    description: "Latest task revision returned by watch."
+                )),
+            ]
+        case .describe, .watch, .receipts:
+            return []
+        }
+    }
+
+    private func sampleInputObject() -> SMLObject {
+        Dictionary(uniqueKeysWithValues: inputs.map { field in
+            (field.name, Self.sampleValue(for: field))
+        })
+    }
+
+    private static func sampleValue(for field: SMLWorkflowFieldDescriptor) -> SMLValue {
+        if field.nullable && !field.required {
+            return .null
+        }
+        switch field.type {
+        case .string:
+            return .string(field.name)
+        case .number:
+            return .number(Decimal(1.0))
+        case .integer:
+            return .number(1)
+        case .boolean:
+            return .bool(true)
+        case .object:
+            return .object([:])
+        case .array:
+            return .array([])
+        }
+    }
+
+    private static func renderJSONObject(_ object: SMLObject) -> String {
+        "{" + object.keys.sorted().map { key in
+            "\(renderJSONString(key)):\(renderJSONValue(object[key] ?? .null))"
+        }.joined(separator: ",") + "}"
+    }
+
+    private static func renderJSONValue(_ value: SMLValue) -> String {
+        switch value {
+        case .null:
+            return "null"
+        case .bool(let bool):
+            return bool ? "true" : "false"
+        case .number(let number):
+            return NSDecimalNumber(decimal: number).stringValue
+        case .string(let string):
+            return renderJSONString(string)
+        case .array(let values):
+            return "[" + values.map(renderJSONValue).joined(separator: ",") + "]"
+        case .object(let object):
+            return renderJSONObject(object)
+        }
+    }
+
+    private static func renderJSONString(_ string: String) -> String {
+        var output = "\""
+        for scalar in string.unicodeScalars {
+            switch scalar {
+            case "\"": output += "\\\""
+            case "\\": output += "\\\\"
+            case "\n": output += "\\n"
+            case "\r": output += "\\r"
+            case "\t": output += "\\t"
+            default: output.unicodeScalars.append(scalar)
+            }
+        }
+        output += "\""
+        return output
     }
 
     private static func describeInstruction(_ instruction: SMLInstruction) -> String {
