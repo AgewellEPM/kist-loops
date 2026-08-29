@@ -868,6 +868,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "openapi.json",
             "planning.json",
             "repl-scripts/langgraph.review.repl",
+            "runbook.json",
             "runtime-export.json",
             "runtime-source-package.json",
         ]
@@ -998,8 +999,96 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(attachment.skillIndex.count, 3)
         XCTAssertEqual(attachment.commandBindings.count, 7)
 
+        let runbook = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostScaffoldRunbook.self,
+            from: Data(contentsOf: outputURL.appendingPathComponent("runbook.json"))
+        )
+        XCTAssertEqual(runbook.schemaVersion, KistRunner.SMLRuntimeHostScaffoldRunbook.currentSchemaVersion)
+        XCTAssertEqual(runbook.sourcePath, manifestURL.path)
+        XCTAssertEqual(runbook.sourceFormat, .langGraphManifest)
+        XCTAssertEqual(runbook.outputDirectory, outputURL.path)
+        XCTAssertEqual(runbook.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(runbook.apiBasePaths, ["/source"])
+        XCTAssertTrue(runbook.descriptorOnly)
+        XCTAssertEqual(runbook.omittedRuntimeState, [
+            "actor_identity",
+            "completion_authority",
+            "credentials",
+            "leases",
+            "provider_registry",
+            "runtime_handles",
+        ])
+        XCTAssertEqual(runbook.artifacts.scaffoldIndexPath, "scaffold.json")
+        XCTAssertEqual(runbook.artifacts.runtimeSourcePackagePath, "runtime-source-package.json")
+        XCTAssertEqual(runbook.artifacts.runtimeExportPath, "runtime-export.json")
+        XCTAssertEqual(runbook.artifacts.openAPIPath, "openapi.json")
+        XCTAssertEqual(runbook.artifacts.modelRouterPath, "model-router.json")
+        XCTAssertEqual(runbook.artifacts.onyxDriversPath, "onyx-drivers.json")
+        XCTAssertEqual(runbook.artifacts.planningPath, "planning.json")
+        XCTAssertEqual(runbook.artifacts.hostWiringPath, "host-wiring.json")
+        XCTAssertEqual(runbook.artifacts.attachmentsPath, "attachments.json")
+        XCTAssertEqual(runbook.launchDescriptor, scaffold.launchDescriptor)
+        let workflowRunbook = try XCTUnwrap(runbook.workflows.first)
+        XCTAssertEqual(workflowRunbook.workflowID, "langgraph.review")
+        XCTAssertEqual(workflowRunbook.workflowVersion, attachment.workflowVersion)
+        XCTAssertEqual(workflowRunbook.workflowName, attachment.workflowName)
+        XCTAssertEqual(workflowRunbook.role, "reviewer")
+        XCTAssertEqual(workflowRunbook.apiBasePath, "/source")
+        XCTAssertEqual(workflowRunbook.attachmentPath, "attachments/langgraph.review.json")
+        XCTAssertEqual(workflowRunbook.replScriptPath, "repl-scripts/langgraph.review.repl")
+        XCTAssertEqual(workflowRunbook.apiScriptPath, "api-scripts/langgraph.review.json")
+        XCTAssertEqual(workflowRunbook.modelScriptPath, "model-scripts/langgraph.review.prompts")
+        XCTAssertEqual(workflowRunbook.replTranscriptCommand.executable, "kist")
+        XCTAssertEqual(workflowRunbook.replTranscriptCommand.workingDirectory, outputURL.path)
+        XCTAssertEqual(workflowRunbook.replTranscriptCommand.arguments, [
+            "--sml-runtime-repl-script", ".",
+            "--sml-script", "repl-scripts/langgraph.review.repl",
+            "--sml-workflow", "langgraph.review",
+        ])
+        XCTAssertFalse(workflowRunbook.replTranscriptCommand.requiresProviderBinding)
+        XCTAssertEqual(workflowRunbook.apiTranscriptCommand.arguments, [
+            "--sml-runtime-api-script", ".",
+            "--sml-api-script", "api-scripts/langgraph.review.json",
+        ])
+        XCTAssertFalse(workflowRunbook.apiTranscriptCommand.requiresProviderBinding)
+        XCTAssertEqual(workflowRunbook.modelTranscriptCommand.arguments, [
+            "--sml-runtime-model-script", ".",
+            "--sml-model-script", "model-scripts/langgraph.review.prompts",
+            "--provider", "<provider>",
+            "--model", "<model>",
+        ])
+        XCTAssertTrue(workflowRunbook.modelTranscriptCommand.requiresProviderBinding)
+        XCTAssertEqual(workflowRunbook.modelToolName, attachment.modelToolName)
+        XCTAssertEqual(workflowRunbook.modelRouterToolName, attachment.modelRouterToolName)
+        XCTAssertEqual(workflowRunbook.onyxDriverID, attachment.onyxDriverID)
+        XCTAssertEqual(workflowRunbook.planningWorkflowID, attachment.planningWorkflowID)
+        XCTAssertEqual(workflowRunbook.plannerEntrypoint, attachment.plannerEntrypoint)
+        XCTAssertEqual(workflowRunbook.skillIDs, ["plan", "receipt", "write"])
+        XCTAssertEqual(workflowRunbook.toolReferences, attachment.toolReferences)
+        XCTAssertEqual(
+            workflowRunbook.decomposableUnitIDs,
+            Array(Set(attachment.decomposableUnits.map(\.instructionID))).sorted()
+        )
+        XCTAssertEqual(
+            workflowRunbook.approvalGateIDs,
+            Array(Set(attachment.approvalGates.map(\.instructionID))).sorted()
+        )
+        XCTAssertEqual(workflowRunbook.commandActions.count, 7)
+        XCTAssertEqual(workflowRunbook.apiEndpoints.count, attachment.apiRoutes.count)
+        XCTAssertTrue(workflowRunbook.apiEndpoints.contains {
+            $0.method == .post
+                && $0.pathTemplate == "/source/workflows/langgraph.review/tasks"
+                && $0.action == .start
+        })
+        XCTAssertTrue(workflowRunbook.apiEndpoints.contains {
+            $0.method == .get
+                && $0.pathTemplate == "/source/workflows/langgraph.review/tasks/{task_id}/receipts"
+                && $0.action == .receipts
+        })
+
         let readme = try String(contentsOf: outputURL.appendingPathComponent("README.md"))
         XCTAssertTrue(readme.contains("Host wiring order"))
+        XCTAssertTrue(readme.contains("runbook.json"))
         XCTAssertTrue(readme.contains("api-scripts/*.json"))
         XCTAssertTrue(readme.contains("model-scripts/*.prompts"))
         XCTAssertTrue(readme.contains("repl-scripts/*.repl"))

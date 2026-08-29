@@ -406,6 +406,236 @@ extension KistRunner {
         }
     }
 
+    struct SMLRuntimeHostScaffoldRunbookArtifacts: Sendable, Codable, Equatable {
+        let scaffoldIndexPath: String
+        let readmePath: String
+        let runtimeSourcePackagePath: String
+        let runtimeExportPath: String
+        let catalogPath: String
+        let mountPath: String
+        let launchPath: String
+        let openAPIPath: String
+        let modelToolsPath: String
+        let modelRouterPath: String
+        let onyxDriversPath: String
+        let planningPath: String
+        let agentGuidePath: String
+        let hostGuidePath: String
+        let hostWiringPath: String
+        let attachmentsPath: String
+
+        init(
+            scaffoldIndexPath: String = "scaffold.json",
+            readmePath: String = "README.md",
+            runtimeSourcePackagePath: String = "runtime-source-package.json",
+            runtimeExportPath: String = "runtime-export.json",
+            catalogPath: String = "catalog.json",
+            mountPath: String = "mount.json",
+            launchPath: String = "launch.json",
+            openAPIPath: String = "openapi.json",
+            modelToolsPath: String = "model-tools.json",
+            modelRouterPath: String = "model-router.json",
+            onyxDriversPath: String = "onyx-drivers.json",
+            planningPath: String = "planning.json",
+            agentGuidePath: String = "agent-guide.json",
+            hostGuidePath: String = "host-guide.json",
+            hostWiringPath: String = "host-wiring.json",
+            attachmentsPath: String = "attachments.json"
+        ) {
+            self.scaffoldIndexPath = scaffoldIndexPath
+            self.readmePath = readmePath
+            self.runtimeSourcePackagePath = runtimeSourcePackagePath
+            self.runtimeExportPath = runtimeExportPath
+            self.catalogPath = catalogPath
+            self.mountPath = mountPath
+            self.launchPath = launchPath
+            self.openAPIPath = openAPIPath
+            self.modelToolsPath = modelToolsPath
+            self.modelRouterPath = modelRouterPath
+            self.onyxDriversPath = onyxDriversPath
+            self.planningPath = planningPath
+            self.agentGuidePath = agentGuidePath
+            self.hostGuidePath = hostGuidePath
+            self.hostWiringPath = hostWiringPath
+            self.attachmentsPath = attachmentsPath
+        }
+    }
+
+    struct SMLRuntimeHostScaffoldCommandTemplate: Sendable, Codable, Equatable {
+        let executable: String
+        let workingDirectory: String
+        let arguments: [String]
+        let requiresProviderBinding: Bool
+        let summary: String
+
+        init(
+            executable: String = "kist",
+            workingDirectory: String,
+            arguments: [String],
+            requiresProviderBinding: Bool = false,
+            summary: String
+        ) {
+            self.executable = executable
+            self.workingDirectory = workingDirectory
+            self.arguments = arguments
+            self.requiresProviderBinding = requiresProviderBinding
+            self.summary = summary
+        }
+    }
+
+    struct SMLRuntimeHostScaffoldEndpointReference: Sendable, Codable, Equatable {
+        let method: SMLWorkflowAPIMethod
+        let pathTemplate: String
+        let operationID: String
+        let action: SMLWorkflowControlAction?
+
+        init(route: SMLWorkflowRuntimeAPIMount) {
+            method = route.method
+            pathTemplate = route.pathTemplate
+            operationID = route.operationID
+            action = route.action
+        }
+    }
+
+    struct SMLRuntimeHostScaffoldWorkflowRunbook: Sendable, Codable, Equatable {
+        let workflowID: String
+        let workflowVersion: String
+        let workflowName: String
+        let role: String
+        let apiBasePath: String
+        let attachmentPath: String
+        let replScriptPath: String
+        let apiScriptPath: String
+        let modelScriptPath: String
+        let replTranscriptCommand: SMLRuntimeHostScaffoldCommandTemplate
+        let apiTranscriptCommand: SMLRuntimeHostScaffoldCommandTemplate
+        let modelTranscriptCommand: SMLRuntimeHostScaffoldCommandTemplate
+        let apiEndpoints: [SMLRuntimeHostScaffoldEndpointReference]
+        let modelToolName: String
+        let modelRouterToolName: String
+        let onyxDriverID: String
+        let planningWorkflowID: String?
+        let plannerEntrypoint: String?
+        let skillIDs: [String]
+        let toolReferences: [String]
+        let decomposableUnitIDs: [String]
+        let approvalGateIDs: [String]
+        let commandActions: [String]
+
+        init(
+            attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest,
+            outputDirectory: String
+        ) {
+            let fileStem = KistRunner.smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+            workflowID = attachment.workflowID
+            workflowVersion = attachment.workflowVersion
+            workflowName = attachment.workflowName
+            role = attachment.role
+            apiBasePath = attachment.apiBasePath
+            attachmentPath = "attachments/\(fileStem).json"
+            replScriptPath = "repl-scripts/\(fileStem).repl"
+            apiScriptPath = "api-scripts/\(fileStem).json"
+            modelScriptPath = "model-scripts/\(fileStem).prompts"
+            replTranscriptCommand = SMLRuntimeHostScaffoldCommandTemplate(
+                workingDirectory: outputDirectory,
+                arguments: [
+                    "--sml-runtime-repl-script", ".",
+                    "--sml-script", "repl-scripts/\(fileStem).repl",
+                    "--sml-workflow", attachment.workflowID,
+                ],
+                summary: "Replay the generated REPL script and emit a workflow REPL transcript."
+            )
+            apiTranscriptCommand = SMLRuntimeHostScaffoldCommandTemplate(
+                workingDirectory: outputDirectory,
+                arguments: [
+                    "--sml-runtime-api-script", ".",
+                    "--sml-api-script", "api-scripts/\(fileStem).json",
+                ],
+                summary: "Replay the generated API request script and emit a generated API transcript."
+            )
+            modelTranscriptCommand = SMLRuntimeHostScaffoldCommandTemplate(
+                workingDirectory: outputDirectory,
+                arguments: [
+                    "--sml-runtime-model-script", ".",
+                    "--sml-model-script", "model-scripts/\(fileStem).prompts",
+                    "--provider", "<provider>",
+                    "--model", "<model>",
+                ],
+                requiresProviderBinding: true,
+                summary: "Replay the generated model prompt script through the native model-router tool."
+            )
+            apiEndpoints = attachment.apiRoutes.map(SMLRuntimeHostScaffoldEndpointReference.init).sorted {
+                if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+                if $0.method.rawValue != $1.method.rawValue {
+                    return $0.method.rawValue < $1.method.rawValue
+                }
+                return $0.operationID < $1.operationID
+            }
+            modelToolName = attachment.modelToolName
+            modelRouterToolName = attachment.modelRouterToolName
+            onyxDriverID = attachment.onyxDriverID
+            planningWorkflowID = attachment.planningWorkflowID
+            plannerEntrypoint = attachment.plannerEntrypoint
+            skillIDs = Array(Set(attachment.skillTree.map(\.id))).sorted()
+            toolReferences = attachment.toolReferences
+            decomposableUnitIDs = Array(Set(attachment.decomposableUnits.map(\.instructionID))).sorted()
+            approvalGateIDs = Array(Set(attachment.approvalGates.map(\.instructionID))).sorted()
+            commandActions = Array(Set(attachment.commandBindings.map { $0.action.rawValue })).sorted()
+        }
+    }
+
+    struct SMLRuntimeHostScaffoldRunbook: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let outputDirectory: String
+        let workflowIDs: [String]
+        let apiBasePaths: [String]
+        let descriptorOnly: Bool
+        let omittedRuntimeState: [String]
+        let artifacts: SMLRuntimeHostScaffoldRunbookArtifacts
+        let workflows: [SMLRuntimeHostScaffoldWorkflowRunbook]
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostScaffoldRunbook.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            outputDirectory: String,
+            workflowIDs: [String],
+            apiBasePaths: [String],
+            descriptorOnly: Bool = true,
+            omittedRuntimeState: [String] = [
+                "actor_identity",
+                "completion_authority",
+                "credentials",
+                "leases",
+                "provider_registry",
+                "runtime_handles",
+            ],
+            artifacts: SMLRuntimeHostScaffoldRunbookArtifacts = SMLRuntimeHostScaffoldRunbookArtifacts(),
+            workflows: [SMLRuntimeHostScaffoldWorkflowRunbook],
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.outputDirectory = outputDirectory
+            self.workflowIDs = Array(Set(workflowIDs)).sorted()
+            self.apiBasePaths = Array(Set(apiBasePaths)).sorted()
+            self.descriptorOnly = descriptorOnly
+            self.omittedRuntimeState = Array(Set(omittedRuntimeState)).sorted()
+            self.artifacts = artifacts
+            self.workflows = workflows.sorted {
+                if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+                return $0.workflowVersion < $1.workflowVersion
+            }
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
     struct SMLRuntimeHostAttachments: Sendable, Codable, Equatable {
         static let currentSchemaVersion = 4
 
@@ -2396,6 +2626,18 @@ extension KistRunner {
                     text: smlRuntimeScaffoldModelScript(for: attachment)
                 ))
             }
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "runbook.json",
+                outputDirectory: outputURL,
+                summary: "Machine-readable host integration runbook tying artifacts, commands, API endpoints, model-router, Onyx, and planning IDs together.",
+                payload: smlRuntimeScaffoldRunbook(
+                    sourcePath: host.sourcePath,
+                    sourceFormat: host.sourceFormat,
+                    outputDirectory: outputURL.standardizedFileURL.path,
+                    launchDescriptor: launchDescriptor,
+                    attachments: attachments
+                )
+            ))
             files.append(try writeSMLRuntimeScaffoldTextFile(
                 relativePath: "README.md",
                 outputDirectory: outputURL,
@@ -2623,6 +2865,29 @@ extension KistRunner {
         return stem.isEmpty ? "workflow" : stem
     }
 
+    private static func smlRuntimeScaffoldRunbook(
+        sourcePath: String,
+        sourceFormat: SMLRuntimeHostExportSourceFormat,
+        outputDirectory: String,
+        launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor,
+        attachments: [SMLWorkflowRuntimeWorkflowAttachmentManifest]
+    ) -> SMLRuntimeHostScaffoldRunbook {
+        SMLRuntimeHostScaffoldRunbook(
+            sourcePath: sourcePath,
+            sourceFormat: sourceFormat,
+            outputDirectory: outputDirectory,
+            workflowIDs: launchDescriptor.workflowIDs,
+            apiBasePaths: launchDescriptor.apiBasePaths,
+            workflows: attachments.map {
+                SMLRuntimeHostScaffoldWorkflowRunbook(
+                    attachment: $0,
+                    outputDirectory: outputDirectory
+                )
+            },
+            launchDescriptor: launchDescriptor
+        )
+    }
+
     private static func smlRuntimeScaffoldReadme(
         sourcePath: String,
         sourceFormat: SMLRuntimeHostExportSourceFormat,
@@ -2660,15 +2925,16 @@ extension KistRunner {
 
         ## Host wiring order
 
-        1. Decode `runtime-source-package.json` or inspect `runtime-export.json`.
-        2. Mount routes from `mount.json` and `openapi.json`.
-        3. Attach `model-router.json` as the native tool exposed to the selected model.
-        4. Load `onyx-drivers.json` for skill trees, tool bindings, and plans.
-        5. Use `planning.json`, `agent-guide.json`, and `host-guide.json` as the agent/host operating contract.
-        6. Use `host-wiring.json` or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
-        7. Run `repl-scripts/*.repl` with `kist --sml-runtime-repl-script <this directory> --sml-script <script>` to produce a multi-turn workflow REPL transcript.
-        8. Run `api-scripts/*.json` with `kist --sml-runtime-api-script <this directory> --sml-api-script <script>` to produce a multi-request generated API transcript.
-        9. Run `model-scripts/*.prompts` with `kist --sml-runtime-model-script <this directory> --sml-model-script <script>` plus a native-tool provider/model to produce a multi-turn model-router transcript.
+        1. Decode `runbook.json` for exact scaffold artifact paths, command templates, API endpoints, model-router IDs, Onyx driver IDs, and planning IDs.
+        2. Decode `runtime-source-package.json` or inspect `runtime-export.json`.
+        3. Mount routes from `mount.json` and `openapi.json`.
+        4. Attach `model-router.json` as the native tool exposed to the selected model.
+        5. Load `onyx-drivers.json` for skill trees, tool bindings, and plans.
+        6. Use `planning.json`, `agent-guide.json`, and `host-guide.json` as the agent/host operating contract.
+        7. Use `host-wiring.json` or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
+        8. Run `repl-scripts/*.repl` with `kist --sml-runtime-repl-script <this directory> --sml-script <script>` to produce a multi-turn workflow REPL transcript.
+        9. Run `api-scripts/*.json` with `kist --sml-runtime-api-script <this directory> --sml-api-script <script>` to produce a multi-request generated API transcript.
+        10. Run `model-scripts/*.prompts` with `kist --sml-runtime-model-script <this directory> --sml-model-script <script>` plus a native-tool provider/model to produce a multi-turn model-router transcript.
 
         Descriptor files do not carry actor identity, leases, credentials, provider registries, runtime handles, or completion authority. State changes still have to cross the generated host command gateway and replay/admission checks.
         """
