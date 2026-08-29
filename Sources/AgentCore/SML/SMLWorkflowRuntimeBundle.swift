@@ -2146,23 +2146,284 @@ public struct SMLWorkflowRuntimeAPIResponse: Sendable, Equatable {
     }
 }
 
+public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
+    public let workflowID: String
+    public let workflowVersion: String
+    public let workflowName: String
+    public let role: String
+    public let sourceKind: SMLWorkflowSourceKind
+    public let apiBasePath: String
+    public let installed: Bool
+    public let installedInstructionCount: Int?
+    public let replMount: SMLWorkflowRuntimeREPLMount
+    public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
+    public let modelToolName: String
+    public let modelRouterToolName: String
+    public let onyxDriverID: String
+    public let planningWorkflowID: String?
+    public let hostBindingChannels: [SMLWorkflowRuntimeHostBindingChannel]
+
+    public init(
+        workflowID: String,
+        workflowVersion: String,
+        workflowName: String,
+        role: String,
+        sourceKind: SMLWorkflowSourceKind,
+        apiBasePath: String,
+        installed: Bool,
+        installedInstructionCount: Int?,
+        replMount: SMLWorkflowRuntimeREPLMount,
+        apiRoutes: [SMLWorkflowRuntimeAPIMount],
+        modelToolName: String,
+        modelRouterToolName: String,
+        onyxDriverID: String,
+        planningWorkflowID: String?,
+        hostBindingChannels: [SMLWorkflowRuntimeHostBindingChannel]
+    ) {
+        self.workflowID = workflowID
+        self.workflowVersion = workflowVersion
+        self.workflowName = workflowName
+        self.role = role
+        self.sourceKind = sourceKind
+        self.apiBasePath = apiBasePath
+        self.installed = installed
+        self.installedInstructionCount = installedInstructionCount
+        self.replMount = replMount
+        self.apiRoutes = apiRoutes.sorted {
+            if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.operationID < $1.operationID
+        }
+        self.modelToolName = modelToolName
+        self.modelRouterToolName = modelRouterToolName
+        self.onyxDriverID = onyxDriverID
+        self.planningWorkflowID = planningWorkflowID
+        self.hostBindingChannels = Array(Set(hostBindingChannels)).sorted {
+            $0.rawValue < $1.rawValue
+        }
+    }
+
+    public init(
+        mount: SMLWorkflowRuntimeWorkflowMount,
+        descriptor: SMLWorkflowRuntimeDescriptor,
+        installedWorkflow: SMLWorkflowProjection?,
+        hostBinding: SMLWorkflowRuntimeWorkflowHostGuide?
+    ) {
+        self.init(
+            workflowID: mount.workflowID,
+            workflowVersion: mount.workflowVersion,
+            workflowName: mount.workflowName,
+            role: mount.role,
+            sourceKind: descriptor.sourceKind,
+            apiBasePath: mount.apiBasePath,
+            installed: installedWorkflow != nil,
+            installedInstructionCount: installedWorkflow?.instructionCount,
+            replMount: mount.repl,
+            apiRoutes: mount.apiRoutes,
+            modelToolName: mount.modelToolName,
+            modelRouterToolName: mount.modelRouterToolName,
+            onyxDriverID: mount.onyxDriverID,
+            planningWorkflowID: mount.planningWorkflowID,
+            hostBindingChannels: hostBinding?.hostBindings.map(\.channel) ?? []
+        )
+    }
+}
+
+/// Serializable receipt-shaped summary of what a host actually mounted.
+///
+/// `SMLWorkflowRuntimeExport` describes what can be mounted. This value is produced after launch and
+/// cross-checks the declared runtime catalog against the installed workflow projections, so a host
+/// can persist or display one bounded artifact for REPL/API/model-router/Onyx/planning attachment.
+/// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
+/// runtime handle, or executable closure.
+public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let sourcePackageSchemaVersion: Int?
+    public let runtimeExportSchemaVersion: Int
+    public let workflowIDs: [String]
+    public let installedWorkflowIDs: [String]
+    public let missingInstalledWorkflowIDs: [String]
+    public let unexpectedInstalledWorkflowIDs: [String]
+    public let launchComplete: Bool
+    public let apiBasePaths: [String]
+    public let metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
+    public let workflows: [SMLWorkflowRuntimeLaunchWorkflow]
+    public let modelRouter: SMLWorkflowRuntimeModelRouterDescriptor
+    public let onyxDriverIDs: [String]
+    public let planningWorkflowIDs: [String]
+    public let requiredHostServices: [String]
+    public let launchSteps: [SMLWorkflowRuntimeHostLaunchStep]
+    public let sourceSummaries: [SMLWorkflowRuntimeSourceSummary]
+
+    public init(
+        schemaVersion: Int = SMLWorkflowRuntimeLaunchDescriptor.currentSchemaVersion,
+        sourcePackageSchemaVersion: Int?,
+        runtimeExportSchemaVersion: Int,
+        workflowIDs: [String],
+        installedWorkflowIDs: [String],
+        missingInstalledWorkflowIDs: [String],
+        unexpectedInstalledWorkflowIDs: [String],
+        launchComplete: Bool,
+        apiBasePaths: [String],
+        metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint],
+        workflows: [SMLWorkflowRuntimeLaunchWorkflow],
+        modelRouter: SMLWorkflowRuntimeModelRouterDescriptor,
+        onyxDriverIDs: [String],
+        planningWorkflowIDs: [String],
+        requiredHostServices: [String],
+        launchSteps: [SMLWorkflowRuntimeHostLaunchStep],
+        sourceSummaries: [SMLWorkflowRuntimeSourceSummary]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.sourcePackageSchemaVersion = sourcePackageSchemaVersion
+        self.runtimeExportSchemaVersion = runtimeExportSchemaVersion
+        self.workflowIDs = workflowIDs.sorted()
+        self.installedWorkflowIDs = installedWorkflowIDs.sorted()
+        self.missingInstalledWorkflowIDs = missingInstalledWorkflowIDs.sorted()
+        self.unexpectedInstalledWorkflowIDs = unexpectedInstalledWorkflowIDs.sorted()
+        self.launchComplete = launchComplete
+        self.apiBasePaths = apiBasePaths.sorted()
+        self.metadataEndpoints = metadataEndpoints.sorted {
+            if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+            return $0.operationID < $1.operationID
+        }
+        self.workflows = workflows.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.workflowVersion < $1.workflowVersion
+        }
+        self.modelRouter = modelRouter
+        self.onyxDriverIDs = onyxDriverIDs.sorted()
+        self.planningWorkflowIDs = planningWorkflowIDs.sorted()
+        self.requiredHostServices = requiredHostServices.sorted()
+        self.launchSteps = launchSteps
+        self.sourceSummaries = sourceSummaries.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.workflowVersion < $1.workflowVersion
+        }
+    }
+
+    public init(
+        registry: SMLWorkflowRuntimeRegistry,
+        installedWorkflows: [SMLWorkflowProjection],
+        sourcePackage: SMLWorkflowRuntimeSourcePackage? = nil
+    ) {
+        let catalog = registry.catalog
+        let mountContract = catalog.mountContract
+        let hostGuide = catalog.hostGuide
+        let descriptorsByWorkflowID = Dictionary(
+            uniqueKeysWithValues: catalog.workflows.map { ($0.workflowID, $0) }
+        )
+        let installed = installedWorkflows.sorted {
+            if $0.id != $1.id { return $0.id < $1.id }
+            return $0.version < $1.version
+        }
+        var installedByWorkflowID: [String: SMLWorkflowProjection] = [:]
+        for projection in installed {
+            installedByWorkflowID[projection.id] = projection
+        }
+        let hostBindingsByWorkflowID = Dictionary(
+            uniqueKeysWithValues: hostGuide.workflowBindings.map { ($0.workflowID, $0) }
+        )
+        let declaredWorkflowIDs = catalog.workflowIDs
+        let declaredSet = Set(declaredWorkflowIDs)
+        let installedWorkflowIDs = installed.map(\.id)
+        let installedSet = Set(installedWorkflowIDs)
+        let missingInstalled = declaredWorkflowIDs.filter { !installedSet.contains($0) }
+        let unexpectedInstalled = installedWorkflowIDs.filter { !declaredSet.contains($0) }
+        self.init(
+            sourcePackageSchemaVersion: sourcePackage?.schemaVersion,
+            runtimeExportSchemaVersion: SMLWorkflowRuntimeExport.currentSchemaVersion,
+            workflowIDs: declaredWorkflowIDs,
+            installedWorkflowIDs: installedWorkflowIDs,
+            missingInstalledWorkflowIDs: missingInstalled,
+            unexpectedInstalledWorkflowIDs: unexpectedInstalled,
+            launchComplete: missingInstalled.isEmpty && unexpectedInstalled.isEmpty,
+            apiBasePaths: mountContract.apiBasePaths,
+            metadataEndpoints: catalog.metadataEndpoints,
+            workflows: mountContract.workflowMounts.compactMap { mount in
+                guard let descriptor = descriptorsByWorkflowID[mount.workflowID] else {
+                    return nil
+                }
+                return SMLWorkflowRuntimeLaunchWorkflow(
+                    mount: mount,
+                    descriptor: descriptor,
+                    installedWorkflow: installedByWorkflowID[mount.workflowID],
+                    hostBinding: hostBindingsByWorkflowID[mount.workflowID]
+                )
+            },
+            modelRouter: catalog.modelRouter,
+            onyxDriverIDs: mountContract.onyxDriverIDs,
+            planningWorkflowIDs: mountContract.planningWorkflowIDs,
+            requiredHostServices: hostGuide.requiredHostServices,
+            launchSteps: hostGuide.launchSteps,
+            sourceSummaries: Self.sourceSummaries(
+                from: sourcePackage,
+                mountContract: mountContract
+            )
+        )
+    }
+
+    private static func sourceSummaries(
+        from sourcePackage: SMLWorkflowRuntimeSourcePackage?,
+        mountContract: SMLWorkflowRuntimeMountContract
+    ) -> [SMLWorkflowRuntimeSourceSummary] {
+        guard let sourcePackage else { return [] }
+        let mountsByWorkflowID = Dictionary(
+            uniqueKeysWithValues: mountContract.workflowMounts.map { ($0.workflowID, $0) }
+        )
+        return sourcePackage.normalizedWorkflows.map { workflow in
+            let mount = mountsByWorkflowID[workflow.id]
+            return SMLWorkflowRuntimeSourceSummary(
+                workflowID: workflow.id,
+                workflowVersion: workflow.version,
+                workflowName: workflow.name,
+                sourceKind: workflow.source.kind,
+                sourceReference: workflow.source.reference,
+                sourceDigest: workflow.source.digest,
+                apiBasePath: mount?.apiBasePath ?? "",
+                replGrammar: mount?.repl.grammar ?? "",
+                modelToolName: mount?.modelToolName ?? "",
+                modelRouterToolName: mount?.modelRouterToolName
+                    ?? SMLWorkflowRuntimeModelAdapter.toolName,
+                onyxDriverID: mount?.onyxDriverID ?? "",
+                planningWorkflowID: mount?.planningWorkflowID
+            )
+        }
+    }
+}
+
 public struct SMLWorkflowRuntimeLaunch: Sendable {
     public let registry: SMLWorkflowRuntimeRegistry
     public let app: SMLWorkflowRuntimeApp
     public let installedWorkflows: [SMLWorkflowProjection]
+    public let sourcePackage: SMLWorkflowRuntimeSourcePackage?
 
     public init(
         registry: SMLWorkflowRuntimeRegistry,
         app: SMLWorkflowRuntimeApp,
-        installedWorkflows: [SMLWorkflowProjection]
+        installedWorkflows: [SMLWorkflowProjection],
+        sourcePackage: SMLWorkflowRuntimeSourcePackage? = nil
     ) {
         self.registry = registry
         self.app = app
         self.installedWorkflows = installedWorkflows
+        self.sourcePackage = sourcePackage
     }
 
     public var mountContract: SMLWorkflowRuntimeMountContract {
         registry.mountContract
+    }
+
+    public var launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor {
+        SMLWorkflowRuntimeLaunchDescriptor(
+            registry: registry,
+            installedWorkflows: installedWorkflows,
+            sourcePackage: sourcePackage
+        )
     }
 
     public func export(
@@ -2508,19 +2769,16 @@ public struct SMLWorkflowRuntimeApp: Sendable {
     }
 
     public static func launch(
-        mounts: [SMLWorkflowRuntimeMount],
+        registry: SMLWorkflowRuntimeRegistry,
         runtime: SMLRuntime,
         replayGuard: any SMLCommandReplayGuard,
         authorityResolver: @escaping AuthorityResolver,
-        commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
-        taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() },
+        sourcePackage: SMLWorkflowRuntimeSourcePackage? = nil,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) async throws -> SMLWorkflowRuntimeLaunch {
-        let registry = try SMLWorkflowRuntimeRegistry.compile(
-            mounts: mounts,
-            commandID: commandID,
-            taskID: taskID
-        )
+        if let sourcePackage {
+            try requireSourcePackage(sourcePackage, matches: registry)
+        }
         let installed = try await registry.installAll(into: runtime)
         let app = registry.makeApp(
             gateway: SMLCommandGateway(runtime: runtime, replayGuard: replayGuard),
@@ -2530,8 +2788,102 @@ public struct SMLWorkflowRuntimeApp: Sendable {
         return SMLWorkflowRuntimeLaunch(
             registry: registry,
             app: app,
-            installedWorkflows: installed
+            installedWorkflows: installed,
+            sourcePackage: sourcePackage
         )
+    }
+
+    public static func launch(
+        mounts: [SMLWorkflowRuntimeMount],
+        runtime: SMLRuntime,
+        replayGuard: any SMLCommandReplayGuard,
+        authorityResolver: @escaping AuthorityResolver,
+        commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() },
+        clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
+    ) async throws -> SMLWorkflowRuntimeLaunch {
+        try await launch(
+            registry: try SMLWorkflowRuntimeRegistry.compile(
+                mounts: mounts,
+                commandID: commandID,
+                taskID: taskID
+            ),
+            runtime: runtime,
+            replayGuard: replayGuard,
+            authorityResolver: authorityResolver,
+            clock: clock
+        )
+    }
+
+    private static func requireSourcePackage(
+        _ sourcePackage: SMLWorkflowRuntimeSourcePackage,
+        matches registry: SMLWorkflowRuntimeRegistry
+    ) throws {
+        guard sourcePackage.workflowIDs == registry.workflowIDs else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeExportMismatch(
+                field: "launch.registry.workflowIDs",
+                expected: sourcePackage.workflowIDs,
+                actual: registry.workflowIDs
+            )
+        }
+        let sourceByWorkflowID = Dictionary(
+            uniqueKeysWithValues: sourcePackage.normalizedWorkflows.map { ($0.id, $0) }
+        )
+        for descriptor in registry.catalog.workflows {
+            guard let workflow = sourceByWorkflowID[descriptor.workflowID] else {
+                throw SMLWorkflowRuntimeSourcePackageError.runtimeExportMismatch(
+                    field: "launch.registry.workflowIDs",
+                    expected: sourcePackage.workflowIDs,
+                    actual: registry.workflowIDs
+                )
+            }
+            try require(
+                descriptor.workflowVersion,
+                equals: workflow.version,
+                workflowID: workflow.id,
+                field: "launch.registry.workflowVersion"
+            )
+            try require(
+                descriptor.workflowName,
+                equals: workflow.name,
+                workflowID: workflow.id,
+                field: "launch.registry.workflowName"
+            )
+            try require(
+                descriptor.sourceKind.rawValue,
+                equals: workflow.source.kind.rawValue,
+                workflowID: workflow.id,
+                field: "launch.registry.sourceKind"
+            )
+            try require(
+                descriptor.sourceReference,
+                equals: workflow.source.reference,
+                workflowID: workflow.id,
+                field: "launch.registry.sourceReference"
+            )
+            try require(
+                descriptor.sourceDigest ?? "",
+                equals: workflow.source.digest ?? "",
+                workflowID: workflow.id,
+                field: "launch.registry.sourceDigest"
+            )
+        }
+    }
+
+    private static func require(
+        _ actual: String,
+        equals expected: String,
+        workflowID: String,
+        field: String
+    ) throws {
+        guard actual == expected else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeWorkflowMismatch(
+                workflowID: workflowID,
+                field: field,
+                expected: expected,
+                actual: actual
+            )
+        }
     }
 
     public static func launch(

@@ -1065,13 +1065,22 @@ public extension SMLWorkflowRuntimeApp {
         taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() },
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) async throws -> SMLWorkflowRuntimeLaunch {
-        try await launch(
-            candidateMounts: sourceMounts.map { try $0.candidateMount(limits: limits) },
+        let candidateMounts = try sourceMounts.map { try $0.candidateMount(limits: limits) }
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            candidateMounts: candidateMounts,
+            commandID: commandID,
+            taskID: taskID
+        )
+        let sourcePackage = try SMLWorkflowRuntimeSourcePackage(
+            normalizedWorkflows: candidateMounts.map(\.workflow),
+            runtime: registry.export()
+        )
+        return try await launch(
+            registry: registry,
             runtime: runtime,
             replayGuard: replayGuard,
             authorityResolver: authorityResolver,
-            commandID: commandID,
-            taskID: taskID,
+            sourcePackage: sourcePackage,
             clock: clock
         )
     }

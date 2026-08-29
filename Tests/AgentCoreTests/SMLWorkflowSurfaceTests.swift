@@ -531,6 +531,66 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             try launch.app.resolveWorkflowMount(workflowID: "content.review").apiRoutes.count,
             7
         )
+        XCTAssertNil(launch.sourcePackage)
+
+        let launchDescriptor = launch.launchDescriptor
+        XCTAssertEqual(
+            launchDescriptor.schemaVersion,
+            SMLWorkflowRuntimeLaunchDescriptor.currentSchemaVersion
+        )
+        XCTAssertNil(launchDescriptor.sourcePackageSchemaVersion)
+        XCTAssertEqual(
+            launchDescriptor.runtimeExportSchemaVersion,
+            SMLWorkflowRuntimeExport.currentSchemaVersion
+        )
+        XCTAssertEqual(launchDescriptor.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(launchDescriptor.installedWorkflowIDs, ["content.release", "content.review"])
+        XCTAssertTrue(launchDescriptor.missingInstalledWorkflowIDs.isEmpty)
+        XCTAssertTrue(launchDescriptor.unexpectedInstalledWorkflowIDs.isEmpty)
+        XCTAssertTrue(launchDescriptor.launchComplete)
+        XCTAssertEqual(launchDescriptor.apiBasePaths, ["/automation"])
+        XCTAssertEqual(launchDescriptor.metadataEndpoints.count, 9)
+        XCTAssertEqual(
+            launchDescriptor.modelRouter.tool.name,
+            SMLWorkflowRuntimeModelAdapter.toolName
+        )
+        XCTAssertEqual(launchDescriptor.planningWorkflowIDs, [
+            "content.release", "content.review",
+        ])
+        XCTAssertTrue(
+            launchDescriptor.requiredHostServices.contains("transport_router_for_repl_and_api")
+        )
+        XCTAssertEqual(launchDescriptor.launchSteps.map(\.id), [
+            "decode_source_package",
+            "fresh_host_admission",
+            "launch_runtime_app",
+            "serve_descriptor_metadata",
+            "route_repl_and_api",
+            "attach_model_router",
+            "attach_onyx_and_planning",
+        ])
+        let reviewLaunch = try XCTUnwrap(
+            launchDescriptor.workflows.first { $0.workflowID == "content.review" }
+        )
+        XCTAssertTrue(reviewLaunch.installed)
+        XCTAssertEqual(reviewLaunch.installedInstructionCount, 7)
+        XCTAssertEqual(reviewLaunch.replMount.workflowID, "content.review")
+        XCTAssertEqual(reviewLaunch.apiRoutes.count, 7)
+        XCTAssertEqual(reviewLaunch.modelToolName, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(reviewLaunch.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(reviewLaunch.planningWorkflowID, "content.review")
+        XCTAssertEqual(Set(reviewLaunch.hostBindingChannels), [
+            .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
+            .onyxDriver, .planningWorkflow,
+        ])
+
+        let encodedLaunchDescriptor = String(
+            decoding: try JSONEncoder().encode(launchDescriptor),
+            as: UTF8.self
+        )
+        XCTAssertFalse(encodedLaunchDescriptor.contains("operator.luke"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("launch-lease"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("authenticatedActor"))
 
         let started = try await launch.app.handleRuntimeAPI(
             SMLWorkflowAPIRequest(

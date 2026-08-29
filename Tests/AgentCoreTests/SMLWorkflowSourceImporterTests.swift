@@ -58,6 +58,20 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         )
 
         XCTAssertEqual(launch.installedWorkflows.map(\.id), ["langgraph.review"])
+        XCTAssertEqual(launch.sourcePackage?.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(launch.launchDescriptor.sourceSummaries.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(
+            launch.launchDescriptor.sourcePackageSchemaVersion,
+            SMLWorkflowRuntimeSourcePackage.currentSchemaVersion
+        )
+        XCTAssertTrue(launch.launchDescriptor.launchComplete)
+        let encodedLaunchDescriptor = String(
+            decoding: try JSONEncoder().encode(launch.launchDescriptor),
+            as: UTF8.self
+        )
+        XCTAssertFalse(encodedLaunchDescriptor.contains("operator.luke"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("source-lease"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("authenticatedActor"))
         XCTAssertEqual(launch.mountContract.workflowMounts.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(
             try launch.app.resolveWorkflowMount(workflowID: "langgraph.review").apiRoutes.count,
@@ -221,6 +235,44 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         )
 
         XCTAssertEqual(launch.installedWorkflows.map(\.id), ["langgraph.review"])
+        XCTAssertEqual(launch.sourcePackage, package)
+        let launchDescriptor = launch.launchDescriptor
+        XCTAssertEqual(
+            launchDescriptor.sourcePackageSchemaVersion,
+            SMLWorkflowRuntimeSourcePackage.currentSchemaVersion
+        )
+        XCTAssertEqual(
+            launchDescriptor.runtimeExportSchemaVersion,
+            SMLWorkflowRuntimeExport.currentSchemaVersion
+        )
+        XCTAssertEqual(launchDescriptor.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(launchDescriptor.installedWorkflowIDs, ["langgraph.review"])
+        XCTAssertTrue(launchDescriptor.missingInstalledWorkflowIDs.isEmpty)
+        XCTAssertTrue(launchDescriptor.unexpectedInstalledWorkflowIDs.isEmpty)
+        XCTAssertTrue(launchDescriptor.launchComplete)
+        XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(launchDescriptor.sourceSummaries.first?.sourceKind, .langGraph)
+        XCTAssertEqual(launchDescriptor.sourceSummaries.first?.apiBasePath, "/source")
+        let launchedWorkflow = try XCTUnwrap(launchDescriptor.workflows.first)
+        XCTAssertTrue(launchedWorkflow.installed)
+        XCTAssertEqual(launchedWorkflow.installedInstructionCount, 3)
+        XCTAssertEqual(launchedWorkflow.replMount.workflowID, "langgraph.review")
+        XCTAssertEqual(launchedWorkflow.apiRoutes.count, 7)
+        XCTAssertEqual(launchedWorkflow.modelToolName, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(launchedWorkflow.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(launchedWorkflow.planningWorkflowID, "langgraph.review")
+        XCTAssertEqual(Set(launchedWorkflow.hostBindingChannels), [
+            .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
+            .onyxDriver, .planningWorkflow,
+        ])
+        let encodedLaunchDescriptor = String(
+            decoding: try JSONEncoder().encode(launchDescriptor),
+            as: UTF8.self
+        )
+        XCTAssertFalse(encodedLaunchDescriptor.contains("operator.luke"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("package-launch-lease"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("authenticatedActor"))
+
         let mount = try launch.app.resolveWorkflowMount(workflowID: "langgraph.review")
         XCTAssertEqual(mount.role, "reviewer")
         XCTAssertEqual(mount.apiBasePath, "/source")
@@ -243,6 +295,74 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(started.command?.actor, "operator.luke")
         XCTAssertEqual(started.command?.role, "reviewer")
         XCTAssertEqual(started.result?.task?.workflowID, "langgraph.review")
+    }
+
+    func testRuntimePackageLaunchDescriptorUsesLiveHostOverridesForSourceSummaries() async throws {
+        let package = try reviewSourcePackage()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-package-override-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SMLRuntimeStore(
+            fileURL: directory.appendingPathComponent("runtime.json"),
+            clock: { 4_600 }
+        )
+        let runtime = SMLRuntime(store: store, clock: { 4_600 })
+        let authority: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = {
+            command in
+            SMLCommandAuthority(
+                authenticatedActor: "operator.luke",
+                leaseID: "package-override-lease",
+                roles: [command.role],
+                tasks: [command.task],
+                operations: [command.op],
+                scope: command.scope
+            )
+        }
+
+        let launch = try await SMLWorkflowRuntimeApp.launch(
+            package: package,
+            admissionCatalog: reviewCatalog(),
+            actor: "operator.luke",
+            runtime: runtime,
+            replayGuard: store,
+            authorityResolver: authority,
+            roleOverride: "override-reviewer",
+            apiBasePathOverride: "/override",
+            modelMaximumCommandRoundsOverride: 2,
+            commandID: { "package-override-command" },
+            taskID: { "TASK-PACKAGE-OVERRIDE-GENERATED" },
+            clock: { 4_600 }
+        )
+
+        let launchDescriptor = launch.launchDescriptor
+        XCTAssertEqual(launch.sourcePackage, package)
+        XCTAssertEqual(launchDescriptor.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(launchDescriptor.installedWorkflowIDs, ["langgraph.review"])
+        XCTAssertTrue(launchDescriptor.launchComplete)
+        XCTAssertEqual(launchDescriptor.apiBasePaths, ["/override"])
+        XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.apiBasePath), ["/override"])
+
+        let launchedWorkflow = try XCTUnwrap(launchDescriptor.workflows.first)
+        XCTAssertEqual(launchedWorkflow.role, "override-reviewer")
+        XCTAssertEqual(launchedWorkflow.apiBasePath, "/override")
+        XCTAssertEqual(launchedWorkflow.replMount.apiBasePath, "/override")
+        XCTAssertEqual(launchedWorkflow.installedInstructionCount, 3)
+        XCTAssertEqual(launchDescriptor.modelRouter.maximumCommandRounds, 2)
+        XCTAssertEqual(
+            try launch.app.resolveWorkflowMount(workflowID: "langgraph.review").apiBasePath,
+            "/override"
+        )
+        let openAPIPaths = try object(launch.export().openAPI["paths"])
+        XCTAssertNotNil(openAPIPaths["/override/workflows/langgraph.review/tasks"])
+        XCTAssertNil(openAPIPaths["/source/workflows/langgraph.review/tasks"])
+
+        let encodedLaunchDescriptor = String(
+            decoding: try JSONEncoder().encode(launchDescriptor),
+            as: UTF8.self
+        )
+        XCTAssertFalse(encodedLaunchDescriptor.contains("operator.luke"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("package-override-lease"))
+        XCTAssertFalse(encodedLaunchDescriptor.contains("authenticatedActor"))
     }
 
     func testRuntimePackageRelaunchFailsClosedWithoutFreshHostAdmissionCatalog() throws {

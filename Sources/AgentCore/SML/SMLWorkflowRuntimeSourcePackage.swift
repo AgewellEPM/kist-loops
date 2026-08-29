@@ -477,20 +477,22 @@ public extension SMLWorkflowRuntimeApp {
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) async throws -> SMLWorkflowRuntimeLaunch {
         try await launch(
-            candidateMounts: package.candidateMounts(
+            registry: try SMLWorkflowRuntimeRegistry.compile(
+                package: package,
                 admissionCatalog: admissionCatalog,
                 actor: actor,
                 roleOverride: roleOverride,
                 replActionsOverride: replActionsOverride,
                 modelActionsOverride: modelActionsOverride,
                 apiBasePathOverride: apiBasePathOverride,
-                modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+                modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride,
+                commandID: commandID,
+                taskID: taskID
             ),
             runtime: runtime,
             replayGuard: replayGuard,
             authorityResolver: authorityResolver,
-            commandID: commandID,
-            taskID: taskID,
+            sourcePackage: package,
             clock: clock
         )
     }
