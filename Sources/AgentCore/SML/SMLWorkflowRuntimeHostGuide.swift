@@ -215,6 +215,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
     public let toolReferences: [String]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+    public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
     public let hostBindings: [SMLWorkflowRuntimeHostBinding]
 
     public init(
@@ -236,6 +237,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         toolReferences: [String],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = [],
         hostBindings: [SMLWorkflowRuntimeHostBinding]
     ) {
         self.workflowID = workflowID
@@ -268,6 +270,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.instructionID < $1.instructionID
         }
+        self.commandBindings = Self.sortedCommandBindings(commandBindings)
         self.hostBindings = hostBindings.sorted {
             if $0.channel.rawValue != $1.channel.rawValue {
                 return $0.channel.rawValue < $1.channel.rawValue
@@ -283,6 +286,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding],
         metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
     ) {
         let replMount = mount?.repl ?? SMLWorkflowRuntimeREPLMount(descriptor)
@@ -310,6 +314,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             toolReferences: planningToolIndex.map(\.reference),
             decomposableUnits: decomposableUnits,
             approvalGates: approvalGates,
+            commandBindings: commandBindings,
             hostBindings: Self.hostBindings(
                 workflowID: descriptor.workflowID,
                 replMount: replMount,
@@ -322,6 +327,106 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 metadataEndpoints: metadataEndpoints
             )
         )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case workflowName
+        case role
+        case sourceKind
+        case sourceReference
+        case sourceDigest
+        case apiBasePath
+        case replMount
+        case apiRoutes
+        case modelTool
+        case modelRouterToolName
+        case onyxDriverID
+        case planningWorkflowID
+        case plannerEntrypoint
+        case toolReferences
+        case decomposableUnits
+        case approvalGates
+        case commandBindings
+        case hostBindings
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
+            workflowName: try container.decode(String.self, forKey: .workflowName),
+            role: try container.decode(String.self, forKey: .role),
+            sourceKind: try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind),
+            sourceReference: try container.decode(String.self, forKey: .sourceReference),
+            sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
+            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            replMount: try container.decode(SMLWorkflowRuntimeREPLMount.self, forKey: .replMount),
+            apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
+            modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
+            modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
+            onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
+            planningWorkflowID: try container.decodeIfPresent(
+                String.self,
+                forKey: .planningWorkflowID
+            ),
+            plannerEntrypoint: try container.decode(String.self, forKey: .plannerEntrypoint),
+            toolReferences: try container.decode([String].self, forKey: .toolReferences),
+            decomposableUnits: try container.decode(
+                [SMLWorkflowRuntimePlanningDecompositionUnit].self,
+                forKey: .decomposableUnits
+            ),
+            approvalGates: try container.decode(
+                [SMLWorkflowRuntimePlanningApprovalGate].self,
+                forKey: .approvalGates
+            ),
+            commandBindings: try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningCommandBinding].self,
+                forKey: .commandBindings
+            ) ?? [],
+            hostBindings: try container.decode(
+                [SMLWorkflowRuntimeHostBinding].self,
+                forKey: .hostBindings
+            )
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(workflowName, forKey: .workflowName)
+        try container.encode(role, forKey: .role)
+        try container.encode(sourceKind, forKey: .sourceKind)
+        try container.encode(sourceReference, forKey: .sourceReference)
+        try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
+        try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(replMount, forKey: .replMount)
+        try container.encode(apiRoutes, forKey: .apiRoutes)
+        try container.encode(modelTool, forKey: .modelTool)
+        try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
+        try container.encode(onyxDriverID, forKey: .onyxDriverID)
+        try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
+        try container.encode(plannerEntrypoint, forKey: .plannerEntrypoint)
+        try container.encode(toolReferences, forKey: .toolReferences)
+        try container.encode(decomposableUnits, forKey: .decomposableUnits)
+        try container.encode(approvalGates, forKey: .approvalGates)
+        try container.encode(commandBindings, forKey: .commandBindings)
+        try container.encode(hostBindings, forKey: .hostBindings)
+    }
+
+    private static func sortedCommandBindings(
+        _ bindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
+        bindings.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
+        }
     }
 
     private static func hostBindings(
@@ -465,7 +570,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 8
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]
@@ -486,6 +591,7 @@ public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
         let toolsByWorkflowID = Dictionary(grouping: planning.toolIndex, by: \.workflowID)
         let decomposableByWorkflowID = Dictionary(grouping: planning.decomposableUnits, by: \.workflowID)
         let approvalsByWorkflowID = Dictionary(grouping: planning.approvalGates, by: \.workflowID)
+        let commandsByWorkflowID = Dictionary(grouping: planning.commandBindings, by: \.workflowID)
         let metadataEndpoints = catalog.metadataEndpoints
         self.schemaVersion = Self.currentSchemaVersion
         self.requiredHostServices = [
@@ -512,6 +618,7 @@ public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
                 planningToolIndex: toolsByWorkflowID[descriptor.workflowID] ?? [],
                 decomposableUnits: decomposableByWorkflowID[descriptor.workflowID] ?? [],
                 approvalGates: approvalsByWorkflowID[descriptor.workflowID] ?? [],
+                commandBindings: commandsByWorkflowID[descriptor.workflowID] ?? [],
                 metadataEndpoints: metadataEndpoints
             )
         }.sorted {

@@ -7,7 +7,7 @@ import Foundation
 /// model router, and Onyx exports. It carries no actor, lease, credentials, runtime handle, replay
 /// state, or host authority; mutations still have to cross the runtime command gateway.
 public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public let schemaVersion: Int
     public let systemPrompt: String
@@ -24,13 +24,15 @@ public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
         let toolsByWorkflowID = Dictionary(grouping: planning.toolIndex, by: \.workflowID)
         let decomposableByWorkflowID = Dictionary(grouping: planning.decomposableUnits, by: \.workflowID)
         let approvalsByWorkflowID = Dictionary(grouping: planning.approvalGates, by: \.workflowID)
+        let commandsByWorkflowID = Dictionary(grouping: planning.commandBindings, by: \.workflowID)
         let workflowGuides = catalog.workflows.map { descriptor in
             SMLWorkflowRuntimeWorkflowAgentGuide(
                 descriptor: descriptor,
                 mount: mountsByWorkflowID[descriptor.workflowID],
                 planningToolIndex: toolsByWorkflowID[descriptor.workflowID] ?? [],
                 decomposableUnits: decomposableByWorkflowID[descriptor.workflowID] ?? [],
-                approvalGates: approvalsByWorkflowID[descriptor.workflowID] ?? []
+                approvalGates: approvalsByWorkflowID[descriptor.workflowID] ?? [],
+                commandBindings: commandsByWorkflowID[descriptor.workflowID] ?? []
             )
         }
         let modelRouterTool = catalog.modelRouter.tool
@@ -109,6 +111,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
     public let planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+    public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
 
     public init(
         workflowID: String,
@@ -131,7 +134,8 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         onyxDriverID: String,
         planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
-        approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+        approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = []
     ) {
         self.workflowID = workflowID
         self.workflowVersion = workflowVersion
@@ -173,6 +177,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         self.approvalGates = approvalGates.sorted {
             $0.instructionID < $1.instructionID
         }
+        self.commandBindings = Self.sortedCommandBindings(commandBindings)
     }
 
     public init(
@@ -180,7 +185,8 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         mount: SMLWorkflowRuntimeWorkflowMount?,
         planningToolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
-        approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+        approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
     ) {
         self.init(
             workflowID: descriptor.workflowID,
@@ -203,7 +209,8 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             onyxDriverID: descriptor.onyx.driverID,
             planningToolIndex: planningToolIndex,
             decomposableUnits: decomposableUnits,
-            approvalGates: approvalGates
+            approvalGates: approvalGates,
+            commandBindings: commandBindings
         )
     }
 
@@ -227,6 +234,23 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             ? "none"
             : approvalGates.map {
                 "\($0.instructionID) successors:\($0.successors.joined(separator: ","))"
+            }.joined(separator: "\n")
+        let commandBindings = commandBindings.isEmpty
+            ? "none"
+            : commandBindings.map { binding in
+                let model = binding.modelEligible ? "model:eligible" : "model:blocked"
+                let replFields = binding.replJSONFields.map(\.name).joined(separator: ",")
+                let apiFields = binding.apiBodyFields.map(\.name).joined(separator: ",")
+                return [
+                    "\(binding.action.rawValue):",
+                    #"repl="\#(binding.replLineTemplate)""#,
+                    "json:\(binding.replJSONBodyKind.rawValue)",
+                    "replFields:\(replFields.isEmpty ? "none" : replFields)",
+                    "api:\(binding.apiMethod.rawValue) \(binding.apiPathTemplate)",
+                    "body:\(binding.apiBodyKind.rawValue)",
+                    "apiFields:\(apiFields.isEmpty ? "none" : apiFields)",
+                    model,
+                ].joined(separator: " ")
             }.joined(separator: "\n")
         return """
         \(workflowID)@\(workflowVersion) — \(workflowName)
@@ -261,6 +285,9 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
 
         Approval gates:
         \(approvals)
+
+        Command bindings:
+        \(commandBindings)
         """
     }
 
@@ -286,6 +313,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         case planningToolIndex
         case decomposableUnits
         case approvalGates
+        case commandBindings
     }
 
     public init(from decoder: Decoder) throws {
@@ -326,7 +354,11 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             approvalGates: try container.decode(
                 [SMLWorkflowRuntimePlanningApprovalGate].self,
                 forKey: .approvalGates
-            )
+            ),
+            commandBindings: try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningCommandBinding].self,
+                forKey: .commandBindings
+            ) ?? []
         )
     }
 
@@ -353,6 +385,19 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         try container.encode(planningToolIndex, forKey: .planningToolIndex)
         try container.encode(decomposableUnits, forKey: .decomposableUnits)
         try container.encode(approvalGates, forKey: .approvalGates)
+        try container.encode(commandBindings, forKey: .commandBindings)
+    }
+
+    private static func sortedCommandBindings(
+        _ bindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
+        bindings.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
+        }
     }
 }
 

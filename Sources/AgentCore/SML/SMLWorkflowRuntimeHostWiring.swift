@@ -34,6 +34,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let toolReferences: [String]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+    public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
 
     public init(
         workflowID: String,
@@ -57,6 +58,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         toolReferences: [String],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = [],
         hostBindings: [SMLWorkflowRuntimeHostBinding]
     ) {
         let sortedAPIRoutes = apiRoutes.sorted {
@@ -111,6 +113,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.instructionID < $1.instructionID
         }
+        self.commandBindings = Self.sortedCommandBindings(commandBindings)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -140,6 +143,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         case toolReferences
         case decomposableUnits
         case approvalGates
+        case commandBindings
     }
 
     public init(from decoder: Decoder) throws {
@@ -196,6 +200,24 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             [SMLWorkflowRuntimePlanningApprovalGate].self,
             forKey: .approvalGates
         )
+        commandBindings = Self.sortedCommandBindings(
+            try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningCommandBinding].self,
+                forKey: .commandBindings
+            ) ?? []
+        )
+    }
+
+    private static func sortedCommandBindings(
+        _ bindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
+        bindings.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
+        }
     }
 
     private static func modelExamples(
@@ -235,6 +257,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
     public let toolReferences: [String]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+    public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
     public let hostBindings: [SMLWorkflowRuntimeHostBinding]
     public let attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
 
@@ -260,6 +283,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         toolReferences: [String],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = [],
         hostBindings: [SMLWorkflowRuntimeHostBinding],
         attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest? = nil
     ) {
@@ -279,6 +303,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.instructionID < $1.instructionID
         }
+        let sortedCommandBindings = Self.sortedCommandBindings(commandBindings)
         let sortedHostBindings = hostBindings.sorted {
             if $0.channel.rawValue != $1.channel.rawValue {
                 return $0.channel.rawValue < $1.channel.rawValue
@@ -303,6 +328,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         self.toolReferences = sortedToolReferences
         self.decomposableUnits = sortedDecomposableUnits
         self.approvalGates = sortedApprovalGates
+        self.commandBindings = sortedCommandBindings
         self.hostBindings = sortedHostBindings
         self.attachment = attachment ?? SMLWorkflowRuntimeWorkflowAttachmentManifest(
             workflowID: workflowID,
@@ -326,6 +352,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             toolReferences: sortedToolReferences,
             decomposableUnits: sortedDecomposableUnits,
             approvalGates: sortedApprovalGates,
+            commandBindings: sortedCommandBindings,
             hostBindings: sortedHostBindings
         )
     }
@@ -357,6 +384,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             toolReferences: hostGuide?.toolReferences ?? [],
             decomposableUnits: hostGuide?.decomposableUnits ?? [],
             approvalGates: hostGuide?.approvalGates ?? [],
+            commandBindings: SMLWorkflowRuntimePlanningManifest.commandBindings(for: descriptor),
             hostBindings: hostGuide?.hostBindings ?? []
         )
     }
@@ -380,6 +408,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         case toolReferences
         case decomposableUnits
         case approvalGates
+        case commandBindings
         case hostBindings
         case attachment
     }
@@ -416,6 +445,10 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             [SMLWorkflowRuntimePlanningApprovalGate].self,
             forKey: .approvalGates
         )
+        let commandBindings = try container.decodeIfPresent(
+            [SMLWorkflowRuntimePlanningCommandBinding].self,
+            forKey: .commandBindings
+        ) ?? []
         let hostBindings = try container.decode(
             [SMLWorkflowRuntimeHostBinding].self,
             forKey: .hostBindings
@@ -439,6 +472,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             toolReferences: toolReferences,
             decomposableUnits: decomposableUnits,
             approvalGates: approvalGates,
+            commandBindings: commandBindings,
             hostBindings: hostBindings,
             attachment: try container.decodeIfPresent(
                 SMLWorkflowRuntimeWorkflowAttachmentManifest.self,
@@ -467,13 +501,26 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         try container.encode(toolReferences, forKey: .toolReferences)
         try container.encode(decomposableUnits, forKey: .decomposableUnits)
         try container.encode(approvalGates, forKey: .approvalGates)
+        try container.encode(commandBindings, forKey: .commandBindings)
         try container.encode(hostBindings, forKey: .hostBindings)
         try container.encode(attachment, forKey: .attachment)
+    }
+
+    private static func sortedCommandBindings(
+        _ bindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
+        bindings.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
+        }
     }
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 9
+    public static let currentSchemaVersion = 10
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]
