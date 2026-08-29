@@ -239,6 +239,7 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 replActions: replActionsOverride ?? Set(descriptor.repl.allowedActions),
                 modelActions: modelActionsOverride ?? Set(descriptor.model.allowedActions),
                 apiBasePath: apiBasePathOverride ?? descriptor.api.basePath,
+                apiWorkflowPath: descriptor.api.workflowPath,
                 modelMaximumCommandRounds: modelMaximumCommandRoundsOverride
                     ?? descriptor.model.maximumCommandRounds
             )

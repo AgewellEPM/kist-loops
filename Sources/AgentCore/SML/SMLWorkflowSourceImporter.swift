@@ -40,6 +40,7 @@ public struct SMLWorkflowRuntimeSourceMount: Sendable {
     public let replActions: Set<SMLWorkflowControlAction>?
     public let modelActions: Set<SMLWorkflowControlAction>
     public let apiBasePath: String
+    public let apiWorkflowPath: String?
     public let modelMaximumCommandRounds: Int
 
     public init(
@@ -50,6 +51,7 @@ public struct SMLWorkflowRuntimeSourceMount: Sendable {
         replActions: Set<SMLWorkflowControlAction>? = nil,
         modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
         apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil,
         modelMaximumCommandRounds: Int = 4
     ) {
         self.document = document
@@ -59,6 +61,7 @@ public struct SMLWorkflowRuntimeSourceMount: Sendable {
         self.replActions = replActions
         self.modelActions = modelActions
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
         self.modelMaximumCommandRounds = modelMaximumCommandRounds
     }
 
@@ -73,6 +76,7 @@ public struct SMLWorkflowRuntimeSourceMount: Sendable {
             replActions: replActions,
             modelActions: modelActions,
             apiBasePath: apiBasePath,
+            apiWorkflowPath: apiWorkflowPath,
             modelMaximumCommandRounds: modelMaximumCommandRounds
         )
     }
@@ -182,6 +186,7 @@ public enum SMLWorkflowSourceImporter {
         replActions: Set<SMLWorkflowControlAction>? = nil,
         modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
         apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil,
         modelMaximumCommandRounds: Int = 4,
         limits: SMLWireCodec.Limits = .standard
     ) throws -> SMLWorkflowRuntimeCandidateMount {
@@ -193,6 +198,7 @@ public enum SMLWorkflowSourceImporter {
             replActions: replActions,
             modelActions: modelActions,
             apiBasePath: apiBasePath,
+            apiWorkflowPath: apiWorkflowPath,
             modelMaximumCommandRounds: modelMaximumCommandRounds
         ).candidateMount(limits: limits)
     }

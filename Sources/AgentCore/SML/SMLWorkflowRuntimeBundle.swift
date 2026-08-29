@@ -311,6 +311,7 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
         replActions: Set<SMLWorkflowControlAction>? = nil,
         modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
         apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil,
         modelMaximumCommandRounds: Int = 4,
         commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() }
@@ -320,12 +321,14 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             surface: surface,
             actor: actor,
             basePath: apiBasePath,
+            workflowPath: apiWorkflowPath,
             commandID: commandID
         )
         let baseOnyxDriver = SMLOnyxDriverCompiler.compile(
             surface: surface,
             modelActions: modelActions,
-            apiBasePath: apiBasePath
+            apiBasePath: apiBasePath,
+            apiWorkflowPath: apiCompiler.catalog.workflowPath
         )
         let modelTool = SMLWorkflowModelToolDescriptor(
             surface.modelCommandTool(allowedActions: modelActions)
@@ -480,6 +483,7 @@ public struct SMLWorkflowRuntimeMount: Sendable {
     public let replActions: Set<SMLWorkflowControlAction>?
     public let modelActions: Set<SMLWorkflowControlAction>
     public let apiBasePath: String
+    public let apiWorkflowPath: String?
     public let modelMaximumCommandRounds: Int
 
     public init(
@@ -489,6 +493,7 @@ public struct SMLWorkflowRuntimeMount: Sendable {
         replActions: Set<SMLWorkflowControlAction>? = nil,
         modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
         apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil,
         modelMaximumCommandRounds: Int = 4
     ) {
         self.admitted = admitted
@@ -497,6 +502,7 @@ public struct SMLWorkflowRuntimeMount: Sendable {
         self.replActions = replActions
         self.modelActions = modelActions
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
         self.modelMaximumCommandRounds = modelMaximumCommandRounds
     }
 }
@@ -509,6 +515,7 @@ public struct SMLWorkflowRuntimeCandidateMount: Sendable {
     public let replActions: Set<SMLWorkflowControlAction>?
     public let modelActions: Set<SMLWorkflowControlAction>
     public let apiBasePath: String
+    public let apiWorkflowPath: String?
     public let modelMaximumCommandRounds: Int
 
     public init(
@@ -519,6 +526,7 @@ public struct SMLWorkflowRuntimeCandidateMount: Sendable {
         replActions: Set<SMLWorkflowControlAction>? = nil,
         modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
         apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil,
         modelMaximumCommandRounds: Int = 4
     ) {
         self.workflow = workflow
@@ -528,6 +536,7 @@ public struct SMLWorkflowRuntimeCandidateMount: Sendable {
         self.replActions = replActions
         self.modelActions = modelActions
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
         self.modelMaximumCommandRounds = modelMaximumCommandRounds
     }
 
@@ -542,6 +551,7 @@ public struct SMLWorkflowRuntimeCandidateMount: Sendable {
             replActions: replActions,
             modelActions: modelActions,
             apiBasePath: apiBasePath,
+            apiWorkflowPath: apiWorkflowPath,
             modelMaximumCommandRounds: modelMaximumCommandRounds
         )
     }
@@ -2485,6 +2495,7 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
                 replActions: mount.replActions,
                 modelActions: mount.modelActions,
                 apiBasePath: mount.apiBasePath,
+                apiWorkflowPath: mount.apiWorkflowPath,
                 modelMaximumCommandRounds: mount.modelMaximumCommandRounds,
                 commandID: commandID,
                 taskID: taskID
@@ -2527,6 +2538,7 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
                     replActions: replActions,
                     modelActions: modelActions,
                     apiBasePath: apiBasePath,
+                    apiWorkflowPath: nil,
                     modelMaximumCommandRounds: modelMaximumCommandRounds
                 )
             },
@@ -2555,6 +2567,7 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
                     replActions: replActions,
                     modelActions: modelActions,
                     apiBasePath: apiBasePath,
+                    apiWorkflowPath: nil,
                     modelMaximumCommandRounds: modelMaximumCommandRounds
                 )
             },

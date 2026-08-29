@@ -98,18 +98,35 @@ public struct SMLWorkflowAPICatalog: Sendable, Codable, Equatable {
     public let workflowID: String
     public let workflowVersion: String
     public let basePath: String
+    public let workflowPath: String
     public let endpoints: [SMLWorkflowAPIEndpoint]
 
     public init(surface: SMLWorkflowSurface, basePath: String = "/v1") {
+        self.init(
+            surface: surface,
+            basePath: basePath,
+            workflowPath: Self.defaultWorkflowPath(workflowID: surface.workflowID)
+        )
+    }
+
+    init(
+        surface: SMLWorkflowSurface,
+        basePath: String = "/v1",
+        workflowPath: String
+    ) {
         let normalizedBase = basePath.hasSuffix("/")
             ? String(basePath.dropLast())
             : basePath
+        let normalizedWorkflowPath = workflowPath.hasSuffix("/")
+            ? String(workflowPath.dropLast())
+            : workflowPath
         self.workflowID = surface.workflowID
         self.workflowVersion = surface.workflowVersion
         self.basePath = normalizedBase
-        let workflowPath = "\(normalizedBase)/workflows/\(surface.workflowID)"
-        let taskPath = "\(workflowPath)/tasks/{task_id}"
-        let exampleTaskPath = "\(workflowPath)/tasks/TASK-ID"
+        self.workflowPath = normalizedWorkflowPath
+        let workflowRoutePath = "\(normalizedBase)\(normalizedWorkflowPath)"
+        let taskPath = "\(workflowRoutePath)/tasks/{task_id}"
+        let exampleTaskPath = "\(workflowRoutePath)/tasks/TASK-ID"
         let sampleInput = surface.sampleInputObject()
         let startBody: SMLObject = sampleInput.isEmpty
             ? ["task_id": .string("TASK-ID")]
@@ -119,17 +136,17 @@ public struct SMLWorkflowAPICatalog: Sendable, Codable, Equatable {
             ]
         let expectedStateBody: SMLObject = ["task_revision": .number(0)]
         endpoints = [
-            .init(method: .get, pathTemplate: workflowPath,
+            .init(method: .get, pathTemplate: workflowRoutePath,
                   operationID: "describe_workflow", action: .describe,
                   summary: "Describe the exact admitted workflow surface",
                   examples: [
                     .init(
                         method: .get,
-                        path: workflowPath,
+                        path: workflowRoutePath,
                         summary: "Describe the exact admitted workflow revision."
                     ),
                   ]),
-            .init(method: .post, pathTemplate: "\(workflowPath)/tasks",
+            .init(method: .post, pathTemplate: "\(workflowRoutePath)/tasks",
                   operationID: "start_workflow_task", action: .start,
                   summary: "Start a task; body requires task_id and accepts input",
                   bodyKind: .startTask,
@@ -137,7 +154,7 @@ public struct SMLWorkflowAPICatalog: Sendable, Codable, Equatable {
                   examples: [
                     .init(
                         method: .post,
-                        path: "\(workflowPath)/tasks",
+                        path: "\(workflowRoutePath)/tasks",
                         body: startBody,
                         summary: "Start a workflow task with declared input fields."
                     ),
@@ -200,6 +217,39 @@ public struct SMLWorkflowAPICatalog: Sendable, Codable, Equatable {
                   ]),
         ]
     }
+
+    enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case basePath
+        case workflowPath
+        case endpoints
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workflowID = try container.decode(String.self, forKey: .workflowID)
+        workflowVersion = try container.decode(String.self, forKey: .workflowVersion)
+        basePath = try container.decode(String.self, forKey: .basePath)
+        workflowPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .workflowPath
+        ) ?? Self.defaultWorkflowPath(workflowID: workflowID)
+        endpoints = try container.decode([SMLWorkflowAPIEndpoint].self, forKey: .endpoints)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(basePath, forKey: .basePath)
+        try container.encode(workflowPath, forKey: .workflowPath)
+        try container.encode(endpoints, forKey: .endpoints)
+    }
+
+    static func defaultWorkflowPath(workflowID: String) -> String {
+        "/workflows/\(workflowID)"
+    }
 }
 
 public struct SMLWorkflowAPIRequest: Sendable, Equatable {
@@ -257,11 +307,20 @@ public struct SMLWorkflowAPICompiler: Sendable {
         surface: SMLWorkflowSurface,
         actor: String,
         basePath: String = "/v1",
+        workflowPath: String? = nil,
         commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }
     ) throws {
         guard Self.validBasePath(basePath) else { throw SMLWorkflowAPIError.invalidBasePath }
+        let workflowPath = workflowPath ?? SMLWorkflowAPICatalog.defaultWorkflowPath(
+            workflowID: surface.workflowID
+        )
+        guard Self.validWorkflowPath(workflowPath) else { throw SMLWorkflowAPIError.invalidPath(workflowPath) }
         self.surface = surface
-        catalog = SMLWorkflowAPICatalog(surface: surface, basePath: basePath)
+        catalog = SMLWorkflowAPICatalog(
+            surface: surface,
+            basePath: basePath,
+            workflowPath: workflowPath
+        )
         compiler = SMLWorkflowCommandCompiler(
             surface: surface,
             actor: actor,
@@ -281,15 +340,16 @@ public struct SMLWorkflowAPICompiler: Sendable {
             )
         }
         let tail = Array(segments.dropFirst(baseSegments.count))
-        guard tail.count >= 2,
-              tail[0] == "workflows",
-              tail[1] == surface.workflowID else {
+        let workflowSegments = catalog.workflowPath.split(separator: "/").map(String.init)
+        guard !workflowSegments.isEmpty,
+              tail.starts(with: workflowSegments) else {
             throw SMLWorkflowAPIError.routeNotFound(
                 method: request.method.rawValue, path: request.path
             )
         }
+        let workflowTail = Array(tail.dropFirst(workflowSegments.count))
 
-        if request.method == .get, tail.count == 2 {
+        if request.method == .get, workflowTail.isEmpty {
             try requireEmptyBody(request.body)
             return try compiler.compile(
                 action: .describe,
@@ -298,7 +358,7 @@ public struct SMLWorkflowAPICompiler: Sendable {
                 issuedAtEpoch: issuedAtEpoch
             )
         }
-        if request.method == .post, tail.count == 3, tail[2] == "tasks" {
+        if request.method == .post, workflowTail == ["tasks"] {
             try requireKeys(request.body, allowed: ["task_id", "input"])
             guard case .string(let task)? = request.body["task_id"] else {
                 throw SMLWorkflowAPIError.missingBodyField("task_id")
@@ -321,14 +381,14 @@ public struct SMLWorkflowAPICompiler: Sendable {
                 issuedAtEpoch: issuedAtEpoch
             )
         }
-        guard tail.count >= 4, tail[2] == "tasks" else {
+        guard workflowTail.count >= 2, workflowTail[0] == "tasks" else {
             throw SMLWorkflowAPIError.routeNotFound(
                 method: request.method.rawValue, path: request.path
             )
         }
-        let task = tail[3]
+        let task = workflowTail[1]
         let action: SMLWorkflowControlAction
-        switch (request.method, Array(tail.dropFirst(4))) {
+        switch (request.method, Array(workflowTail.dropFirst(2))) {
         case (.get, []):
             try requireEmptyBody(request.body)
             action = .watch
@@ -403,6 +463,14 @@ public struct SMLWorkflowAPICompiler: Sendable {
             && !path.contains("//") && !path.contains("%")
             && path.split(separator: "/").allSatisfy {
                 SMLValidationSupport.identifierIsValid(String($0), allowDot: false)
+            }
+    }
+
+    static func validWorkflowPath(_ path: String) -> Bool {
+        path.hasPrefix("/") && path != "/" && !path.contains("?") && !path.contains("#")
+            && !path.contains("//") && !path.contains("%")
+            && path.split(separator: "/").allSatisfy {
+                SMLValidationSupport.identifierIsValid(String($0), allowDot: true)
             }
     }
 }

@@ -153,11 +153,12 @@ struct KistOptions {
     var smlRuntimeAgentGuide: String? // --sml-runtime-agent-guide <source.json>: emit agent operating guide
     var smlRuntimeHostGuide: String? // --sml-runtime-host-guide <source.json>: emit host wiring guide
     var smlRuntimeHostWiring: String? // --sml-runtime-host-wiring <source.json>: emit compact host wiring map
+    var smlRuntimeRunbook: String? // --sml-runtime-runbook <source.json>: emit host scaffold runbook
     var smlRuntimeScaffold: String? // --sml-runtime-scaffold <source.json>: write all host-consumable runtime artifacts
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeREPLScript: String? // --sml-runtime-repl-script <source.json>: run a generated workflow REPL script offline
-    var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/attachments
+    var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/runbook/attachments
     var smlRuntimeREPLLine: String? // --sml-line <line>: generated workflow REPL line to run
     var smlRuntimeREPLScriptPath: String? // --sml-script <path>: generated workflow REPL script file to run
     var smlRuntimeAPI: String?      // --sml-runtime-api <source.json>: run one generated runtime API request offline
@@ -253,6 +254,9 @@ struct KistOptions {
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-host-wiring", "--sml-host-wiring"].contains(flag):
                                             if let v = next() { o.smlRuntimeHostWiring = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-runbook", "--sml-runbook"].contains(flag):
+                                            if let v = next() { o.smlRuntimeRunbook = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-scaffold", "--sml-scaffold"].contains(flag):
                                             if let v = next() { o.smlRuntimeScaffold = v }
@@ -551,6 +555,7 @@ struct KistOptions {
             ("--sml-runtime-agent-guide", o.smlRuntimeAgentGuide != nil),
             ("--sml-runtime-host-guide", o.smlRuntimeHostGuide != nil),
             ("--sml-runtime-host-wiring", o.smlRuntimeHostWiring != nil),
+            ("--sml-runtime-runbook", o.smlRuntimeRunbook != nil),
             ("--sml-runtime-scaffold", o.smlRuntimeScaffold != nil),
             ("--sml-runtime-attachments", o.smlRuntimeAttachments != nil),
             ("--sml-runtime-repl", o.smlRuntimeREPL != nil),
@@ -581,14 +586,16 @@ struct KistOptions {
             }
         } else if o.smlRuntimeREPLScriptPath != nil {
             o.optionErrors.append("--sml-script requires --sml-runtime-repl-script <source.json>")
-        } else {
-            if o.smlRuntimeWorkflowID != nil
-                && o.smlRuntimeAttachments == nil
-                && o.smlRuntimeOnyx == nil {
-                o.optionErrors.append(
-                    "--sml-workflow requires --sml-runtime-repl, --sml-runtime-repl-script, or --sml-runtime-attachments <source.json>; it can also filter --sml-runtime-onyx <source.json>"
-                )
-            }
+        }
+        if o.smlRuntimeWorkflowID != nil
+            && o.smlRuntimeREPL == nil
+            && o.smlRuntimeREPLScript == nil
+            && o.smlRuntimeAttachments == nil
+            && o.smlRuntimeOnyx == nil
+            && o.smlRuntimeRunbook == nil {
+            o.optionErrors.append(
+                "--sml-workflow requires --sml-runtime-repl, --sml-runtime-repl-script, --sml-runtime-runbook, or --sml-runtime-attachments <source.json>; it can also filter --sml-runtime-onyx <source.json>"
+            )
         }
         if o.smlRuntimeAPI != nil {
             if o.smlRuntimeAPIPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
@@ -837,10 +844,12 @@ struct KistOptions {
                                     manifest. Download requires a prior passing dry-run marker;
                                     inspect/onboard/benchmark require the prior stage markers.
           --sml-runtime-export <json>
-                                    Offline-wrap a LangGraph manifest, SML workflow JSON, or SML
-                                    runtime source package into a host JSON payload containing the
-                                    generated custom REPL mount, API/OpenAPI routes, native model-router
-                                    tool, Onyx driver manifests, planning graph, and launch descriptor.
+                                    Offline-wrap a LangGraph manifest, SML workflow JSON, SML
+                                    runtime source package, or runtime source set with optional
+                                    per-workflow role/API-base/API-path/model-rounds into a host JSON
+                                    payload containing the generated custom REPL mount,
+                                    API/OpenAPI routes, native model-router tool, Onyx driver
+                                    manifests, planning graph, and launch descriptor.
           --sml-runtime-launch <json>
                                     Launch the wrapped source offline and emit the exact launch
                                     descriptor/receipt for mounted REPL, API, model, Onyx, and
@@ -873,10 +882,14 @@ struct KistOptions {
           --sml-runtime-host-wiring <json>
                                     Launch the wrapped source offline and emit the compact host
                                     wiring map for REPL/API/model-router/Onyx/planning adapters.
+          --sml-runtime-runbook <json> [--sml-workflow <id>]
+                                    Launch the wrapped source offline and emit a machine-readable
+                                    host runbook with artifact paths, inline scripts, command templates,
+                                    API endpoints, model-router IDs, Onyx driver IDs, and planning IDs.
           --sml-runtime-scaffold <json> --sml-out <dir>
                                     Launch the wrapped source offline and write catalog, mount,
-                                    OpenAPI, model-router, Onyx, planning, guide, wiring, and
-                                    attachment artifacts into one host-consumable directory.
+                                    OpenAPI, model-router, Onyx, planning, guide, wiring, runbook,
+                                    and attachment artifacts into one host-consumable directory.
           --sml-runtime-attachments <json> [--sml-workflow <id>]
                                     Emit the per-workflow attachment manifests for generated REPL,
                                     API, model-router, Onyx driver, and planning adapters; optionally

@@ -317,6 +317,101 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(modelAdapter.allowedActions, SMLWorkflowSurface.modelDefaultActions)
     }
 
+    func testRuntimeBundleSupportsCustomWorkflowAPIPathAcrossCompilerOnyxAndMountContract() throws {
+        let admitted = try makeAdmitted()
+        let bundle = try SMLWorkflowRuntimeBundle.compile(
+            admitted: admitted,
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation",
+            apiWorkflowPath: "/review",
+            commandID: { "custom-route-command" },
+            taskID: { "TASK-CUSTOM" }
+        )
+
+        XCTAssertEqual(bundle.descriptor.api.basePath, "/automation")
+        XCTAssertEqual(bundle.descriptor.api.workflowPath, "/review")
+        let startEndpoint = try XCTUnwrap(bundle.descriptor.api.endpoints.first {
+            $0.action == .start
+        })
+        XCTAssertEqual(startEndpoint.pathTemplate, "/automation/review/tasks")
+        XCTAssertEqual(startEndpoint.examples.first?.path, "/automation/review/tasks")
+
+        let command = try bundle.apiCompiler.compile(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/review/tasks",
+                body: [
+                    "task_id": .string("TASK-API"),
+                    "input": .object(["target": .string("api.md")]),
+                ]
+            ),
+            issuedAtEpoch: 3_050
+        )
+        XCTAssertEqual(command.op, SMLRuntimeCommandOperation.workflowRun)
+        XCTAssertEqual(command.role, "release-manager")
+        XCTAssertEqual(command.arguments["workflow_id"], .string("content.release"))
+
+        XCTAssertThrowsError(try bundle.apiCompiler.compile(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/workflows/content.release/tasks",
+                body: [
+                    "task_id": .string("TASK-API"),
+                    "input": .object(["target": .string("api.md")]),
+                ]
+            ),
+            issuedAtEpoch: 3_051
+        )) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowAPIError,
+                .routeNotFound(method: "POST", path: "/automation/workflows/content.release/tasks")
+            )
+        }
+
+        XCTAssertEqual(bundle.onyxDriver.api.basePath, "/automation")
+        XCTAssertEqual(bundle.onyxDriver.api.workflowPath, "/review")
+        let onyxStartBinding = try XCTUnwrap(bundle.onyxDriver.commandBindings.first {
+            $0.action == .start
+        })
+        XCTAssertEqual(onyxStartBinding.apiPathTemplate, "/automation/review/tasks")
+        XCTAssertEqual(onyxStartBinding.exampleAPIPath, "/automation/review/tasks")
+
+        let registry = try SMLWorkflowRuntimeRegistry(bundles: [bundle])
+        let start = try registry.mountContract.resolveAPI(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/review/tasks",
+                body: [
+                    "task_id": .string("TASK-START"),
+                    "input": .object(["target": .string("notes.md")]),
+                ]
+            )
+        )
+        XCTAssertEqual(start.route.workflowID, "content.release")
+        XCTAssertEqual(start.route.action, .start)
+        XCTAssertEqual(start.route.pathTemplate, "/automation/review/tasks")
+
+        XCTAssertThrowsError(try registry.mountContract.resolveAPI(
+            method: .post,
+            path: "/automation/workflows/content.release/tasks"
+        )) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeMountContractError,
+                .routeNotFound(method: "POST", path: "/automation/workflows/content.release/tasks")
+            )
+        }
+
+        XCTAssertThrowsError(try SMLWorkflowAPICompiler(
+            surface: bundle.surface,
+            actor: "operator.luke",
+            basePath: "/automation",
+            workflowPath: "relative"
+        )) {
+            XCTAssertEqual($0 as? SMLWorkflowAPIError, .invalidPath("relative"))
+        }
+    }
+
     func testRuntimeBundleDescriptorRoundTripsWithoutActorOrAuthority() throws {
         let bundle = try SMLWorkflowRuntimeBundle.compile(
             admitted: try makeAdmitted(),
@@ -3170,6 +3265,33 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(endpoint.bodyKind, .none)
         XCTAssertTrue(endpoint.bodyFields.isEmpty)
         XCTAssertTrue(endpoint.examples.isEmpty)
+    }
+
+    func testOldAPICatalogsDecodeWithDefaultWorkflowPath() throws {
+        let data = Data(
+            """
+            {
+              "workflowID": "content.release",
+              "workflowVersion": "1.0.0",
+              "basePath": "/automation",
+              "endpoints": [
+                {
+                  "method": "GET",
+                  "pathTemplate": "/automation/workflows/content.release",
+                  "operationID": "describe_workflow",
+                  "action": "describe",
+                  "summary": "Describe workflow"
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let catalog = try JSONDecoder().decode(SMLWorkflowAPICatalog.self, from: data)
+
+        XCTAssertEqual(catalog.workflowID, "content.release")
+        XCTAssertEqual(catalog.workflowPath, "/workflows/content.release")
+        XCTAssertEqual(catalog.endpoints.first?.bodyKind, SMLWorkflowAPIRequestBodyKind.none)
     }
 
     func testOnyxPlanningContractsExposeControlsRetryPluginsAndNestedWorkflows() throws {

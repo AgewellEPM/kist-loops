@@ -313,7 +313,8 @@ public enum SMLOnyxDriverCompiler {
     public static func compile(
         surface: SMLWorkflowSurface,
         modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
-        apiBasePath: String = "/v1"
+        apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil
     ) -> SMLOnyxDriverManifest {
         let workflow = surface.workflow
         let successorsByID = Dictionary(uniqueKeysWithValues: workflow.instructions.map {
@@ -337,7 +338,13 @@ public enum SMLOnyxDriverCompiler {
         let tools = workflow.instructions.compactMap(toolBinding).sorted {
             $0.instructionID < $1.instructionID
         }
-        let api = SMLWorkflowAPICatalog(surface: surface, basePath: apiBasePath)
+        let api = SMLWorkflowAPICatalog(
+            surface: surface,
+            basePath: apiBasePath,
+            workflowPath: apiWorkflowPath ?? SMLWorkflowAPICatalog.defaultWorkflowPath(
+                workflowID: surface.workflowID
+            )
+        )
         let modelToolName = "propose_sml_command"
         let planNodes = workflow.instructions.map { instruction in
             SMLOnyxPlanNode(

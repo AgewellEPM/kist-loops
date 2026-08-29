@@ -16,6 +16,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let agentGuideDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAgentGuide != nil"))
         let hostGuideDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeHostGuide != nil"))
         let hostWiringDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeHostWiring != nil"))
+        let runbookDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeRunbook != nil"))
         let scaffoldDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeScaffold != nil"))
         let attachmentsDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAttachments != nil"))
         let replScriptDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeREPLScript != nil"))
@@ -76,6 +77,11 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             hostWiringDispatch.lowerBound,
             configLoad.lowerBound,
             "offline SML runtime host wiring export must not initialize providers, keychain, MCP, tools, or REPL"
+        )
+        XCTAssertLessThan(
+            runbookDispatch.lowerBound,
+            configLoad.lowerBound,
+            "offline SML runtime runbook export must not initialize providers, keychain, MCP, tools, or REPL"
         )
         XCTAssertLessThan(
             scaffoldDispatch.lowerBound,
@@ -1010,6 +1016,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(runbook.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(runbook.apiBasePaths, ["/source"])
         XCTAssertTrue(runbook.descriptorOnly)
+        XCTAssertTrue(runbook.artifactsMaterialized)
         XCTAssertEqual(runbook.omittedRuntimeState, [
             "actor_identity",
             "completion_authority",
@@ -1038,6 +1045,17 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(workflowRunbook.replScriptPath, "repl-scripts/langgraph.review.repl")
         XCTAssertEqual(workflowRunbook.apiScriptPath, "api-scripts/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.modelScriptPath, "model-scripts/langgraph.review.prompts")
+        XCTAssertTrue(workflowRunbook.replScript.contains("kist --sml-runtime-repl-script ."))
+        XCTAssertTrue(workflowRunbook.replScript.contains("start TASK-SCAFFOLD"))
+        XCTAssertEqual(workflowRunbook.apiScript.count, 4)
+        XCTAssertEqual(workflowRunbook.apiScript.map(\.path), [
+            "/source/workflows/langgraph.review",
+            "/source/workflows/langgraph.review/tasks",
+            "/source/workflows/langgraph.review/tasks/TASK-SCAFFOLD",
+            "/source/workflows/langgraph.review/tasks/TASK-SCAFFOLD/receipts",
+        ])
+        XCTAssertTrue(workflowRunbook.modelScript.contains("kist --sml-runtime-model-script ."))
+        XCTAssertTrue(workflowRunbook.modelScript.contains("Start langgraph.review as task TASK-SCAFFOLD"))
         XCTAssertEqual(workflowRunbook.replTranscriptCommand.executable, "kist")
         XCTAssertEqual(workflowRunbook.replTranscriptCommand.workingDirectory, outputURL.path)
         XCTAssertEqual(workflowRunbook.replTranscriptCommand.arguments, [
@@ -1086,6 +1104,66 @@ final class KistSMLRuntimeExportTests: XCTestCase {
                 && $0.action == .receipts
         })
 
+        let directManifestRunbookJSON = try await KistRunner.renderSMLRuntimeHostRunbook(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let directManifestRunbook = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostScaffoldRunbook.self,
+            from: Data(directManifestRunbookJSON.utf8)
+        )
+        XCTAssertEqual(directManifestRunbook.sourcePath, manifestURL.path)
+        XCTAssertEqual(directManifestRunbook.sourceFormat, .langGraphManifest)
+        XCTAssertEqual(directManifestRunbook.outputDirectory, directory.path)
+        XCTAssertFalse(directManifestRunbook.artifactsMaterialized)
+        XCTAssertEqual(directManifestRunbook.workflows.first?.modelScriptPath, "model-scripts/langgraph.review.prompts")
+        XCTAssertEqual(directManifestRunbook.workflows.first?.apiScript.count, 4)
+        XCTAssertTrue(directManifestRunbook.workflows.first?.replScript.contains("start TASK-SCAFFOLD") == true)
+        XCTAssertTrue(directManifestRunbook.workflows.first?.modelScript.contains("List receipts for langgraph.review") == true)
+        XCTAssertEqual(directManifestRunbook.workflows.first?.modelTranscriptCommand.arguments, [
+            "--sml-runtime-model-script", ".",
+            "--sml-model-script", "model-scripts/langgraph.review.prompts",
+            "--provider", "<provider>",
+            "--model", "<model>",
+        ])
+        XCTAssertFalse(directManifestRunbookJSON.contains("operator.test"))
+        XCTAssertFalse(directManifestRunbookJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(directManifestRunbookJSON.contains("authenticatedActor"))
+
+        let directScaffoldRunbookJSON = try await KistRunner.renderSMLRuntimeHostRunbook(
+            sourcePath: "runtime-scaffold",
+            projectRoot: directory.path,
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let directScaffoldRunbook = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostScaffoldRunbook.self,
+            from: Data(directScaffoldRunbookJSON.utf8)
+        )
+        XCTAssertEqual(directScaffoldRunbook.sourcePath, indexURL.path)
+        XCTAssertEqual(directScaffoldRunbook.sourceFormat, .runtimeScaffold)
+        XCTAssertEqual(directScaffoldRunbook.outputDirectory, outputURL.path)
+        XCTAssertEqual(directScaffoldRunbook.workflowIDs, runbook.workflowIDs)
+        XCTAssertEqual(directScaffoldRunbook.apiBasePaths, runbook.apiBasePaths)
+        XCTAssertTrue(directScaffoldRunbook.descriptorOnly)
+        XCTAssertTrue(directScaffoldRunbook.artifactsMaterialized)
+        XCTAssertEqual(directScaffoldRunbook.artifacts, runbook.artifacts)
+        XCTAssertEqual(directScaffoldRunbook.workflows, runbook.workflows)
+        XCTAssertEqual(directScaffoldRunbook.launchDescriptor, runbook.launchDescriptor)
+        XCTAssertFalse(directScaffoldRunbookJSON.contains("operator.test"))
+        XCTAssertFalse(directScaffoldRunbookJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(directScaffoldRunbookJSON.contains("authenticatedActor"))
+
         let readme = try String(contentsOf: outputURL.appendingPathComponent("README.md"))
         XCTAssertTrue(readme.contains("Host wiring order"))
         XCTAssertTrue(readme.contains("runbook.json"))
@@ -1113,12 +1191,15 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let scaffoldScript = try String(
             contentsOf: outputURL.appendingPathComponent("repl-scripts/langgraph.review.repl")
         )
+        XCTAssertEqual(workflowRunbook.replScript, scaffoldScript)
         XCTAssertTrue(scaffoldScript.contains("kist --sml-runtime-repl-script ."))
         XCTAssertTrue(scaffoldScript.contains("start TASK-SCAFFOLD"))
         XCTAssertTrue(scaffoldScript.contains("watch TASK-SCAFFOLD"))
         let modelPromptScript = try String(
             contentsOf: outputURL.appendingPathComponent("model-scripts/langgraph.review.prompts")
         )
+        XCTAssertEqual(workflowRunbook.modelScript, modelPromptScript)
+        XCTAssertEqual(workflowRunbook.apiScript, apiScript)
         XCTAssertTrue(modelPromptScript.contains("kist --sml-runtime-model-script ."))
         XCTAssertTrue(modelPromptScript.contains("Start langgraph.review as task TASK-SCAFFOLD"))
         XCTAssertTrue(modelPromptScript.contains("Watch the current langgraph.review task"))
@@ -2447,6 +2528,369 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         }
     }
 
+    func testRuntimeRunbookFiltersOneWorkflowFromRuntimePackage() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let release = try SMLWorkflowSourceImporter.langGraphWorkflow(from: langGraphReviewManifest(
+            id: "content.release",
+            name: "Content release",
+            sourceReference: "graphs/release.py",
+            sourceDigest: String(repeating: "b", count: 64)
+        ))
+        let review = try SMLWorkflowSourceImporter.langGraphWorkflow(from: langGraphReviewManifest(
+            id: "content.review",
+            name: "Content review",
+            sourceReference: "graphs/review.py",
+            sourceDigest: String(repeating: "c", count: 64)
+        ))
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            workflows: [release, review],
+            admissionCatalog: SMLExecutionAdmissionCatalog(
+                toolCapabilities: ["repository.write"],
+                modelPurposes: ["review.plan"],
+                modelOutputSchemas: ["review.plan.v1"],
+                workflows: ["content.release", "content.review"]
+            ),
+            role: "reviewer",
+            actor: "operator.test",
+            apiBasePath: "/source",
+            modelMaximumCommandRounds: 3
+        )
+        let package = try SMLWorkflowRuntimeSourcePackage(
+            normalizedWorkflows: [release, review],
+            runtime: registry.export(title: "Source Runtime", version: "2026.08")
+        )
+        let packageURL = directory.appendingPathComponent("content.package.json")
+        try JSONEncoder().encode(package).write(to: packageURL)
+
+        let json = try await KistRunner.renderSMLRuntimeHostRunbook(
+            sourcePath: "content.package.json",
+            projectRoot: directory.path,
+            workflowID: "content.review",
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let runbook = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostScaffoldRunbook.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertEqual(runbook.sourcePath, packageURL.path)
+        XCTAssertEqual(runbook.sourceFormat, .runtimeSourcePackage)
+        XCTAssertEqual(runbook.outputDirectory, directory.path)
+        XCTAssertEqual(runbook.workflowIDs, ["content.review"])
+        XCTAssertEqual(runbook.apiBasePaths, ["/source"])
+        XCTAssertFalse(runbook.artifactsMaterialized)
+        XCTAssertEqual(runbook.launchDescriptor.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(runbook.workflows.map(\.workflowID), ["content.review"])
+        let workflow = try XCTUnwrap(runbook.workflows.first)
+        XCTAssertEqual(workflow.workflowName, "Content review")
+        XCTAssertEqual(workflow.attachmentPath, "attachments/content.review.json")
+        XCTAssertEqual(workflow.replScriptPath, "repl-scripts/content.review.repl")
+        XCTAssertEqual(workflow.apiScriptPath, "api-scripts/content.review.json")
+        XCTAssertEqual(workflow.modelScriptPath, "model-scripts/content.review.prompts")
+        XCTAssertEqual(workflow.apiScript.count, 4)
+        XCTAssertTrue(workflow.replScript.contains("start TASK-SCAFFOLD"))
+        XCTAssertTrue(workflow.modelScript.contains("Start content.review as task TASK-SCAFFOLD"))
+        XCTAssertEqual(workflow.modelTranscriptCommand.arguments, [
+            "--sml-runtime-model-script", ".",
+            "--sml-model-script", "model-scripts/content.review.prompts",
+            "--provider", "<provider>",
+            "--model", "<model>",
+        ])
+        XCTAssertEqual(workflow.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertTrue(workflow.apiEndpoints.contains {
+            $0.pathTemplate == "/source/workflows/content.review/tasks" && $0.action == .start
+        })
+        XCTAssertFalse(runbook.workflows.contains { $0.workflowID == "content.release" })
+        XCTAssertFalse(json.contains("operator.test"))
+        XCTAssertFalse(json.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(json.contains("authenticatedActor"))
+
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostRunbook(
+                sourcePath: "content.package.json",
+                projectRoot: directory.path,
+                workflowID: "content.missing",
+                roleOverride: "reviewer"
+            )
+            XCTFail("unknown runbook workflow ID should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("unknown --sml-workflow 'content.missing'"))
+            XCTAssertTrue(message.contains("content.release"))
+            XCTAssertTrue(message.contains("content.review"))
+        }
+    }
+
+    func testRuntimeSourceSetWrapsMultipleWorkflowManifestsIntoAllSurfaces() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let releaseURL = directory.appendingPathComponent("release.langgraph.json")
+        try langGraphReviewManifest(
+            id: "content.release",
+            name: "Content release",
+            sourceReference: "graphs/release.py",
+            sourceDigest: String(repeating: "b", count: 64)
+        ).write(to: releaseURL)
+        let reviewURL = directory.appendingPathComponent("review.langgraph.json")
+        try langGraphReviewManifest(
+            id: "content.review",
+            name: "Content review",
+            sourceReference: "graphs/review.py",
+            sourceDigest: String(repeating: "c", count: 64)
+        ).write(to: reviewURL)
+        let sourceSetURL = directory.appendingPathComponent("runtime.sources.json")
+        let sourceSet = KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(
+                path: "release.langgraph.json",
+                role: "release-agent",
+                apiBasePath: "/release",
+                apiWorkflowPath: "/publish",
+                modelMaximumCommandRounds: 2
+            ),
+            .init(
+                path: "review.langgraph.json",
+                role: "review-agent",
+                apiBasePath: "/review",
+                apiWorkflowPath: "/review-flow",
+                modelMaximumCommandRounds: 5
+            ),
+        ])
+        try JSONEncoder().encode(sourceSet).write(to: sourceSetURL)
+
+        let export = try await KistRunner.makeSMLRuntimeHostExport(
+            sourcePath: "runtime.sources.json",
+            projectRoot: directory.path,
+            actor: "operator.test",
+            title: "Source Runtime",
+            version: "2026.08"
+        )
+
+        XCTAssertEqual(export.sourcePath, sourceSetURL.path)
+        XCTAssertEqual(export.sourceFormat, .runtimeSourceSet)
+        XCTAssertEqual(export.runtimePackage.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.runtimePackage.runtime.mountContract.apiBasePaths, ["/release", "/review"])
+        XCTAssertEqual(
+            export.runtimePackage.runtime.mountContract.replMounts.map(\.workflowID),
+            ["content.release", "content.review"]
+        )
+        XCTAssertEqual(
+            export.runtimePackage.runtime.mountContract.replMounts.map(\.role),
+            ["release-agent", "review-agent"]
+        )
+        XCTAssertEqual(export.runtimePackage.runtime.modelRouter.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.runtimePackage.runtime.modelRouter.maximumCommandRounds, 5)
+        XCTAssertEqual(
+            export.runtimePackage.runtime.modelTools.map(\.maximumCommandRounds),
+            [2, 5]
+        )
+        XCTAssertEqual(export.runtimePackage.runtime.planning.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(
+            export.runtimePackage.runtime.hostWiring.attachmentManifests.map(\.workflowID),
+            ["content.release", "content.review"]
+        )
+        XCTAssertEqual(
+            export.runtimePackage.runtime.hostWiring.attachmentManifests.map(\.apiBasePath),
+            ["/release", "/review"]
+        )
+        XCTAssertEqual(
+            export.runtimePackage.runtime.onyxDrivers.map(\.driverID),
+            export.runtimePackage.runtime.mountContract.onyxDriverIDs
+        )
+        let paths = try object(export.runtimePackage.runtime.openAPI["paths"])
+        XCTAssertNotNil(paths["/release/publish/tasks"])
+        XCTAssertNotNil(paths["/review/review-flow/tasks"])
+        XCTAssertNil(paths["/release/workflows/content.release/tasks"])
+        XCTAssertNil(paths["/review/workflows/content.review/tasks"])
+        XCTAssertEqual(export.launchDescriptor.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.launchDescriptor.hostWiring, export.hostWiring)
+
+        let runbookJSON = try await KistRunner.renderSMLRuntimeHostRunbook(
+            sourcePath: "runtime.sources.json",
+            projectRoot: directory.path,
+            workflowID: "content.review",
+            actor: "operator.test",
+            title: "Source Runtime",
+            version: "2026.08"
+        )
+        let runbook = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostScaffoldRunbook.self,
+            from: Data(runbookJSON.utf8)
+        )
+        XCTAssertEqual(runbook.sourcePath, sourceSetURL.path)
+        XCTAssertEqual(runbook.sourceFormat, .runtimeSourceSet)
+        XCTAssertEqual(runbook.outputDirectory, directory.path)
+        XCTAssertEqual(runbook.workflowIDs, ["content.review"])
+        XCTAssertEqual(runbook.apiBasePaths, ["/review"])
+        XCTAssertFalse(runbook.artifactsMaterialized)
+        XCTAssertEqual(runbook.launchDescriptor.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(runbook.workflows.map(\.workflowID), ["content.review"])
+        let workflow = try XCTUnwrap(runbook.workflows.first)
+        XCTAssertEqual(workflow.workflowName, "Content review")
+        XCTAssertEqual(workflow.role, "review-agent")
+        XCTAssertEqual(workflow.apiBasePath, "/review")
+        XCTAssertEqual(workflow.replScriptPath, "repl-scripts/content.review.repl")
+        XCTAssertEqual(workflow.apiScriptPath, "api-scripts/content.review.json")
+        XCTAssertEqual(workflow.modelScriptPath, "model-scripts/content.review.prompts")
+        XCTAssertTrue(workflow.replScript.contains("start TASK-SCAFFOLD"))
+        XCTAssertTrue(workflow.modelScript.contains("Start content.review as task TASK-SCAFFOLD"))
+        XCTAssertTrue(workflow.apiEndpoints.contains {
+            $0.pathTemplate == "/review/review-flow/tasks" && $0.action == .start
+        })
+        XCTAssertFalse(runbook.workflows.contains { $0.workflowID == "content.release" })
+        XCTAssertFalse(runbookJSON.contains("operator.test"))
+        XCTAssertFalse(runbookJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(runbookJSON.contains("authenticatedActor"))
+
+        let overriddenExport = try await KistRunner.makeSMLRuntimeHostExport(
+            sourcePath: "runtime.sources.json",
+            projectRoot: directory.path,
+            roleOverride: "global-agent",
+            actor: "operator.test",
+            apiBasePathOverride: "/global",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        XCTAssertEqual(overriddenExport.runtimePackage.runtime.mountContract.apiBasePaths, ["/global"])
+        XCTAssertEqual(
+            overriddenExport.runtimePackage.runtime.mountContract.replMounts.map(\.role),
+            ["global-agent", "global-agent"]
+        )
+        XCTAssertEqual(overriddenExport.runtimePackage.runtime.modelRouter.maximumCommandRounds, 3)
+        let overriddenPaths = try object(overriddenExport.runtimePackage.runtime.openAPI["paths"])
+        XCTAssertNotNil(overriddenPaths["/global/publish/tasks"])
+        XCTAssertNotNil(overriddenPaths["/global/review-flow/tasks"])
+        XCTAssertNil(overriddenPaths["/global/workflows/content.release/tasks"])
+        XCTAssertNil(overriddenPaths["/global/workflows/content.review/tasks"])
+
+        let packageURL = directory.appendingPathComponent("source-set.package.json")
+        try JSONEncoder().encode(export.runtimePackage).write(to: packageURL)
+        let packageExport = try await KistRunner.makeSMLRuntimeHostExport(
+            sourcePath: "source-set.package.json",
+            projectRoot: directory.path,
+            actor: "operator.test",
+            apiBasePathOverride: "/package",
+            title: "Source Runtime",
+            version: "2026.08"
+        )
+        XCTAssertEqual(packageExport.sourceFormat, .runtimeSourcePackage)
+        XCTAssertEqual(packageExport.runtimePackage.runtime.mountContract.apiBasePaths, ["/package"])
+        let packagePaths = try object(packageExport.runtimePackage.runtime.openAPI["paths"])
+        XCTAssertNotNil(packagePaths["/package/publish/tasks"])
+        XCTAssertNotNil(packagePaths["/package/review-flow/tasks"])
+        XCTAssertNil(packagePaths["/package/workflows/content.release/tasks"])
+        XCTAssertNil(packagePaths["/package/workflows/content.review/tasks"])
+    }
+
+    func testRuntimeSourceSetRejectsEmptyDuplicateAndNestedSources() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reviewURL = directory.appendingPathComponent("review.langgraph.json")
+        try langGraphReviewManifest().write(to: reviewURL)
+
+        let emptySetURL = directory.appendingPathComponent("empty.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [])).write(to: emptySetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "empty.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("empty runtime source set should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("runtime source set"))
+            XCTAssertTrue(message.contains("sources must contain at least one workflow source"))
+        }
+
+        let duplicateSetURL = directory.appendingPathComponent("duplicate.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: "review.langgraph.json"),
+            .init(path: "review.langgraph.json"),
+        ])).write(to: duplicateSetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "duplicate.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("duplicate runtime source set should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("duplicate workflow id 'langgraph.review'"))
+        }
+
+        let sourceExport = try await KistRunner.makeSMLRuntimeHostExport(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            roleOverride: "reviewer"
+        )
+        let packageURL = directory.appendingPathComponent("review.package.json")
+        try JSONEncoder().encode(sourceExport.runtimePackage).write(to: packageURL)
+        let nestedSetURL = directory.appendingPathComponent("nested.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: "review.package.json"),
+        ])).write(to: nestedSetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "nested.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("nested package runtime source set should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("must be a single LangGraph manifest or SML workflow JSON"))
+        }
+
+        let invalidAPIBaseSetURL = directory.appendingPathComponent("invalid-api-base.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: "review.langgraph.json", apiBasePath: "relative"),
+        ])).write(to: invalidAPIBaseSetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "invalid-api-base.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("invalid runtime source set API base path should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("apiBasePath must be an absolute literal path"))
+        }
+
+        let invalidAPIWorkflowSetURL = directory.appendingPathComponent("invalid-api-workflow.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: "review.langgraph.json", apiWorkflowPath: "relative"),
+        ])).write(to: invalidAPIWorkflowSetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "invalid-api-workflow.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("invalid runtime source set API workflow path should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("apiWorkflowPath must be an absolute literal path"))
+        }
+
+        let invalidRoundsSetURL = directory.appendingPathComponent("invalid-rounds.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: "review.langgraph.json", modelMaximumCommandRounds: 9),
+        ])).write(to: invalidRoundsSetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "invalid-rounds.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("invalid runtime source set model rounds should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("modelMaximumCommandRounds must be between 1 and 8"))
+        }
+    }
+
     func testRuntimePackageInputUsesLiveHostOverridesInExportAndDescriptor() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2515,7 +2959,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             XCTFail("unsupported runtime source should fail")
         } catch {
             let message = String(describing: error)
-            XCTAssertTrue(message.contains("Expected a runtime source package, runtime scaffold, LangGraph manifest, or SML workflow JSON"))
+            XCTAssertTrue(message.contains("Expected a runtime source package, runtime scaffold, runtime source set, LangGraph manifest, or SML workflow JSON"))
         }
     }
 
@@ -2526,15 +2970,20 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         return directory
     }
 
-    private func langGraphReviewManifest() -> Data {
+    private func langGraphReviewManifest(
+        id: String = "langgraph.review",
+        name: String = "LangGraph review",
+        sourceReference: String = "graphs/review.py",
+        sourceDigest: String = String(repeating: "a", count: 64)
+    ) -> Data {
         Data("""
         {
           "manifest_version": 1,
-          "id": "langgraph.review",
+          "id": "\(id)",
           "version": "1.0.0",
-          "name": "LangGraph review",
-          "source_reference": "graphs/review.py",
-          "source_digest": "\(String(repeating: "a", count: 64))",
+          "name": "\(name)",
+          "source_reference": "\(sourceReference)",
+          "source_digest": "\(sourceDigest)",
           "state_schema": [
             {"name":"topic","type":"string"},
             {"name":"draft","type":"string","required":false}

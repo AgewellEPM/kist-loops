@@ -111,6 +111,7 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertEqual(o.smlRuntimeModelRounds, 3)
         XCTAssertNil(o.goal)
         XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-export <json>"))
+        XCTAssertTrue(KistOptions.helpText.contains("runtime source set"))
         XCTAssertTrue(KistOptions.helpText.contains("--sml-api-base <path>"))
     }
 
@@ -242,6 +243,16 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertNil(hostWiring.goal)
         XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-host-wiring <json>"))
 
+        let runbook = KistOptions.parse([
+            "--sml-runtime-runbook", "graphs/review.langgraph.json",
+            "--sml-workflow", "langgraph.review",
+        ])
+        XCTAssertEqual(runbook.smlRuntimeRunbook, "graphs/review.langgraph.json")
+        XCTAssertEqual(runbook.smlRuntimeWorkflowID, "langgraph.review")
+        XCTAssertNil(runbook.goal)
+        XCTAssertTrue(runbook.optionErrors.isEmpty)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-runbook <json> [--sml-workflow <id>]"))
+
         let scaffold = KistOptions.parse([
             "--sml-runtime-scaffold", "graphs/review.langgraph.json",
             "--sml-out", ".kist/generated/review-runtime",
@@ -270,6 +281,10 @@ final class KistOptionsTests: XCTestCase {
         )
         XCTAssertEqual(
             KistOptions.parse(["--sml-host-wiring", "graphs/review.langgraph.json"]).smlRuntimeHostWiring,
+            "graphs/review.langgraph.json"
+        )
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-runbook", "graphs/review.langgraph.json"]).smlRuntimeRunbook,
             "graphs/review.langgraph.json"
         )
         let scaffoldAlias = KistOptions.parse([
@@ -330,6 +345,7 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertEqual(o.smlRuntimeVersion, "2026.08")
         XCTAssertEqual(o.smlRuntimeModelRounds, 3)
         XCTAssertNil(o.goal)
+        XCTAssertTrue(o.optionErrors.isEmpty)
         XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-repl <json>"))
         XCTAssertTrue(KistOptions.helpText.contains("--sml-line <line>"))
 
@@ -361,6 +377,7 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertEqual(script.smlRuntimeVersion, "2026.08")
         XCTAssertEqual(script.smlRuntimeModelRounds, 3)
         XCTAssertNil(script.goal)
+        XCTAssertTrue(script.optionErrors.isEmpty)
         XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-repl-script <json>"))
         XCTAssertTrue(KistOptions.helpText.contains("--sml-script <path>"))
 
@@ -562,6 +579,12 @@ final class KistOptionsTests: XCTestCase {
         })
         XCTAssertNil(hostWiring.smlRuntimeHostWiring)
 
+        let runbook = KistOptions.parse(["--sml-runtime-runbook"])
+        XCTAssertTrue(runbook.optionErrors.contains {
+            $0.contains("--sml-runtime-runbook requires <source.json>")
+        })
+        XCTAssertNil(runbook.smlRuntimeRunbook)
+
         let scaffold = KistOptions.parse(["--sml-runtime-scaffold"])
         XCTAssertTrue(scaffold.optionErrors.contains {
             $0.contains("--sml-runtime-scaffold requires <source.json>")
@@ -715,7 +738,7 @@ final class KistOptionsTests: XCTestCase {
 
         let workflowOnly = KistOptions.parse(["--sml-workflow", "langgraph.review"])
         XCTAssertTrue(workflowOnly.optionErrors.contains {
-            $0.contains("--sml-workflow requires --sml-runtime-repl, --sml-runtime-repl-script, or --sml-runtime-attachments")
+            $0.contains("--sml-workflow requires --sml-runtime-repl, --sml-runtime-repl-script, --sml-runtime-runbook, or --sml-runtime-attachments")
         })
 
         let conflict = KistOptions.parse([
