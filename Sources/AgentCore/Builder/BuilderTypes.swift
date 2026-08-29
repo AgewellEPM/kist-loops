@@ -21,6 +21,65 @@ public enum BuilderCompletionMode: String, Codable, Sendable, Hashable {
     case build
     case verificationOnly
 }
+/// Sealed review authority for one Builder run. Independent review remains the implicit default.
+/// The weaker same-model grade is valid only for a host-classified low-risk direct transaction and
+/// still requires a fresh conversation in a separate provider invocation.
+public struct BuilderReviewPolicy: Codable, Sendable, Equatable {
+    public let grade: EvolutionReviewGrade
+    public let safetyRisk: BuilderRisk
+    public let requiresFreshConversation: Bool
+    public let requiresSeparateInvocation: Bool
+    public let disposableRootIdentity: String?
+    public let maximumMutationPaths: Int?
+    public let requiresOSProcessSandbox: Bool
+    public let allowsLiveControl: Bool
+
+    public init(
+        grade: EvolutionReviewGrade = .independent,
+        safetyRisk: BuilderRisk = .low,
+        requiresFreshConversation: Bool = false,
+        requiresSeparateInvocation: Bool = false,
+        disposableRootIdentity: String? = nil,
+        maximumMutationPaths: Int? = nil,
+        requiresOSProcessSandbox: Bool = false,
+        allowsLiveControl: Bool = false
+    ) {
+        self.grade = grade
+        self.safetyRisk = safetyRisk
+        self.requiresFreshConversation = requiresFreshConversation
+        self.requiresSeparateInvocation = requiresSeparateInvocation
+        self.disposableRootIdentity = disposableRootIdentity
+        self.maximumMutationPaths = maximumMutationPaths
+        self.requiresOSProcessSandbox = requiresOSProcessSandbox
+        self.allowsLiveControl = allowsLiveControl
+    }
+
+    public static let independent = BuilderReviewPolicy()
+
+    public static func lowRiskFreshContextSameModel(
+        disposableRootIdentity: String
+    ) -> BuilderReviewPolicy {
+        BuilderReviewPolicy(
+            grade: .freshContextSameModel,
+            safetyRisk: .low,
+            requiresFreshConversation: true,
+            requiresSeparateInvocation: true,
+            disposableRootIdentity: disposableRootIdentity,
+            maximumMutationPaths: 1,
+            requiresOSProcessSandbox: true,
+            allowsLiveControl: false)
+    }
+
+    public var authorizesDisposableFreshContextSameModel: Bool {
+        guard let root = disposableRootIdentity,
+              root.utf8.count == 64,
+              root.utf8.allSatisfy({ byte in
+                  (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
+              }),
+              root.utf8.contains(where: { $0 != 48 }) else { return false }
+        return self == .lowRiskFreshContextSameModel(disposableRootIdentity: root)
+    }
+}
 public struct BuilderRouteHint: Codable, Sendable, Equatable {
     public var preferred: BuilderRoute?; public var estimatedFiles: Int; public var independentWorkstreams: Int; public var risk: BuilderRisk; public var requiresResearch: Bool; public var requiresSimulation: Bool
     public init(
@@ -49,7 +108,7 @@ public struct BuilderRouteHint: Codable, Sendable, Equatable {
     }
 }
 public struct BuilderContract: Codable, Sendable, Equatable {
-    public let id: String; public var objective: String; public var constraints: [String]; public var allowedPaths: [String]; public var capabilities: [String]; public var doneWhen: [String]; public var routeHint: BuilderRouteHint; public var checkpointIdentity: String?; public var maxTokens: Int?; public var completionMode: BuilderCompletionMode?; public var producerIdentities: [String]?; public var executionContract: SealedBuilderExecutionContract?; public var governanceAdmission: BuilderGraphGovernanceAdmission?
+    public let id: String; public var objective: String; public var constraints: [String]; public var allowedPaths: [String]; public var capabilities: [String]; public var doneWhen: [String]; public var routeHint: BuilderRouteHint; public var checkpointIdentity: String?; public var maxTokens: Int?; public var completionMode: BuilderCompletionMode?; public var producerIdentities: [String]?; public var reviewPolicy: BuilderReviewPolicy?; public var executionContract: SealedBuilderExecutionContract?; public var governanceAdmission: BuilderGraphGovernanceAdmission?
     public init(
         id: String = UUID().uuidString,
         objective: String,
@@ -62,6 +121,7 @@ public struct BuilderContract: Codable, Sendable, Equatable {
         maxTokens: Int? = nil,
         completionMode: BuilderCompletionMode = .build,
         producerIdentities: [String]? = nil,
+        reviewPolicy: BuilderReviewPolicy? = nil,
         executionContract: SealedBuilderExecutionContract? = nil,
         governanceAdmission: BuilderGraphGovernanceAdmission? = nil
     ) {
@@ -76,11 +136,13 @@ public struct BuilderContract: Codable, Sendable, Equatable {
         self.maxTokens = maxTokens.map { max(0, $0) }
         self.completionMode = completionMode
         self.producerIdentities = producerIdentities
+        self.reviewPolicy = reviewPolicy
         self.executionContract = executionContract
         self.governanceAdmission = governanceAdmission
     }
 
     public var effectiveCompletionMode: BuilderCompletionMode { completionMode ?? .build }
+    public var effectiveReviewPolicy: BuilderReviewPolicy { reviewPolicy ?? .independent }
 }
 public enum BuilderResourceAccess: String, Codable, Sendable, Hashable { case read, write }
 public enum BuilderIsolation: String, Codable, Sendable, Hashable { case shared, sandbox, worktree }
@@ -539,4 +601,3 @@ public struct BuilderFleetChildVerificationBundle: Codable, Sendable, Equatable 
         }
     }
 }
-

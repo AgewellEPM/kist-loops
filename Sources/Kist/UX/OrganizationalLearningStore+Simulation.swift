@@ -225,7 +225,9 @@ extension OrganizationalLearningStore {
             impact: min(5, max(1, strategy.expectedValue / 20)),
             tags: ["simulation-gate", run.domain.rawValue, "probabilistic-trials", "benchmark"]
         )
-        return appendJSON(record, to: benchmarksPath) ? 1 : 0
+        return appendGenericMemory(
+            record, to: benchmarksPath, decayRate: .fast,
+            at: Date(timeIntervalSince1970: run.generatedAt)) ? 1 : 0
     }
 
     struct MeasuredSimulationCommand {

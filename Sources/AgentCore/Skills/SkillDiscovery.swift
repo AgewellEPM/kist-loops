@@ -35,7 +35,14 @@ public enum SkillDiscovery {
 
     /// Discover builtin skills embedded in the AgentCore resource bundle.
     public static func discoverBuiltins() -> ([Skill], [SkillState]) {
-        guard let root = builtinRoot() else { return ([], []) }
+        guard let root = builtinRoot() else {
+            // Fail-LOUD (autopsy 2026-08-25): an absent resource bundle would silently amputate
+            // every builtin skill — the deploy copies the binary, and AgentCore_AgentCore.bundle
+            // must travel beside it. Say so instead of quietly returning nothing.
+            FileHandle.standardError.write(Data(
+                "skills · builtin resource bundle missing beside the executable — builtin skills UNAVAILABLE (deploy must copy AgentCore_AgentCore.bundle)\n".utf8))
+            return ([], [])
+        }
         var skills: [Skill] = []
         var states: [SkillState] = []
         let fm = FileManager.default

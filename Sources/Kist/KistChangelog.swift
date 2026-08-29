@@ -13,6 +13,15 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.60", date: "2026-08-25",
+                headline: "Routing availability gate: the health daemon's provider-health.json finally feeds selection; no lane stays on a known-down provider, and a dead escalation classifier announces itself",
+                changes: [
+                    "Routing audit (2026-08-25, 21-agent sweep, 12 confirmed findings) root-caused 'every report identical / never codes': ollama was down and the daemon's provider-health.json KNEW it, but nothing on the request path ever read the file - the session default, the auto-router's stay path, the Captain's stability guard, and the assignment engine all re-picked the dead provider every turn and every turn died with the same transport error",
+                    "NEW ProviderHealthFileStore (fail-open, freshness-windowed): a fresh status=down verdict benches a provider exactly like a live cooldown. ONE combined avoid gate (cooldowns + health) is threaded through EVERY selection site: resolveProvider's warm filter AND its last-resort local fallback, AutoModelRouter.route()'s stay path, captainDecision()'s stability default, ModelAssignmentEngine.assignInteractive/choose (new unavailable param: benched candidates never compete, a benched incumbent loses its baseline), and the REPL's substitution consult side",
+                    "Escalation classifier failure is LOUD: ConversationRouter no longer try?-swallows a dead classifier provider (which silently disabled plan/fleet/council/research and read as 'nothing to escalate') - it announces 'escalation classifier unavailable (<provider>): <error> - handling inline'",
+                    "Dashboard honesty: futureEvolution was ONE hardcoded sentence stamped into every capsule (every dashboard identical forever) - now derived from the run's actual trajectory (worst failing tool + count / read-only-turn signal), honestly blank when the run carries no signal; estimatedImpact no longer claims 'High' unconditionally (failed-run follow-ups only)",
+                    "Per-site regression pins (multi-site fix discipline): 17 new tests - behavior per selection site + one source pin per file, so a regressed site names itself",
+                ]),
         Release(version: "0.17.59", date: "2026-08-14",
                 headline: "REPL rate-limit resilience: the media reroute, text-turn substitution, auto-router tiers, and --health all consult the live cooldown ledger (5th reproduction, closed)",
                 changes: [
@@ -84,10 +93,10 @@ enum KistChangelog {
         Release(version: "0.17.50", date: "2026-08-08",
                 headline: "Flywheel P1: recall→plan read-back + an oracle that ISOLATES it (injection A/B, not cold-vs-warm)",
                 changes: [
-                    "NEW recall→plan read-back: verified past lessons (kind=auto-lesson, deposited only on a GROUNDED win) can auto-enter a turn's system prompt as an ADVISORY block — the model gets the winning approach without having to decide to call `recall`. Framed as context, never an authority grant; only auto-lessons above a similarity floor, capped at 3. Wired into both the native and text protocols (per-turn, no accumulation)",
+                    "NEW recall→plan read-back: typed locally checked, unsigned advisory lessons (kind=auto-lesson, deposited only after a GROUNDED win) can auto-enter a turn's system prompt as an ADVISORY block — the model gets the winning approach without having to decide to call `recall`. Framed as context, never an authority grant; only auto-lessons above a similarity floor, capped at 3. Wired into both the native and text protocols (per-turn, no accumulation)",
                     "OFF BY DEFAULT (KIST_RECALL_INJECT=1 to opt in) — zero per-turn cost / no behavior change until the oracle proves it compounds. That proof gate is the point: we don't flip a user-facing default on a hunch",
-                    "NEW `/ablation recall` — P1's ISOLATED oracle. Cold-vs-warm confounds three variables (self__ tools, the recall TOOL, the injection); this holds the toolset CONSTANT and toggles ONLY the injection, so advantage = injection-ON − injection-OFF is causally the wire. It REFUSES up-front (no embedder, or no verified lesson matches any case) rather than report a FALSE flat, and PLATEAUED (model already gets the lesson via the tool) is an honest per-wire result, not a failure",
-                    "Recall corpus seam (EvalGoldenSuite.recallCases ← .kist/eval/recall-suite.json): memory-dependent tasks answerable only from a recalled lesson. Pinned by P1RecallReadBackTests (verified-only filter, floor, cap, advisory framing, and per-corpus disjointness across golden/capability/recall)",
+                    "NEW `/ablation recall` — P1's ISOLATED oracle. Cold-vs-warm confounds three variables (self__ tools, the recall TOOL, the injection); this holds the toolset CONSTANT and toggles ONLY the injection, so advantage = injection-ON − injection-OFF is causally the wire. It REFUSES up-front (memory disabled, no embedder, or no locally checked advisory lesson matches any case) rather than report a FALSE flat, and PLATEAUED (model already gets the lesson via the tool) is an honest per-wire result, not a failure",
+                    "Recall corpus seam (EvalGoldenSuite.recallCases ← .kist/eval/recall-suite.json): memory-dependent tasks answerable only from a recalled lesson. Pinned by P1RecallReadBackTests (typed locally-checked advisory filter, floor, cap, advisory framing, and per-corpus disjointness across golden/capability/recall)",
                 ]),
         Release(version: "0.17.49", date: "2026-08-08",
                 headline: "cobol_generate self-verifies — compiles + runs what it wrote, never launders wrong COBOL",
@@ -283,11 +292,11 @@ enum KistChangelog {
                     "The whole scanner suite (SecurityAuditor/SecretScanner/StaticAnalyzer/DependencyAuditor/ComplianceMapper) already existed — this exposes it as a command. Findings are static-analysis leads: verify before acting",
                 ]),
         Release(version: "0.17.21", date: "2026-08-05",
-                headline: "Semantic memory now fills itself — verified wins are auto-remembered (roadmap #3)",
+                headline: "Semantic memory records locally checked wins as advisory context (roadmap #3)",
                 changes: [
-                    "On a VERIFIED win (grounded + settled success), kist now auto-captures a durable lesson into semantic (vector) memory — into the SAME store the `recall` tool reads. The vector infra existed (SemanticMemory/VectorStore/embeddings) but nothing filled it; now it does, so `recall` actually returns your past solutions across sessions",
-                    "Gated on an embedder (local Ollama via KIST_EMBEDDER=ollama, or a Gemini key) and --no-memory; fire-and-forget + fail-soft so it never blocks or slows a turn",
-                    "Deferred (next): auto-RECALL injection at turn start (blast-radius on the turn context) + a recall prompt-nudge",
+                    "After a locally checked grounded + settled success, kist can capture an unsigned advisory lesson into semantic (vector) memory — into the SAME store the `recall` tool reads. The vector infra existed (SemanticMemory/VectorStore/embeddings) but nothing filled it; now it does, so eligible temporal recall can return past solutions across sessions without treating them as receipts",
+                    "Gated on an embedder (local Ollama via KIST_EMBEDDER=ollama, or a Gemini key) and --no-memory; deposits are awaited and persistence failures are surfaced so a failed write is never reported as remembered",
+                    "Later delivered as an off-by-default recall→plan injection (`KIST_RECALL_INJECT=1`) with typed advisory filtering, bounded untrusted-data framing, and a dedicated ablation refusal gate",
                 ]),
         Release(version: "0.17.20", date: "2026-08-05",
                 headline: "Eval harness — golden suite + baseline + regression detection (roadmap #1)",

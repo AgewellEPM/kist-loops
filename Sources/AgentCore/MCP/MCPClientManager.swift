@@ -105,7 +105,8 @@ public actor MCPClientManager {
             do {
                 let specs = try await connection.listTools()
                 for spec in specs {
-                    wrappers.append(RemoteMCPTool(serverName: cfg.name, spec: spec, manager: self))
+                    wrappers.append(RemoteMCPTool(serverName: cfg.name, spec: spec, manager: self,
+                                                  computerUsePolicy: cfg.computerUsePolicy))
                 }
                 MCPLog.info("server '\(cfg.name)': discovered \(specs.count) tool(s)")
             } catch {
@@ -243,7 +244,8 @@ public actor MCPClientManager {
 
     /// Route a tool call to its server. `arguments` come straight from the model; the
     /// result is sanitized before return.
-    public func call(server: String, tool: String, arguments: [String: Any]) async -> ToolResult {
+    public func call(server: String, tool: String, arguments: [String: Any],
+                     correlationID: String? = nil) async -> ToolResult {
         guard let config = knownConfigs[server] else {
             return .failure("MCP server '\(server)' is not connected")
         }
@@ -258,7 +260,8 @@ public actor MCPClientManager {
             }
         }
         do {
-            let raw = try await connection.callTool(name: tool, arguments: arguments)
+            let raw = try await connection.callTool(name: tool, arguments: arguments,
+                                                    correlationID: correlationID)
             let (text, isError) = MCPOutputSanitizer.extract(from: raw)
             return ToolResult(
                 success: !isError,

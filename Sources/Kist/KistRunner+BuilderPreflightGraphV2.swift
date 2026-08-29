@@ -199,7 +199,9 @@ extension KistRunner {
             skillLocations: context.skillLocations,
             skillTracker: context.skillTracker,
             auditLog: context.auditLog,
-            externalReadRoots: context.externalReadRoots)
+            externalReadRoots: context.externalReadRoots,
+            correlationID: context.correlationID,
+            traceRecorder: context.traceRecorder)
         var captures: [CommandCapture] = []
         for (index, command) in plan.verificationCommands.enumerated() {
                 let remaining = Int(floor(wallDeadline.timeIntervalSinceNow))

@@ -115,17 +115,22 @@ final class BudgetEnforcementTests: XCTestCase {
         XCTAssertTrue(subtasks.isEmpty, "an exhausted budget must skip planning entirely")
     }
 
-    // SITE 7 (Codex) — evolution shares ONE ledger across all variants (a fresh ledger per variant
-    // would silently allow N×budget). Pin that the ledger is built OUTSIDE the variants loop.
-    // Evolve candidates must run in the BOXED envelope (confined sandbox + enabled shell) so they have
-    // the full sandboxed tool set (custom_tool.run) — else building/running generated tools fails.
-    func testEvolutionCandidatesRunSandboxed() throws {
+    // SITE 7 (Codex) — pre-commit evolution is deliberately non-executable. Candidate-authored code
+    // reaches only the later exact-commit attested verifier; generation receives concrete in-process
+    // file tools, denied shell, strict confinement, and no external/media read bridge.
+    func testEvolutionCandidatesUseStrictNonExecutableGenerationEnvelope() throws {
         let src = try source("Sources/Kist/KistEvolutionCommand.swift")
-        XCTAssertTrue(src.contains(".confined("), "candidate context must use a confined OS sandbox")
-        XCTAssertTrue(src.replacingOccurrences(of: " ", with: "").contains("ShellPolicy(enabled:true"),
-                      "candidate shell must be enabled so it can run its own tools")
-        XCTAssertTrue(src.contains("approval: { _ in true }"),
-                      "sandboxed candidate must auto-approve raw shell (kernel sandbox is the real guard)")
+        let compact = src.replacingOccurrences(of: " ", with: "")
+        XCTAssertTrue(src.contains("shell: .denied"),
+                      "pre-commit candidate shell must remain denied")
+        XCTAssertTrue(src.contains("sandbox: .strictAutonomous(forbiddenReadPaths: [root])"),
+                      "candidate context must hide the host repository behind strict confinement")
+        XCTAssertTrue(compact.contains("externalReadRoots:[],allowMediaDropInbox:false"),
+                      "candidate context must expose no external or media read bridge")
+        XCTAssertFalse(compact.contains("ShellPolicy(enabled:true"),
+                       "pre-commit candidates must not regain raw shell")
+        XCTAssertFalse(src.contains("approval: { _ in true }"),
+                       "pre-commit candidates must not auto-approve raw shell")
     }
 
     func testEvolutionSharedLedgerPinned() throws {
@@ -138,7 +143,7 @@ final class BudgetEnforcementTests: XCTestCase {
         guard let ledgerPos = src.range(of: "let evolveBudget = budgetOverride ?? opts.budgetTokens.map"),
               let genLoopPos = src.range(of: "for generation in 1...generations"),
               let candidateLoopPos = src.range(of: "for index in 1...variantCount"),
-              let worktreePos = src.range(of: "GitIsolation.makeWorktree") else {
+              let worktreePos = src.range(of: "EvolutionLineageWorkspace.createChild") else {
             return XCTFail("evolution budget/loop markers not found")
         }
         XCTAssertTrue(ledgerPos.lowerBound < genLoopPos.lowerBound,

@@ -78,6 +78,8 @@ enum ProcessGroupRunner {
                     stdinByteLimit: Int = 16 * 1_024 * 1_024,
                     telemetrySink: BuilderTrustedCommandSink? = nil,
                     requestedArgumentsDigest: String? = nil,
+                    builderSandboxAuthority: BuilderSandboxExecutionAuthority? = nil,
+                    requireBuilderSandbox: Bool = false,
                     cancellationCheck: @Sendable () -> Bool = { false }) -> Outcome {
 
         let telemetryStarted = DispatchTime.now().uptimeNanoseconds
@@ -93,6 +95,7 @@ enum ProcessGroupRunner {
         var effectiveEnvironment = env
         var effectiveEnvironmentDigest = environmentDigest(env)
         var sandboxProfileDigest: String?
+        var builderValidation: BuilderSandboxLaunchValidation?
         func launcherDigest() -> String {
             return BuilderEvidenceDigest.sha256(
                 (["kist.builder.effective-launch.v1", effectiveLaunchPath]
@@ -104,6 +107,23 @@ enum ProcessGroupRunner {
         }
         func observed(_ original: Outcome) -> Outcome {
             var outcome = original
+            if let builderValidation {
+                do { try builderValidation.validate() }
+                catch {
+                    outcome = Outcome(
+                        combined: "Builder OS sandbox identity changed during subprocess execution",
+                        exitCode: -1, timedOut: original.timedOut,
+                        stdout: original.stdout, stderr: original.stderr,
+                        stdoutByteCount: original.stdoutByteCount,
+                        stderrByteCount: original.stderrByteCount,
+                        wasSignalled: original.wasSignalled,
+                        stdoutTruncated: original.stdoutTruncated,
+                        stderrTruncated: original.stderrTruncated,
+                        outputTruncated: original.outputTruncated,
+                        stdoutDigest: original.stdoutDigest, stderrDigest: original.stderrDigest,
+                        cancelled: original.cancelled)
+                }
+            }
             let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
             outcome.effectiveLauncherDigest = launcherDigest()
             outcome.effectiveEnvironmentDigest = effectiveEnvironmentDigest
@@ -118,7 +138,8 @@ enum ProcessGroupRunner {
         do {
             prepared = try BuilderOSProcessSandboxAttestor.preparedLaunch(
                 launchPath: launchPath, launchArgs: launchArgs, cwd: cwd,
-                environment: env)
+                environment: env, authority: builderSandboxAuthority,
+                requireSandbox: requireBuilderSandbox)
         } catch {
             return observed(Outcome(combined: "Builder OS sandbox refused subprocess: \(error.localizedDescription)",
                                     exitCode: -1, timedOut: false))
@@ -130,6 +151,7 @@ enum ProcessGroupRunner {
         effectiveEnvironmentDigest = prepared?.environmentDigest
             ?? environmentDigest(effectiveEnvironment)
         sandboxProfileDigest = prepared?.sandboxProfileDigest
+        builderValidation = prepared?.validation
 
         // --- staged stdin (before any pipe so one defer covers every exit path) ---
         guard let stdinFD = Self.stagedInputDescriptor(stdinData, byteLimit: stdinByteLimit) else {
@@ -236,6 +258,17 @@ enum ProcessGroupRunner {
                                     exitCode: -1, timedOut: false))
         }
 
+        // Re-resolve every pinned staged/private directory at the last possible point before exec.
+        // A path swap after attestation never downgrades to a raw launch.
+        do { try builderValidation?.validate() }
+        catch {
+            close(outFds[0]); close(outFds[1]); close(errFds[0]); close(errFds[1])
+            close(stopFds[0]); close(stopFds[1])
+            return observed(Outcome(
+                combined: "Builder OS sandbox identity changed before subprocess exec",
+                exitCode: -1, timedOut: false))
+        }
+
         var pid: pid_t = 0
         let rc = posix_spawn(&pid, effectiveLaunchPath, &fa, &attr, argv, envp)   // returns errno DIRECTLY
         // Parent must close its copy of the write ends or reads never see EOF.
@@ -316,8 +349,12 @@ enum ProcessGroupRunner {
         // reap it. Adds ZERO latency to the normal case (all children exit with the leader → instant EOF);
         // the timeout path above already killed hard. Gated on detect.rc == 0 (a real zombie reserves the
         // PGID) exactly as before, so no signal can hit a recycled PGID.
-        let drainedCleanly = drains.wait(timeout: .now() + .seconds(graceSeconds)) == .success
-        if !drainedCleanly, detect.rc == 0 {
+        _ = drains.wait(timeout: .now() + .seconds(graceSeconds)) == .success
+        if detect.rc == 0 {
+            // The unreaped leader still reserves this exact PGID. Sweep on EVERY return, even when a
+            // descendant deliberately closed stdout/stderr before lingering; pipe EOF is not lifecycle
+            // evidence. TERM then KILL while the PGID is still reserved, before disarm/reap.
+            killer.kill(SIGTERM)
             killer.kill(SIGKILL)
         }
 

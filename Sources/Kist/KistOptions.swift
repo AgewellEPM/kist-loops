@@ -62,6 +62,7 @@ struct KistOptions {
     var workerSpec: String?         // --worker <provider[:model]>: vendor for the WORKER/research role
     var coderSpec: String?          // --coder <provider[:model]>: vendor for the CODER (generate) role
     var criticSpec: String?         // --critic <provider[:model]>: vendor for the CRITIC (verify) role
+    var reviewGrade: EvolutionReviewGrade? // --review-grade: explicit /grow or narrow Builder review grade
     var roleProfile: String?        // --roles <name>: saved role/team profile from ~/.config/kist/roles.json
     var budgetTokens: Int?          // --budget <n>: hard token ceiling for ANY run (one-shot, REPL,
                                     // resume, plan→execute); shared across the whole delegation tree
@@ -311,6 +312,12 @@ struct KistOptions {
             case "--worker":                o.workerSpec = next()
             case "--coder", "--builder":    o.coderSpec = next()
             case "--critic":                o.criticSpec = next()
+            case "--review-grade":
+                if let raw = next(), let grade = EvolutionReviewGrade(rawValue: raw) {
+                    o.reviewGrade = grade
+                } else {
+                    o.optionErrors.append("--review-grade requires independent or fresh_context_same_model")
+                }
             case "--roles":                 o.roleProfile = next()
             case "--budget":                if let v = next(), let n = Int(v), n > 0 { o.budgetTokens = n }
             case "--max-cost":
@@ -554,6 +561,11 @@ struct KistOptions {
                                     vendors per role for a team, e.g.:
                                     --provider openai --builder deepseek --critic gemini
                                     --fleet "big build" --coder mimo --worker deepseek --critic gemini
+          --review-grade <grade>    Review evidence for /grow or Builder. Default `independent` requires
+                                    a distinct provider. `fresh_context_same_model` is never independent
+                                    or deployment authority. Builder permits it only with an explicit exact
+                                    --critic on a sandboxed --headless --auto build in a non-Git disposable
+                                    temp root, sealed to one file mutation and one deterministic verifier.
           --roles <name>            Load a saved role profile from ~/.config/kist/roles.json.
                                     Explicit role flags override it.
           --budget <tokens>         Hard TOKEN ceiling. Enforced on the agent loops — one-shot, REPL,

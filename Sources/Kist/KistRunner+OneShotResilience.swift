@@ -51,14 +51,17 @@ extension KistRunner {
         return OneShotSubstitution(decision: decision, shouldCooldown: transient)
     }
 
-    /// Registry-backed convenience wiring for the pure decision above.
+    /// Registry-backed convenience wiring for the pure decision above. The warm gate is the
+    /// COMBINED availability check (cooldowns + health daemon; Codex P2, 2026-08-25): a one-shot
+    /// retry must not substitute onto a provider the daemon already knows is down.
     static func oneShotSubstitution(outcomeSuccess: Bool,
                                     outcomeSummary: String,
                                     trajectory: [ActionRecord],
                                     current: ProviderBinding,
                                     roles: RoleBindings,
                                     registry: ProviderRegistry,
-                                    cooldowns: ProviderCooldownStore) -> OneShotSubstitution? {
+                                    cooldowns: ProviderCooldownStore,
+                                    health: ProviderHealthFileStore = ProviderHealthFileStore()) -> OneShotSubstitution? {
         let models = Dictionary(
             registry.providers.map { ($0.id.lowercased(), $0.availableModels.map(\.id)) },
             uniquingKeysWith: { first, _ in first })
@@ -68,6 +71,6 @@ extension KistRunner {
         return oneShotSubstitution(success: outcomeSuccess, summary: outcomeSummary,
                                    trajectory: trajectory, current: current, roles: roles,
                                    providerHasKey: hasKey, providerModels: models,
-                                   coolingDown: cooldowns.coolingDown)
+                                   coolingDown: { cooldowns.coolingDown($0) || health.down($0) })
     }
 }

@@ -87,7 +87,7 @@ final class KistREPL {
     var replayRunID: String? = nil
     /// Durable lesson memory: records obstacles from unhealthy/failed turns (advisory, retrieval-only).
     var lessonStore: LessonStore? = nil
-    /// The Cortex: human-readable .md memory of YOU (preferences/projects/journal). `/cortex` views + edits it.
+    /// Read-only operator audit handle for legacy Cortex Markdown; never prompt context.
     var cortex: CortexMemory? = nil
     /// Provider/model health reports. probe=true spends a tiny live completion per configured provider.
     var providerHealth: ((_ probe: Bool) async -> String)? = nil
@@ -100,9 +100,9 @@ final class KistREPL {
     var runEval: ((_ goal: String) async -> Void)? = nil
     /// Run the GOLDEN eval suite (regression gate): replay the fixed task set, score, compare to baseline.
     var runEvalSuite: (() async -> Void)? = nil
-    /// Auto-capture a durable lesson into SEMANTIC (vector) memory on a verified win, so a future session
-    /// can recall it. nil when no embedder is configured. Fail-soft — never blocks or throws into a turn.
-    var rememberLesson: (@Sendable (_ text: String) async -> Void)? = nil
+    /// Auto-capture a typed, locally checked advisory lesson into temporal semantic memory.
+    /// nil when no embedder is configured. Fail-soft — never blocks or throws into a turn.
+    var rememberLesson: (@Sendable (_ deposit: SemanticLessonDeposit) async -> Void)? = nil
     /// A configured vision-capable provider to borrow for media turns when the active model can't see
     /// (nil if none is configured). Set by the runner to e.g. "gemini" when its key is present.
     var visionProviderId: String? = nil
@@ -426,7 +426,7 @@ final class KistREPL {
                     let completedTurn = recordVerificationAndFinal(outcome: oc, intent: intent)
                     selfMonitor(goal: taskPrompt, intent: intent, success: completedTurn)
                     await printTurnUsage()
-                    recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+                    await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
                     // LOOP FIX: a RESEARCH item is a single-shot digest-and-decide unit (see ManageTasksTool),
                     // yet a plain research answer never calls `tasks done`, so `plan.active` re-served the same
                     // research task on every 'next'/'continue' forever. When a research-kind driving task's turn
@@ -783,7 +783,7 @@ final class KistREPL {
             let completedTurn = recordVerificationAndFinal(outcome: oc, intent: turnIntent)
             selfMonitor(goal: messageText, intent: turnIntent, success: completedTurn)
             await printTurnUsage()
-            recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+            await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
         }
     }
 }

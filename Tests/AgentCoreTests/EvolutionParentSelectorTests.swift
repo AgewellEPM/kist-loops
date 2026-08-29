@@ -8,9 +8,9 @@ final class EvolutionParentSelectorTests: XCTestCase {
 
     private func rec(_ id: String, status: EvolutionCandidateStatus, score: Int,
                      parent: String? = nil, changed: [String] = ["a.swift"], at: Double = 0) -> EvolutionCandidateRecord {
-        EvolutionCandidateRecord(runID: "r", candidateID: id, parentID: parent, objective: "o", branch: "b",
+        EvolutionTestAuthority.seal(EvolutionCandidateRecord(runID: "r", candidateID: id, parentID: parent, objective: "o", branch: "b",
                                  worktreePath: "/w", baseSHA: "0", commitSHA: "1", status: status, score: score,
-                                 changedFiles: changed, protectedFiles: [], benchmarks: [], summary: "s", createdAtEpoch: at)
+                                 changedFiles: changed, protectedFiles: [], benchmarks: [], summary: "s", createdAtEpoch: at))
     }
 
     // A `blocked` candidate gamed the verifier / touched the trust spine — breeding from it would let the
@@ -32,25 +32,31 @@ final class EvolutionParentSelectorTests: XCTestCase {
 
     func testFailedWithDiffIsASteppingStoneWhenEnabled() {
         let archive = [rec("partial", status: .failed, score: 1, changed: ["x.swift"])]
-        XCTAssertEqual(EvolutionParentSelector.eligibleParents(archive).count, 1, "a failed-but-changed variant is a stepping-stone")
-        XCTAssertTrue(EvolutionParentSelector.eligibleParents(archive, config: .init(includeFailedSteppingStones: false)).isEmpty)
+        XCTAssertTrue(EvolutionParentSelector.eligibleParents(archive).isEmpty,
+                      "default/autonomous parent selection must be passed-only")
+        XCTAssertEqual(EvolutionParentSelector.eligibleParents(
+            archive, config: .init(includeFailedSteppingStones: true)).count, 1,
+            "failed stepping stones require an explicit experimental opt-in")
         // a failed candidate with NO diff is not a stepping-stone (nothing to build on)
-        XCTAssertTrue(EvolutionParentSelector.eligibleParents([rec("nodiff", status: .failed, score: 1, changed: [])]).isEmpty)
+        XCTAssertTrue(EvolutionParentSelector.eligibleParents(
+            [rec("nodiff", status: .failed, score: 1, changed: [])],
+            config: .init(includeFailedSteppingStones: true)).isEmpty)
     }
 
     func testArchiveContextShowsSelectedFailedSteppingStone() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("evolution-parent-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let store = EvolutionArchiveStore(root: root.path)
-        let winner = rec("winner", status: .passed, score: 120, changed: ["winner.swift"])
-        let steppingStone = rec("partial", status: .failed, score: 10, changed: ["partial.swift"])
-        let blocked = rec("blocked", status: .blocked, score: 999, changed: ["trust.swift"])
-        try store.append(winner)
-        try store.append(steppingStone)
-        try store.append(blocked)
+        _ = try store.append(EvolutionArchiveAuthorityCodec.withoutAuthority(
+            rec("winner", status: .passed, score: 120, changed: ["winner.swift"])))
+        let steppingStone = try store.append(EvolutionArchiveAuthorityCodec.withoutAuthority(
+            rec("partial", status: .failed, score: 10, changed: ["partial.swift"])))
+        _ = try store.append(EvolutionArchiveAuthorityCodec.withoutAuthority(
+            rec("blocked", status: .blocked, score: 999, changed: ["trust.swift"])))
 
-        let context = store.context(selectedParent: steppingStone, limit: 3)
+        let context = store.contextForTesting(selectedParent: steppingStone, limit: 3)
         XCTAssertTrue(context.contains("Selected parent to build from:"))
         XCTAssertTrue(context.contains("partial status=failed"))
         XCTAssertTrue(context.contains("partial.swift"))

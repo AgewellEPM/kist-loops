@@ -9,6 +9,8 @@ readonly INSTALL_HOME="/Users/lukekist"
 readonly KIST_HOME="$INSTALL_HOME/.kist"
 readonly PYTHON="/usr/bin/python3"
 readonly RUNTIME="$KIST_HOME/scripts/kist_runtime.py"
+readonly DASHBOARD_LAUNCHER="$INSTALL_HOME/bin/kist-dashboard"
+readonly DASHBOARD_REBUILD="$INSTALL_HOME/bin/kist-rebuild"
 readonly SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 readonly SERVICE="kist-live-dashboard"
 PATH="$SAFE_PATH"
@@ -473,11 +475,16 @@ def cortex():
 schema3_required={"schema","stamp","deployed","worktree","branch","commit","remote-origin-sha256","repository-id","source-dirty","source-state-sha256","binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256","dashboard-runtime-sha256","artifact-closure-sha256","artifact-closure-count","test-evidence"}
 schema4_extras={"deployment-assurance","provenance-kind","unsigned-release-sha256","signed-installed-sha256","signing-type","signing-identity","notarization-status","notarization-submission-id","notarization-package-sha256","deployment-evidence-sha256","product-version"}
 schema4_legacy_base=schema3_required|schema4_extras
-# V3 is exactly the transactionally restorable release payload. Mutable dashboard runtime/cortex
-# state is trust-walked and descriptor-pinned at launch, but is intentionally not release/archive data.
-schema4_v3_base=(schema3_required-{"dashboard-runtime-sha256"})|schema4_extras|{"safe-rebuild-sha256"}
+# The v3 aggregate closure remains exactly the transactionally restorable release payload.
+# Dashboard runtime and cortex code/assets are operational state, not archive payloads, but new v3
+# manifests bind the exact runtime plus selected cortex tree through separate digests/count. The
+# older v3 shape remains readable for bootstrap and rollback compatibility and still receives the
+# full trust walk below.
+schema4_v3_legacy_base=(schema3_required-{"dashboard-runtime-sha256"})|schema4_extras|{"safe-rebuild-sha256"}
+schema4_v3_operational={"dashboard-runtime-sha256","dashboard-cortex-sha256","dashboard-cortex-count"}
+schema4_v3_base=schema4_v3_legacy_base|schema4_v3_operational
 schema4_enterprise={"candidate-manifest-sha256","full-suite-evidence-sha256","full-suite-test-count","full-suite-failures","full-suite-errors","five-canary-evidence-sha256","five-canary-count","five-canary-failures","sbom-sha256","sbom-format","enterprise-evidence-sha256"}
-fields={}; stamp=""; schema=""; closure_version=0
+fields={}; stamp=""; schema=""; closure_version=0; operational_bound=False
 if EVALUATE:
     if EVAL_CLOSURE_VERSION not in {"2","3"}: raise SystemExit(1)
     closure_version=int(EVAL_CLOSURE_VERSION)
@@ -497,7 +504,11 @@ else:
         required=schema3_required; closure_version=2
     elif schema=="4" and assurance in {"pilot","enterprise"}:
         if "safe-rebuild-sha256" in fields:
-            required=schema4_v3_base; closure_version=3
+            closure_version=3
+            if schema4_v3_operational&set(fields):
+                required=schema4_v3_base; operational_bound=True
+            else:
+                required=schema4_v3_legacy_base
         else:
             required=schema4_legacy_base; closure_version=2
         if assurance=="enterprise": required=required|schema4_enterprise
@@ -521,15 +532,15 @@ for logical,exe in fixed:
     digest,mode,size=read_leaf(selected,exe,logical=logical,digest_only=True)
     entries.append((logical,digest,mode,size)); hashes[logical]=digest.hex()
 
+cortex_entries=cortex()
 runtime_digest=None
 if closure_version==2:
-    entries += cortex()
+    entries += cortex_entries
     runtime_digest=hashes[".kist/scripts/kist_runtime.py"]
-elif not EVALUATE:
-    # Operational state is independently trust-validated on every launch/validation. Runtime bytes
-    # are then compiled from, and retained through, the validated descriptor below.
+else:
+    # Runtime remains independently trust-validated on every launch/validation. Its bytes are then
+    # compiled from, and retained through, the validated descriptor below.
     runtime_digest=read_leaf(".kist/scripts/kist_runtime.py",True,digest_only=True)[0].hex()
-    cortex()
 entries.sort(key=lambda x:x[0].encode())
 closure=hashlib.sha256()
 closure.update(b"kist-artifact-closure-v3\0" if closure_version==3 else b"kist-artifact-closure-v2\0")
@@ -537,6 +548,12 @@ for logical,digest,mode,size in entries:
     p=logical.encode()
     closure.update(len(p).to_bytes(8,"big")); closure.update(p)
     closure.update(mode.to_bytes(4,"big")); closure.update(size.to_bytes(8,"big")); closure.update(digest)
+cortex_entries.sort(key=lambda x:x[0].encode())
+cortex_digest=hashlib.sha256(b"kist-dashboard-cortex-v1\0")
+for logical,digest,mode,size in cortex_entries:
+    p=logical.encode()
+    cortex_digest.update(len(p).to_bytes(8,"big")); cortex_digest.update(p)
+    cortex_digest.update(mode.to_bytes(4,"big")); cortex_digest.update(size.to_bytes(8,"big")); cortex_digest.update(digest)
 
 if EVALUATE:
     print("binary-sha256="+hashes["bin/kist-current"])
@@ -545,6 +562,9 @@ if EVALUATE:
     print("rebuild-sha256="+hashes["bin/kist-rebuild"])
     if closure_version==3:
         print("safe-rebuild-sha256="+hashes["bin/kist-safe-rebuild.sh"])
+        print("dashboard-runtime-sha256="+runtime_digest)
+        print("dashboard-cortex-sha256="+cortex_digest.hexdigest())
+        print("dashboard-cortex-count="+str(len(cortex_entries)))
     else:
         print("dashboard-runtime-sha256="+hashes[".kist/scripts/kist_runtime.py"])
     print("artifact-closure-sha256="+closure.hexdigest())
@@ -562,18 +582,27 @@ hash_fields=["remote-origin-sha256","repository-id","source-state-sha256","binar
              "wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
              "artifact-closure-sha256"]
 hash_fields.append("safe-rebuild-sha256" if closure_version==3 else "dashboard-runtime-sha256")
+if operational_bound: hash_fields.extend(["dashboard-runtime-sha256","dashboard-cortex-sha256"])
 for key in hash_fields:
     if not valid_hex(fields[key]): raise SystemExit(1)
 if fields["source-dirty"] not in {"yes","no"} or fields["test-evidence"].lower()=="yes": raise SystemExit(1)
 try: closure_count=int(fields["artifact-closure-count"])
 except ValueError: raise SystemExit(1)
 if closure_count<=0 or str(closure_count)!=fields["artifact-closure-count"] or closure_count!=len(entries): raise SystemExit(1)
+if operational_bound:
+    try: cortex_count=int(fields["dashboard-cortex-count"])
+    except ValueError: raise SystemExit(1)
+    if cortex_count<0 or str(cortex_count)!=fields["dashboard-cortex-count"] or cortex_count!=len(cortex_entries): raise SystemExit(1)
 checks={"binary-sha256":hashes["bin/kist-current"],"wrapper-sha256":hashes["bin/kist"],
         "dashboard-launcher-sha256":hashes["bin/kist-dashboard"],
         "rebuild-sha256":hashes["bin/kist-rebuild"],
         "artifact-closure-sha256":closure.hexdigest(),"artifact-closure-count":str(len(entries))}
 if closure_version==3:
     checks["safe-rebuild-sha256"]=hashes["bin/kist-safe-rebuild.sh"]
+    if operational_bound:
+        checks["dashboard-runtime-sha256"]=runtime_digest
+        checks["dashboard-cortex-sha256"]=cortex_digest.hexdigest()
+        checks["dashboard-cortex-count"]=str(len(cortex_entries))
 else:
     checks["dashboard-runtime-sha256"]=hashes[".kist/scripts/kist_runtime.py"]
 if any(fields[k]!=v for k,v in checks.items()): raise SystemExit(1)
@@ -616,6 +645,10 @@ if REQUIRE_ENTERPRISE and not (
 ): raise SystemExit(1)
 if runtime_digest is None: raise SystemExit(1)
 print("dashboard-runtime-sha256="+runtime_digest)
+print("dashboard-cortex-sha256="+cortex_digest.hexdigest())
+print("dashboard-cortex-count="+str(len(cortex_entries)))
+print("artifact-closure-version="+str(closure_version))
+print("artifact-closure-sha256="+closure.hexdigest())
 print("deployment-assurance="+(fields.get("deployment-assurance") or "legacy-schema-3"))
 PY
  )" || die 'deployment provenance validation failed'
@@ -627,11 +660,69 @@ if [[ "${KIST_REBUILD_TESTING-}" == 1 \
   exec 9>&-
 fi
 assert_lease deployment
-if [[ "$VALIDATE" -eq 1 ]]; then exit 0; fi
-RUNTIME_SHA=$(printf '%s\n' "$PROVENANCE_OUTPUT" | /usr/bin/awk -F= '
-  $1=="dashboard-runtime-sha256" { if (seen++) exit 2; value=substr($0,26) }
-  END { if (seen!=1 || value !~ /^[a-f0-9]{64}$/) exit 3; print value }
-') || die 'validated provenance omitted the exact runtime digest'
+projection_value() {
+  local projection="$1" key="$2"
+  printf '%s\n' "$projection" | /usr/bin/awk -F= -v key="$key" '
+    $1==key { if (seen++) exit 2; value=substr($0,length(key)+2) }
+    END { if (seen!=1 || value=="") exit 3; print value }
+  '
+}
+RUNTIME_SHA=$(projection_value "$PROVENANCE_OUTPUT" dashboard-runtime-sha256) \
+  || die 'validated provenance omitted the exact runtime digest'
+CORTEX_SHA=$(projection_value "$PROVENANCE_OUTPUT" dashboard-cortex-sha256) \
+  || die 'validated provenance omitted the exact cortex digest'
+CORTEX_COUNT=$(projection_value "$PROVENANCE_OUTPUT" dashboard-cortex-count) \
+  || die 'validated provenance omitted the exact cortex count'
+CLOSURE_VERSION=$(projection_value "$PROVENANCE_OUTPUT" artifact-closure-version) \
+  || die 'validated provenance omitted the closure version'
+CLOSURE_SHA=$(projection_value "$PROVENANCE_OUTPUT" artifact-closure-sha256) \
+  || die 'validated provenance omitted the closure digest'
+[[ "$RUNTIME_SHA" =~ ^[a-f0-9]{64}$ && "$CORTEX_SHA" =~ ^[a-f0-9]{64}$ \
+   && "$CORTEX_COUNT" =~ ^(0|[1-9][0-9]*)$ && "$CLOSURE_VERSION" =~ ^[23]$ \
+   && "$CLOSURE_SHA" =~ ^[a-f0-9]{64}$ ]] \
+  || die 'validated provenance returned a malformed operational projection'
+
+# Re-inventory immediately before returning validation or starting Python so ordinary same-account
+# startup drift fails closed. The installation UID is the trust boundary: that principal also owns
+# this process and can rewrite or debug it after this check, so this is not a claim of lifetime
+# cortex immutability. Runtime execution is stronger and remains pinned to an exact open descriptor.
+revalidate_operational_state() {
+  local output actual_closure actual_runtime actual_cortex actual_count
+  assert_lease deployment
+  if [[ "$CLOSURE_VERSION" == 3 ]]; then
+    output=$("$DASHBOARD_LAUNCHER" --provenance-evaluate \
+      "$INSTALL_HOME/bin/kist-current" "$INSTALL_HOME/bin/kist" \
+      "$DASHBOARD_LAUNCHER" "$DASHBOARD_REBUILD" \
+      "$INSTALL_HOME/bin/kist-safe-rebuild.sh" 9>&-) || return 1
+    actual_runtime=$(projection_value "$output" dashboard-runtime-sha256) || return 1
+    actual_cortex=$(projection_value "$output" dashboard-cortex-sha256) || return 1
+    actual_count=$(projection_value "$output" dashboard-cortex-count) || return 1
+    [[ "$actual_runtime" == "$RUNTIME_SHA" && "$actual_cortex" == "$CORTEX_SHA" \
+       && "$actual_count" == "$CORTEX_COUNT" ]] || return 1
+  else
+    output=$("$DASHBOARD_LAUNCHER" --provenance-evaluate \
+      "$INSTALL_HOME/bin/kist-current" "$INSTALL_HOME/bin/kist" \
+      "$DASHBOARD_LAUNCHER" "$DASHBOARD_REBUILD" 9>&-) || return 1
+  fi
+  actual_closure=$(projection_value "$output" artifact-closure-sha256) || return 1
+  [[ "$actual_closure" == "$CLOSURE_SHA" ]] || return 1
+  assert_lease deployment
+}
+if [[ "${KIST_REBUILD_TESTING-}" == 1 \
+      && -n "${KIST_DASHBOARD_TEST_AFTER_PROVENANCE_VALIDATION_HOOK-}" ]]; then
+  [[ "$INSTALL_HOME" != /Users/lukekist ]] \
+    || die 'dashboard provenance hooks are forbidden for production'
+  PROVENANCE_HOOK="$KIST_DASHBOARD_TEST_AFTER_PROVENANCE_VALIDATION_HOOK"
+  [[ "$PROVENANCE_HOOK" = /* && -x "$PROVENANCE_HOOK" && ! -L "$PROVENANCE_HOOK" ]] \
+    || die 'dashboard provenance hook is not one absolute executable file'
+  /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" LANG=C LC_ALL=C \
+    "$PROVENANCE_HOOK" 9>&- || die 'dashboard provenance hook failed'
+fi
+if [[ "$VALIDATE" -eq 1 ]]; then
+  revalidate_operational_state \
+    || die 'dashboard artifacts or operational state changed after provenance validation'
+  exit 0
+fi
 
 TOKEN="${KIST_DASHBOARD_TOKEN-}"
 BOOTSTRAP="${KIST_DASHBOARD_BOOTSTRAP-}"
@@ -923,6 +1014,9 @@ PY
 fi
 
 assert_lease deployment
+assert_lease launch
+revalidate_operational_state \
+  || die 'dashboard artifacts or operational state changed before Python startup'
 assert_lease launch
 /usr/bin/env -i HOME="$INSTALL_HOME" PATH="$SAFE_PATH" KIST_HOME="$KIST_HOME" \
   LANG="en_US.UTF-8" LC_ALL="en_US.UTF-8" TMPDIR="/tmp" PYTHONNOUSERSITE=1 \

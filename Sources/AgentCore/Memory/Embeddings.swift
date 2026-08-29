@@ -6,6 +6,10 @@ import FoundationNetworking
 /// Turns text into vectors for semantic search. Provider-neutral so the vector store / memory service
 /// never depend on a specific vendor.
 public protocol EmbeddingProviding: Sendable {
+    /// Stable identity for the provider/model vector space. Vectors from different spaces must never
+    /// be compared merely because their dimensions happen to match. Every conformer must implement
+    /// this explicitly; configurable embedders may resolve immutable model identity asynchronously.
+    func embeddingSpaceID() async throws -> String
     /// One vector per input text, order-preserving.
     func embeddings(for texts: [String]) async throws -> [[Float]]
 }
@@ -25,6 +29,21 @@ public struct GeminiEmbeddingClient: EmbeddingProviding {
     private let model: String
 
     public static let defaultModel = "gemini-embedding-001"
+    public func embeddingSpaceID() async throws -> String {
+        guard let components = URLComponents(string: baseURL),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              (scheme == "https" || scheme == "http"),
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else {
+            throw EmbeddingError.badURL
+        }
+        var endpoint = "\(scheme)://\(host)"
+        if let port = components.port { endpoint += ":\(port)" }
+        let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !path.isEmpty { endpoint += "/\(path)" }
+        return "gemini:\(endpoint):\(model)"
+    }
 
     public init(apiKey: String, model: String = defaultModel,
                 transport: HTTPTransport = URLSessionTransport(),

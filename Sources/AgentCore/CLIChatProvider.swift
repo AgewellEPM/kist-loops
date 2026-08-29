@@ -75,7 +75,23 @@ public struct CLIChatProvider: ChatProvider {
             timeoutSeconds: max(1, Int(authTimeout.rounded(.up))),
             capPerStream: 8 * 1_024,
             graceSeconds: 1)
-        return outcome.exitCode == 0 && !outcome.timedOut
+        return Self.authenticationStatusIsUsable(
+            providerID: id, exitCode: outcome.exitCode,
+            timedOut: outcome.timedOut, stdout: outcome.stdout)
+    }
+
+    /// Claude's `auth status` exits zero even when its JSON says `loggedIn:false`, so process status
+    /// alone is not authentication evidence. Codex currently signals logout through a non-zero status;
+    /// keep that documented contract while parsing Claude's machine-readable result fail-closed.
+    static func authenticationStatusIsUsable(
+        providerID: String, exitCode: Int32, timedOut: Bool, stdout: String
+    ) -> Bool {
+        guard exitCode == 0, !timedOut else { return false }
+        guard providerID == "claude-cli" else { return true }
+        guard let data = stdout.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let status = object as? [String: Any] else { return false }
+        return status["loggedIn"] as? Bool == true
     }
 
     /// Whether the backing CLI binary exists at all (pure file checks — no subprocess, safe to call

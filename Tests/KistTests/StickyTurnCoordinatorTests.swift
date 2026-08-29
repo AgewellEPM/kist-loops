@@ -485,7 +485,7 @@ final class StickyTurnCoordinatorTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let runner = kistRunnerFamilySource()
         let dispatch = try XCTUnwrap(runner.range(of: "if opts.stickyBarSelfTest"))
-        let registry = try XCTUnwrap(runner.range(of: "var registry = makeRegistry()"))
+        let registry = try XCTUnwrap(runner.range(of: "var registry = makeRegistry(config: config)"))
         XCTAssertLessThan(dispatch.lowerBound, registry.lowerBound,
                           "offline diagnostic must dispatch before provider/MCP construction")
     }

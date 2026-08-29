@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// The shared enforcement gate every tool invocation passes through — skill capability scope +
 /// the immutable audit record + secret-masking — extracted so that COMPOSITE tools (research_run,
@@ -35,7 +36,8 @@ public enum ToolGate {
             await context.auditLog?.record(AuditEntry(at: Date().timeIntervalSince1970, tool: name,
                                                       argKeys: argKeys, argsDigest: argsDigest,
                                                       outcome: outcome, success: success,
-                                                      scope: allowlist?.sorted()))
+                                                      scope: allowlist?.sorted(),
+                                                      correlationID: context.correlationID))
         }
         // Authorization scope (action-class gate: plan-only / needs-approval). Enforced HERE, inside the
         // SHARED gate, so a composite sub-action (research_run → fetch/browse/visual) is subject to the
@@ -114,9 +116,9 @@ public enum ToolGate {
         switch type {
         case "string": return value is String
         case "array": return value is [Any]
-        case "boolean": return value is Bool
+        case "boolean": return isBooleanValue(value)
         case "integer":
-            if value is Bool { return false }
+            if isBooleanValue(value) { return false }
             if value is Int { return true }
             if let number = value as? NSNumber {
                 let double = number.doubleValue
@@ -124,10 +126,17 @@ public enum ToolGate {
             }
             return false
         case "number":
-            if value is Bool { return false }
+            if isBooleanValue(value) { return false }
             return value is NSNumber || value is Int || value is Double || value is Float
         default:
             return false
         }
+    }
+
+    /// Swift's Foundation bridge makes some NSNumber values (notably 0 and 1) satisfy `is Bool` on
+    /// Darwin. JSON integers must remain integers; only the CFBoolean singleton type is a boolean.
+    private static func isBooleanValue(_ value: Any) -> Bool {
+        guard let number = value as? NSNumber else { return value is Bool }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 }

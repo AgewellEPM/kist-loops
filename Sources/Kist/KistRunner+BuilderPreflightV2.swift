@@ -922,6 +922,7 @@ extension KistRunner {
         let captainDecisionDigest: String
         let producerIdentities: [String]
         let reviewerIdentity: String
+        let reviewGrade: EvolutionReviewGrade
         let parentMaxTokens: Int
         let budget: BudgetLedger
         let maxToolCalls: Int
@@ -931,6 +932,7 @@ extension KistRunner {
         init(store: BuilderCompositionArtifactStore, planStore: BuilderPreflightStore,
              executionNodeIDs: Set<String>, captainDecisionDigest: String,
              producerIdentities: [String], reviewerIdentity: String,
+             reviewGrade: EvolutionReviewGrade = .independent,
              maxTokens: Int, budget: BudgetLedger, maxToolCalls: Int = 256,
              maxWallTimeSeconds: Int = 1_800,
              requiresMissionLineage: Bool) throws {
@@ -943,6 +945,7 @@ extension KistRunner {
             self.captainDecisionDigest = captainDecisionDigest
             self.producerIdentities = producerIdentities
             self.reviewerIdentity = reviewerIdentity
+            self.reviewGrade = reviewGrade
             self.parentMaxTokens = maxTokens
             self.budget = budget
             self.maxToolCalls = maxToolCalls
@@ -1033,7 +1036,9 @@ extension KistRunner {
                 statement: "The staged build introduces no new warnings"))
             criteria.append(try BuilderStageCriterion(
                 id: "independent-review", stage: .review, kind: .modelJudgment,
-                statement: "A model independent of every producer approves the verified staged result"))
+                statement: reviewGrade == .independent
+                    ? "A model independent of every producer approves the verified staged result"
+                    : "A fresh-context separate invocation of the exact producer model approves the disposable staged result (independent=false)"))
             let total = try BuilderResourceBudget(
                 maxToolCalls: maxToolCalls, maxTokens: selectedTokenLimit,
                 maxWallTimeSeconds: maxWallTimeSeconds)
@@ -1044,7 +1049,8 @@ extension KistRunner {
             ])
             let identities = try BuilderIdentityPlan(
                 producers: producerIdentities.map { try builderModelIdentity($0) },
-                reviewers: [try builderModelIdentity(reviewerIdentity)])
+                reviewers: [try builderModelIdentity(reviewerIdentity)],
+                reviewGrade: reviewGrade)
             let contract = try BuilderExecutionContract(
                 builderContractID: request.builderContract.id,
                 builderNodeID: request.node.id, mutations: mutations,

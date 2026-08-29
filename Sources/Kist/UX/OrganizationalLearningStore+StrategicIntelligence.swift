@@ -23,9 +23,11 @@ extension OrganizationalLearningStore {
 
     @discardableResult
     func recordStrategicIntelligence(_ intelligence: StrategicIntelligenceSnapshot) -> Int {
+        guard writeStrategicArchive(intelligence) else { return 0 }
+
         var count = 0
         for target in intelligence.sourceTargets {
-            if appendJSON(DiskMemoryRecord(
+            if appendGenericMemory(DiskMemoryRecord(
                 id: target.id,
                 title: target.title,
                 summary: "\(target.category.rawValue) comparison: \(target.reason)",
@@ -41,12 +43,13 @@ extension OrganizationalLearningStore {
                 confidence: target.priority == .high ? 80 : 68,
                 impact: target.expectedImpact,
                 tags: ["strategic-intelligence", target.category.rawValue, target.priority.rawValue]
-            ), to: industryIntelligencePath) {
+            ), to: industryIntelligencePath, decayRate: .fast,
+               at: Date(timeIntervalSince1970: intelligence.generatedAt)) {
                 count += 1
             }
         }
         for proposal in intelligence.proposals {
-            if appendJSON(DiskMemoryRecord(
+            if appendGenericMemory(DiskMemoryRecord(
                 id: proposal.id,
                 title: proposal.title,
                 summary: proposal.reason,
@@ -59,11 +62,11 @@ extension OrganizationalLearningStore {
                 confidence: 82,
                 impact: proposal.expectedImpact,
                 tags: ["evolution-proposal", "strategic-intelligence"]
-            ), to: evolutionProposalsPath) {
+            ), to: evolutionProposalsPath, decayRate: .medium,
+               at: Date(timeIntervalSince1970: intelligence.generatedAt)) {
                 count += 1
             }
         }
-        writeStrategicArchive(intelligence)
         return count
     }
 
@@ -82,16 +85,16 @@ extension OrganizationalLearningStore {
                 reason: "Promoted from Strategic Intelligence proposal `\(proposal.title)`.",
                 evidence: proposal.evidenceNeeded + [proposal.benchmarkPlan],
                 sourceCapsuleID: nil)
-            if record.status == .active {
+            if record?.status == .active {
                 promoted += 1
             }
         }
         return promoted
     }
 
-    func writeStrategicArchive(_ intelligence: StrategicIntelligenceSnapshot) {
+    @discardableResult
+    func writeStrategicArchive(_ intelligence: StrategicIntelligenceSnapshot) -> Bool {
         let dir = researchArchiveRoot + "/strategic-intelligence"
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         var lines = [
             "# Strategic Intelligence \(intelligence.id)",
             "",
@@ -122,7 +125,14 @@ extension OrganizationalLearningStore {
         lines += ["", "## Questions"]
         lines += intelligence.questions.map { "- \($0)" }
         let path = dir + "/\(intelligence.id).md"
-        try? (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try (lines.joined(separator: "\n") + "\n")
+                .write(toFile: path, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            return false
+        }
     }
 
     func mergeResearch(_ items: [StatusDashboard.ResearchItem]) -> [StatusDashboard.ResearchItem] {

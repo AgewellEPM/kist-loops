@@ -18,6 +18,7 @@ final class PromptCompilerTests: XCTestCase {
         XCTAssertEqual(brief.intent, .build)
         XCTAssertEqual(brief.expectedOutcome, .mutation)
         XCTAssertEqual(PromptCompiler.compile("research the API").expectedOutcome, .evidence)
+        XCTAssertEqual(PromptCompiler.compile("review the API implementation").expectedOutcome, .evidence)
         XCTAssertEqual(PromptCompiler.compile("make a plan", mode: .plan).expectedOutcome, .plan)
         XCTAssertEqual(PromptCompiler.compile("what happened?").expectedOutcome, .answer)
         XCTAssertEqual(PromptCompiler.compile("open Safari").expectedOutcome, .externalAction)
@@ -139,6 +140,15 @@ final class PromptCompilerTests: XCTestCase {
 
         XCTAssertEqual(brief.intent, .build)
         XCTAssertTrue(brief.intent.expectsMutation)
+    }
+
+    func testInspectionThenExplicitRepairIsABuild() {
+        let request = "This is a disposable COBOL fixture. Inspect ledger.cob, diagnose the compiler failure, and make the smallest source fix."
+
+        XCTAssertEqual(PromptCompiler.inferIntent(request), .build)
+        XCTAssertEqual(PromptCompiler.compile(request).expectedOutcome, .mutation)
+        XCTAssertEqual(PromptCompiler.inferIntent("assess Kist and start fixing itself"), .build)
+        XCTAssertFalse(PromptCompiler.compile("Explain how to fix this").intent.expectsMutation)
     }
 
     func testDesktopNounCannotOverrideAnExplicitBuildDirective() {

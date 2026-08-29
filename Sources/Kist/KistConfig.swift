@@ -30,6 +30,14 @@ struct KistConfig {
     /// How the DEFAULT model is chosen when nothing is pinned: "power" (strongest) or "cost" (cheapest).
     /// Absent = power. Set by `/cost` · `/power` in the REPL or `--by-cost` · `--by-power`.
     var selectBy: ProviderSelectionPolicy? = nil
+    /// Optional provider-id allowlist. Absent preserves the historical unrestricted catalog; a
+    /// present list is a hard routing boundary applied before a ProviderRegistry is constructed.
+    /// An empty list intentionally permits no providers, and malformed policy input is decoded to
+    /// that same fail-closed state rather than silently restoring the full provider catalog.
+    var allowedProviders: Set<String>? = nil
+    /// Parsing diagnostic kept separate from the effective allowlist. This is deliberately not a
+    /// persisted field: `allowedProviders == []` is the enforcement state for malformed input.
+    var providerPolicyError: String? = nil
     var fetchAllowedHosts: [String] = []
 
     static func path() -> String {
@@ -53,6 +61,27 @@ struct KistConfig {
         _ policy: ProviderSelectionPolicy,
         atPath p: String,
         beforeCompareAndSwap: (() -> Void)? = nil
+    ) -> Bool {
+        writeMergedConfig(atPath: p, beforeCompareAndSwap: beforeCompareAndSwap) { obj in
+            obj["selectBy"] = policy.rawValue
+        }
+    }
+
+    /// Persist the provider boundary while preserving every other config field. Provider ids are
+    /// canonicalized exactly as they are during parsing, so a policy written by Kist round-trips to
+    /// the same effective set. An empty array is valid and means "deny every provider".
+    @discardableResult
+    static func writeAllowedProviders(_ providerIDs: [String], atPath p: String = path()) -> Bool {
+        guard let normalized = normalizeAllowedProviderIDs(providerIDs) else { return false }
+        return writeMergedConfig(atPath: p) { obj in
+            obj["allowedProviders"] = normalized.sorted()
+        }
+    }
+
+    private static func writeMergedConfig(
+        atPath p: String,
+        beforeCompareAndSwap: (() -> Void)? = nil,
+        update: (inout [String: Any]) -> Void
     ) -> Bool {
         inProcessWriteLock.lock()
         defer { inProcessWriteLock.unlock() }
@@ -79,7 +108,7 @@ struct KistConfig {
                         as? [String: Any] else { return false }
                 obj = parsed
             }
-            obj["selectBy"] = policy.rawValue
+            update(&obj)
             guard let data = try? JSONSerialization.data(
                 withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
                   data.count <= maxConfigBytes else { return false }
@@ -177,7 +206,8 @@ struct KistConfig {
     }
 
     private static func invalidPublicWebConfig() -> KistConfig {
-        KistConfig(fetchAllowedHosts: ["\0invalid-kist-config-json"])
+        KistConfig(allowedProviders: [], providerPolicyError: "invalid config JSON",
+                   fetchAllowedHosts: ["\0invalid-kist-config-json"])
     }
 
     /// Split from load() so parsing is testable without touching the real config path.
@@ -190,10 +220,51 @@ struct KistConfig {
         } else {
             fetchAllowedHosts = []
         }
+        let allowedProviders: Set<String>?
+        let providerPolicyError: String?
+        if let raw = obj["allowedProviders"] {
+            if let values = raw as? [String], let normalized = normalizeAllowedProviderIDs(values) {
+                allowedProviders = normalized
+                providerPolicyError = nil
+            } else {
+                // A present-but-malformed security policy must never mean "all providers".
+                allowedProviders = []
+                providerPolicyError = "allowedProviders must be an array of canonical provider ids"
+            }
+        } else {
+            allowedProviders = nil
+            providerPolicyError = nil
+        }
         return KistConfig(provider: obj["provider"] as? String,
                    model: obj["model"] as? String,
                    autoRouting: obj["autoRouting"] as? Bool,
                    selectBy: (obj["selectBy"] as? String).flatMap(ProviderSelectionPolicy.init(loose:)),
+                   allowedProviders: allowedProviders,
+                   providerPolicyError: providerPolicyError,
                    fetchAllowedHosts: fetchAllowedHosts)
+    }
+
+    /// Provider ids are stable lower-case routing identifiers, not display names or endpoint data.
+    /// Keeping the grammar narrow prevents whitespace/confusable values from turning a policy typo
+    /// into a surprising match while still admitting future providers such as `onyx-cobol`.
+    private static func normalizeAllowedProviderIDs(_ values: [String]) -> Set<String>? {
+        var normalized = Set<String>()
+        for value in values {
+            let id = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !id.isEmpty, id.utf8.count <= 128,
+                  id.unicodeScalars.allSatisfy({ scalar in
+                      switch scalar.value {
+                      case 0x61...0x7a, 0x30...0x39, 0x2d, 0x2e, 0x5f: return true
+                      default: return false
+                      }
+                  }) else { return nil }
+            normalized.insert(id)
+        }
+        return normalized
+    }
+
+    func permitsProvider(_ providerID: String) -> Bool {
+        guard let allowedProviders else { return true }
+        return allowedProviders.contains(providerID.lowercased())
     }
 }

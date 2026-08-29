@@ -312,8 +312,11 @@ public struct BuilderModelIdentity: Codable, Sendable, Equatable, Hashable {
 public struct BuilderIdentityPlan: Codable, Sendable, Equatable {
     public let producers: [BuilderModelIdentity]
     public let reviewers: [BuilderModelIdentity]
+    /// Optional for backward-compatible decoding/fingerprints. `nil` is the historical independent grade.
+    public let reviewGrade: EvolutionReviewGrade?
 
-    public init(producers: [BuilderModelIdentity], reviewers: [BuilderModelIdentity]) throws {
+    public init(producers: [BuilderModelIdentity], reviewers: [BuilderModelIdentity],
+                reviewGrade: EvolutionReviewGrade = .independent) throws {
         guard !producers.isEmpty, !reviewers.isEmpty else {
             throw BuilderExecutionContractError.invalidIdentity("producer and reviewer lists must both be nonempty")
         }
@@ -323,22 +326,44 @@ public struct BuilderIdentityPlan: Codable, Sendable, Equatable {
                 throw BuilderExecutionContractError.identityConflict(identity.canonicalID)
             }
         }
-        var reviewerModels: Set<String> = []
-        for identity in reviewers {
-            guard !producerModels.contains(identity.independenceKey),
-                  reviewerModels.insert(identity.independenceKey).inserted else {
-                throw BuilderExecutionContractError.identityConflict(identity.canonicalID)
+        switch reviewGrade {
+        case .independent:
+            var reviewerModels: Set<String> = []
+            for identity in reviewers {
+                guard !producerModels.contains(identity.independenceKey),
+                      reviewerModels.insert(identity.independenceKey).inserted else {
+                    throw BuilderExecutionContractError.identityConflict(identity.canonicalID)
+                }
+            }
+        case .freshContextSameModel:
+            guard producers.count == 1, reviewers.count == 1,
+                  producers[0].canonicalID.caseInsensitiveCompare(
+                    reviewers[0].canonicalID) == .orderedSame else {
+                throw BuilderExecutionContractError.invalidIdentity(
+                    "fresh_context_same_model requires one exact producer/reviewer provider:model identity")
             }
         }
         self.producers = producers.sorted { $0.canonicalID < $1.canonicalID }
         self.reviewers = reviewers.sorted { $0.canonicalID < $1.canonicalID }
+        self.reviewGrade = reviewGrade == .independent ? nil : reviewGrade
     }
 
-    private enum CodingKeys: String, CodingKey { case producers, reviewers }
+    public var effectiveReviewGrade: EvolutionReviewGrade { reviewGrade ?? .independent }
+
+    private enum CodingKeys: String, CodingKey { case producers, reviewers, reviewGrade }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(producers: values.decode([BuilderModelIdentity].self, forKey: .producers),
-                      reviewers: values.decode([BuilderModelIdentity].self, forKey: .reviewers))
+                      reviewers: values.decode([BuilderModelIdentity].self, forKey: .reviewers),
+                      reviewGrade: values.decodeIfPresent(
+                        EvolutionReviewGrade.self, forKey: .reviewGrade) ?? .independent)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(producers, forKey: .producers)
+        try values.encode(reviewers, forKey: .reviewers)
+        try values.encodeIfPresent(reviewGrade, forKey: .reviewGrade)
     }
 }
 

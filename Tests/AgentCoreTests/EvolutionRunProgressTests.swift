@@ -4,19 +4,21 @@ import XCTest
 /// Pins the multi-generation DGM progress arithmetic: only PASSED candidates count as fitness, strict
 /// improvement resets stagnation, and early-stop fires exactly at the patience threshold.
 final class EvolutionRunProgressTests: XCTestCase {
-
     private func rec(_ id: String, status: EvolutionCandidateStatus, score: Int) -> EvolutionCandidateRecord {
-        EvolutionCandidateRecord(runID: "r", candidateID: id, parentID: nil, objective: "o", branch: "b",
+        EvolutionTestAuthority.seal(EvolutionCandidateRecord(runID: "r", candidateID: id, parentID: nil, objective: "o", branch: "b",
                                  worktreePath: "/w", baseSHA: "0", commitSHA: "1", status: status, score: score,
-                                 changedFiles: ["a.swift"], protectedFiles: [], benchmarks: [], summary: "s", createdAtEpoch: 0)
+                                 changedFiles: ["a.swift"], protectedFiles: [], benchmarks: [], summary: "s", createdAtEpoch: 0))
     }
 
     func testBestPassingScoreIgnoresNonPassed() {
         let archive = [rec("a", status: .passed, score: 120), rec("b", status: .failed, score: 999),
                        rec("c", status: .blocked, score: 9999), rec("d", status: .passed, score: 150)]
-        XCTAssertEqual(EvolutionRunProgress.bestPassingScore(archive), 150)   // not the blocked 9999
-        XCTAssertNil(EvolutionRunProgress.bestPassingScore([rec("x", status: .failed, score: 5)]))
-        XCTAssertNil(EvolutionRunProgress.bestPassingScore([]))
+        XCTAssertEqual(EvolutionRunProgress.bestPassingScoreForTesting(archive), 150)
+        XCTAssertNil(EvolutionRunProgress.bestPassingScoreForTesting(
+            [rec("x", status: .failed, score: 5)]))
+        XCTAssertNil(EvolutionRunProgress.bestPassingScoreForTesting([]))
+        XCTAssertNil(EvolutionRunProgress.bestPassingScore(archive),
+                     "unwitnessed local benchmark scores are sterile")
     }
 
     func testImprovementSemantics() {

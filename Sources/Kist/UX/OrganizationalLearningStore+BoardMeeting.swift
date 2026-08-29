@@ -3,11 +3,16 @@ import AgentCore
 
 extension OrganizationalLearningStore {
     func runBoardMeeting(plan: Plan, trajectory: [ActionRecord]) -> EvolutionBoardReport {
+        runBoardMeeting(plan: plan, trajectory: trajectory, at: now())
+    }
+
+    func runBoardMeeting(plan: Plan, trajectory: [ActionRecord],
+                         at instant: Date) -> EvolutionBoardReport {
         let insights = DashboardResearchPlanner.build(for: plan, projectRoot: projectRoot,
                                                        trajectory: trajectory, limit: 6)
-        let debts = openKnowledgeDebt(limit: 8)
-        let latest = latestCapsule()
-        let timestamp = Int(now().timeIntervalSince1970)
+        let debts = openKnowledgeDebt(limit: 8, at: instant)
+        let latest = latestTemporallyEligibleCapsule(at: instant)
+        let timestamp = Int(instant.timeIntervalSince1970)
         let path = boardMeetingsRoot + "/\(timestamp)-evolve.md"
         ensureMemoryArchitecture()
         let strategy = CaptainStrategist.plan(objective: strategyObjective(plan: plan),
@@ -21,8 +26,9 @@ extension OrganizationalLearningStore {
             strategy: strategy,
             debts: debts,
             insights: insights,
-            learning: captainLearningRetrievalSummaries(),
-            generatedAt: now().timeIntervalSince1970,
+            learning: captainLearningRetrievalSummaries(
+                now: instant.timeIntervalSince1970),
+            generatedAt: instant.timeIntervalSince1970,
             isKistProject: isKistProject)
         let strategicResearch = strategicResearchItems(from: intelligence)
         let combinedInsights = DashboardInsightBundle(
@@ -32,15 +38,21 @@ extension OrganizationalLearningStore {
             observation: insights.observation)
         let seeded = seedResearchTasks(plan: plan, insights: combinedInsights)
         let strategicRecords = recordStrategicIntelligence(intelligence)
-        let retrieval = retrievalContext(objective: strategy.objective, strategy: strategy)
+        let retrieval = retrievalContext(
+            objective: strategy.objective, strategy: strategy, at: instant)
         let createdSpecialists = createMissingSpecialists(strategy.missingSpecialists)
         let existingRuleIDs = Set(permanentRules(limit: Int.max).map(\.id))
         let taughtRule = teachCaptain(plan: plan, latest: latest, strategy: strategy,
                                       intelligence: intelligence)
-        let taughtNew = taughtRule.status == .active && !existingRuleIDs.contains(taughtRule.id)
+        let taughtNew = taughtRule.map {
+            $0.status == .active && !existingRuleIDs.contains($0.id)
+        } ?? false
+        let reservedRuleIDs = taughtRule.map {
+            existingRuleIDs.union([$0.id])
+        } ?? existingRuleIDs
         let promotedStrategicRules = promoteStrategicProposalRules(
             intelligence,
-            existingRuleIDs: existingRuleIDs.union([taughtRule.id]))
+            existingRuleIDs: reservedRuleIDs)
         let promotedRules = (taughtNew ? 1 : 0) + promotedStrategicRules
         let rules = permanentRules(limit: 5)
         let proposed = proposedRules(limit: 5)
@@ -99,16 +111,22 @@ extension OrganizationalLearningStore {
                 "  Teachable rule: \(proposal.teachableRule)",
             ]
         }
-        lines += [
-            "",
-            "## Teach Captain",
-            "Question: What organizational lesson should become permanent?",
-            "\(taughtRule.status == .active ? "Promoted" : "Proposed") rule: \(taughtRule.id)",
-            "Lesson: \(taughtRule.lesson)",
-            "Confidence: \(taughtRule.confidence)%",
-            "Status: \(taughtRule.status.rawValue)",
-            "Reason: \(taughtRule.reason)",
-        ]
+        lines += ["", "## Teach Captain",
+                  "Question: What organizational lesson should become permanent?"]
+        if let taughtRule {
+            lines += [
+                "\(taughtRule.status == .active ? "Promoted" : "Proposed") rule: \(taughtRule.id)",
+                "Lesson: \(taughtRule.lesson)",
+                "Confidence: \(taughtRule.confidence)%",
+                "Status: \(taughtRule.status.rawValue)",
+                "Reason: \(taughtRule.reason)",
+            ]
+        } else {
+            lines += [
+                "Status: PERSISTENCE REFUSED",
+                "No rule was reported as taught; the existing organizational ledger was preserved.",
+            ]
+        }
         lines += ["", "## Highest Knowledge Debt"]
         let debtRows = debts.isEmpty
             ? insights.research.map { ($0.title, $0.reason, $0.impact) }
@@ -177,7 +195,7 @@ extension OrganizationalLearningStore {
     @discardableResult
     func teachCaptain(plan: Plan, latest: LearningCapsule?,
                               strategy: CaptainStrategyPlan,
-                              intelligence: StrategicIntelligenceSnapshot) -> OrganizationalRuleRecord {
+                              intelligence: StrategicIntelligenceSnapshot) -> OrganizationalRuleRecord? {
         let lesson = CaptainStrategist.organizationalLessonCandidate(
             objective: strategy.objective,
             expertiseNames: strategy.requiredExpertise.map(\.name)

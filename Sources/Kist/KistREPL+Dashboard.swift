@@ -96,9 +96,13 @@ extension KistREPL {
                                research: Self.mergeResearch(insights.research),
                                knowledgeDebt: Self.mergeKnowledgeDebt(insights.knowledgeDebt + persistedKnowledge),
                                questions: insights.questions,
+                               // Impact comes from the capsule's outcome, not a hardcoded "High"
+                               // (routing audit 2026-08-25: every dashboard claimed High impact
+                               // forever). A failed run's follow-up is genuinely high-impact; a
+                               // passing run makes no impact claim — the renderer skips empty.
                                futureEvolution: latestCapsule.map {
                                    .init(capability: $0.futureEvolution,
-                                         estimatedImpact: "High")
+                                         estimatedImpact: $0.status == .fail ? "High" : "")
                                },
                                observation: insights.observation,
                                confidenceReport: confidenceReport,

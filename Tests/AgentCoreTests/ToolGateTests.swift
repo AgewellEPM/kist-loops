@@ -12,6 +12,7 @@ final class ToolGateTests: XCTestCase {
         let parameters = [
             ToolParameter(name: "value", type: "string", description: "value", required: true),
             ToolParameter(name: "enabled", type: "boolean", description: "enabled", required: false),
+            ToolParameter(name: "count", type: "integer", description: "count", required: false),
         ]
         func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
             .init(success: true, output: "ran")
@@ -106,6 +107,21 @@ final class ToolGateTests: XCTestCase {
 
         let valid = await registry.execute(name: "schema_probe", arguments: ["value": "ok", "enabled": true], context: context)
         XCTAssertTrue(valid.success, valid.error ?? "")
+    }
+
+    func testJSONNSNumberOneIsAnIntegerNotABoolean() async throws {
+        let registry = ToolRegistry([SchemaProbeTool()])
+        let context = ToolContext(projectRoot: root)
+        let integer = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(#"{"value":"ok","count":1}"#.utf8)) as? [String: Any])
+        let accepted = await registry.execute(name: "schema_probe", arguments: integer, context: context)
+        XCTAssertTrue(accepted.success, accepted.error ?? "")
+
+        let boolean = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(#"{"value":"ok","count":true}"#.utf8)) as? [String: Any])
+        let rejected = await registry.execute(name: "schema_probe", arguments: boolean, context: context)
+        XCTAssertFalse(rejected.success)
+        XCTAssertTrue((rejected.error ?? "").contains("must be integer"), rejected.error ?? "")
     }
 
     func testPermissionDeniedErrorIsExplicit() {

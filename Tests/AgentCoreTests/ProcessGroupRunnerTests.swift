@@ -86,6 +86,20 @@ final class ProcessGroupRunnerTests: XCTestCase {
         XCTAssertTrue(waitGone(gc), "background grandchild \(gc) must be swept on normal return")
     }
 
+    func testNormalReturnSweepsChildThatClosedCapturedFileDescriptors() throws {
+        let pidfile = cwd + "/gc-closed-fds.pid"
+        let script = "(exec >/dev/null 2>&1; sleep 30) & echo $! > '\(pidfile)'; exit 0"
+        let outcome = ProcessGroupRunner.run(
+            launchPath: "/bin/sh", launchArgs: ["-c", script], cwd: cwd, env: env,
+            timeoutSeconds: 10, capPerStream: 100_000)
+        XCTAssertFalse(outcome.timedOut)
+        guard let child = readGrandchildPID(pidfile) else {
+            return XCTFail("closed-fd child never published its PID")
+        }
+        XCTAssertTrue(waitGone(child),
+                      "pipe EOF must not let closed-fd child \(child) survive the reserved-PGID sweep")
+    }
+
     func testOutputCapSweepsBackgroundGrandchild() throws {
         // Flood stdout past the cap (not a timeout): the cap callback tears the group down,
         // which must also take out the backgrounded grandchild.

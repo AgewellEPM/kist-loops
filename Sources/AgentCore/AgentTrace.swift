@@ -23,6 +23,9 @@ public struct AgentSpan: Sendable, Codable, Equatable, Identifiable {
     public let promptTokens: Int          // gen_ai.usage.input_tokens (measured; 0 if provider omits)
     public let completionTokens: Int      // gen_ai.usage.output_tokens
     public let finishReason: String?
+    /// Bounded, host-measured attributes. Tool spans use digest/count metadata only; raw arguments,
+    /// output, errors, and remote result metadata never enter the trace.
+    public let attributes: [String: String]?
     public let startedAt: Date
     public let endedAt: Date
     public let status: SpanStatus
@@ -30,11 +33,13 @@ public struct AgentSpan: Sendable, Codable, Equatable, Identifiable {
     public init(id: String, traceId: String, parentSpanId: String? = nil, kind: SpanKind,
                 role: String? = nil, vendor: String? = nil, model: String? = nil, toolName: String? = nil,
                 promptTokens: Int = 0, completionTokens: Int = 0, finishReason: String? = nil,
+                attributes: [String: String]? = nil,
                 startedAt: Date, endedAt: Date, status: SpanStatus = .ok) {
         self.id = id; self.traceId = traceId; self.parentSpanId = parentSpanId; self.kind = kind
         self.role = role; self.vendor = vendor; self.model = model; self.toolName = toolName
         self.promptTokens = promptTokens; self.completionTokens = completionTokens
-        self.finishReason = finishReason; self.startedAt = startedAt; self.endedAt = endedAt; self.status = status
+        self.finishReason = finishReason; self.attributes = attributes
+        self.startedAt = startedAt; self.endedAt = endedAt; self.status = status
     }
 
     public var totalTokens: Int { promptTokens + completionTokens }

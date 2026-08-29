@@ -12,10 +12,13 @@ final class EvolutionLoopWiringTests: XCTestCase {
         XCTAssertEqual(ToolOwnershipResolver.owner(of: "run_command"), .kist)
     }
 
-    // P5 — outcome mapping: promoted/rejected are recorded (so dedup fires); N/A + skip are not.
+    // P5 — a hard-contained promotion remains terminal, while the current advisory ceiling is recorded as
+    // blocked (retryable after the missing host authority is actually wired), never as promoted.
     func testLedgerOutcomeMapping() {
         XCTAssertEqual(ClosedEvolutionLoop.ledgerOutcome(for: .promoted), "promoted")
-        for r in [EvolutionOutcome.rejectedGate, .rejectedVeto, .rejectedAdversary, .rejectedSameProvider, .authorFailed] {
+        XCTAssertEqual(ClosedEvolutionLoop.ledgerOutcome(for: .quarantinedHardContainment), "blocked")
+        for r in [EvolutionOutcome.rejectedGate, .rejectedVeto, .rejectedAdversary,
+                  .rejectedSameProvider, .quarantinedSameModel, .authorFailed] {
             XCTAssertEqual(ClosedEvolutionLoop.ledgerOutcome(for: r), "rejected", "\(r) must be recorded so we don't retry it")
         }
         XCTAssertNil(ClosedEvolutionLoop.ledgerOutcome(for: .notApplicable))

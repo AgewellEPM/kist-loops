@@ -162,7 +162,8 @@ public struct SpecialistSpawner: Sendable {
                 authorizationScope: context.authorizationScope,
                 scopeOverrideApproved: context.scopeOverrideApproved,
                 skillLocations: context.skillLocations, skillTracker: context.skillTracker,
-                auditLog: context.auditLog, externalReadRoots: context.externalReadRoots)
+                auditLog: context.auditLog, externalReadRoots: context.externalReadRoots,
+                correlationID: context.correlationID, traceRecorder: context.traceRecorder)
         }
 
         let loop = HeadlessAgentLoop(

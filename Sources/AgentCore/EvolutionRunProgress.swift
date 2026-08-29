@@ -10,7 +10,16 @@ public enum EvolutionRunProgress {
     /// candidate is the only kind that represents a real, benchmarked improvement (stepping-stones can be
     /// bred from but are not "progress"). nil ⇒ nothing has passed yet.
     public static func bestPassingScore(_ records: [EvolutionCandidateRecord]) -> Int? {
-        records.filter { $0.status == .passed }.map(\.score).max()
+        let readiness = EvolutionAutonomyReadinessAssessment.current
+        guard !readiness.blockers.contains(where: {
+            $0.gate == .parentRelativeCapabilityFitness || $0.gate == .externalRollbackWitness
+        }) else { return nil }
+        return bestPassingScoreForTesting(records)
+    }
+
+    /// Pure arithmetic seam for unit tests. Production callers cannot inject an optimistic readiness object.
+    static func bestPassingScoreForTesting(_ records: [EvolutionCandidateRecord]) -> Int? {
+        return records.filter { $0.hasValidArchiveAuthority && $0.status == .passed }.map(\.score).max()
     }
 
     /// Did the best passing score STRICTLY improve? A first pass (nil → some) counts as improvement.

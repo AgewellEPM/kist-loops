@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Linux OS-level sandbox for `run_command` — the counterpart to macOS `SeatbeltSandbox`. Uses
 /// bubblewrap (`bwrap`, unprivileged user namespaces) to enforce the SAME policy the Seatbelt profile
@@ -33,17 +38,37 @@ enum BubblewrapSandbox {
         guard let canonicalRoot = ToolContext.canonicalize(root) else {
             return .unavailable(reason: "cannot canonicalize sandbox root: \(root)")
         }
+        var denied: [String] = policy.forbiddenReadPaths
+        if policy.denyRealHomeReads { denied.append(NSHomeDirectory()) }
+        var canonicalDenied: [String] = []
+        for path in denied {
+            guard path.hasPrefix("/"), path != "/", path.utf8.count <= 4_096,
+                  let canonical = ToolContext.canonicalize(path), canonical != "/",
+                  canonical != canonicalRoot,
+                  !canonicalRoot.hasPrefix(canonical + "/"),
+                  !canonical.hasPrefix(canonicalRoot + "/") else {
+                return .unavailable(reason: "sandbox forbidden-read roots are invalid or overlap the project root")
+            }
+            var status = stat()
+            guard lstat(canonical, &status) == 0,
+                  status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                return .unavailable(reason: "Linux strict sandbox can mask only existing authority directories")
+            }
+            canonicalDenied.append(canonical)
+        }
         let canonicalCwd = ToolContext.canonicalize(cwd) ?? canonicalRoot
         return .wrapped(path: bwrap,
                         args: buildArgs(root: canonicalRoot, cwd: canonicalCwd, policy: policy,
-                                        launchPath: launchPath, args: args))
+                                        launchPath: launchPath, args: args,
+                                        validatedReadDenyPaths: Array(Set(canonicalDenied)).sorted()))
     }
 
     /// Pure bubblewrap argv for the given policy. Order matters: the read-only bind of `/` comes first,
     /// then the essential virtual filesystems and the writable root bind OVERRIDE it for their subtrees
     /// (bwrap applies binds left-to-right, later wins).
     static func buildArgs(root: String, cwd: String, policy: SandboxPolicy,
-                          launchPath: String, args: [String]) -> [String] {
+                          launchPath: String, args: [String],
+                          validatedReadDenyPaths: [String]? = nil) -> [String] {
         // Namespace isolation (Codex-hardened):
         //   --unshare-pid : a fresh PID namespace so the sandbox can't see other processes' /proc/<pid>/
         //                   environ (which would leak API keys that never passed through SecretMasker).
@@ -60,6 +85,12 @@ enum BubblewrapSandbox {
         // --unshare-net does NOT block — otherwise a confined command could talk to the Docker socket
         // and escape by launching a container that bind-mounts /.
         a += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run"]
+        let denied = validatedReadDenyPaths ?? {
+            var values = policy.forbiddenReadPaths
+            if policy.denyRealHomeReads { values.append(NSHomeDirectory()) }
+            return Array(Set(values)).sorted()
+        }()
+        for path in denied { a += ["--tmpfs", path] }
         if policy.confineWrites {
             a += ["--bind", root, root]                 // make ONLY the project root writable (overrides ro-bind)
         }

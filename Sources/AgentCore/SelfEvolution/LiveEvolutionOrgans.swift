@@ -14,19 +14,35 @@ public struct LiveCapabilityAuthor: CapabilityAuthor {
     let registry: ProviderRegistry
     let providerId: String
     let model: String?
+    let canonicalIdentity: String
     let sandboxRoot: String   // candidates are written here (NOT the activation store — gating happens first)
 
-    public init(registry: ProviderRegistry, providerId: String, model: String?, sandboxRoot: String) {
-        self.registry = registry; self.providerId = providerId; self.model = model; self.sandboxRoot = sandboxRoot
+    public init(registry: ProviderRegistry, providerId: String, model: String?,
+                canonicalIdentity: String? = nil, sandboxRoot: String) {
+        let resolvedModel = registry.provider(id: providerId)?.resolvedModel(model) ?? model
+        self.registry = registry
+        self.providerId = providerId
+        self.model = resolvedModel
+        self.canonicalIdentity = canonicalIdentity
+            ?? providerId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                + ":" + (resolvedModel ?? "default").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.sandboxRoot = sandboxRoot
     }
 
     struct Output: Codable { let manifest: SelfAuthoredManifest; let script: String }
 
     public func author(brief: String, culpritTool: String, signature: String) async -> CapabilityCandidate? {
+        // Bind the artifact to this concrete provider invocation. The critic receives a separate ID and a
+        // brand-new transcript, so a same-model review cannot masquerade as another author conversation turn.
+        let invocationID = UUID().uuidString
         let prompt = Self.prompt(brief: brief, culpritTool: culpritTool)
-        guard let raw = try? await registry.complete(providerId: providerId, model: model,
-                                                     messages: [ChatMessage(role: .user, content: prompt)]),
-              let out = Self.parse(raw),
+        guard let completion = try? await registry.completeWithRoute(
+                providerId: providerId, model: model,
+                messages: [ChatMessage(role: .user, content: prompt)],
+                allowFallback: false, allowModelResolution: false),
+              completion.providerId.caseInsensitiveCompare(providerId) == .orderedSame,
+              completion.model.caseInsensitiveCompare(model ?? "") == .orderedSame,
+              let out = Self.parse(completion.text),
               out.manifest.name.hasPrefix(kistSelfAuthoredPrefix) else { return nil }
         // CONFINE FIRST (fail-closed) — the name + scriptFile are UNTRUSTED model output. Before creating
         // ANY directory or writing ANY file, prove the per-candidate home and every file we're about to
@@ -46,8 +62,11 @@ public struct LiveCapabilityAuthor: CapabilityAuthor {
             let mData = try JSONEncoder().encode(out.manifest)
             try mData.write(to: manifestURL)
         } catch { return nil }
-        return CapabilityCandidate(toolName: out.manifest.name, workdir: home,
-                                   contract: out.manifest.contract, authorProvider: providerId)
+        return CapabilityCandidate(
+            toolName: out.manifest.name, workdir: home,
+            contract: out.manifest.contract, authorProvider: providerId,
+            authorModel: model, authorCanonicalIdentity: canonicalIdentity,
+            authorInvocationID: invocationID)
     }
 
     static func prompt(brief: String, culpritTool: String) -> String {
@@ -86,11 +105,26 @@ public struct LiveCapabilityAuthor: CapabilityAuthor {
 
 public struct LiveCapabilityAdversary: CapabilityAdversary {
     let registry: ProviderRegistry
-    public let provider: String     // MUST differ from the author's provider (enforced by the loop, fail-closed)
+    public let provider: String
     let model: String?
+    public let reviewContext: EvolutionReviewContext
 
-    public init(registry: ProviderRegistry, provider: String, model: String?) {
-        self.registry = registry; self.provider = provider; self.model = model
+    public init(registry: ProviderRegistry, provider: String, model: String?,
+                reviewGrade: EvolutionReviewGrade = .independent,
+                canonicalIdentity: String? = nil) {
+        let resolvedModel = registry.provider(id: provider)?.resolvedModel(model) ?? model
+        self.registry = registry
+        self.provider = provider
+        self.model = resolvedModel
+        self.reviewContext = EvolutionReviewContext(
+            grade: reviewGrade,
+            provider: provider,
+            model: resolvedModel,
+            canonicalIdentity: canonicalIdentity
+                ?? provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    + ":" + (resolvedModel ?? "default").trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            invocationID: UUID().uuidString,
+            freshConversation: true)
     }
 
     struct Attack: Codable { let breakingArgs: [String: String]?; let expectContains: String?; let confidence: Double? }
@@ -110,19 +144,30 @@ public struct LiveCapabilityAdversary: CapabilityAdversary {
                                     attackFound: "script path escapes candidate sandbox — refusing to execute",
                                     confidence: 0.95)
         }
-        let prompt = Self.prompt(manifest: manifest)
-        guard let raw = try? await registry.complete(providerId: provider, model: model,
-                                                     messages: [ChatMessage(role: .user, content: prompt)]),
-              let atk = Self.parse(raw) else {
+        let prompt = Self.prompt(manifest: manifest, reviewGrade: reviewContext.grade)
+        // Fresh conversation is structural: this separate provider completion receives exactly one newly
+        // created user message and none of the author's messages or response.
+        guard let completion = try? await registry.completeWithRoute(
+                providerId: provider, model: model,
+                messages: [ChatMessage(role: .user, content: prompt)],
+                allowFallback: false, allowModelResolution: false),
+              completion.providerId.caseInsensitiveCompare(provider) == .orderedSame,
+              completion.model.caseInsensitiveCompare(model ?? "") == .orderedSame,
+              let atk = Self.parse(completion.text) else {
             // Couldn't attack → NOT a vouch. Low confidence ⇒ the promote gate holds.
             return AdversaryVerdict(survived: true, attackFound: nil, confidence: 0.0)
         }
-        // No breaking input proposed → the adversary couldn't break it; carry its confidence to the gate.
-        guard let bad = atk.breakingArgs, let expect = atk.expectContains, !bad.isEmpty else {
-            return AdversaryVerdict(survived: true, attackFound: nil, confidence: min(max(atk.confidence ?? 0.5, 0), 1))
+        // A prose/opinion-only vouch is not execution evidence. Promotion requires an actual input and a
+        // non-empty oracle string that the contained runner can check; otherwise fail closed at confidence
+        // zero even when the reviewer claims certainty.
+        guard let (bad, expect) = Self.executableAttack(atk) else {
+            return AdversaryVerdict(
+                survived: true,
+                attackFound: "\(reviewContext.grade.evidenceLabel) supplied no executable counterexample",
+                confidence: 0.0)
         }
-        // EXECUTION-GROUNDED: actually RUN the proposed input through the contained runner and check the
-        // tool's real output against what the adversary says is correct. A break is proven by the runner.
+        // This production call currently refuses before interpreter launch. Until a separately typed hard
+        // runner returns exact per-execution authority, adversarial prose cannot become execution evidence.
         let cli = ScriptTool.cliArgs(from: bad, manifest: manifest)
         let r = await ScriptTool.runContained(interpreter: manifest.interpreter, scriptPath: scriptPath, args: cli)
         if !r.success {
@@ -136,15 +181,32 @@ public struct LiveCapabilityAdversary: CapabilityAdversary {
         return AdversaryVerdict(survived: true, attackFound: nil, confidence: min(max(atk.confidence ?? 0.7, 0.6), 1))
     }
 
-    static func prompt(manifest: SelfAuthoredManifest) -> String {
-        """
-        A DIFFERENT model authored this tool. Try to BREAK it. Its contract: “\(manifest.contract)”.
+    static func prompt(manifest: SelfAuthoredManifest,
+                       reviewGrade: EvolutionReviewGrade = .independent) -> String {
+        let provenance: String
+        switch reviewGrade {
+        case .independent:
+            provenance = "A model on a DIFFERENT provider authored this tool."
+        case .freshContextSameModel:
+            provenance = "A separate, fresh conversation of this SAME model authored this tool. This review is not independent."
+        }
+        return """
+        \(provenance) Try to BREAK it. Its contract: “\(manifest.contract)”.
         Its parameters: \(manifest.parameters.map { $0.name }.joined(separator: ", ")).
         Find ONE input where it should produce a specific correct output but likely won't (edge case, empty,
         unicode, large, boundary). Reply with ONLY JSON:
         {"breakingArgs":{"<param>":"<value>"},"expectContains":"<what a CORRECT tool must output>","confidence":0.0-1.0}
-        If you genuinely cannot find a breaking input, reply {"breakingArgs":null,"expectContains":null,"confidence":<how sure it's correct>}.
+        You MUST provide a concrete input and a non-empty expected substring so the host can execute and
+        verify your attack. If you genuinely cannot do that, reply
+        {"breakingArgs":null,"expectContains":null,"confidence":0}; that cannot authorize promotion.
         """
+    }
+
+    static func executableAttack(_ attack: Attack) -> ([String: String], String)? {
+        guard let arguments = attack.breakingArgs, !arguments.isEmpty,
+              let expected = attack.expectContains,
+              !expected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (arguments, expected)
     }
 
     static func parse(_ raw: String) -> Attack? {

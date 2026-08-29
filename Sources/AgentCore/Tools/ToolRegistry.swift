@@ -133,9 +133,18 @@ public struct ToolRegistry: Sendable {
         }
     }
 
+    /// Builtin skill locations, cached once — consulted only on the unknown-tool path to teach
+    /// interface misuse (a skill called as if it were a tool). Discovery reads the resource
+    /// bundle; failure there yields an empty map and the plain unknown-tool refusal stands.
+    private static let builtinSkillLocations: [String: String] = {
+        let (skills, _) = SkillDiscovery.discoverBuiltins()
+        return Dictionary(skills.map { ($0.name, $0.skillFilePath) }, uniquingKeysWith: { a, _ in a })
+    }()
+
     /// Execute a tool by name, never throwing — unknown tools and thrown errors are
     /// normalized into a failed `ToolResult` so the agent loop can observe and recover.
     public func execute(name: String, arguments: [String: Any], context: ToolContext) async -> ToolResult {
+        let spanStartedAt = Date()
         let telemetryStarted = DispatchTime.now().uptimeNanoseconds
         // Audit at THE choke point (council #1): one immutable record per invocation, capturing the
         // tool + an arg DIGEST (values hashed, never logged raw) + the enforcement OUTCOME. Records
@@ -148,17 +157,58 @@ public struct ToolRegistry: Sendable {
         func audit(_ outcome: String, _ success: Bool) async {
             await context.auditLog?.record(AuditEntry(at: Self.now(), tool: name, argKeys: rawArgKeys,
                                                       argsDigest: rawArgsDigest, outcome: outcome,
-                                                      success: success, scope: activeScope))
+                                                      success: success, scope: activeScope,
+                                                      correlationID: context.correlationID))
+        }
+
+        func traced(_ result: ToolResult, argumentKeys: [String],
+                    argumentsDigest: String) async -> ToolResult {
+            guard let recorder = context.traceRecorder else { return result }
+            let metadataCanonical = result.metadata.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }.joined(separator: "\u{1f}")
+            let resultDigest = AuditLog.digest([
+                "success": result.success, "output": result.output,
+                "error": result.error ?? "", "metadata": metadataCanonical,
+            ]).digest
+            let metadataDigest = AuditLog.digest(["metadata": metadataCanonical]).digest
+            await recorder.record(AgentSpan(
+                id: TraceID.make(), traceId: recorder.traceId, kind: .toolCall,
+                toolName: name,
+                attributes: [
+                    "arguments.digest": argumentsDigest,
+                    "arguments.key_count": String(argumentKeys.count),
+                    "result.digest": resultDigest,
+                    "result.output_bytes": String(result.output.utf8.count),
+                    "result.error_bytes": String((result.error ?? "").utf8.count),
+                    "result.metadata_count": String(result.metadata.count),
+                    "result.metadata_digest": metadataDigest,
+                ],
+                startedAt: spanStartedAt, endedAt: Date(),
+                status: result.success ? .ok : .error))
+            return result
         }
 
         guard let tool = tools[name] else {
+            // Interface-misuse teaching (autopsy 2026-08-25): a weak model called the ADVERTISED
+            // skill `code-investigation` as if it were a tool; the bare "unknown tool" refusal was
+            // then classified as a capability gap (toolLimit) and spawned a ghost "extend the tool"
+            // self-heal mission — the first domino in the autonomy flatline. When the name matches
+            // a known builtin skill, teach the real interface so the model's NEXT step is the
+            // correct read — and the failure classifier sees guidance, not absence.
+            if let skillLocation = Self.builtinSkillLocations[name] {
+                await audit("skill_called_as_tool", false)
+                return await traced(
+                    .failure("'\(name)' is a skill, not a tool. Read \(skillLocation) with read_file, then follow its instructions using the tools it names."),
+                    argumentKeys: rawArgKeys, argumentsDigest: rawArgsDigest)
+            }
             await audit("unknown_tool", false)
             BuilderTrustedTelemetry.recordTool(
                 name: "unknown-tool", argumentsDigest: rawArgsDigest, success: false,
                 elapsedMilliseconds: 1,
                 workspaceRootIdentity: try? BuilderWorkspaceRootIdentity.capture(
                     rootPath: context.projectRoot))
-            return .failure("unknown tool: \(name)")
+            return await traced(.failure("unknown tool: \(name)"),
+                                argumentKeys: rawArgKeys, argumentsDigest: rawArgsDigest)
         }
         let effectiveArguments = (tool as? any ToolArgumentCanonicalizing)?
             .canonicalizeToolArguments(arguments) ?? arguments
@@ -178,7 +228,7 @@ public struct ToolRegistry: Sendable {
             elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)),
             workspaceRootIdentity: try? BuilderWorkspaceRootIdentity.capture(
                 rootPath: context.projectRoot))
-        return result
+        return await traced(result, argumentKeys: rawArgKeys, argumentsDigest: argsDigest)
     }
 
     /// Epoch seconds without `Date()` ambiguity (kept simple + Sendable).

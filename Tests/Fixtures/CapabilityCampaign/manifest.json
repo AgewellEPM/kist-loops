@@ -1,0 +1,617 @@
+{
+  "schema": "kist.codex-capability-campaign.v1",
+  "providerPolicy": {
+    "schema": "kist.inference-provider-policy.v1",
+    "allowedProviders": ["codex-cli"],
+    "allowedModels": {"codex-cli": ["gpt-5.6-sol"]}
+  },
+  "context": {
+    "PERSLIS_REPO": "${HOME}/perslis-dos-snake",
+    "GHOSTBRIDGE_REPO": "${HOME}/GhostBridge",
+    "TINKY_REPO": "${HOME}/tinkybink-dashboard",
+    "TINKY_MCP_REPO": "${HOME}/tinky-vision-mcp",
+    "DASHBOARD_REPO": "${HOME}/.kist/cortex/live"
+  },
+  "phases": [
+    {
+      "id": "preflight",
+      "description": "Identity, toolchain, frozen-contract, and MCP schema inventory with no actuation.",
+      "steps": [
+        {
+          "id": "codex-auth",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}",
+          "argv": ["/opt/homebrew/bin/codex", "login", "status"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["/opt/homebrew/bin/codex"],
+          "timeoutSeconds": 10,
+          "expect": {"exitCodes": [0], "combinedContains": ["Logged in"]}
+        },
+        {
+          "id": "kist-version",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${KIST_REPO}",
+          "argv": ["${KIST_REPO}/.build/debug/kist", "--version"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${KIST_REPO}/.build/debug/kist"],
+          "timeoutSeconds": 10,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "perslis-doctor",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${PERSLIS_REPO}",
+          "argv": ["${HOME}/bin/perslis", "doctor"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/bin/perslis", "${HOME}/.perslis/unified/current"],
+          "timeoutSeconds": 60,
+          "expect": {"exitCodes": [0], "combinedContains": ["\"overall\":\"passed\"", "\"toolCount\":22", "\"catalogEntryCount\":68"]}
+        },
+        {
+          "id": "mcp-inventory",
+          "kind": "mcp_inventory",
+          "safety": "read_only",
+          "config": "${HOME}/.mcp.json",
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/.mcp.json"],
+          "timeoutSeconds": 20,
+          "expectedServers": [
+            "isolated-tester",
+            "jeeves-floor",
+            "lsp-swift",
+            "tinky-vision-readonly",
+            "tinky-vision-control",
+            "jeeves-floor-code",
+            "perslis",
+            "vm-guest-isolated",
+            "garbage-man"
+          ]
+        },
+        {
+          "id": "mcp-unarmed-computer-use-denial",
+          "kind": "mcp_unarmed_denial",
+          "safety": "read_only",
+          "config": "${HOME}/.mcp.json",
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/.mcp.json"],
+          "assertions": [
+            {"server": "isolated-tester", "tool": "screenshot", "effect": "readOnly", "expected": "denied_unarmed"},
+            {"server": "isolated-tester", "tool": "click", "effect": "projectMutation", "expected": "denied_unarmed"},
+            {"server": "tinky-vision-control", "tool": "os_screenshot", "effect": "readOnly", "expected": "denied_unarmed"},
+            {"server": "tinky-vision-control", "tool": "os_click", "effect": "projectMutation", "expected": "denied_unarmed"},
+            {"server": "tinky-vision-control", "tool": "portal_remote_status", "effect": "readOnly", "expected": "denied_unarmed"},
+            {"server": "tinky-vision-control", "tool": "portal_remote_begin", "effect": "projectMutation", "expected": "denied_unarmed"},
+            {"server": "perslis", "tool": "vm_capture", "effect": "readOnly", "expected": "denied_unarmed"},
+            {"server": "perslis", "tool": "vm_control", "effect": "projectMutation", "expected": "denied_unarmed"},
+            {"server": "perslis", "tool": "vm_launch", "effect": "projectMutation", "expected": "denied_unarmed"},
+            {"server": "vm-guest-isolated", "tool": "guest_frame", "effect": "readOnly", "expected": "denied_unarmed"},
+            {"server": "vm-guest-isolated", "tool": "guest_execute", "effect": "projectMutation", "expected": "denied_unarmed"}
+          ]
+        },
+        {
+          "id": "mcp-readonly-calls",
+          "kind": "mcp_safe_calls",
+          "safety": "read_only",
+          "config": "${HOME}/.mcp.json",
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/.mcp.json"],
+          "timeoutSeconds": 180,
+          "expectedServers": [
+            "isolated-tester",
+            "jeeves-floor",
+            "lsp-swift",
+            "tinky-vision-readonly",
+            "tinky-vision-control",
+            "jeeves-floor-code",
+            "perslis",
+            "vm-guest-isolated",
+            "garbage-man"
+          ],
+          "calls": [
+            {"server": "isolated-tester", "tool": "setup_status", "arguments": {}},
+            {"server": "jeeves-floor", "tool": "engineering_rules", "arguments": {"objective": "compile and verify a COBOL batch"}},
+            {"server": "lsp-swift", "tool": "diagnostics", "arguments": {"filePath": "${KIST_REPO}/Sources/AgentCore/Tools/ToolGate.swift"}},
+            {"server": "tinky-vision-readonly", "tool": "os_ax_check", "arguments": {}},
+            {"server": "tinky-vision-control", "tool": "os_ax_check", "arguments": {}},
+            {"server": "jeeves-floor-code", "tool": "engineering_rules", "arguments": {"objective": "compile and verify a COBOL batch"}},
+            {"server": "perslis", "tool": "perslis_identity", "arguments": {}, "expect": {"contains": ["ready"]}},
+            {"server": "vm-guest-isolated", "tool": "guest_frame", "arguments": {}, "notApplicableReason": "non-live campaign must not capture or touch an existing guest; schema and unarmed-denial rungs cover this server"},
+            {"server": "garbage-man", "tool": "garbage_find_home", "arguments": {"path": "${KIST_REPO}"}}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kist_protocol",
+      "description": "Kist completion gates, workspace transaction isolation, and live Codex-to-Kist JSON actions.",
+      "steps": [
+        {
+          "id": "kist-loop-and-transaction-tests",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${KIST_REPO}",
+          "argv": ["/usr/bin/swift", "test", "--filter", "HeadlessAgentLoopTests|BuilderIsolatedWorkspaceTransactionTests|BuilderOSProcessSandboxAttestorTests|CompletionVerifierTests|PromptCompilerTests|ToolGateTests|KistBuilderRunCompositionTests|AgentCoreTests.testRegistryRequiresSubscriptionCLIAuthenticationNotJustInstallation|AgentCoreTests.testClaudeCLIAuthenticationStatusParsesLoggedInFieldFailClosed"],
+          "resumeBindings": ["/usr/bin/swift"],
+          "resumeTreeBindings": [
+            {"path": "${KIST_REPO}", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", ".kist", "DerivedData", "build", "dist", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 900,
+          "expect": {"exitCodes": [0], "combinedContains": ["0 failures"]}
+        },
+        {
+          "id": "kist-mcp-and-evolution-policy-tests",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${KIST_REPO}",
+          "argv": ["/usr/bin/swift", "test", "--filter", "MCPClientTests|MCPReconnectReliabilityTests|ComputerUseArmingTests|EvolveProviderSelectionTests|LiveOrgansParseTests"],
+          "resumeBindings": ["/usr/bin/swift"],
+          "resumeTreeBindings": [
+            {"path": "${KIST_REPO}", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", ".kist", "DerivedData", "build", "dist", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 900,
+          "expect": {"exitCodes": [0], "combinedContains": ["0 failures"]}
+        },
+        {
+          "id": "codex-kist-read-probe",
+          "kind": "command",
+          "safety": "subscription",
+          "modelInference": true,
+          "provider": "codex-cli",
+          "authorModel": "gpt-5.6-sol",
+          "cwd": "${KIST_REPO}",
+          "argv": [
+            "${KIST_REPO}/.build/debug/kist", "--provider", "codex-cli", "--model", "gpt-5.6-sol", "--tools", "text",
+            "--budget", "100000", "--max-iterations", "16", "--sandbox", "--project", "${KIST_REPO}",
+            "READ-ONLY AUTOPSY PROBE. Work in bounded microtasks and finish every document before inspecting code. First use Kist tools to read, in order, AGENTS.md, CLAUDE.md, docs/KIST_AUTONOMY_FLATLINE_AUTOPSY_2026-08-27.md, docs/KIST_MEMORY_GOVERNANCE_STATUS_2026-08-28.md, docs/kist/GREAT_LOOP_EVOLUTION_ROADMAP.md, and docs/CODEX_CAPABILITY_FAILURE_ZONE_CAMPAIGN_2026-08-27.md. Then inspect git status and only narrowly path-scoped diffs for the specific memory, evidence, sandbox, and evolution claims you need to verify; never request the unscoped full repository diff. Assess Kist internally against those documents: identify the flatline causes, which repairs the current diff actually supports, the memory and DGM boundaries, and every remaining red gate before autonomy. End with two explicit lines beginning AUTOPSY_ASSESSMENT: and RED_GATES:. Do not edit, build, deploy, run shell commands, or use external systems. If you made no Kist tool call, you are not done."
+          ],
+          "resumeBindings": ["${KIST_REPO}/.build/debug/kist", "/opt/homebrew/bin/codex"],
+          "resumeTreeBindings": [
+            {"path": "${KIST_REPO}", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", ".kist", "DerivedData", "build", "dist", "node_modules", ".next", "__pycache__"]}
+          ],
+          "resourceScopes": ["subscription:global", "workspace:${KIST_REPO}"],
+          "timeoutSeconds": 600,
+          "expect": {
+            "exitCodes": [0],
+            "combinedContains": [
+              "tool call(s)",
+              "read_file working · path=AGENTS.md",
+              "read_file working · path=CLAUDE.md",
+              "read_file working · path=docs/KIST_AUTONOMY_FLATLINE_AUTOPSY_2026-08-27.md",
+              "read_file working · path=docs/KIST_MEMORY_GOVERNANCE_STATUS_2026-08-28.md",
+              "read_file working · path=docs/kist/GREAT_LOOP_EVOLUTION_ROADMAP.md",
+              "read_file working · path=docs/CODEX_CAPABILITY_FAILURE_ZONE_CAMPAIGN_2026-08-27.md",
+              "git working · subcommand: status",
+              "git working · subcommand: diff",
+              "AUTOPSY_ASSESSMENT:",
+              "RED_GATES:"
+            ],
+            "combinedExcludes": [
+              "0 tool call(s)",
+              "REVIEW INCOMPLETE",
+              "AUTOPSY_ASSESSMENT: INCOMPLETE",
+              "session exposes none of the specified Kist",
+              "claimed repository/file tools were unavailable"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "resilience",
+      "description": "Crash, interruption, stale-input, retry, checkpoint, and process-cleanup regressions.",
+      "steps": [
+        {
+          "id": "campaign-resume-and-interruption-tests",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${KIST_REPO}",
+          "argv": ["/usr/bin/python3", "scripts/tests/test_codex_capability_campaign.py"],
+          "resumeBindings": ["/usr/bin/python3"],
+          "resumeTreeBindings": [
+            {"path": "${KIST_REPO}", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", ".kist", "DerivedData", "build", "dist", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 300,
+          "expect": {"exitCodes": [0], "combinedContains": ["OK"]}
+        },
+        {
+          "id": "kist-continuation-regressions",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${KIST_REPO}",
+          "argv": ["/usr/bin/swift", "test", "--filter", "HeadlessAgentLoopTests|MCPReconnectReliabilityTests|DurablePlanExecuteRegressionTests|WorkspaceLifecycleRegressionTests|LoopCheckpointStoreTests|BuilderRunPersistenceReviewTests|InterruptCancellationTests|ProviderRetryTests"],
+          "resumeBindings": ["/usr/bin/swift"],
+          "resumeTreeBindings": [
+            {"path": "${KIST_REPO}", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", ".kist", "DerivedData", "build", "dist", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0], "combinedContains": ["0 failures"]}
+        }
+      ]
+    },
+    {
+      "id": "legacy_cobol",
+      "description": "Deterministic COBOL fail-detect-fix-build-run plus Perslis legacy/MCP regressions.",
+      "steps": [
+        {
+          "id": "cobol-deterministic-heal",
+          "kind": "cobol_heal",
+          "safety": "read_only",
+          "resumePolicy": "rerun",
+          "resumeBindings": ["/opt/homebrew/bin/cobc"]
+        },
+        {
+          "id": "perslis-legacy-tests",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${PERSLIS_REPO}",
+          "argv": ["/usr/bin/swift", "test", "--filter", "MCPServerTests|HeadlessLegacyRunHostTests|LegacyRebuildTests|LegacyModernizeTests|LegacyTranspileTests"],
+          "resumeBindings": ["/usr/bin/swift"],
+          "resumeTreeBindings": [
+            {"path": "${PERSLIS_REPO}", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0], "combinedContains": ["0 failures"]}
+        }
+      ]
+    },
+    {
+      "id": "self_heal",
+      "description": "Codex as Kist's brain repairs and proves a disposable broken COBOL program.",
+      "steps": [
+        {
+          "id": "codex-repair-cobol",
+          "kind": "codex_repair_cobol",
+          "safety": "subscription",
+          "modelInference": true,
+          "kistBinary": "${KIST_REPO}/.build/debug/kist",
+          "provider": "codex-cli",
+          "authorModel": "gpt-5.6-sol",
+          "critic": "codex-cli:gpt-5.6-sol",
+          "reviewGrade": "fresh_context_same_model",
+          "perslisBinary": "${HOME}/bin/perslis",
+          "mcpConfig": "${HOME}/.mcp.json",
+          "symbolicClaim": "A COMP-3 field is a packed decimal",
+          "resumeBindings": ["${KIST_REPO}/.build/debug/kist", "/opt/homebrew/bin/codex", "${HOME}/bin/perslis", "${HOME}/.perslis/unified/current", "${HOME}/.mcp.json", "${HOME}/Jeeves/jeeves-mcp/run.sh", "${HOME}/.perslis/legacy_floor.db"],
+          "timeoutSeconds": 900
+        }
+      ]
+    },
+    {
+      "id": "self_tools",
+      "description": "Kist authors, gates, adversarially reviews, activates, smoke-tests, and reloads a confined self__ tool.",
+      "steps": [
+        {
+          "id": "codex-grow-self-tool",
+          "kind": "kist_grow_tool",
+          "safety": "subscription",
+          "modelInference": true,
+          "kistBinary": "${KIST_REPO}/.build/debug/kist",
+          "provider": "codex-cli",
+          "authorModel": "gpt-5.6-sol",
+          "critic": "codex-cli:gpt-5.6-sol",
+          "reviewGrade": "fresh_context_same_model",
+          "promotionExpectation": "blocked_identity_distinct_reviewer",
+          "resumeBindings": ["${KIST_REPO}/.build/debug/kist", "/opt/homebrew/bin/codex"],
+          "timeoutSeconds": 1200,
+          "capability": "Parse a comma-separated list of signed integers, reject non-integers, sort ascending, and print one comma-separated line."
+        }
+      ]
+    },
+    {
+      "id": "ghostbridge",
+      "description": "Independent non-live GhostBridge executable checks; never live handoff.",
+      "steps": [
+        {
+          "id": "ghostbridge-swift-tests",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["/usr/bin/swift", "test", "--package-path", "."],
+          "resumeBindings": ["/usr/bin/swift"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-supervised-handoff-test",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-supervised-handoff.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-supervised-handoff.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-vm-endpoint-test",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-vm-endpoint.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-vm-endpoint.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-real-vm-refusal-test",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-real-vm-validator.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-real-vm-validator.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-remote-agent-package-test",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-remote-agent-package.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-remote-agent-package.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-host-cli-test",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-host-cli.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-host-cli.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-tinky-mcp-tests",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${TINKY_MCP_REPO}",
+          "argv": ["/usr/bin/env", "TINKY_AUDIT_PATH=${TMP}/tinky-mcp-audit.jsonl", "/opt/homebrew/bin/npm", "test"],
+          "resumeBindings": ["/usr/bin/env", "/opt/homebrew/bin/npm", "/opt/homebrew/bin/node"],
+          "resumeTreeBindings": [
+            {"path": "${TINKY_MCP_REPO}", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-validation-safety-static",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-validation-safety-static.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-validation-safety-static.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 120,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-validation-cleanup-fixture",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-validation-cleanup-fixture.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-validation-cleanup-fixture.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 120,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-validation-cleanup-signals",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["./Support/test-validation-cleanup-exit-fixtures.sh"],
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/Support/test-validation-cleanup-exit-fixtures.sh"],
+          "resumeTreeBindings": [
+            {"path": "${GHOSTBRIDGE_REPO}/Tools/Portal", "excludeDirectoryNames": [".git", ".build", ".build-local", ".swiftpm", "DerivedData", "build", "node_modules", ".next", "__pycache__"]}
+          ],
+          "timeoutSeconds": 180,
+          "expect": {"exitCodes": [0]}
+        }
+      ]
+    },
+    {
+      "id": "ghostbridge_provenance",
+      "description": "Read-only GhostBridge frozen provenance, deployed signatures/configuration, runtime parity, and explicit drift evidence.",
+      "steps": [
+        {
+          "id": "ghostbridge-frozen-baseline",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${GHOSTBRIDGE_REPO}/Tools/Portal",
+          "argv": ["/usr/bin/shasum", "-a", "256", "-c", "baseline.sha256"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${GHOSTBRIDGE_REPO}/Tools/Portal/baseline.sha256"],
+          "timeoutSeconds": 60,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-isolated-configured-signature",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}",
+          "argv": ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", "${HOME}/.kist/mcp/isolated-tester/bin/isolated-mcp"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/.kist/mcp/isolated-tester/bin/isolated-mcp"],
+          "timeoutSeconds": 60,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-isolated-local-signature",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}",
+          "argv": ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", "${HOME}/.local/bin/isolated-mcp"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/.local/bin/isolated-mcp"],
+          "timeoutSeconds": 60,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-tinkystream-signature",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}",
+          "argv": ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", "${HOME}/Applications/TinkyStream.app"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/Applications/TinkyStream.app/Contents/MacOS/TinkyStream"],
+          "timeoutSeconds": 60,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-perslis-bom",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}/perslis",
+          "argv": ["${HOME}/perslis/Tests/Shell/perslis_system_bom_validation.sh"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/perslis/Tests/Shell/perslis_system_bom_validation.sh", "${HOME}/.perslis/unified/current"],
+          "timeoutSeconds": 120,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-tinky-sync",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}",
+          "argv": ["${HOME}/bin/tinky-vision-sync", "check"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/bin/tinky-vision-sync"],
+          "timeoutSeconds": 120,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "ghostbridge-tinkystream-plist",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}",
+          "argv": ["/usr/bin/plutil", "-p", "${HOME}/Library/LaunchAgents/com.tinky.tinkystream.plist"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/Library/LaunchAgents/com.tinky.tinkystream.plist"],
+          "timeoutSeconds": 60,
+          "expect": {"exitCodes": [0], "combinedContains": ["\"TINKY_STREAM_FPS\" => \"1\"", "\"TINKY_STREAM_RING\" => \"300\""]}
+        }
+      ]
+    },
+    {
+      "id": "dashboard",
+      "description": "Project-authoritative dashboard aggregation, honest verification semantics, and installed closure provenance.",
+      "steps": [
+        {
+          "id": "dashboard-aggregation-tests",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${DASHBOARD_REPO}",
+          "argv": ["/usr/bin/python3", "-m", "pytest", "tests/test_runs.py", "tests/test_aggregate.py", "-q"],
+          "resumeBindings": ["/usr/bin/python3"],
+          "resumeTreeBindings": [
+            {"path": "${DASHBOARD_REPO}", "excludeDirectoryNames": [".git", ".pytest_cache", "__pycache__"]}
+          ],
+          "timeoutSeconds": 300,
+          "expect": {"exitCodes": [0], "combinedContains": ["passed"]}
+        },
+        {
+          "id": "dashboard-provenance-validate",
+          "kind": "command",
+          "safety": "read_only",
+          "cwd": "${HOME}",
+          "argv": ["${HOME}/bin/kist-dashboard", "--provenance-validate"],
+          "resumePolicy": "rerun",
+          "resumeBindings": ["${HOME}/bin/kist-dashboard"],
+          "timeoutSeconds": 30,
+          "expect": {"exitCodes": [0]}
+        }
+      ]
+    },
+    {
+      "id": "tinkyspeak",
+      "description": "DB-free TinkySpeak regression and production build.",
+      "steps": [
+        {
+          "id": "tinkyspeak-smoke",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${TINKY_REPO}",
+          "argv": ["/opt/homebrew/bin/npm", "run", "smoke", "--workspace=@tinky/tinkyspeak"],
+          "resumeBindings": [
+            "/opt/homebrew/bin/npm",
+            "/opt/homebrew/bin/node",
+            "${TINKY_REPO}/package.json",
+            "${TINKY_REPO}/package-lock.json",
+            "${TINKY_REPO}/.env.local",
+            "${TINKY_REPO}/apps/tinkyspeak/package.json",
+            "${TINKY_REPO}/apps/tinkyspeak/tsconfig.json",
+            "${TINKY_REPO}/apps/tinkyspeak/vitest.config.ts"
+          ],
+          "resumeTreeBindings": [
+            "${TINKY_REPO}/apps/tinkyspeak/src",
+            {"path": "${TINKY_REPO}/packages", "excludeDirectoryNames": ["node_modules", ".build", "build", "dist", "__pycache__"]}
+          ],
+          "timeoutSeconds": 600,
+          "expect": {"exitCodes": [0]}
+        },
+        {
+          "id": "tinkyspeak-build",
+          "kind": "command",
+          "safety": "workspace_build",
+          "cwd": "${TINKY_REPO}",
+          "argv": ["/opt/homebrew/bin/npm", "run", "build:tinkyspeak"],
+          "resumeBindings": [
+            "/opt/homebrew/bin/npm",
+            "/opt/homebrew/bin/node",
+            "${TINKY_REPO}/package.json",
+            "${TINKY_REPO}/package-lock.json",
+            "${TINKY_REPO}/.env.local",
+            "${TINKY_REPO}/apps/tinkyspeak/package.json",
+            "${TINKY_REPO}/apps/tinkyspeak/tsconfig.json",
+            "${TINKY_REPO}/apps/tinkyspeak/next.config.mjs",
+            "${TINKY_REPO}/apps/tinkyspeak/next-env.d.ts",
+            "${TINKY_REPO}/apps/tinkyspeak/instrumentation.ts",
+            "${TINKY_REPO}/apps/tinkyspeak/postcss.config.mjs",
+            "${TINKY_REPO}/apps/tinkyspeak/tailwind.config.ts",
+            "${TINKY_REPO}/apps/tinkyspeak/sentry.client.config.ts",
+            "${TINKY_REPO}/apps/tinkyspeak/sentry.edge.config.ts",
+            "${TINKY_REPO}/apps/tinkyspeak/sentry.server.config.ts"
+          ],
+          "resumeTreeBindings": [
+            "${TINKY_REPO}/apps/tinkyspeak/src",
+            "${TINKY_REPO}/apps/tinkyspeak/public",
+            "${TINKY_REPO}/apps/tinkyspeak/lib",
+            "${TINKY_REPO}/apps/tinkyspeak/scripts",
+            "${TINKY_REPO}/apps/tinkyspeak/prisma",
+            {"path": "${TINKY_REPO}/apps/tinkyspeak/board-cache-worker", "excludeDirectoryNames": ["node_modules", ".wrangler", "build", "dist", "__pycache__"]},
+            {"path": "${TINKY_REPO}/packages", "excludeDirectoryNames": ["node_modules", ".build", "build", "dist", "__pycache__"]}
+          ],
+          "timeoutSeconds": 1200,
+          "expect": {"exitCodes": [0]}
+        }
+      ]
+    }
+  ]
+}

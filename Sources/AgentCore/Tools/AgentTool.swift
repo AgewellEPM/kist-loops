@@ -268,6 +268,10 @@ public struct ToolContext: Sendable {
     /// confined to `projectRoot` (and the `ConfinedRoot.readOnly` flag enforces it again at
     /// the primitive level). Empty by default — fail-closed, exactly as before.
     public let externalReadRoots: [String]
+    /// The interactive drag/screenshot inbox is a convenience grant, not appropriate for autonomous
+    /// candidate generation. Strict callers disable it so empty `externalReadRoots` truly means no
+    /// external read/list surface.
+    public let allowMediaDropInbox: Bool
     public let shell: ShellPolicy
     /// Opt-in OS-level sandbox for `run_command` (kernel-enforced egress-deny + write
     /// confinement). Disabled by default; in-process gates always apply regardless.
@@ -288,11 +292,20 @@ public struct ToolContext: Sendable {
     /// Immutable per-call audit trail at the tool choke point (council #1). nil = off (library/tests);
     /// the CLI wires one writing `.kist/audit/tools.jsonl`.
     public let auditLog: AuditLog?
+    /// Host-owned root identifier for a correlated mission. It is never read from model tool
+    /// arguments. nil keeps non-mission/library flows exactly as before.
+    public let correlationID: String?
+    /// Optional host-owned recorder used by ToolRegistry to emit measured tool-call spans.
+    public let traceRecorder: TraceRecorder?
 
     public init(projectRoot: String, shell: ShellPolicy = .denied, sandbox: SandboxPolicy = .confined(),
                 authorizationScope: ScopeDecision? = nil, scopeOverrideApproved: Bool = false,
                 skillLocations: [String: String] = [:], skillTracker: SkillTracker? = nil,
-                auditLog: AuditLog? = nil, externalReadRoots: [String] = []) {
+                auditLog: AuditLog? = nil, externalReadRoots: [String] = [],
+                allowMediaDropInbox: Bool = true,
+                correlationID: String? = nil, traceRecorder: TraceRecorder? = nil) {
+        precondition(correlationID == nil || traceRecorder == nil || traceRecorder?.traceId == correlationID,
+                     "a correlated ToolContext and TraceRecorder must share one root id")
         self.projectRoot = projectRoot
         self.shell = shell
         self.sandbox = sandbox
@@ -301,6 +314,9 @@ public struct ToolContext: Sendable {
         self.skillLocations = skillLocations
         self.skillTracker = skillTracker
         self.auditLog = auditLog
+        self.correlationID = correlationID
+        self.traceRecorder = traceRecorder
+        self.allowMediaDropInbox = allowMediaDropInbox
         // Canonicalize once, drop non-existent entries (fail-closed: a bogus root grants nothing).
         // "/" is refused outright — it would un-confine every read; arm specific trees instead.
         self.externalReadRoots = externalReadRoots
@@ -312,14 +328,18 @@ public struct ToolContext: Sendable {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: decision, scopeOverrideApproved: false,
                     skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
-                    externalReadRoots: externalReadRoots)
+                    externalReadRoots: externalReadRoots,
+                    allowMediaDropInbox: allowMediaDropInbox,
+                    correlationID: correlationID, traceRecorder: traceRecorder)
     }
 
     public func withScopeOverrideApproved(_ approved: Bool) -> ToolContext {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: authorizationScope, scopeOverrideApproved: approved,
                     skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
-                    externalReadRoots: externalReadRoots)
+                    externalReadRoots: externalReadRoots,
+                    allowMediaDropInbox: allowMediaDropInbox,
+                    correlationID: correlationID, traceRecorder: traceRecorder)
     }
 
     /// Attach a discovered skill set to this context (used by the loop after discovery).
@@ -327,7 +347,9 @@ public struct ToolContext: Sendable {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: authorizationScope, scopeOverrideApproved: scopeOverrideApproved,
                     skillLocations: locations, skillTracker: tracker, auditLog: auditLog,
-                    externalReadRoots: externalReadRoots)
+                    externalReadRoots: externalReadRoots,
+                    allowMediaDropInbox: allowMediaDropInbox,
+                    correlationID: correlationID, traceRecorder: traceRecorder)
     }
 
     /// Attach an audit log (used by the CLI when constructing the run's context).
@@ -335,7 +357,22 @@ public struct ToolContext: Sendable {
         ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
                     authorizationScope: authorizationScope, scopeOverrideApproved: scopeOverrideApproved,
                     skillLocations: skillLocations, skillTracker: skillTracker, auditLog: log,
-                    externalReadRoots: externalReadRoots)
+                    externalReadRoots: externalReadRoots,
+                    allowMediaDropInbox: allowMediaDropInbox,
+                    correlationID: correlationID, traceRecorder: traceRecorder)
+    }
+
+    /// Bind the runtime-owned PlanExecute identity to every tool call. The typed mission id and the
+    /// recorder equality precondition keep this provenance out of model-controlled argument maps.
+    public func withPlanExecuteMission(_ missionID: PlanExecuteMissionID,
+                                       traceRecorder: TraceRecorder) -> ToolContext {
+        ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
+                    authorizationScope: authorizationScope,
+                    scopeOverrideApproved: scopeOverrideApproved,
+                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
+                    externalReadRoots: externalReadRoots,
+                    allowMediaDropInbox: allowMediaDropInbox,
+                    correlationID: missionID.rawValue, traceRecorder: traceRecorder)
     }
 
     /// TOCTOU-safe filesystem confinement for this context's root (Codex HIGH#2). File
@@ -371,7 +408,8 @@ public struct ToolContext: Sendable {
         }
         // macOS drag/screenshot inbox: a file the user ATTACHED (dragged/pasted a screenshot) lands
         // here read-only. Vision/media tools may read it without a --allow-read grant. See mediaDropInbox().
-        if let inbox = Self.mediaDropInbox(), resolved == inbox || resolved.hasPrefix(inbox + "/") {
+        if allowMediaDropInbox, let inbox = Self.mediaDropInbox(),
+           resolved == inbox || resolved.hasPrefix(inbox + "/") {
             // Screenshot/drag drops normally live in a unique OS-created subdirectory. Root the
             // descriptor confinement at the requested item's canonical parent instead of opening
             // the shared TemporaryItems directory: this grants a strictly smaller read surface and
@@ -405,7 +443,8 @@ public struct ToolContext: Sendable {
             // macOS drag/screenshot inbox — user-attached media is readable read-only (see mediaDropInbox()).
             // MUST mirror confinedRootForReading: view_image validates here, then reads bytes there — a fix
             // in one without the other passes validation and then fails the read (or vice versa).
-            if let inbox = Self.mediaDropInbox(), resolved == inbox || resolved.hasPrefix(inbox + "/") {
+            if allowMediaDropInbox, let inbox = Self.mediaDropInbox(),
+               resolved == inbox || resolved.hasPrefix(inbox + "/") {
                 if mustExist && !FileManager.default.fileExists(atPath: resolved) {
                     throw ToolError.notFound(path)
                 }
@@ -437,7 +476,7 @@ public struct ToolContext: Sendable {
         var roots = externalReadRoots
         // Surface the auto-armed drag/screenshot inbox too — it IS readable, so an honest error
         // must name it (otherwise the model is steered to a pointless `cp` or --allow-read).
-        if let inbox = Self.mediaDropInbox() { roots.append(inbox) }
+        if allowMediaDropInbox, let inbox = Self.mediaDropInbox() { roots.append(inbox) }
         return roots.isEmpty
             ? projectReal
             : projectReal + "; also readable read-only: " + roots.joined(separator: ", ")

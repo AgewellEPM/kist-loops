@@ -13,6 +13,10 @@ struct ConversationRouter {
     let providers: ProviderRegistry
     let binding: ProviderBinding      // a fast model for the one-word classification
     var defaultFleetAgents: Int = 3
+    /// Surfaced when the classifier provider fails: escalation silently degrading to inline was
+    /// indistinguishable from "nothing to escalate" (routing audit 2026-08-25 — with the classifier
+    /// bound to a dead provider, plan/fleet/council/research were unreachable and nobody knew).
+    var onClassifierUnavailable: ((String) -> Void)? = nil
 
     enum Route: Equatable {
         case fleet(agents: Int)
@@ -114,9 +118,29 @@ struct ConversationRouter {
             ChatMessage(role: .system, content: Self.systemPrompt),
             ChatMessage(role: .user, content: "REQUEST:\n\(input)\n\nReply with ONE word."),
         ]
-        guard let raw = try? await providers.complete(providerId: binding.providerId, model: binding.model, messages: messages)
-        else { return nil }
+        let raw: String
+        do {
+            raw = try await providers.complete(providerId: binding.providerId, model: binding.model, messages: messages)
+        } catch {
+            // A user-cancelled turn (ESC mid-classification) surfaces here as a transport error —
+            // that is an intentional interruption, not a dead provider; announcing it would report
+            // a healthy classifier as down (Codex P2, 2026-08-25).
+            if Task.isCancelled || Self.isCancellation(error) { return nil }
+            // Inline is still the right degrade — but LOUDLY, so a dead classifier provider reads as
+            // "escalation disabled: <why>" instead of masquerading as a routing decision.
+            onClassifierUnavailable?("escalation classifier unavailable (\(binding.providerId)): \(error) — handling inline")
+            return nil
+        }
         return Self.parseRoute(raw, defaultFleetAgents: defaultFleetAgents)
+    }
+
+    /// The registry translates a mid-flight CancellationError into `transport("completion
+    /// cancelled")` (ProviderCatalog's cancellation catch) — recognize BOTH shapes, or an ESC
+    /// during classification still reads as a provider outage.
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if case AIProviderError.transport(let message) = error, message == "completion cancelled" { return true }
+        return false
     }
 
     static func parseRoute(_ raw: String, defaultFleetAgents: Int) -> Route? {

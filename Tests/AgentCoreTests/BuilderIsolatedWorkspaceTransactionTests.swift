@@ -335,6 +335,65 @@ final class BuilderIsolatedWorkspaceTransactionTests: XCTestCase {
         }
     }
 
+    func testGeneratedBuildDirectoriesAreExcludedAndMayChurnDuringStagedBuild() async throws {
+        let f = try fixture(); let original = Data("old".utf8)
+        try write(original, to: f.project, path: "Sources/declared.txt")
+        let generatedPaths = [
+            ".build/root-cache", ".build-local/local-cache",
+            "DerivedData/index-cache", "Nested/.build/nested-cache"
+        ]
+        for path in generatedPaths {
+            try write(Data("cache-before".utf8), to: f.project, path: path)
+        }
+        let c = try contract(operations: [try .init(
+            kind: .modify, path: "Sources/declared.txt",
+            preimageSHA256: rawDigest(original))])
+        let source = try BuilderIsolatedWorkspaceTransactionSource(
+            projectRoot: f.project, stagingBase: f.staging, attestor: TestAttestor())
+        let context = try BuilderStageContext(
+            contract: c, node: f.node, attempt: 1, stage: .build)
+        let baseline = try await source.prepare(context)
+        let workspace = try await source.executionWorkspace(for: context)
+        let staged = URL(fileURLWithPath: workspace.rootPath, isDirectory: true)
+
+        for path in generatedPaths {
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: staged.appendingPathComponent(path).path))
+            try write(Data("cache-after".utf8), to: f.project, path: path)
+        }
+        try write(Data("new-cache".utf8), to: f.project, path: ".build/new-cache")
+        try write(Data("new".utf8), to: staged, path: "Sources/declared.txt")
+
+        let worker = BuilderWorkerReceipt(
+            nodeID: f.node.id, provider: "worker", model: "builder-v1",
+            changedPaths: ["Sources/declared.txt"],
+            checks: [.init(name: "build", passed: true)])
+        let observation = try await source.observe(.init(
+            context: context, baseline: baseline, subject: .execution(worker)))
+        XCTAssertNotEqual(observation.workspaceDigestBefore, observation.workspaceDigestAfter)
+    }
+
+    func testGeneratedBuildOutputWithWrongTypeFailsClosed() async throws {
+        let f = try fixture()
+        try write(Data("not-a-directory".utf8), to: f.project, path: ".build")
+        let c = try contract(operations: [])
+        let source = try BuilderIsolatedWorkspaceTransactionSource(
+            projectRoot: f.project, stagingBase: f.staging, attestor: TestAttestor())
+        let context = try BuilderStageContext(
+            contract: c, node: f.node, attempt: 1, stage: .build)
+        await XCTAssertThrowsErrorAsync { try await source.prepare(context) }
+    }
+
+    func testGeneratedBuildOutputCannotReceiveMutationAuthority() async throws {
+        let f = try fixture()
+        let c = try contract(operations: [try .init(kind: .create, path: ".build/rogue")])
+        let source = try BuilderIsolatedWorkspaceTransactionSource(
+            projectRoot: f.project, stagingBase: f.staging, attestor: TestAttestor())
+        let context = try BuilderStageContext(
+            contract: c, node: f.node, attempt: 1, stage: .build)
+        await XCTAssertThrowsErrorAsync { try await source.prepare(context) }
+    }
+
     func testEscapingSymlinkAndFIFOAreRejectedWithoutFollowing() async throws {
         let f = try fixture()
         XCTAssertEqual(symlink("../../outside", f.project.appendingPathComponent("escape").path), 0)

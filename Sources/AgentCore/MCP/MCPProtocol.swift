@@ -17,6 +17,19 @@ import Foundation
 /// speak is a protocol lie a strict stateless server could reject. Implementing the stateless `_meta`
 /// path is the follow-up that would let us bump the offer.
 public enum MCPProtocol {
+    /// Host-owned correlation metadata for tools/call. This is deliberately outside `arguments`,
+    /// so model-authored fields cannot replace it.
+    public static let correlationMetadataKey = "kist.correlation_id"
+
+    static func toolCallMetadata(correlationID: String?, authorization: String? = nil) -> [String: String]? {
+        var metadata: [String: String] = [:]
+        if let authorization, !authorization.isEmpty { metadata["authorization"] = authorization }
+        if let raw = correlationID, let missionID = PlanExecuteMissionID(rawValue: raw) {
+            metadata[correlationMetadataKey] = missionID.rawValue
+        }
+        return metadata.isEmpty ? nil : metadata
+    }
+
     /// The protocol version offered in `initialize` — the latest revision kist actually implements
     /// (stateful handshake). Env-overridable for pinning / forward-testing a newer server.
     public static let offeredVersion: String = {

@@ -15,15 +15,19 @@ public struct RemoteMCPTool: AgentTool {
     public let name: String
     public let description: String
     public let parameters: [ToolParameter]
+    /// Explicit per-server/per-tool policy. `nil` preserves the conservative legacy name heuristic.
+    public let explicitComputerUseRequirement: Bool?
 
     private let serverName: String
     private let remoteToolName: String
     private let manager: MCPClientManager
 
-    init(serverName: String, spec: RemoteToolSpec, manager: MCPClientManager) {
+    init(serverName: String, spec: RemoteToolSpec, manager: MCPClientManager,
+         computerUsePolicy: MCPComputerUsePolicy = .legacyNameHeuristic) {
         self.serverName = serverName
         self.remoteToolName = spec.name
         self.manager = manager
+        self.explicitComputerUseRequirement = computerUsePolicy.explicitRequirement(for: spec.name)
         // The model-facing (registry) name is derived from the UNTRUSTED server tool name — sanitize +
         // cap it so a hostile name can't inject into the tool schema (DeepSeek H1). Routing still uses the
         // raw `remoteToolName` below, so a sanitized display name can't break a legit call.
@@ -41,7 +45,8 @@ public struct RemoteMCPTool: AgentTool {
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         // Forward verbatim; the manager sanitizes the result. The remote server is
         // responsible for validating its own inputs.
-        await manager.call(server: serverName, tool: remoteToolName, arguments: arguments)
+        await manager.call(server: serverName, tool: remoteToolName, arguments: arguments,
+                           correlationID: context.correlationID)
     }
 
     // MARK: - JSON Schema -> [ToolParameter]

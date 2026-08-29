@@ -50,10 +50,15 @@ public struct BuilderSandboxAttestationRequest: Sendable, Equatable {
     public let governedRootDigest: String
     public let challenge: String
     public let stage: BuilderExecutionStage
+    /// Host-owned paths that verification code must not read. The OS-sandbox policy binds these
+    /// paths into its signed evidence; callers use this for source repositories, archives, and
+    /// other authority stores that sit outside the staged workspace.
+    public let forbiddenReadPaths: [String]
 
     public init(contractFingerprint: String, builderContractID: String, nodeID: String,
                 attempt: Int, stagedRoot: String, governedRootDigest: String,
-                challenge: String, stage: BuilderExecutionStage = .build) {
+                challenge: String, stage: BuilderExecutionStage = .build,
+                forbiddenReadPaths: [String] = []) {
         self.contractFingerprint = contractFingerprint
         self.builderContractID = builderContractID
         self.nodeID = nodeID
@@ -62,6 +67,7 @@ public struct BuilderSandboxAttestationRequest: Sendable, Equatable {
         self.governedRootDigest = governedRootDigest
         self.challenge = challenge
         self.stage = stage
+        self.forbiddenReadPaths = forbiddenReadPaths
     }
 }
 

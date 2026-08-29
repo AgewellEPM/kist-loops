@@ -35,17 +35,38 @@ extension KistRunner {
         }
         let keyedCloud = registry.providers.filter { $0.requiresAPIKey && registry.hasKey(for: $0) }
         let eligible = subscriptionReady + keyedCloud
-        // Cross-process live-failure memory: a provider that just rate-limited another kist
-        // process sits out its cooldown instead of being re-picked by every new one-shot.
-        // Fail-open: if EVERYTHING is cooling down, the full eligible set still competes.
+        // Cross-process live-failure memory (cooldowns) + the daemon's health snapshot: a provider
+        // that just rate-limited another kist process — or that the health daemon already knows is
+        // down — sits out instead of being re-picked by every new session. The health file was
+        // previously written but NEVER read here, so a dead ollama became the session default and
+        // every turn failed identically (routing audit 2026-08-25).
+        // Fail-open: if EVERYTHING is benched, the full eligible set still competes.
         let cooldowns = ProviderCooldownStore()
-        let warm = eligible.filter { !cooldowns.coolingDown($0.id) }
+        let health = ProviderHealthFileStore()
+        let benchedGate: (String) -> Bool = { cooldowns.coolingDown($0) || health.down($0) }
+        let warm = eligible.filter { !benchedGate($0.id) }
         if warm.count < eligible.count {
-            let benched = eligible.map(\.id).filter(cooldowns.coolingDown).sorted().joined(separator: ", ")
-            note("router · cooling down (recent live failures): \(benched)")
+            let benched = eligible.map(\.id).filter(benchedGate).sorted().joined(separator: ", ")
+            note("router · benched (live failures / health daemon says down): \(benched)")
         }
         if let best = pickByPolicy(warm.isEmpty ? eligible : warm, policy: policy, verdicts: verdicts) { return best.id }
-        if let local = registry.providers.first(where: { !$0.requiresAPIKey }) { return local.id }
+        // Last-resort local fallback honors the same gate: prefer a WARM local provider over the
+        // catalog-first one (previously this line blindly returned dead ollama). If every local is
+        // benched, still return the first — fail-open, but say so instead of dying silently.
+        // "Local" must mean USABLE-local (Codex P2, 2026-08-25): a subscription CLI that is
+        // installed but logged out would fail authentication, and the explicit-only COBOL
+        // specialist (`kist -p cobol`) only knows COBOL — neither is a sane session default.
+        let locals = registry.providers.filter { p in
+            guard !p.requiresAPIKey, p.id != "cobol" else { return false }
+            if let cli = p as? CLIChatProvider { return cli.isLocallyAvailable() }
+            return true
+        }
+        if let local = locals.first(where: { !benchedGate($0.id) }) ?? locals.first {
+            if benchedGate(local.id) {
+                note("router · WARNING: all local providers benched; last resort \(local.id) will likely fail until it recovers")
+            }
+            return local.id
+        }
         err("error: no provider has a key. Set one (e.g. export OPENAI_API_KEY=…) or use --provider. See --list-providers.")
         return nil
     }
@@ -71,11 +92,11 @@ extension KistRunner {
 
     /// Interactive startup picker for a bare `kist` REPL. It is deliberately TTY-only so piped
     /// commands like `printf '/help\n/exit\n' | kist` still go straight to the REPL.
-    static func pickProvider(_ registry: ProviderRegistry) async -> ProviderPick? {
+    static func pickProvider(_ registry: ProviderRegistry, config: KistConfig) async -> ProviderPick? {
         guard stdinIsTTY() else { return nil }
         var reg = registry
         while true {
-        let choices = reg.providers.filter { !$0.requiresAPIKey || reg.hasKey(for: $0) }
+        let choices = reg.providers.filter { reg.hasKey(for: $0) }
         guard !choices.isEmpty else { return nil }
 
         note("Select model for this session (Enter = default):")
@@ -84,15 +105,21 @@ extension KistRunner {
             note("  \(idx + 1). \(provider.id) · \(provider.name)\(model)")
         }
         let addIndex = choices.count + 1
-        note("  \(addIndex). add · Add a model (any OpenAI-compatible) — auto-tests & configures it")
+        if config.allowedProviders == nil {
+            note("  \(addIndex). add · Add a model (any OpenAI-compatible) — auto-tests & configures it")
+        }
         FileHandle.standardError.write(Data("provider> ".utf8))
         guard let raw = readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return nil }
 
         // "Add a model": onboard it (self-heal · self-test · pen-test), then re-render so it's pickable now.
         if raw.lowercased() == "add" || Int(raw) == addIndex {
+            guard config.allowedProviders == nil else {
+                err("provider onboarding is disabled while allowedProviders is configured")
+                continue
+            }
             _ = await AddModelFlow.run()
-            reg = makeRegistry()   // rebuild; the loop re-renders with the new model (bounded, no recursion)
+            reg = makeRegistry(config: config)   // rebuild without widening the configured provider boundary
             continue
         }
 

@@ -506,6 +506,383 @@ final class BuilderDynamicExecutionContractTests: XCTestCase {
         XCTAssertNil(snapshot.finalReceipt)
         XCTAssertEqual(snapshot.nodeStates["build"]?.phase, .failed)
     }
+
+    func testAcceptedFinalCommitFailureStaysDurableAndResumeCommitsBeforeRelease()
+        async throws {
+        let log = DynamicBuilderLog()
+        let provider = try DynamicTestContractProvider(
+            mode: .fixed("Sources/Feature/New.swift"), log: log)
+        let graph = try BuilderGraph(nodes: [BuilderNode(
+            id: "build", objective: "build",
+            resources: [.init(path: "Sources/Feature", access: .write)])])
+        let store = BuilderJSONStore(fileURL: dynamicTemporaryFile())
+        let mutationSource = try dynamicIsolatedSource(beside: store.fileURL)
+        let commitProbe = DynamicAcceptanceCommitProbe(failuresBeforeSuccess: 1)
+        let commit: BuilderFinalAcceptanceCommit = { authority in
+            try await commitProbe.commit(authority)
+        }
+        let run = try dynamicRun(
+            contract: dynamicParentContract(), graph: graph,
+            policy: .init(nodeClasses: ["build": .mutation]),
+            provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+            store: store, mutationSource: mutationSource,
+            finalAcceptanceCommit: commit)
+
+        do {
+            _ = try await run.run()
+            XCTFail("external acceptance failure must remain explicitly pending")
+        } catch let error as BuilderRunError {
+            guard case .acceptancePersistencePending = error else {
+                return XCTFail("expected acceptancePersistencePending, got \(error)")
+            }
+        }
+        let durableValue = try await store.load()
+        let durable = try XCTUnwrap(durableValue)
+        let persistedFinal = try XCTUnwrap(durable.finalReceipt)
+        XCTAssertTrue(persistedFinal.accepted)
+        XCTAssertTrue(persistedFinal.hasValidBuilderFinalAuthority)
+        XCTAssertNil(durable.pendingFinalReceipt)
+        XCTAssertFalse(durable.finalizationPending)
+        let failedAttempts = await commitProbe.attemptCount()
+        let failedCommits = await commitProbe.committedCount()
+        XCTAssertEqual(failedAttempts, 1)
+        XCTAssertEqual(failedCommits, 0)
+        XCTAssertEqual(dynamicRetainedWorkspaceLeaves(mutationSource), ["baseline", "workspace"])
+
+        let resumed = try dynamicRun(
+            contract: dynamicParentContract(), graph: graph,
+            policy: .init(nodeClasses: ["build": .mutation]),
+            provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+            store: store, resumeExisting: true, mutationSource: mutationSource,
+            finalAcceptanceCommit: commit)
+        let final = try await resumed.run()
+        XCTAssertEqual(final, persistedFinal)
+        let resumedAttempts = await commitProbe.attemptCount()
+        let resumedCommits = await commitProbe.committedCount()
+        XCTAssertEqual(resumedAttempts, 2)
+        XCTAssertEqual(resumedCommits, 1)
+        XCTAssertTrue(dynamicRetainedWorkspaceLeaves(mutationSource).isEmpty)
+    }
+
+    func testDisposableFreshContextSameModelPersistsSealedDisjointCLIInvocationsAndResumes()
+        async throws {
+        let log = DynamicBuilderLog()
+        let identity = "codex-cli:fixture-model"
+        let provider = try DynamicTestContractProvider(
+            mode: .fixed("Sources/Feature/New.swift"), log: log,
+            producerProviderID: "codex-cli", producerModelID: "fixture-model",
+            reviewerProviderID: "codex-cli", reviewerModelID: "fixture-model",
+            reviewGrade: .freshContextSameModel)
+        let graph = try BuilderGraph(nodes: [BuilderNode(
+            id: "build", objective: "build one disposable file",
+            resources: [.init(path: "Sources/Feature/New.swift", access: .write)],
+            isolation: .sandbox, role: .builder, retryLimit: 0)])
+        let store = BuilderJSONStore(fileURL: dynamicTemporaryFile())
+        let mutationSource = try dynamicIsolatedSource(beside: store.fileURL)
+        let contract = BuilderContract(
+            id: "same-model-parent", objective: "build one disposable file",
+            allowedPaths: ["Sources/Feature/New.swift"], doneWhen: ["verified"],
+            routeHint: .init(preferred: .direct, risk: .medium),
+            producerIdentities: [identity],
+            reviewPolicy: .lowRiskFreshContextSameModel(
+                disposableRootIdentity: try dynamicDisposableRootIdentity(mutationSource)))
+        let cli = dynamicSameModelCLIProvider()
+        let run = try dynamicRun(
+            contract: contract, graph: graph,
+            policy: .init(nodeClasses: ["build": .mutation]),
+            provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+            store: store, mutationSource: mutationSource, sameModelCLIProvider: cli)
+
+        let final = try await run.run()
+        XCTAssertTrue(final.accepted)
+        XCTAssertTrue(final.hasValidBuilderFinalAuthority)
+        XCTAssertEqual(
+            final.authority?.objectiveFingerprint,
+            BuilderEvidenceDigest.sha256(contract.id + "\u{0}" + contract.objective))
+        XCTAssertEqual(final.review.reviewGrade, .freshContextSameModel)
+        XCTAssertEqual(final.review.independent, false)
+        XCTAssertEqual(final.review.freshConversation, true)
+        XCTAssertEqual(final.review.separateInvocation, true)
+        XCTAssertEqual(final.review.reviewThreshold, 3)
+        XCTAssertEqual(final.review.workerIdentities, [identity])
+        XCTAssertEqual(final.review.reviewerIdentity, identity)
+        let producerIDs = try XCTUnwrap(final.review.producerInvocationIDs)
+        let reviewerIDs = try XCTUnwrap(final.review.reviewerInvocationIDs)
+        XCTAssertEqual(producerIDs.count, 1)
+        XCTAssertEqual(reviewerIDs.count, 4)
+        XCTAssertTrue(Set(producerIDs).isDisjoint(with: Set(reviewerIDs)))
+        XCTAssertTrue((final.review.votes ?? []).allSatisfy {
+            $0.freshConversation == true && $0.invocationID?.hasPrefix("builder-review-test-") == true
+                && !reviewerIDs.contains($0.invocationID ?? "")
+        })
+
+        func tamperedFinal(_ mutate: (inout [String: Any]) -> Void) throws
+            -> BuilderFinalReceipt {
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(final))
+                    as? [String: Any])
+            mutate(&object)
+            return try JSONDecoder().decode(
+                BuilderFinalReceipt.self,
+                from: JSONSerialization.data(withJSONObject: object))
+        }
+        let relabeled = try tamperedFinal { object in
+            var review = object["review"] as? [String: Any] ?? [:]
+            review["reviewGrade"] = EvolutionReviewGrade.independent.rawValue
+            review["independent"] = true
+            object["review"] = review
+        }
+        let changedGrade = try tamperedFinal { object in
+            var review = object["review"] as? [String: Any] ?? [:]
+            review["reviewGrade"] = EvolutionReviewGrade.independent.rawValue
+            object["review"] = review
+        }
+        let changedIndependence = try tamperedFinal { object in
+            var review = object["review"] as? [String: Any] ?? [:]
+            review["independent"] = true
+            object["review"] = review
+        }
+        let changedThreshold = try tamperedFinal { object in
+            var review = object["review"] as? [String: Any] ?? [:]
+            review["reviewThreshold"] = 2
+            object["review"] = review
+        }
+        let changedPacket = try tamperedFinal { object in
+            var review = object["review"] as? [String: Any] ?? [:]
+            review["evidencePacketDigest"] = String(repeating: "f", count: 64)
+            object["review"] = review
+        }
+        let changedVote = try tamperedFinal { object in
+            var review = object["review"] as? [String: Any] ?? [:]
+            var votes = review["votes"] as? [[String: Any]] ?? []
+            if !votes.isEmpty { votes[0]["accepted"] = false }
+            review["votes"] = votes
+            object["review"] = review
+        }
+        let changedMission = try tamperedFinal { object in
+            var verification = object["verification"] as? [String: Any] ?? [:]
+            verification["missionInstanceID"] = String(repeating: "a", count: 64)
+            object["verification"] = verification
+        }
+        let changedObjectiveBinding = try tamperedFinal { object in
+            var verification = object["verification"] as? [String: Any] ?? [:]
+            verification["contractFingerprint"] = String(repeating: "b", count: 64)
+            object["verification"] = verification
+        }
+        let changedSealedObjective = try tamperedFinal { object in
+            var authority = object["authority"] as? [String: Any] ?? [:]
+            authority["objectiveFingerprint"] = String(repeating: "c", count: 64)
+            object["authority"] = authority
+        }
+        let changedTelemetryIDs = try tamperedFinal { object in
+            var review = object["review"] as? [String: Any] ?? [:]
+            var ids = review["reviewerInvocationIDs"] as? [String] ?? []
+            if !ids.isEmpty { ids[0] = "copied-review-observation" }
+            review["reviewerInvocationIDs"] = ids
+            object["review"] = review
+        }
+        XCTAssertFalse(relabeled.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedGrade.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedIndependence.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedThreshold.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedPacket.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedVote.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedMission.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedObjectiveBinding.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedSealedObjective.hasValidBuilderFinalAuthority)
+        XCTAssertFalse(changedTelemetryIDs.hasValidBuilderFinalAuthority)
+
+        let durableValue = try await store.load()
+        let durable = try XCTUnwrap(durableValue)
+        XCTAssertThrowsError(try BuilderFinalAcceptanceAuthority(
+            finalReceipt: relabeled,
+            trustedTelemetry: durable.trustedTelemetry,
+            parentContractFingerprint: try XCTUnwrap(durable.parentContractFingerprint),
+            graphFingerprint: try XCTUnwrap(durable.graphFingerprint),
+            objectiveFingerprint: try XCTUnwrap(final.authority?.objectiveFingerprint),
+            commitEpoch: try XCTUnwrap(durable.commitEpoch)))
+        var detachedTelemetry = durable.trustedTelemetry
+        _ = detachedTelemetry.popLast()
+        XCTAssertThrowsError(try BuilderFinalAcceptanceAuthority(
+            finalReceipt: final,
+            trustedTelemetry: detachedTelemetry,
+            parentContractFingerprint: try XCTUnwrap(durable.parentContractFingerprint),
+            graphFingerprint: try XCTUnwrap(durable.graphFingerprint),
+            objectiveFingerprint: try XCTUnwrap(final.authority?.objectiveFingerprint),
+            commitEpoch: try XCTUnwrap(durable.commitEpoch)))
+
+        let resumed = try dynamicRun(
+            contract: contract, graph: graph,
+            policy: .init(nodeClasses: ["build": .mutation]),
+            provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+            store: store, resumeExisting: true, mutationSource: mutationSource,
+            sameModelCLIProvider: cli)
+        let replayed = try await resumed.run()
+        XCTAssertTrue(replayed.hasValidBuilderFinalAuthority)
+        XCTAssertEqual(replayed.review.producerInvocationIDs, producerIDs)
+        XCTAssertEqual(replayed.review.reviewerInvocationIDs, reviewerIDs)
+        XCTAssertEqual(replayed.review.reviewThreshold, 3)
+
+        let tamperedValue = try await store.load()
+        var tamperedSnapshot = try XCTUnwrap(tamperedValue)
+        tamperedSnapshot.finalReceipt = relabeled
+        tamperedSnapshot.sequence += 1
+        try await store.save(tamperedSnapshot)
+        let tamperedResume = try dynamicRun(
+            contract: contract, graph: graph,
+            policy: .init(nodeClasses: ["build": .mutation]),
+            provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+            store: store, resumeExisting: true, mutationSource: mutationSource,
+            sameModelCLIProvider: cli)
+        do {
+            _ = try await tamperedResume.run()
+            XCTFail("resume must reject a snapshot-sealed but final-authority-tampered receipt")
+        } catch let error as BuilderRunError {
+            guard case .persistedStateInvalid(let reason) = error else {
+                return XCTFail("expected persistedStateInvalid, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("published Builder final authority"), reason)
+        }
+    }
+
+    func testFreshContextSameModelRejectsMalformedPolicyAndHighOrCriticalRiskAtInit()
+        throws {
+        let identity = "codex-cli:fixture-model"
+        let graph = try BuilderGraph(nodes: [BuilderNode(
+            id: "build", objective: "build one disposable file",
+            resources: [.init(path: "Sources/Feature/New.swift", access: .write)],
+            isolation: .sandbox, role: .builder, retryLimit: 0)])
+        let policy = BuilderGraphExecutionPolicy(nodeClasses: ["build": .mutation])
+        let store = BuilderJSONStore(fileURL: dynamicTemporaryFile())
+        let source = try dynamicIsolatedSource(beside: store.fileURL)
+        let rootIdentity = try dynamicDisposableRootIdentity(source)
+        let log = DynamicBuilderLog()
+        let provider = try DynamicTestContractProvider(
+            mode: .fixed("Sources/Feature/New.swift"), log: log,
+            producerProviderID: "codex-cli", producerModelID: "fixture-model",
+            reviewerProviderID: "codex-cli", reviewerModelID: "fixture-model",
+            reviewGrade: .freshContextSameModel)
+
+        func contract(
+            risk: BuilderRisk = .low,
+            reviewPolicy: BuilderReviewPolicy
+        ) -> BuilderContract {
+            BuilderContract(
+                id: "same-model-invalid-\(UUID().uuidString)",
+                objective: "build one disposable file",
+                allowedPaths: ["Sources/Feature/New.swift"], doneWhen: ["verified"],
+                routeHint: .init(preferred: .direct, risk: risk),
+                producerIdentities: [identity], reviewPolicy: reviewPolicy)
+        }
+
+        let malformed = BuilderReviewPolicy(
+            grade: .freshContextSameModel,
+            safetyRisk: .low,
+            requiresFreshConversation: false,
+            requiresSeparateInvocation: true,
+            disposableRootIdentity: rootIdentity,
+            maximumMutationPaths: 1,
+            requiresOSProcessSandbox: true,
+            allowsLiveControl: false)
+        XCTAssertThrowsError(try dynamicRun(
+            contract: contract(reviewPolicy: malformed), graph: graph, policy: policy,
+            provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+            store: store, mutationSource: source,
+            sameModelCLIProvider: dynamicSameModelCLIProvider()))
+
+        let exact = BuilderReviewPolicy.lowRiskFreshContextSameModel(
+            disposableRootIdentity: rootIdentity)
+        for risk in [BuilderRisk.high, .critical] {
+            XCTAssertThrowsError(try dynamicRun(
+                contract: contract(risk: risk, reviewPolicy: exact),
+                graph: graph, policy: policy,
+                provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+                store: store, mutationSource: source,
+                sameModelCLIProvider: dynamicSameModelCLIProvider()))
+        }
+    }
+
+    func testDisposableFreshContextSameModelRejectsNonTempRootRootSwapAndNestedGit()
+        async throws {
+        let identity = "codex-cli:fixture-model"
+        let graph = try BuilderGraph(nodes: [BuilderNode(
+            id: "build", objective: "build one disposable file",
+            resources: [.init(path: "Sources/Feature/New.swift", access: .write)],
+            isolation: .sandbox, role: .builder, retryLimit: 0)])
+
+        func assertSourceRejected(
+            _ label: String,
+            source: BuilderIsolatedWorkspaceTransactionSource,
+            sealedRootIdentity: String,
+            store: BuilderJSONStore
+        ) async throws {
+            let log = DynamicBuilderLog()
+            let provider = try DynamicTestContractProvider(
+                mode: .fixed("Sources/Feature/New.swift"), log: log,
+                producerProviderID: "codex-cli", producerModelID: "fixture-model",
+                reviewerProviderID: "codex-cli", reviewerModelID: "fixture-model",
+                reviewGrade: .freshContextSameModel)
+            let contract = BuilderContract(
+                id: "same-model-source-\(label)-\(UUID().uuidString)",
+                objective: "build one disposable file",
+                allowedPaths: ["Sources/Feature/New.swift"], doneWhen: ["verified"],
+                routeHint: .init(preferred: .direct, risk: .medium),
+                producerIdentities: [identity],
+                reviewPolicy: .lowRiskFreshContextSameModel(
+                    disposableRootIdentity: sealedRootIdentity))
+            let run = try dynamicRun(
+                contract: contract, graph: graph,
+                policy: .init(nodeClasses: ["build": .mutation]),
+                provider: provider, source: DynamicTestObservationSource(log: log), log: log,
+                store: store, mutationSource: source,
+                sameModelCLIProvider: dynamicSameModelCLIProvider())
+
+            await assertAsyncThrows { _ = try await run.run() }
+            let workers = await log.workerNodes()
+            XCTAssertTrue(workers.isEmpty, "\(label) reached model-authored mutation execution")
+        }
+
+        let nonTempRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath,
+                              isDirectory: true)
+            .appendingPathComponent(".builder-same-model-nontemp-\(UUID().uuidString)",
+                                    isDirectory: true)
+        let nonTempStaging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("builder-same-model-nontemp-stage-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: nonTempRoot)
+            try? FileManager.default.removeItem(at: nonTempStaging)
+        }
+        try FileManager.default.createDirectory(
+            at: nonTempRoot, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let nonTempSource = try BuilderIsolatedWorkspaceTransactionSource(
+            projectRoot: nonTempRoot, stagingBase: nonTempStaging,
+            attestor: BuilderOSProcessSandboxAttestor())
+        try await assertSourceRejected(
+            "non-temp", source: nonTempSource,
+            sealedRootIdentity: dynamicDisposableRootIdentity(nonTempSource),
+            store: BuilderJSONStore(fileURL: dynamicTemporaryFile()))
+
+        let authorityStore = BuilderJSONStore(fileURL: dynamicTemporaryFile())
+        let authoritySource = try dynamicIsolatedSource(beside: authorityStore.fileURL)
+        let swappedStore = BuilderJSONStore(fileURL: dynamicTemporaryFile())
+        let swappedSource = try dynamicIsolatedSource(beside: swappedStore.fileURL)
+        try await assertSourceRejected(
+            "root-swap", source: swappedSource,
+            sealedRootIdentity: dynamicDisposableRootIdentity(authoritySource),
+            store: swappedStore)
+
+        let nestedStore = BuilderJSONStore(fileURL: dynamicTemporaryFile())
+        let nestedSource = try dynamicIsolatedSource(beside: nestedStore.fileURL)
+        let nestedGit = nestedSource.projectRoot
+            .appendingPathComponent("Sources/Feature/.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedGit, withIntermediateDirectories: true)
+        try await assertSourceRejected(
+            "nested-git", source: nestedSource,
+            sealedRootIdentity: dynamicDisposableRootIdentity(nestedSource),
+            store: nestedStore)
+    }
 }
 
 private enum DynamicProviderMode: Sendable {
@@ -556,20 +933,62 @@ private actor DynamicBuilderLog {
     }
 }
 
+private actor DynamicAcceptanceCommitProbe {
+    private let failuresBeforeSuccess: Int
+    private var attempts = 0
+    private var committedSeals = Set<String>()
+
+    init(failuresBeforeSuccess: Int) {
+        self.failuresBeforeSuccess = failuresBeforeSuccess
+    }
+
+    func commit(_ authority: BuilderFinalAcceptanceAuthority) throws {
+        attempts += 1
+        guard authority.isValid,
+              let seal = authority.finalReceipt.authority?.seal else {
+            throw BuilderRunError.persistedStateInvalid(
+                "test received invalid final acceptance authority")
+        }
+        if attempts <= failuresBeforeSuccess {
+            throw BuilderRunError.persistedStateInvalid(
+                "injected external accepted-run persistence failure")
+        }
+        committedSeals.insert(seal)
+    }
+
+    func attemptCount() -> Int { attempts }
+    func committedCount() -> Int { committedSeals.count }
+}
+
 private actor DynamicTestContractProvider: BuilderNodeExecutionContractProvider {
     nonisolated let identity: BuilderNodeContractProviderIdentity
     private let mode: DynamicProviderMode
     private let log: DynamicBuilderLog
     private let maxTokens: Int
     private let includeReviewStageAuthority: Bool
+    private let producerProviderID: String
+    private let producerModelID: String
+    private let reviewerProviderID: String
+    private let reviewerModelID: String
+    private let reviewGrade: EvolutionReviewGrade
 
     init(mode: DynamicProviderMode, log: DynamicBuilderLog, maxTokens: Int = 10_000,
-         includeReviewStageAuthority: Bool = true) throws {
+         includeReviewStageAuthority: Bool = true,
+         producerProviderID: String = "build-provider",
+         producerModelID: String = "builder-model",
+         reviewerProviderID: String = "review-provider",
+         reviewerModelID: String = "reviewer-model",
+         reviewGrade: EvolutionReviewGrade = .independent) throws {
         self.identity = try dynamicProviderIdentity("a")
         self.mode = mode
         self.log = log
         self.maxTokens = maxTokens
         self.includeReviewStageAuthority = includeReviewStageAuthority
+        self.producerProviderID = producerProviderID
+        self.producerModelID = producerModelID
+        self.reviewerProviderID = reviewerProviderID
+        self.reviewerModelID = reviewerModelID
+        self.reviewGrade = reviewGrade
     }
 
     init(identity: BuilderNodeContractProviderIdentity,
@@ -579,6 +998,11 @@ private actor DynamicTestContractProvider: BuilderNodeExecutionContractProvider 
         self.log = log
         self.maxTokens = 10_000
         self.includeReviewStageAuthority = true
+        self.producerProviderID = "build-provider"
+        self.producerModelID = "builder-model"
+        self.reviewerProviderID = "review-provider"
+        self.reviewerModelID = "reviewer-model"
+        self.reviewGrade = .independent
     }
 
     func sealedContract(for request: BuilderNodeContractRequest) async throws
@@ -609,7 +1033,12 @@ private actor DynamicTestContractProvider: BuilderNodeExecutionContractProvider 
             nodeID: nodeID,
             path: path,
             maxTokens: maxTokens,
-            includeReviewStageAuthority: includeReviewStageAuthority)
+            includeReviewStageAuthority: includeReviewStageAuthority,
+            producerProviderID: producerProviderID,
+            producerModelID: producerModelID,
+            reviewerProviderID: reviewerProviderID,
+            reviewerModelID: reviewerModelID,
+            reviewGrade: reviewGrade)
     }
 }
 
@@ -765,11 +1194,18 @@ private func dynamicProviderIdentity(_ marker: String) throws
 
 private func dynamicSealedContract(
     builderContractID: String, nodeID: String, path: String, maxTokens: Int = 10_000,
-    includeReviewStageAuthority: Bool = true
+    includeReviewStageAuthority: Bool = true,
+    producerProviderID: String = "build-provider",
+    producerModelID: String = "builder-model",
+    reviewerProviderID: String = "review-provider",
+    reviewerModelID: String = "reviewer-model",
+    reviewGrade: EvolutionReviewGrade = .independent
 ) throws
     -> SealedBuilderExecutionContract {
-    let producer = try BuilderModelIdentity(providerID: "build-provider", modelID: "builder-model")
-    let reviewer = try BuilderModelIdentity(providerID: "review-provider", modelID: "reviewer-model")
+    let producer = try BuilderModelIdentity(
+        providerID: producerProviderID, modelID: producerModelID)
+    let reviewer = try BuilderModelIdentity(
+        providerID: reviewerProviderID, modelID: reviewerModelID)
     let total = try BuilderResourceBudget(
         maxToolCalls: 100, maxTokens: maxTokens, maxWallTimeSeconds: 100)
     let stage = try BuilderResourceBudget(
@@ -798,7 +1234,8 @@ private func dynamicSealedContract(
         mutations: [try BuilderMutationOperation(kind: .create, path: path)],
         criteria: criteria,
         budgets: try BuilderBudgetPolicy(total: total, stages: stages),
-        identities: try BuilderIdentityPlan(producers: [producer], reviewers: [reviewer]),
+        identities: try BuilderIdentityPlan(
+            producers: [producer], reviewers: [reviewer], reviewGrade: reviewGrade),
         lineage: try BuilderLineageEnvelope())
     return try SealedBuilderExecutionContract.issue(contract)
 }
@@ -819,10 +1256,18 @@ private func dynamicRun(
     executionContractMaxTokens: Int = 10_000,
     includeReviewStageAuthority: Bool = true,
     reviewAccepted: Bool = true,
-    failFinalVerificationInvocation: Int? = nil
+    failFinalVerificationInvocation: Int? = nil,
+    sameModelCLIProvider: CLIChatProvider? = nil,
+    finalAcceptanceCommit: BuilderFinalAcceptanceCommit? = nil
 ) throws -> BuilderRun {
     let storeValue = store ?? BuilderJSONStore(fileURL: dynamicTemporaryFile())
     let governedSource = try mutationSource ?? dynamicIsolatedSource(beside: storeValue.fileURL)
+    let producerProviderID = sameModelCLIProvider == nil ? "build-provider" : "codex-cli"
+    let producerModelID = sameModelCLIProvider == nil ? "builder-model" : "fixture-model"
+    let reviewerProviderID = sameModelCLIProvider == nil ? "review-provider" : producerProviderID
+    let reviewerModelID = sameModelCLIProvider == nil ? "reviewer-model" : producerModelID
+    let reviewGrade: EvolutionReviewGrade = sameModelCLIProvider == nil
+        ? .independent : .freshContextSameModel
     return try BuilderRun(
         contract: contract,
         graph: graph,
@@ -834,6 +1279,7 @@ private func dynamicRun(
             sourceValue: governedSource),
         readOnlyObservationSourceProvider: DynamicReadOnlyObservationSourceProvider(
             sourceValue: source),
+        finalAcceptanceCommit: finalAcceptanceCommit,
         execute: { request in
             await log.recordWorker(request.node.id, attempt: request.attempt)
             var changedPaths: [String] = []
@@ -845,8 +1291,11 @@ private func dynamicRun(
                     throw DynamicFixtureFailure.missingExecutionWorkspace
                 }
                 await log.recordWorkspace(request.node.id, rootPath: rootPath)
+                if let sameModelCLIProvider {
+                    _ = try await dynamicCLICompletion(sameModelCLIProvider)
+                }
                 BuilderTrustedTelemetry.recordProvider(
-                    providerID: "build-provider", modelID: "builder-model",
+                    providerID: producerProviderID, modelID: producerModelID,
                     inputTokens: 1, outputTokens: 1, elapsedMilliseconds: 1,
                     outputDigest: BuilderEvidenceDigest.sha256(
                         "dynamic-worker-attempt-\(request.attempt)"))
@@ -871,15 +1320,15 @@ private func dynamicRun(
             }
             return BuilderWorkerReceipt(
                 nodeID: request.node.id,
-                provider: "build-provider",
-                model: "builder-model",
+                provider: producerProviderID,
+                model: producerModelID,
                 changedPaths: changedPaths,
                 checks: [.init(name: "worker", passed: true)],
                 unresolvedRisks: risks)
         },
         verify: { request in
             BuilderTrustedTelemetry.recordProvider(
-                providerID: "review-provider", modelID: "reviewer-model",
+                providerID: reviewerProviderID, modelID: reviewerModelID,
                 inputTokens: 1, outputTokens: 1, elapsedMilliseconds: 1,
                 outputDigest: dynamicDigest("f"))
             switch request {
@@ -895,7 +1344,12 @@ private func dynamicRun(
                     builderContractID: parent.id, nodeID: node.id,
                     path: "Sources/Feature/New.swift",
                     maxTokens: executionContractMaxTokens,
-                    includeReviewStageAuthority: includeReviewStageAuthority)
+                    includeReviewStageAuthority: includeReviewStageAuthority,
+                    producerProviderID: producerProviderID,
+                    producerModelID: producerModelID,
+                    reviewerProviderID: reviewerProviderID,
+                    reviewerModelID: reviewerModelID,
+                    reviewGrade: reviewGrade)
                 let result = await ToolRegistry([RunCommandTool()]).execute(
                     name: "run_command",
                     arguments: [
@@ -922,8 +1376,8 @@ private func dynamicRun(
                     contractFingerprint: try sealed.contract.fingerprint(),
                     trustedCommandReference: reference)
                 return BuilderVerifierReceipt(
-                    scope: .node(node.id), provider: "review-provider",
-                    model: "reviewer-model", deterministic: true, passed: true,
+                    scope: .node(node.id), provider: reviewerProviderID,
+                    model: reviewerModelID, deterministic: true, passed: true,
                     checks: [.init(name: "verify", passed: true)],
                     verificationSubject: rootPath, baselineDigest: subjectDigest,
                     subjectDigest: subjectDigest,
@@ -931,8 +1385,8 @@ private func dynamicRun(
                     commandEvidence: [command])
             case .node(_, let node, _, _):
                 return BuilderVerifierReceipt(
-                    scope: .node(node.id), provider: "review-provider",
-                    model: "reviewer-model", deterministic: true, passed: true,
+                    scope: .node(node.id), provider: reviewerProviderID,
+                    model: reviewerModelID, deterministic: true, passed: true,
                     checks: [.init(name: "verify", passed: true)])
             case .final(_, _, let workers):
                 let finalInvocation = await log.recordFinalVerification()
@@ -977,8 +1431,8 @@ private func dynamicRun(
                     trustedCommandReference: reference)
                 let passed = finalInvocation != failFinalVerificationInvocation
                 return BuilderVerifierReceipt(
-                    scope: .final, provider: "review-provider",
-                    model: "reviewer-model", deterministic: true, passed: passed,
+                    scope: .final, provider: reviewerProviderID,
+                    model: reviewerModelID, deterministic: true, passed: passed,
                     checks: [.init(name: "verify", passed: passed,
                                    details: passed ? "passed" : "injected post-promotion failure")],
                     verificationSubject: project.path,
@@ -988,6 +1442,30 @@ private func dynamicRun(
         },
         review: { request in
             await log.recordReview(request)
+            if let sameModelCLIProvider {
+                var votes: [BuilderReviewVoteReceipt] = []
+                let lenses = ["Correctness", "Security", "Worth", "Completeness"]
+                for (index, lens) in lenses.enumerated() {
+                    let text = try await dynamicCLICompletion(sameModelCLIProvider)
+                    BuilderTrustedTelemetry.recordProvider(
+                        providerID: reviewerProviderID, modelID: reviewerModelID,
+                        inputTokens: 1, outputTokens: 1, elapsedMilliseconds: 1,
+                        outputDigest: BuilderEvidenceDigest.sha256(text))
+                    votes.append(.init(
+                        lens: lens, accepted: reviewAccepted,
+                        reason: reviewAccepted ? "approved" : "held", failed: false,
+                        provider: reviewerProviderID, model: reviewerModelID,
+                        invocationID: "builder-review-test-\(index)",
+                        freshConversation: true))
+                }
+                return BuilderReviewReceipt(
+                    provider: reviewerProviderID, model: reviewerModelID,
+                    accepted: reviewAccepted,
+                    checks: [.init(name: "review", passed: reviewAccepted)],
+                    findings: reviewAccepted ? [] : ["review rejected"],
+                    evidencePacketDigest: dynamicDigest("evidence-packet"),
+                    votes: votes, reviewThreshold: 3)
+            }
             BuilderTrustedTelemetry.recordProvider(
                 providerID: "review-provider", modelID: "reviewer-model",
                 inputTokens: 1, outputTokens: 1, elapsedMilliseconds: 1,
@@ -1039,6 +1517,51 @@ private func dynamicTemporaryFile() -> URL {
 
 private func dynamicDigest(_ marker: String) -> String {
     String(repeating: String(marker.prefix(1)), count: 64)
+}
+
+private func dynamicDisposableRootIdentity(
+    _ source: BuilderIsolatedWorkspaceTransactionSource
+) throws -> String {
+    let identity = try BuilderWorkspaceRootIdentity.capture(
+        rootPath: source.projectRoot.path)
+    return BuilderEvidenceDigest.sha256([
+        identity.canonicalPath, String(identity.deviceID), String(identity.inode),
+    ].joined(separator: "\u{0}"))
+}
+
+private func dynamicSameModelCLIProvider() -> CLIChatProvider {
+    CLIChatProvider(
+        id: "codex-cli", name: "fixture", iconName: "cpu", keyAccount: "",
+        defaultModel: "fixture-model",
+        availableModels: [AIModel(id: "fixture-model")],
+        binaryName: "/bin/sh",
+        argsForModel: { _ in ["-c", "cat >/dev/null; printf approved"] },
+        parseOutput: { $0 })
+}
+
+private func dynamicRetainedWorkspaceLeaves(
+    _ source: BuilderIsolatedWorkspaceTransactionSource
+) -> [String] {
+    guard let enumerator = FileManager.default.enumerator(
+        at: source.stagingBase,
+        includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
+    var leaves = Set<String>()
+    for case let url as URL in enumerator
+        where url.lastPathComponent == "workspace" || url.lastPathComponent == "baseline" {
+        leaves.insert(url.lastPathComponent)
+    }
+    return leaves.sorted()
+}
+
+private func dynamicCLICompletion(_ provider: CLIChatProvider) async throws -> String {
+    let stream = try await provider.stream(
+        messages: [.init(role: .user, content: "fresh exact review")],
+        model: "fixture-model", settings: .init(), apiKey: nil)
+    var text = ""
+    for try await event in stream {
+        if case .delta(let chunk) = event { text += chunk }
+    }
+    return text
 }
 
 private func assertAsyncThrows(

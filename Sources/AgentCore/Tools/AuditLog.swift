@@ -19,13 +19,18 @@ public struct AuditEntry: Codable, Sendable, Equatable {
     public let outcome: String      // ok | blocked_scope | blocked_auth | unknown_tool | error
     public let success: Bool
     public let scope: [String]?     // the active skill capability scope, if one was in force
+    /// Optional host-owned mission/root id. Kept separate from runID so an existing CLI audit
+    /// stream can correlate a PlanExecute mission without rewriting its invocation identity.
+    public let correlationID: String?
 
     public init(at: Double, tool: String, argKeys: [String], argsDigest: String,
                 outcome: String, success: Bool, scope: [String]?,
-                schemaVersion: Int? = nil, runID: String? = nil) {
+                schemaVersion: Int? = nil, runID: String? = nil,
+                correlationID: String? = nil) {
         self.schemaVersion = schemaVersion; self.runID = runID
         self.at = at; self.tool = tool; self.argKeys = argKeys; self.argsDigest = argsDigest
         self.outcome = outcome; self.success = success; self.scope = scope
+        self.correlationID = correlationID
     }
 }
 
@@ -86,7 +91,8 @@ public actor AuditLog {
                 at: entry.at, tool: entry.tool, argKeys: entry.argKeys,
                 argsDigest: entry.argsDigest, outcome: entry.outcome,
                 success: entry.success, scope: entry.scope,
-                schemaVersion: 1, runID: runID)
+                schemaVersion: 1, runID: runID,
+                correlationID: entry.correlationID)
         } else {
             receipt = entry
         }

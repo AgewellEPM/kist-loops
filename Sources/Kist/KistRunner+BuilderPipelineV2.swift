@@ -595,7 +595,9 @@ extension KistRunner {
             skillLocations: context.skillLocations,
             skillTracker: context.skillTracker,
             auditLog: context.auditLog,
-            externalReadRoots: context.externalReadRoots)
+            externalReadRoots: context.externalReadRoots,
+            correlationID: context.correlationID,
+            traceRecorder: context.traceRecorder)
     }
 
     static func builderWorker(_ worker: BuilderWorkerReceipt,

@@ -83,12 +83,40 @@ extension KistRunner {
         } else {
             configuredProducerIdentities = roleProducerIdentities
         }
-        guard let selectedIndependentReviewer = independentReviewerSelection(
-            preferred: criticBinding,
-            producingIdentities: configuredProducerIdentities,
-            registry: registry
-        ) else {
-            let reason = "no available configured provider:model is distinct from coder \(configuredBuilderIdentity)"
+        let reviewPolicy: BuilderReviewPolicy
+        let selectedIndependentReviewer: IndependentReviewerSelection?
+        if opts.reviewGrade == .freshContextSameModel {
+            guard let explicitCriticSpec = opts.criticSpec,
+                  let exactCriticBinding = ProviderBinding.parse(explicitCriticSpec),
+                  exactCriticBinding.model != nil,
+                  launch.allowsFreshContextSameModelReviewCandidate,
+                  builderDisposableReviewRootEligible(root),
+                  let rootIdentity = try? builderProjectRootIdentity(root) else {
+                let reason = "fresh_context_same_model Builder review requires an explicit exact --critic on a sandboxed, non-git disposable temp-root headless mutation with no high-risk/live/ship authority"
+                err("builder refused to start: \(reason)")
+                emitBuilderRunRecord(contractID: contractID,
+                                     missionInstanceID: planExecuteMissionID?.rawValue,
+                                     launch: launch, outcome: "rejected", detail: reason)
+                return 2
+            }
+            reviewPolicy = .lowRiskFreshContextSameModel(
+                disposableRootIdentity: rootIdentity)
+            selectedIndependentReviewer = freshContextSameModelReviewerSelection(
+                preferred: exactCriticBinding,
+                producingIdentities: configuredProducerIdentities,
+                registry: registry,
+                policy: reviewPolicy)
+        } else {
+            reviewPolicy = .independent
+            selectedIndependentReviewer = independentReviewerSelection(
+                preferred: criticBinding,
+                producingIdentities: configuredProducerIdentities,
+                registry: registry)
+        }
+        guard let selectedIndependentReviewer else {
+            let reason = reviewPolicy.grade == .freshContextSameModel
+                ? "explicit critic must resolve to the sole exact producer provider:model for fresh_context_same_model"
+                : "no available configured provider:model is distinct from coder \(configuredBuilderIdentity)"
             err("builder refused to start: \(reason)")
             if launch.adapter == .mission {
                 emitAutonomyReceipt(prefix: "KIST_OBJECTIVE_RECEIPT:", payload: [
@@ -151,6 +179,22 @@ extension KistRunner {
         } else {
             preflightEnvelope = nil
         }
+        if reviewPolicy.grade == .freshContextSameModel {
+            guard let plan = preflightEnvelope?.plan,
+                  plan.operations.count == 1,
+                  Set(plan.operations.map(\.path)).count == 1,
+                  plan.verificationCommands.count == 1,
+                  plan.partitions.isEmpty,
+                  builderDisposableReviewTargetsEligible(
+                      root: root, paths: plan.operations.map(\.path)) else {
+                let reason = "fresh_context_same_model Builder review requires one sealed file mutation and one deterministic verifier"
+                err("builder refused unsafe disposable mutation: \(reason)")
+                emitBuilderRunRecord(contractID: contractID,
+                                     missionInstanceID: planExecuteMissionID?.rawValue,
+                                     launch: launch, outcome: "rejected", detail: reason)
+                return 2
+            }
+        }
         let routeTools: ToolRegistry
         if launch.adapter == .headless {
             routeTools = builderScopedHeadlessTools(
@@ -180,15 +224,18 @@ extension KistRunner {
             doneWhen: [
                 "the selected build adapter exits successfully",
                 "deterministic execution evidence passes",
-                completionMode == .verificationOnly
-                    ? "an independent critic accepts digest-bound verification evidence"
-                    : "an independent critic accepts the completed build",
+                reviewPolicy.grade == .independent
+                    ? (completionMode == .verificationOnly
+                        ? "an independent critic accepts digest-bound verification evidence"
+                        : "an independent critic accepts the completed build")
+                    : "a fresh-context same-model critic accepts the completed disposable build (independent=false)",
             ],
             routeHint: launch.routeHint,
             checkpointIdentity: checkpointIdentity,
             maxTokens: effectiveTokenBudget,
             completionMode: completionMode,
-            producerIdentities: configuredProducerIdentities.sorted()
+            producerIdentities: configuredProducerIdentities.sorted(),
+            reviewPolicy: reviewPolicy.grade == .independent ? nil : reviewPolicy
         )
         let graph: BuilderGraph
         do {
@@ -302,6 +349,7 @@ extension KistRunner {
                     captainDecisionDigest: captainDecisionReceipt.digest,
                     producerIdentities: configuredProducerIdentities.sorted(),
                     reviewerIdentity: selectedIndependentReviewer.identity,
+                    reviewGrade: reviewPolicy.grade,
                     maxTokens: effectiveTokenBudget, budget: sharedBudget!,
                     requiresMissionLineage:
                         launch.adapter == .mission || launch.adapter == .greatLoop)
@@ -340,7 +388,8 @@ extension KistRunner {
                 parentContractFingerprint: parentContractFingerprint,
                 baselineDigest: baselineDigest)
             let builderReviewContext = BuilderReviewContext(
-                criticBinding: criticBinding, registry: registry, launch: launch,
+                criticBinding: selectedIndependentReviewer.binding,
+                registry: registry, launch: launch,
                 projectRoot: root, finalizedContract: finalizedContract,
                 goal: goal, sharedBudget: sharedBudget)
             let builderExecutionContext = BuilderAdapterExecutionContext(
@@ -370,6 +419,25 @@ extension KistRunner {
                 missionReasoningStore: missionReasoningStore,
                 missionReasoningRunID: missionReasoningRunID,
                 builderModel: builderModel)
+            let finalAcceptanceCommit: BuilderFinalAcceptanceCommit?
+            if launch.adapter == .planExecute {
+                guard let missionID = planExecuteMissionID else {
+                    throw BuilderRunError.invalidConfiguration(
+                        "PlanExecute acceptance persistence requires an exact mission identity")
+                }
+                let iterationBudget = graph.nodes.reduce(0) {
+                    $0 + 1 + $1.retryLimit
+                }
+                finalAcceptanceCommit = { authority in
+                    _ = try persistAcceptedPlanExecuteRun(
+                        authority: authority, missionID: missionID, goal: goal,
+                        projectRoot: root, launch: launch,
+                        planOutcome: planOutcomeBox.get(),
+                        iterationBudget: iterationBudget)
+                }
+            } else {
+                finalAcceptanceCommit = nil
+            }
             let run = try BuilderRun(
                 contract: finalizedContract,
                 graph: graph,
@@ -385,6 +453,7 @@ extension KistRunner {
                 nodeObservationSourceProvider: observationProvider,
                 readOnlyObservationSourceProvider:
                     BuilderProjectReadOnlyObservationProvider(projectRoot: root),
+                finalAcceptanceCommit: finalAcceptanceCommit,
                 execute: { request in
                     try await builderExecuteNode(request, context: builderExecutionContext)
                 },
@@ -401,6 +470,10 @@ extension KistRunner {
             if let reviewAttempt {
                 emitAutonomyReceipt(prefix: "KIST_REVIEW_ATTEMPT_RECEIPT:",
                                     payload: reviewAttemptPayload(reviewAttempt))
+            }
+            if let payload = builderSameModelReviewReceiptPayload(final) {
+                emitAutonomyReceipt(
+                    prefix: "KIST_BUILDER_REVIEW_RECEIPT:", payload: payload)
             }
             if launch.adapter == .headless, opts.ship {
                 if let sharedBudget {
@@ -447,6 +520,67 @@ extension KistRunner {
                                     final, additional: additionalReviewUsage),
                                  finalReceipt: final)
             return final.accepted ? 0 : 1
+        } catch let builderError as BuilderRunError {
+            if case .acceptancePersistencePending(let pendingReason) = builderError {
+                let mission = planExecuteMissionID?.rawValue ?? "the durable Builder run"
+                let reason = "accepted evidence persistence pending: \(pendingReason)"
+                err(reason)
+                note("accepted work remains retained; resume with: kist --resume \(mission)")
+                let reviewAttempt = (try? await runStore.load())?.reviewAttempt
+                if let reviewAttempt {
+                    emitAutonomyReceipt(
+                        prefix: "KIST_REVIEW_ATTEMPT_RECEIPT:",
+                        payload: reviewAttemptPayload(reviewAttempt))
+                }
+                emitBuilderRunRecord(
+                    contractID: contract.id,
+                    missionInstanceID: planExecuteMissionID?.rawValue,
+                    launch: launch, outcome: "acceptance-persistence-pending",
+                    detail: reason)
+                return 1
+            }
+            let error: Error = builderError
+            let reason = error.localizedDescription
+            err("builder failed: \(reason)")
+            if launch.adapter == .mission {
+                let verificationPassed: Bool
+                if case .finalVerificationFailed = builderError { verificationPassed = false }
+                else { verificationPassed = missionStageBox.get("execution")?.passed == true }
+                func stageStatus(_ nodeID: String) -> String {
+                    missionStageBox.get(nodeID)?.passed == true ? "passed" : "failed"
+                }
+                func stageEvidence(_ nodeID: String) -> String {
+                    missionStageBox.get(nodeID)?.evidence ?? "stage was not reached: \(reason)"
+                }
+                emitAutonomyReceipt(prefix: "KIST_OBJECTIVE_RECEIPT:", payload: [
+                    "receiptType": "kist.objective-stages", "schemaVersion": 1,
+                    "stages": [
+                        ["name": "research", "status": stageStatus("research"), "evidence": stageEvidence("research")],
+                        ["name": "council", "status": stageStatus("research"), "evidence": stageEvidence("research")],
+                        ["name": "simulation", "status": stageStatus("simulation"), "evidence": stageEvidence("simulation")],
+                        ["name": "trial", "status": stageStatus("trial"), "evidence": stageEvidence("trial")],
+                        ["name": "execute", "status": stageStatus("execution"), "evidence": stageEvidence("execution")],
+                        ["name": "verify", "status": verificationPassed ? "passed" : "failed", "evidence": reason],
+                        ["name": "review", "status": "failed", "evidence": reason],
+                    ],
+                ])
+                emitAutonomyReceipt(prefix: "KIST_REVIEW_RECEIPT:", payload: [
+                    "receiptType": "kist.independent-review", "schemaVersion": 1,
+                    "builderIdentity": configuredBuilderIdentity, "reviewerIdentity": "unavailable",
+                    "verification": "failed", "decision": "reject", "evidence": reason,
+                ])
+            }
+            let reviewAttempt = (try? await runStore.load())?.reviewAttempt
+            if let reviewAttempt {
+                emitAutonomyReceipt(prefix: "KIST_REVIEW_ATTEMPT_RECEIPT:",
+                                    payload: reviewAttemptPayload(reviewAttempt))
+            }
+            let detail = reviewAttempt.map { reason + " | reviewAttempt=" + $0.evidencePacketDigest } ?? reason
+            emitBuilderRunRecord(contractID: contract.id,
+                                 missionInstanceID: planExecuteMissionID?.rawValue,
+                                 launch: launch, outcome: "failed",
+                                 detail: detail)
+            return 1
         } catch {
             let reason = error.localizedDescription
             err("builder failed: \(reason)")

@@ -4,6 +4,21 @@ import XCTest
 @testable import Kist
 
 final class KistBuilderReviewWorkspaceTests: XCTestCase {
+    func testDisposableSameModelTargetRejectsNestedGitAncestor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "kist-builder-same-model-target-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Nested/Sources/.git", isDirectory: true),
+            withIntermediateDirectories: true)
+
+        XCTAssertTrue(KistRunner.builderDisposableReviewRootEligible(root.path))
+        XCTAssertFalse(KistRunner.builderDisposableReviewTargetsEligible(
+            root: root.path, paths: ["Nested/Sources/New.swift"]))
+        XCTAssertTrue(KistRunner.builderDisposableReviewTargetsEligible(
+            root: root.path, paths: ["Isolated/New.swift"]))
+    }
+
     func testNonFleetReviewUsesOnlyVerifiedStagedSubject() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(
             "kist-builder-review-workspace-\(UUID().uuidString)", isDirectory: true)

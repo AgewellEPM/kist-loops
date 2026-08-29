@@ -35,5 +35,19 @@ final class LiveOrgansParseTests: XCTestCase {
         let a = LiveCapabilityAdversary.parse(#"{"breakingArgs":null,"expectContains":null,"confidence":0.9}"#)
         XCTAssertNil(a?.breakingArgs ?? nil)
         XCTAssertEqual(a?.confidence, 0.9)
+        XCTAssertNil(a.flatMap(LiveCapabilityAdversary.executableAttack),
+                     "opinion-only confidence must not become executable promotion evidence")
+    }
+
+    func testAdversaryRequiresANonEmptyExecutionOracle() {
+        let emptyOracle = LiveCapabilityAdversary.parse(
+            #"{"breakingArgs":{"text":"edge"},"expectContains":"","confidence":0.99}"#)
+        XCTAssertNil(emptyOracle.flatMap(LiveCapabilityAdversary.executableAttack))
+
+        let grounded = LiveCapabilityAdversary.parse(
+            #"{"breakingArgs":{"text":"edge"},"expectContains":"EDGE","confidence":0.8}"#)
+        let plan = grounded.flatMap(LiveCapabilityAdversary.executableAttack)
+        XCTAssertEqual(plan?.0, ["text": "edge"])
+        XCTAssertEqual(plan?.1, "EDGE")
     }
 }

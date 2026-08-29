@@ -2,16 +2,16 @@ import XCTest
 @testable import Kist
 @testable import AgentCore
 
-/// Proves the full tool set (incl. the agent-writable Cortex) is actually WIRED into the runtime —
-/// and identically for fresh and --resume runs (both call buildExtraTools).
+/// Proves temporal semantic tools stay separate from the retired Cortex compatibility surface.
 final class KistExtraToolsTests: XCTestCase {
 
-    func testCortexAndCoreExtrasAreHookedUp() {
+    func testLegacyCortexToolIsAbsentWhileCoreExtrasRemainHookedUp() {
         let opts = KistOptions(project: NSTemporaryDirectory())
         let tools = KistRunner.buildExtraTools(root: NSTemporaryDirectory(), fetchAllowedHosts: [],
-                                               opts: opts, registry: KistRunner.makeRegistry())
+                                               opts: opts, registry: KistRunner.makeRegistry(config: KistConfig()))
         let names = Set(tools.map { $0.name })
-        XCTAssertTrue(names.contains("cortex"), "CortexTool must be registered so the agent can write its own memory")
+        XCTAssertFalse(names.contains("cortex"),
+                       "raw audit-only Markdown must not expose a model tool")
         // Regression guard: --resume previously lost ALL of these by passing no extraTools.
         for n in ["tasks", "browse", "security_audit", "business_workflow"] {
             XCTAssertTrue(names.contains(n), "\(n) must be in the shared extra tool set")
@@ -19,24 +19,46 @@ final class KistExtraToolsTests: XCTestCase {
     }
 
     func testFastModeTrimsToTheLeanDevSet() {
+        let previous = ProcessInfo.processInfo.environment["KIST_EMBEDDER"]
+        setenv("KIST_EMBEDDER", "ollama", 1)
+        defer {
+            if let previous { setenv("KIST_EMBEDDER", previous, 1) }
+            else { unsetenv("KIST_EMBEDDER") }
+        }
         var opts = KistOptions(project: "/tmp"); opts.fast = true
         let names = Set(KistRunner.buildExtraTools(root: "/tmp", fetchAllowedHosts: [], opts: opts,
-                                                   registry: KistRunner.makeRegistry()).map { $0.name })
-        XCTAssertEqual(names, ["cortex"], "--fast keeps only cortex in extras (core code tools live in headless)")
+                                                   registry: KistRunner.makeRegistry(config: KistConfig())).map { $0.name })
+        XCTAssertEqual(names, ["remember", "recall"],
+                       "--fast retains only temporal semantic extras when an embedder is admitted")
         // no media/browse/pentest/research/workflow/vision bloat in fast mode
         for bloat in ["browse", "pentest", "business_workflow", "analyze_media", "view_image", "research_run"] {
             XCTAssertFalse(names.contains(bloat), "\(bloat) must be dropped in --fast")
         }
         opts.noMemory = true
         XCTAssertTrue(KistRunner.buildExtraTools(root: "/tmp", fetchAllowedHosts: [], opts: opts,
-                                                 registry: KistRunner.makeRegistry()).isEmpty, "--fast --no-memory → empty extras")
+                                                 registry: KistRunner.makeRegistry(config: KistConfig())).isEmpty, "--fast --no-memory → empty extras")
     }
 
-    func testCortexOmittedUnderNoMemory() {
+    func testEveryMemoryToolIsOmittedUnderNoMemoryWithActiveEmbedder() {
+        let previous = ProcessInfo.processInfo.environment["KIST_EMBEDDER"]
+        setenv("KIST_EMBEDDER", "ollama", 1)
+        defer {
+            if let previous { setenv("KIST_EMBEDDER", previous, 1) }
+            else { unsetenv("KIST_EMBEDDER") }
+        }
         var opts = KistOptions(project: NSTemporaryDirectory()); opts.noMemory = true
+        let registry = KistRunner.makeRegistry(config: KistConfig())
+        XCTAssertNotNil(KistRunner.makeEmbedder(
+            registry: registry, environment: ["KIST_EMBEDDER": "ollama"]))
+        XCTAssertNil(KistRunner.makeSemanticMemory(
+            root: NSTemporaryDirectory(), opts: opts, registry: registry,
+            environment: ["KIST_EMBEDDER": "ollama"]))
         let tools = KistRunner.buildExtraTools(root: NSTemporaryDirectory(), fetchAllowedHosts: [],
-                                               opts: opts, registry: KistRunner.makeRegistry())
-        XCTAssertFalse(tools.contains { $0.name == "cortex" }, "--no-memory must not expose the cortex tool")
+                                               opts: opts, registry: registry)
+        let names = Set(tools.map(\.name))
+        for memoryTool in ["cortex", "remember", "recall"] {
+            XCTAssertFalse(names.contains(memoryTool), "--no-memory must not expose \(memoryTool)")
+        }
     }
 
     // --resume memory refresh: guarded append so message alternation stays valid.
@@ -53,21 +75,51 @@ final class KistExtraToolsTests: XCTestCase {
         XCTAssertEqual(out.messages.last?.content.contains("prefers X"), true)
     }
 
-    // sessionMemory must carry CORTEX content (not just ProjectMemory) so one-shot/TUI/loop/
-    // plan-execute all inject "what kist knows about you" — the gap Luke flagged.
-    func testSessionMemoryIncludesCortex() throws {
+    func testSessionMemoryExcludesRawCortexButPreservesOperatorProjectConfig() throws {
         let home = NSTemporaryDirectory() + "sessmem-\(UUID().uuidString)"
+        let project = home + "/project"
+        try FileManager.default.createDirectory(
+            atPath: home + "/cortex", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            atPath: project, withIntermediateDirectories: true)
         setenv("XDG_DATA_HOME", home, 1)
         defer { unsetenv("XDG_DATA_HOME"); try? FileManager.default.removeItem(atPath: home) }
-        try CortexMemory().remember("Luke prefers small focused functions")
-        let mem = KistRunner.sessionMemory(root: "/tmp/proj", opts: KistOptions(project: "/tmp/proj"))
+        try "RAW CORTEX MARKER MUST NOT BE INJECTED".write(
+            toFile: home + "/cortex/preferences.md", atomically: true, encoding: .utf8)
+        try "OPERATOR PROJECT CONFIG SURVIVES".write(
+            toFile: project + "/AGENTS.md", atomically: true, encoding: .utf8)
+
+        let mem = KistRunner.sessionMemory(
+            root: project, opts: KistOptions(project: project))
         XCTAssertNotNil(mem)
-        XCTAssertEqual(mem?.contains("small focused functions"), true, "cortex must be in the injected session memory")
+        XCTAssertTrue(mem?.contains("OPERATOR PROJECT CONFIG SURVIVES") == true)
+        XCTAssertFalse(mem?.contains("RAW CORTEX MARKER") == true)
     }
 
-    // REGRESSION (found by live-driving): cortex memory must come FIRST in the brief so the
-    // 4000-char projectContext cap in TaskBrief.prompt can't truncate it off when lessons/persona
-    // fill the budget. This bug made the model answer "NOT FOUND" for a seeded preference.
+    func testCortexSlashSurfaceIsExplicitAuditOnlyAndCannotMutate() throws {
+        let root = NSTemporaryDirectory() + "cortex-audit-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try FileManager.default.createDirectory(
+            atPath: root, withIntermediateDirectories: true)
+        let path = root + "/preferences.md"
+        try "RAW AUDIT MARKER".write(
+            toFile: path, atomically: true, encoding: .utf8)
+        let before = try Data(contentsOf: URL(fileURLWithPath: path))
+        let cortex = CortexMemory(root: root)
+
+        let summary = KistREPL.handleCortex("", cortex: cortex)
+        XCTAssertTrue(summary.contains("raw audit-only"))
+        XCTAssertFalse(summary.contains("RAW AUDIT MARKER"),
+                       "bare /cortex is not an operational recall path")
+        XCTAssertTrue(KistREPL.handleCortex(
+            "remember replacement", cortex: cortex).contains("raw audit-only"))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), before)
+        XCTAssertTrue(KistREPL.handleCortex(
+            "show preferences.md", cortex: cortex).contains("RAW AUDIT MARKER"),
+                      "explicit operator audit remains available")
+    }
+
+    // Operator-owned project context remains ahead of lower-priority lessons/persona in the brief.
     func testMemorySurvivesLargeContextBudget() {
         let roles = RoleBindings(default: ProviderBinding(providerId: "deepseek"))
         let hugeLessons = String(repeating: "prior lesson blah. ", count: 500)   // ~9.5k chars
@@ -77,7 +129,7 @@ final class KistExtraToolsTests: XCTestCase {
         XCTAssertTrue(ctx.range(of: "MARKER-XYZ-77")!.lowerBound < ctx.range(of: "prior lesson")!.lowerBound)
         // …and survives into the compiled prompt despite the huge other context.
         let compiled = PromptCompiler.compiledPrompt("go", mode: .inline, projectContext: ctx)
-        XCTAssertTrue(compiled.contains("MARKER-XYZ-77"), "cortex memory must not be truncated off")
+        XCTAssertTrue(compiled.contains("MARKER-XYZ-77"), "project memory must not be truncated off")
     }
 
     func testSessionMemoryNilUnderNoMemory() {
@@ -85,19 +137,12 @@ final class KistExtraToolsTests: XCTestCase {
         XCTAssertNil(KistRunner.sessionMemory(root: "/tmp", opts: opts))
     }
 
-    // Auto-journaling: a completed goal run logs itself to the cortex journal.
-    func testAutoJournalWritesEntry() throws {
+    func testRetiredAutoJournalNeverWritesRawCortex() throws {
         let home = NSTemporaryDirectory() + "autojournal-\(UUID().uuidString)"
         setenv("XDG_DATA_HOME", home, 1)
         defer { unsetenv("XDG_DATA_HOME"); try? FileManager.default.removeItem(atPath: home) }
         KistRunner.autoJournalRun(goal: "ship the symbols tool\nmore detail", success: true, root: "/tmp/kist", enabled: true)
-        let dir = home + "/cortex/journal"
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
-        XCTAssertEqual(files.count, 1)
-        let body = (try? String(contentsOfFile: dir + "/" + (files.first ?? ""), encoding: .utf8)) ?? ""
-        XCTAssertTrue(body.contains("[done] ship the symbols tool"), "logs first line + status")
-        XCTAssertFalse(body.contains("more detail"), "only the first line is journaled")
-        XCTAssertTrue(body.contains("kist"), "tags the project")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home + "/cortex"))
     }
 
     func testAutoJournalNoOpWhenDisabled() throws {

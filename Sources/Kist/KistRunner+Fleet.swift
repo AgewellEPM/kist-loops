@@ -142,9 +142,9 @@ extension KistRunner {
                                      lessons: String? = nil, specialists: String? = nil,
                                      reviewTargets: String? = nil) -> String? {
         var parts = ["CURRENT AI TEAM: \(roles.summary)"]
-        // Cortex/project memory FIRST — it's the highest-value context ("what kist knows about you,
-        // follow these") and must NOT be truncated off the end by the projectContext length cap
-        // (that bug dropped it in real runs where persona+lessons filled the budget).
+        // Operator-owned project memory FIRST — it is the highest-value durable context and must NOT
+        // be truncated off the end by the projectContext length cap (that bug dropped it in real runs
+        // where persona+lessons filled the budget). Legacy Cortex Markdown never reaches this seam.
         if let memoryContext, !memoryContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             parts.append(memoryContext)
         }

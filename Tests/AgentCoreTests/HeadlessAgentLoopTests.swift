@@ -1399,6 +1399,74 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertTrue(seen.contains("single JSON object"), "but it still gets the standard protocol prompt")
     }
 
+    func testSubscriptionCLIIsToldKistToolsRemainAvailable() async {
+        let provider = SystemPromptCaptureProvider(id: "codex-cli")
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        _ = await HeadlessAgentLoop(
+            providers: registry, providerId: "codex-cli", model: "gpt-5.6-sol",
+            tools: .headless(), context: ToolContext(projectRoot: root),
+            maxIterations: 2).run(goal: "inspect the repository")
+        let seen = await provider.lastSystemPrompt()
+        let normalized = seen.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        XCTAssertTrue(normalized.contains("SUBSCRIPTION CLI BACKEND"))
+        XCTAssertTrue(normalized.contains("Kist executes one valid JSON tool action"))
+        XCTAssertTrue(normalized.contains(
+            "before claiming that file, Git, test, or write access is blocked"))
+    }
+
+    func testSubscriptionCLIZeroToolAvailabilityClaimIsSteeredIntoKistToolCall() async throws {
+        try "ground truth".write(toFile: root + "/CLAUDE.md", atomically: true, encoding: .utf8)
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+            #"{"done":true,"summary":"Blocked: I cannot inspect the repository because no Kist filesystem or git tools are actually exposed."}"#,
+            #"{"tool":"read_file","parameters":{"path":"CLAUDE.md"}}"#,
+            #"{"done":true,"summary":"CLAUDE.md says ground truth."}"#,
+        ])
+        let sink = RecordingEventSink()
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), sink: sink, maxIterations: 5
+        ).run(goal: "inspect CLAUDE.md")
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(out.iterations, 3)
+        XCTAssertTrue(sink.events.contains {
+            if case let .actionStarted(_, tool, _) = $0 { return tool == "read_file" }
+            return false
+        })
+    }
+
+    func testSubscriptionCLIDirectAnswerIsNotForcedToUseTool() async {
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+            #"{"done":true,"summary":"Four."}"#,
+        ])
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), maxIterations: 3
+        ).run(goal: "what is two plus two?")
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(out.iterations, 1)
+        XCTAssertEqual(out.summary, "Four.")
+    }
+
+    func testSubscriptionCLIRepeatedFalseToolBlockerFailsHonestly() async {
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: Array(
+            repeating: #"{"done":true,"summary":"Blocked: read_file is unavailable here."}"#, count: 3
+        ))
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), maxIterations: 4
+        ).run(goal: "inspect CLAUDE.md")
+
+        XCTAssertFalse(out.success)
+        XCTAssertEqual(out.terminalStatus, .stoppedUnverified)
+        XCTAssertTrue(out.summary.contains("before making any call"), out.summary)
+    }
+
     // MARK: - Interrupted-action reconciliation
 
     func testResumeReconcilesInterruptedMutationAsDurableUncertainty() async throws {
@@ -2195,11 +2263,13 @@ private struct FailingProvider: ChatProvider {
 /// Text-path provider (no native tools) that RECORDS the system prompt it was handed, so a test can
 /// prove tier-aware primer injection. Always finishes immediately with a done action.
 private final class SystemPromptCaptureProvider: ChatProvider, @unchecked Sendable {
-    let id = "capture", name = "Capture", iconName = "cpu"
+    let id: String
+    let name = "Capture", iconName = "cpu"
     let requiresAPIKey = false, keyAccount = "capture", defaultModel = "c1"
     let availableModels = [AIModel(id: "c1")]
     private let box = Box()
     private actor Box { var prompt = ""; func set(_ s: String) { prompt = s }; func get() -> String { prompt } }
+    init(id: String = "capture") { self.id = id }
     func lastSystemPrompt() async -> String { await box.get() }
     func stream(messages: [ChatMessage], model: String, settings: ModelSettings, apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
         await box.set(settings.systemPrompt)

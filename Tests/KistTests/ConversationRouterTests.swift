@@ -87,10 +87,48 @@ final class ConversationRouterTests: XCTestCase {
         XCTAssertTrue(proposal.prompt.contains("evidence-first research pipeline"))
         XCTAssertFalse(proposal.prompt.contains("produce a decision and task board"))
     }
+
+    func testClassifierProviderFailureIsLoudAndDegradesInline() async {
+        // Routing audit 2026-08-25: with the classifier bound to a dead provider, escalation was
+        // SILENTLY disabled — indistinguishable from "nothing to escalate". The degrade to inline
+        // stays (correct), but it must announce itself through onClassifierUnavailable.
+        let registry = ProviderRegistry(
+            providers: [RouterDeadProvider()],
+            keyStore: RouterNullKeys())
+        var router = ConversationRouter(
+            providers: registry,
+            binding: ProviderBinding(providerId: "router-dead"))
+        var announced: String?
+        router.onClassifierUnavailable = { announced = $0 }
+
+        // Long, imperative, build-shaped — this request REACHES the classifier (not obviously chat).
+        let proposal = await router.propose(
+            "Refactor the persistence layer and add a caching module and a migration runner")
+
+        XCTAssertNil(proposal, "a dead classifier still degrades to inline")
+        XCTAssertNotNil(announced, "the degrade must be announced, never silent")
+        XCTAssertTrue(announced?.contains("router-dead") ?? false,
+                      "the announcement must name the dead provider: \(announced ?? "nil")")
+    }
 }
 
 private struct RouterNullKeys: KeyStore {
     func key(forAccount account: String) -> String? { nil }
+}
+
+private struct RouterDeadProvider: ChatProvider {
+    struct Dead: Error {}
+    let id = "router-dead"
+    let name = "Router Dead"
+    let requiresAPIKey = false
+    let keyAccount = "router-dead"
+    let defaultModel = "router-dead"
+    let availableModels = [AIModel(id: "router-dead")]
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        throw Dead()
+    }
 }
 
 private struct RouterReplyProvider: ChatProvider {

@@ -763,13 +763,16 @@ public enum ReasoningControlError: Error, Sendable, Equatable {
 /// Durable host-side reasoning state. It contains decisions, summaries, receipts, and opaque
 /// provider continuation handles; it has no field capable of representing raw private reasoning.
 public struct ReasoningControlState: Codable, Sendable, Equatable, Identifiable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public let id: String
     public var schemaVersion: Int
     /// Random identity of one logical PlanExecute mission. Missing only on legacy checkpoints, which
     /// are intentionally ineligible for implicit or token-based resume.
     public var missionInstanceID: String?
+    /// Physical active-project binding for PlanExecute checkpoints. Generic/legacy reasoning may
+    /// leave this nil, but nil state is advisory and is never eligible for PlanExecute resume.
+    public var projectIdentity: String?
     public var goalFingerprint: String?
     /// Optional for schema-v4 and older decoding. A legacy checkpoint cannot execute workspace
     /// actions until the host explicitly installs the complete lifecycle binding.
@@ -813,10 +816,12 @@ public struct ReasoningControlState: Codable, Sendable, Equatable, Identifiable 
 
     public init(id: String, route: ReasoningRoute, goalFingerprint: String? = nil,
                 missionInstanceID: String? = nil,
+                projectIdentity: String? = nil,
                 updatedAt: Double = Date().timeIntervalSince1970) {
         self.id = id
         self.schemaVersion = Self.currentSchemaVersion
         self.missionInstanceID = missionInstanceID
+        self.projectIdentity = projectIdentity
         self.goalFingerprint = goalFingerprint
         self.canonicalFunctionalObjectiveFingerprint = nil
         self.workspaceManifestPolicyFingerprint = nil

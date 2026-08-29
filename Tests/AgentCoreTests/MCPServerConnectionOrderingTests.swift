@@ -1532,7 +1532,8 @@ private actor ReplacementTestConnection: MCPConnection {
 
     func callTool(
         name: String,
-        arguments: [String: Any]
+        arguments: [String: Any],
+        correlationID: String?
     ) throws -> [String: Any] {
         [:]
     }

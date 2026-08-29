@@ -266,7 +266,7 @@ extension KistREPL {
         /// Persist exactly one learning capsule for the submitted turn, after review/repair and the final
         /// deterministic contract have settled. Interim phase summaries remain display-only so a primary
         /// success cannot survive as a false pass when its automatic repair later fails.
-        func recordSubmittedTurnLearning(outcomeSummary: String, success: Bool) {
+        func recordSubmittedTurnLearning(outcomeSummary: String, success: Bool) async {
             let clean = outcomeSummary.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !clean.isEmpty, !lastTurnInterrupted else { return }
             let trajectory = turnEvidenceSnapshot()
@@ -318,11 +318,22 @@ extension KistREPL {
                 loopKinds: report.issues.map { $0.kind.rawValue },
                 wasStuck: !report.healthy, failureRate: failureRate))
 
-            // Roadmap #3: on a VERIFIED win, auto-capture a durable lesson into semantic memory so a
-            // future session can `recall` it (fire-and-forget, fail-soft — never blocks the turn).
-            if verified, let rememberLesson {
-                let lesson = "SOLVED: \(goalText)\n\n\(clean.prefix(500))"
-                Task { await rememberLesson(lesson) }
+            // Roadmap #3: on a locally verified win, capture the evidence clock and durable replay
+            // locator before detaching the advisory semantic-memory write.
+            if verified, let rememberLesson, let replayRunID {
+                let verifiedAt = Date()
+                let boundedGoal = String(goalText.components(separatedBy: .whitespacesAndNewlines)
+                    .filter { !$0.isEmpty }.joined(separator: " ").prefix(240))
+                let observedKinds = report.issues.map { $0.kind.rawValue }.sorted().prefix(8)
+                    .joined(separator: ", ")
+                let lesson = "Locally checked self-heal completed for task: \(boundedGoal). Observed loop classes: \(observedKinds.isEmpty ? "none" : observedKinds). Consult the replay locator and re-run verification before reuse."
+                let deposit = SemanticLessonDeposit(
+                    text: lesson,
+                    evidence: SemanticVerifiedEvidence(
+                        observedAt: verifiedAt,
+                        sourceLocator: "run:\(replayRunID)",
+                        kind: .locallyCheckedLesson))
+                await rememberLesson(deposit)
             }
         }
 

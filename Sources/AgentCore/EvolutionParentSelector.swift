@@ -12,10 +12,11 @@ public enum EvolutionParentSelector {
         /// How strongly to favour under-explored candidates (few children). 0 = pure greedy exploitation
         /// by score; higher = more open-ended exploration of the frontier.
         public var explorationWeight: Double
-        /// Include changed-but-`failed` candidates as stepping-stones (a failed variant can still hold a
-        /// useful partial idea). `blocked` (verifier-gaming) and `noChange` are NEVER eligible.
+        /// Experimental inspection mode for changed-but-`failed` candidates.
+        /// Autonomous/default selection is passed-only because a candidate can
+        /// suppress a sandbox denial and surface an ordinary assertion exit.
         public var includeFailedSteppingStones: Bool
-        public init(explorationWeight: Double = 1.0, includeFailedSteppingStones: Bool = true) {
+        public init(explorationWeight: Double = 1.0, includeFailedSteppingStones: Bool = false) {
             // Clamp exploration ≥ 0: a negative value could drive selection weights to zero/negative and
             // silently degenerate the probabilistic pick to "first eligible" (GPT review).
             self.explorationWeight = max(0, explorationWeight)
@@ -26,22 +27,25 @@ public enum EvolutionParentSelector {
 
     /// Candidates eligible to be a parent. A `blocked` candidate (it gamed the verifier / touched the
     /// trust spine) is NEVER eligible — breeding from a cheat would let the reward-hack propagate. A
-    /// `noChange` candidate has nothing to build on. `passed` always qualifies; `failed`-with-a-diff only
-    /// when stepping-stones are enabled.
-    public static func eligibleParents(_ archive: [EvolutionCandidateRecord], config: Config = .default) -> [EvolutionCandidateRecord] {
+    /// `noChange` candidate has nothing to build on. `passed` always qualifies;
+    /// failed records require an explicit non-default experimental opt-in.
+    public static func eligibleParents(_ archive: [EvolutionCandidateRecord], config: Config = .default,
+                                       allowedCandidateIDs: Set<String>? = nil) -> [EvolutionCandidateRecord] {
         archive.filter { record in
-            switch record.status {
-            case .passed: return true
-            case .failed: return config.includeFailedSteppingStones && !record.changedFiles.isEmpty
-            case .blocked, .noChange: return false
-            }
+            guard record.hasValidArchiveAuthority,
+                  EvolutionRecordAuthority.parentEligible(
+                    record, includeFailed: config.includeFailedSteppingStones),
+                  allowedCandidateIDs?.contains(record.candidateID) ?? true else { return false }
+            return true
         }
     }
 
     /// Count of archived children per candidate (records whose parentID == that candidate's id).
     public static func childCounts(_ archive: [EvolutionCandidateRecord]) -> [String: Int] {
         var counts: [String: Int] = [:]
-        for r in archive { if let p = r.parentID { counts[p, default: 0] += 1 } }
+        for r in archive where r.hasValidArchiveAuthority && r.hasValidEvolutionEvidence {
+            if let p = r.parentID { counts[p, default: 0] += 1 }
+        }
         return counts
     }
 
@@ -65,8 +69,9 @@ public enum EvolutionParentSelector {
     /// archive + seed ⇒ same parent), which the DGM orchestrator advances each generation. Returns nil
     /// when no candidate is eligible (the caller then seeds a fresh root candidate).
     public static func selectParent(from archive: [EvolutionCandidateRecord], seed: UInt64,
-                                    config: Config = .default) -> EvolutionCandidateRecord? {
-        let eligible = eligibleParents(archive, config: config)
+                                    config: Config = .default,
+                                    allowedCandidateIDs: Set<String>? = nil) -> EvolutionCandidateRecord? {
+        let eligible = eligibleParents(archive, config: config, allowedCandidateIDs: allowedCandidateIDs)
         guard !eligible.isEmpty else { return nil }
         let counts = childCounts(archive)
         let weights = eligible.map { weight(score: $0.score, childCount: counts[$0.candidateID] ?? 0, config: config) }
@@ -103,8 +108,9 @@ public enum EvolutionParentSelector {
 
     /// The exploration FRONTIER — eligible parents ranked by selection weight (best exploration targets
     /// first). Useful for surfacing "who the DGM would breed next" and for tests.
-    public static func frontier(_ archive: [EvolutionCandidateRecord], config: Config = .default) -> [EvolutionCandidateRecord] {
-        let eligible = eligibleParents(archive, config: config)
+    public static func frontier(_ archive: [EvolutionCandidateRecord], config: Config = .default,
+                                allowedCandidateIDs: Set<String>? = nil) -> [EvolutionCandidateRecord] {
+        let eligible = eligibleParents(archive, config: config, allowedCandidateIDs: allowedCandidateIDs)
         let counts = childCounts(archive)
         return eligible.sorted { a, b in
             let wa = weight(score: a.score, childCount: counts[a.candidateID] ?? 0, config: config)

@@ -10,6 +10,32 @@ private struct SolApprovingCouncil: PromotionCouncil {
 }
 
 final class SolBuilderAssuranceRegressionTests: XCTestCase {
+    func testFreshContextSameModelCapabilityAllowsDisposableComplexityButRejectsEffectRisk() {
+        let safeGoal = "build and verify one isolated fixture file, diagnose the broken value, implement the smallest fix, then run one deterministic verifier inside the temporary workspace"
+        let safe = KistRunner.builderCompatibilityLaunch(
+            for: KistOptions.parse(["--headless", "--auto", safeGoal]), goal: safeGoal)
+        XCTAssertEqual(safe.adapter, .headless)
+        XCTAssertEqual(safe.routeHint.risk, .medium,
+                       "medium may describe prompt complexity rather than effect risk")
+        XCTAssertEqual(safe.effectSafetyRisk, .low)
+        XCTAssertTrue(safe.allowsFreshContextSameModelReviewCandidate)
+
+        for goal in ["update auth fixture", "prepare deploy fixture", "change payment fixture"] {
+            let launch = KistRunner.builderCompatibilityLaunch(
+                for: KistOptions.parse(["--headless", "--auto", goal]), goal: goal)
+            XCTAssertEqual(launch.adapter, .headless,
+                           "explicit headless must not erase the original risk signal")
+            XCTAssertEqual(launch.effectSafetyRisk, .high)
+            XCTAssertFalse(launch.allowsFreshContextSameModelReviewCandidate)
+        }
+
+        let computerUse = KistRunner.builderCompatibilityLaunch(
+            for: KistOptions.parse([
+                "--headless", "--auto", "--enable-computer-use", safeGoal,
+            ]), goal: safeGoal)
+        XCTAssertFalse(computerUse.allowsFreshContextSameModelReviewCandidate)
+    }
+
     func testHighAssuranceGraphOrdersReceiptBoundPeelCouncilExecutionAndReview() throws {
         let plan = KistRunner.BuilderPreflightPlan(
             schemaVersion: 1, adapter: "mission",

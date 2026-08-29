@@ -61,13 +61,25 @@ extension KistRunner {
         let binding: ProviderBinding
         let identity: String
         let workerIdentities: [String]
+        let reviewGrade: EvolutionReviewGrade
+    }
+
+    static func canonicalProviderModel(provider: String, model: String) -> String? {
+        let provider = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !provider.isEmpty, !model.isEmpty else { return nil }
+        // Codex CLI's short GPT-5.6 selector and its explicit Sol ID route to the same subscription model.
+        // Canonicalize only at this existing identity seam; other provider/model strings remain exact.
+        if provider == "codex-cli", model.caseInsensitiveCompare("gpt-5.6") == .orderedSame {
+            return "gpt-5.6-sol"
+        }
+        return model
     }
 
     static func providerModelIdentity(provider: String, model: String) -> String? {
         let provider = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let model = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !provider.isEmpty, !model.isEmpty else { return nil }
-        return provider + ":" + model
+        guard let model = canonicalProviderModel(provider: provider, model: model) else { return nil }
+        return provider + ":" + model.lowercased()
     }
 
     /// Prefer the configured critic, then deterministically choose the strongest available configured
@@ -107,7 +119,8 @@ extension KistRunner {
             return IndependentReviewerSelection(
                 binding: ProviderBinding(providerId: provider.id, model: resolvedModel),
                 identity: candidateIdentity,
-                workerIdentities: workers.sorted()
+                workerIdentities: workers.sorted(),
+                reviewGrade: .independent
             )
         }
         return nil
@@ -124,6 +137,94 @@ extension KistRunner {
         guard identities.count == workers.count else { return nil }
         return independentReviewerSelection(
             preferred: preferred, producingIdentities: Set(identities), registry: registry)
+    }
+
+    /// Exact same-model selection is never inferred or used as fallback. The caller must already hold
+    /// the host-minted disposable-low-risk policy; this function then proves the explicitly named critic
+    /// model is the sole producer identity and that the provider is actually available. A provider-only
+    /// binding is deliberately ineligible: resolving a default model would no longer be exact authority.
+    static func freshContextSameModelReviewerSelection(
+        preferred: ProviderBinding,
+        producingIdentities: Set<String>,
+        registry: ProviderRegistry,
+        policy: BuilderReviewPolicy
+    ) -> IndependentReviewerSelection? {
+        guard policy.authorizesDisposableFreshContextSameModel else { return nil }
+        let workers = Set(producingIdentities.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        })
+        guard workers.count == 1, let worker = workers.first, !worker.isEmpty,
+              let exactModel = preferred.model?.trimmingCharacters(
+                in: .whitespacesAndNewlines),
+              !exactModel.isEmpty,
+              let provider = registry.provider(id: preferred.providerId),
+              provider is CLIChatProvider,
+              registry.hasKey(for: provider),
+              ["claude-cli", "codex-cli"].contains(provider.id.lowercased()) else { return nil }
+        guard let reviewer = providerModelIdentity(provider: provider.id, model: exactModel),
+              reviewer == worker else { return nil }
+        return IndependentReviewerSelection(
+            binding: ProviderBinding(providerId: provider.id, model: exactModel),
+            identity: reviewer, workerIdentities: [worker],
+            reviewGrade: .freshContextSameModel)
+    }
+
+    /// A same-model Builder run is intentionally limited to an unversioned, canonical descendant of the
+    /// OS temp roots. Symlinks resolving elsewhere, temp-root itself, and nested Git worktrees all fail.
+    static func builderDisposableReviewRootEligible(_ root: String) -> Bool {
+        let fm = FileManager.default
+        let resolved = URL(fileURLWithPath: root, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: resolved.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return false }
+        let tempRoots = Set([
+            URL(fileURLWithPath: "/private/tmp", isDirectory: true),
+            URL(fileURLWithPath: "/tmp", isDirectory: true),
+            URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true),
+        ].map { $0.standardizedFileURL.resolvingSymlinksInPath().path })
+        guard let boundary = tempRoots
+            .filter({ resolved.path.hasPrefix($0 + "/") })
+            .max(by: { $0.count < $1.count }) else { return false }
+        var cursor = resolved
+        while cursor.path.hasPrefix(boundary + "/") {
+            if fm.fileExists(atPath: cursor.appendingPathComponent(".git").path) {
+                return false
+            }
+            let parent = cursor.deletingLastPathComponent()
+            if parent.path == cursor.path { return false }
+            cursor = parent
+        }
+        return cursor.path == boundary
+    }
+
+    /// The disposable root itself is not enough: an otherwise eligible temp directory can contain a
+    /// nested repository. Refuse any planned file whose existing ancestor crosses a `.git` marker.
+    static func builderDisposableReviewTargetsEligible(
+        root: String, paths: [String]
+    ) -> Bool {
+        guard builderDisposableReviewRootEligible(root), !paths.isEmpty else { return false }
+        let fm = FileManager.default
+        let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        for raw in paths {
+            guard let path = try? builderNormalizePreflightPath(raw), path == raw else { return false }
+            var cursor = rootURL
+            if fm.fileExists(atPath: cursor.appendingPathComponent(".git").path) { return false }
+            for component in path.split(separator: "/").dropLast() {
+                cursor.appendPathComponent(String(component), isDirectory: true)
+                if fm.fileExists(atPath: cursor.path) {
+                    let resolved = cursor.standardizedFileURL.resolvingSymlinksInPath()
+                    guard resolved.path == rootURL.path
+                            || resolved.path.hasPrefix(rootURL.path + "/") else { return false }
+                    cursor = resolved
+                }
+                if fm.fileExists(atPath: cursor.appendingPathComponent(".git").path) {
+                    return false
+                }
+            }
+        }
+        return true
     }
 
     static func autonomyReceiptLine(prefix: String, payload: [String: Any]) -> String? {

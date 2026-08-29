@@ -4,6 +4,15 @@ import Foundation
 // static, stateless prompt-construction half of the loop. Extracted verbatim from
 // HeadlessAgentLoop.swift — behavior unchanged.
 extension HeadlessAgentLoop {
+    /// Subscription CLIs run as pure completion backends. Their native agent tools are deliberately
+    /// disabled, but the outer Kist loop still executes every advertised JSON tool action.
+    static let subscriptionCLICompletionBackendRules = """
+    SUBSCRIPTION CLI BACKEND: Your native CLI file, shell, and agent tools are intentionally disabled.
+    This does NOT make the Kist tools advertised in this prompt unavailable. Kist executes one valid JSON tool
+    action after you return it. For repository work, request those Kist tools before claiming that file,
+    Git, test, or write access is blocked.
+    """
+
     /// Shared collaborator persona + restraint rules — the cheap, model-agnostic half of "conversational
     /// feel" (the Claude-Code restraint stance). BEHAVIOR only; it never alters the output protocol below.
     /// This is what separates a careful peer from an over-eager generator.

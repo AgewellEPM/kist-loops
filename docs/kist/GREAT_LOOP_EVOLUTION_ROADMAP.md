@@ -9,9 +9,18 @@ autonomous verification). This is the plan to evolve the great-loop into a genui
 
 The survey found kist is far richer than the great-loop uses:
 
-- **A full DGM (Darwin-Gödel-Machine) engine** — `EvolutionLab` + `EvolutionParentSelector` (open-ended
-  archive selection) + `EvolutionAutopilot` + a JSONL archive + conscience gating. Production-grade minus
-  the promote-back step. **The great-loop never touches it.**
+- **A confined DGM-style experimental scaffold, not yet a full Darwin–Gödel Machine** —
+  `EvolutionLab` + `EvolutionParentSelector` provide open-ended archive selection, and lineage
+  workspaces start from the selected parent's exact durable commit. The local archive is now
+  owner-confined, project-bound, canonical, hash-chained, ForgeSealed, and fail-closed; legacy rows
+  are sterile and passed/failed rows require one-use host evaluation authority. `EvolutionAutopilot`
+  and conscience gating also exist, but unattended evolution remains hard-disabled. Pure contracts
+  now bind exact-parent paired held-out fitness, an externally signed monotonic rollback checkpoint,
+  aggregate CPU/memory/process-count containment and empty-scope cleanup, identity-distinct review,
+  sealed activation, and witnessed budget reservation. Their production authorities are still
+  missing: no host-owned oracle runner, configured external witness/CAS, qualifying hard runner,
+  actual-route distinct reviewer, composed activation service, or external budget witness exists.
+  No candidate auto-promotes.
 - **A forge-proof verify-and-sign spine** — `Foreman` (6-gate deterministic verify over committed
   artifacts) + `GroundedVerdict` + `FleetSignoffLedger` (unforgeable) + `ClaimReconciler` (anti-hallucination)
   + `CIIntegrityGuard`/`RewardHackingGuard`. **The great-loop uses the WEAKEST check** (`outcome.success` +
@@ -57,23 +66,32 @@ Goodhart machine.** Verifier's Law: a verifier that catches 60% of errors leaves
     solves a sub-problem with a reusable procedure, distill it into an **executable, tested** tool (build on
     `custom_tool` + `AgentForge`), admit ONLY if tests passed at capture, retrieve by task-signature.
     Code skills >> prose memory (execution is deterministic; recall is fuzzy).
-1.2 **Wire `LessonStore` + `ProjectMemory` episodes into `runGreatLoop`** (it only persists `EffortMemory`
-    today). Verification-gated writes + timestamps; supersede via **invalidate-don't-delete** (Zep
-    bi-temporal, 2501.13956) so the agent distinguishes "was true" from "true now."
+1.2 **Connect the already-temporal `LessonStore` + `ProjectMemory` retrieval paths to
+    `runGreatLoop`.** Their shared kernel now handles transaction/valid/evidence clocks, lifecycle,
+    decay, explicit recurrence, future-poison rejection, and read-without-reinforcement. The
+    remaining work is great-loop consumption plus receipt-bound writes—not inventing another
+    temporal schema. Preserve history by invalidating or superseding rather than deleting.
 1.3 **Structured reflection (Reflexion done right, 2303.11366 — 91% HumanEval).** Failed cycle → structured
     `{symptom, location, root_cause, fix, signature}` lesson, ranked + capped injection. Avoids the
     vague-advice / context-poisoning trap.
 
 ### PHASE 2 — The self-evolving leap (highest ceiling)
-2.1 **GEPA reflective prompt/policy evolution (2507.19457 — beats RL by ~10% at 35× fewer rollouts).** The
-    second-model review already produces NL critique we throw away. Instead, **evolve the system/policy
-    prompts from it, keeping a Pareto frontier keyed by task-signature** (best prompt per task *type*).
-    Natural-language reflection is a richer, cheaper learning signal than a scalar reward — the right
-    mechanism for a frozen-weights BYOK system.
-2.2 **Connect the great-loop to the DGM `EvolutionLab` archive (2505.22954 — 20%→50% SWE-bench).** Feed the
-    loop's outcomes into the archive; use **open-ended selection** (keep non-best stepping stones — pure
-    hill-climbing got stuck in the ablation). Start at trajectory-level; graduate to scaffold-level (the
-    loop editing its own loop, ADAS 2408.08435) ONLY behind Phase-0 verifier hardening.
+2.1 **GEPA reflective prompt/policy evolution (2507.19457 — beats RL by ~10% at 35× fewer rollouts).**
+    When an actual second-model route is available, its NL critique can become advisory proposal
+    material instead of being discarded: **evolve the system/policy prompts from it, keeping a
+    Pareto frontier keyed by task-signature** (best prompt per task *type*). In the current GPT-only
+    route, a fresh-context same-model critique is not independent and cannot authorize promotion.
+    Natural-language reflection may be a richer learning signal than a scalar reward, but it remains
+    proposal data until grounded gates validate it.
+2.2 **Operate the DGM authorities behind the new contracts, then connect the great-loop to them
+    (2505.22954).** Configure an external monotonic witness and compare-and-advance backend; execute
+    every child and its exact parent through the same host-owned held-out oracle; require a positive,
+    no-regression capability delta; run candidates inside a qualifying aggregate descendant scope;
+    require actual-route identity-distinct review and witnessed budget reservation; then compose
+    those receipts into one sealed activation. Keep unattended evolution disabled until this works
+    end to end. Feed only verified outcomes into open-ended selection, retaining non-best passing
+    stepping stones. Start at trajectory level; graduate to scaffold level (the loop editing its own
+    loop, ADAS 2408.08435) only behind Phase-0 verifier hardening.
 
 ### PHASE 3 — Compute-optimal + real retrieval (cheap multipliers)
 3.1 **Calibrator outputs a search POLICY, not just a tier** (Snell et al. — compute-optimal test-time

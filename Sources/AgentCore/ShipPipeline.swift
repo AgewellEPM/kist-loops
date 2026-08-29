@@ -7,6 +7,7 @@ public struct PromotionCompletionEvidence: Sendable, Equatable {
     public let verifiedAt: Date; public let commandReceipts: [BuilderCommandEvidenceReceipt]
     public let hostChecks: [BuilderCheckReceipt]; public let producerIdentities: [String]
     public let reviewerIdentity: String; public let hadChanges: Bool; public let changedPaths: [String]
+    public let reviewGrade: EvolutionReviewGrade
     public let diffSummary: String
     public let mutationReceipts: [BuilderTransactionPromotionReceipt]
     public let requiredSupportingObligations: [PlanSupportingObligation]
@@ -23,7 +24,9 @@ public struct PromotionCompletionEvidence: Sendable, Equatable {
                 baselineDigest: String, verifiedDigest: String, reviewEntryDigest: String,
                 verifiedAt: Date, commandReceipts: [BuilderCommandEvidenceReceipt],
                 hostChecks: [BuilderCheckReceipt], producerIdentities: [String],
-                reviewerIdentity: String, hadChanges: Bool = false, changedPaths: [String] = [],
+                reviewerIdentity: String,
+                reviewGrade: EvolutionReviewGrade = .independent,
+                hadChanges: Bool = false, changedPaths: [String] = [],
                 diffSummary: String = "",
                 mutationReceipts: [BuilderTransactionPromotionReceipt] = [],
                 requiredSupportingObligations: [PlanSupportingObligation] = [],
@@ -39,6 +42,7 @@ public struct PromotionCompletionEvidence: Sendable, Equatable {
         self.verifiedAt = verifiedAt; self.commandReceipts = commandReceipts
         self.hostChecks = hostChecks; self.producerIdentities = producerIdentities
         self.reviewerIdentity = reviewerIdentity; self.hadChanges = hadChanges
+        self.reviewGrade = reviewGrade
         self.changedPaths = changedPaths; self.diffSummary = diffSummary
         self.mutationReceipts = mutationReceipts.sorted {
             ($0.nodeID, $0.attempt, $0.receiptDigest)
@@ -59,6 +63,7 @@ public struct PromotionCompletionEvidence: Sendable, Equatable {
              verifiedDigest: verifiedDigest, reviewEntryDigest: reviewEntryDigest,
              verifiedAt: verifiedAt, commandReceipts: commandReceipts, hostChecks: hostChecks,
              producerIdentities: producerIdentities, reviewerIdentity: reviewerIdentity,
+             reviewGrade: reviewGrade,
              hadChanges: hadChanges, changedPaths: changedPaths, diffSummary: diffSummary,
              mutationReceipts: mutationReceipts,
              requiredSupportingObligations: requiredSupportingObligations,
@@ -78,8 +83,20 @@ public struct PromotionCompletionEvidence: Sendable, Equatable {
                 || schemaVersion == 4),
               !contractID.isEmpty, !objectiveFingerprint.isEmpty,
               !verificationSubject.isEmpty else { return "contract identity or verification subject is unavailable" }
-        guard reviewer.contains(":"), !producers.isEmpty, producers.allSatisfy({ $0.contains(":") }),
-              !producers.contains(reviewer) else { return "reviewer identity is unknown or not distinct from producers" }
+        guard reviewer.contains(":"), !producers.isEmpty,
+              producers.allSatisfy({ $0.contains(":") }) else {
+            return "reviewer or producer identity is unknown"
+        }
+        switch reviewGrade {
+        case .independent:
+            guard !producers.contains(reviewer) else {
+                return "independent reviewer identity is not distinct from producers"
+            }
+        case .freshContextSameModel:
+            guard Set(producers) == [reviewer] else {
+                return "fresh_context_same_model requires one exact producer/reviewer identity"
+            }
+        }
         guard [baselineDigest, verifiedDigest, reviewEntryDigest].allSatisfy({
             !$0.isEmpty && !$0.hasPrefix("unavailable:")
         }) else { return "one or more governed workspace digests is unavailable" }
@@ -383,6 +400,10 @@ public struct PromotionCompletionEvidence: Sendable, Equatable {
             fields.append(acceptedVerificationSubjectDigests.keys.sorted().map {
                 "\($0):\(acceptedVerificationSubjectDigests[$0] ?? "missing")"
             }.joined(separator: ","))
+        }
+        if reviewGrade != .independent {
+            fields.append(reviewGrade.rawValue)
+            fields.append("independent=false")
         }
         return BuilderEvidenceDigest.sha256(fields.joined(separator: "\u{0}"))
     }

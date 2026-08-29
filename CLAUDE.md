@@ -1,10 +1,15 @@
 # kist-loops — Project Context (CLAUDE.md)
 
 ## What this is
-**The live kist captain.** A Swift Package (SPM, NOT Xcode) building the `kist` CLI —
+**The canonical kist source, not proof of the installed or running captain.** This is a Swift Package
+(SPM, NOT Xcode) building the `kist` CLI —
 an agent shell (REPL + one-shot goals + plan→execute + fleet/council/research) that runs
 on any model (BYOK cloud, local Ollama, keyless claude-cli/codex-cli subscription providers).
-This repo is what runs when Luke types `kist`. Treat every change as production.
+Treat every change as production-impacting, but verify the deployment manifest, binary digest, and
+running-process start time before claiming this checkout is what Luke invokes. At the 2026-08-28
+recovery checkpoint, `~/bin/kist-current` is older than the hardened release build and a Cortex
+daemon predates the Python repair commits; neither running surface may be credited with source-only
+temporal/evolution gates until a separately authorized drain/deploy/restart succeeds.
 
 - Remote: private `github.com/AgewellEPM/kist-loops` (branch `main`).
 - ⚠️ `/Volumes/PRO-G40/Downloads/kist-loops` is a DEAD worktree of a different ancestor —

@@ -95,7 +95,7 @@ public struct HeadlessAgentLoop: Sendable {
     let modelProfiles: LocalModelProfileStore?
 
     /// P1 recall→plan read-back: an optional per-turn hook that, given the turn's goal, returns an
-    /// ADVISORY block of recalled VERIFIED lessons to append to the system prompt (empty ⇒ nothing
+    /// Explicitly untrusted data block of recalled, locally checked advisory lessons (empty ⇒ nothing
     /// injected). Set by the runtime on a WARM loop (interactive REPL + the injection-ON ablation arm);
     /// left nil on a COLD/injection-OFF loop. It's the single toggle that isolates P1's contribution:
     /// injection-ON vs injection-OFF with the toolset held constant. Not in `init` (a post-construction
@@ -194,11 +194,13 @@ public struct HeadlessAgentLoop: Sendable {
     // MARK: - Entry points
 
     /// Start a fresh run.
-    public func run(goal: String) async -> Outcome {
+    public func run(goal: String,
+                    rawRequest explicitRawRequest: String? = nil,
+                    resolvedIntent: TaskBrief.Intent? = nil) async -> Outcome {
         if ownsRecorder { recorder.reset() }
-        let rawRequest = Self.scopeRequestSource(for: goal)
+        let rawRequest = explicitRawRequest ?? Self.scopeRequestSource(for: goal)
         let mode: PromptCompiler.Mode = planMode ? .plan : .inline
-        let intent = PromptCompiler.inferIntent(rawRequest, mode: mode)
+        let intent = resolvedIntent ?? PromptCompiler.inferIntent(rawRequest, mode: mode)
         let cp = LoopCheckpoint(goal: goal, rawRequest: rawRequest, intent: intent,
                                 expectedOutcome: PromptCompiler.expectedOutcome(intent: intent, mode: mode),
                                 providerId: providerId, model: model,
@@ -505,6 +507,9 @@ public struct HeadlessAgentLoop: Sendable {
         var system = Self.systemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot, planMode: planMode,
                                        shellEnabled: scopedContext.shell.enabled, skillsXML: skillsXML,
                                        readableRoots: scopedContext.externalReadRoots)
+        if ["claude-cli", "codex-cli"].contains(providerId.lowercased()) {
+            system += "\n\n" + Self.subscriptionCLICompletionBackendRules
+        }
         // Item #4: small local models stall on the strict JSON protocol. Lead with a gentle, example-
         // driven "simple mode" primer for the weak tier. Only the text path reaches here (frontier API
         // models use the native path), so this targets exactly the local/small models that need it.
@@ -524,6 +529,7 @@ public struct HeadlessAgentLoop: Sendable {
         var consecutiveGathering = 0       // read-only (gathering) calls in a row → forced-synthesis nudge
         var lastSynthesisNudge = -100
         var verificationNudges = 0         // verify-before-done: re-nudge up to a bound, then finish honestly
+        var subscriptionCLIToolBlockNudges = 0 // reject a subscription backend's false zero-tool blocker
         var lastVerify: VerificationReplay? = nil   // last PASSING build/test of this run — re-verify replay candidate
         var replayAttempted = false                 // one deterministic replay per fresh candidate, never a loop
         var recoveryAttempted = false      // stuck-recovery: one hard reset before giving up
@@ -603,6 +609,32 @@ public struct HeadlessAgentLoop: Sendable {
             // 3) Done?
             if action.done {
                 let summary = action.summary ?? action.message ?? "done"
+                // Subscription CLIs are deliberately stripped of THEIR native tools and used as pure
+                // completion backends. The outer Kist loop still advertises and executes its JSON tools.
+                // Some backends conflate those two layers and immediately claim repository access is
+                // unavailable. Reject that false zero-observation blocker while a real Kist read/search
+                // tool is present; after a small bound, fail honestly instead of accepting or looping.
+                if let blockerDecision = subscriptionCLIPrematureToolBlocker(
+                    summary: summary, tools: turnTools, nudges: subscriptionCLIToolBlockNudges
+                ) {
+                    switch blockerDecision {
+                    case .nudge(let why):
+                        subscriptionCLIToolBlockNudges += 1
+                        cp.messages.append(ChatMessage(role: .user, content: CompletionVerifier.steering(reason: why)))
+                        cp.iteration = iteration; persist(&cp)
+                        continue
+                    case .failUnverified(let why):
+                        let honest = "unverified — \(why)"
+                        cp.status = .failed; cp.summary = honest; cp.iteration = iteration; persist(&cp)
+                        await fireStopHook(summary: honest, success: false)
+                        sink.emit(.stateChanged(.failed)); sink.emit(.failed(honest))
+                        return (Outcome(
+                            success: false, summary: honest, iterations: iteration,
+                            checkpointId: cp.id, terminalStatus: .stoppedUnverified), cp)
+                    case .accept:
+                        break
+                    }
+                }
                 // VERIFY-BEFORE-DONE (R7): a code change that was never built/tested is NOT done. Nudge
                 // up to N times; if it's STILL unverified, finish HONESTLY as a failure — never launder
                 // an unbuilt change into success (the LLM's "done" doesn't outrank a real build/test).
@@ -1203,6 +1235,43 @@ public struct HeadlessAgentLoop: Sendable {
     /// not trusted over a real build/test). A source mutation with shell unavailable fails unverified
     /// immediately: repeatedly nudging the model to run a command it cannot run would only waste turns.
     enum DoneDecision: Equatable { case accept, nudge(String), failUnverified(String) }
+
+    /// A completion-only subscription backend can mistake its intentionally disabled native shell for
+    /// absence of the outer Kist tool protocol. A zero-observation claim that file/repository tools are
+    /// unavailable is therefore not a valid completion when Kist actually advertised a grounding tool.
+    /// Ordinary direct answers and honest domain blockers are untouched.
+    func subscriptionCLIPrematureToolBlocker(summary: String, tools: ToolRegistry,
+                                              nudges: Int) -> DoneDecision? {
+        guard ["claude-cli", "codex-cli"].contains(providerId.lowercased()),
+              recorder.snapshot().isEmpty else { return nil }
+
+        let lower = summary.lowercased()
+        let names = Set(tools.names)
+        let groundingOrder = ["read_file", "search_code", "list_files", "glob_files", "git_status", "git_diff"]
+        let offered = groundingOrder.filter { names.contains($0) }
+        let mentionsOfferedTool = offered.contains { lower.contains($0) }
+        // Completion backends do not always echo the advertised JSON name. Codex has also described
+        // the same false blocker as "no Kist filesystem or git tools". Keep these phrases narrow and
+        // behind the zero-observation + subscription-provider guards above so an ordinary domain
+        // blocker is not forced into an unrelated repository call.
+        let mentionsGroundingSurface = mentionsOfferedTool || [
+            "kist filesystem", "kist file tools", "kist tools", "git tools",
+            "filesystem tools", "file-system tools", "repository tools"
+        ].contains { lower.contains($0) }
+        let availabilityNegation = [
+            "unavailable", "not available", "not callable", "cannot call", "can't call", "unable to call",
+            "exposes no", "exposes neither", "does not expose", "doesn't expose", "no kist", "no repository access",
+            "no filesystem access", "no file-system access", "do not have access", "don't have access",
+            "cannot access", "can't access"
+        ].contains { lower.contains($0) }
+        guard !offered.isEmpty, mentionsGroundingSurface, availabilityNegation else { return nil }
+
+        let why = "the subscription CLI claimed repository/file tools were unavailable before making any call, "
+            + "but Kist advertised \(offered.joined(separator: ", ")). Its native CLI tools are disabled; "
+            + "Kist executes the JSON tool action. Request one advertised grounding tool now"
+        return nudges < 2 ? .nudge(why) : .failUnverified(why)
+    }
+
     func verifyBeforeDone(canRunCommands: Bool,
                           expectedOutcome: TaskBrief.ExpectedOutcome? = nil,
                           taskIntent: TaskBrief.Intent? = nil,

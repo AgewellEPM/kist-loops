@@ -7,16 +7,18 @@ import AgentCore
 /// registry + options into the tools and loop every run path shares.
 extension KistRunner {
 
-    /// The full extra tool set (media/data/memory/vision + the agent-writable Cortex), built once so
-    /// EVERY run path — fresh, goal, and --resume — gets identical capabilities. Cortex is included
-    /// unless --no-memory; Gemini/vision/OpenAI tools are added only when their keys/bindings exist.
+    /// The full extra tool set (media/data/temporal-memory/vision), built once so EVERY run path —
+    /// fresh, goal, and --resume — gets identical capabilities. Legacy Cortex Markdown is audit-only;
+    /// temporal semantic tools are included when an admitted embedder is available.
     static func buildExtraTools(root: String, fetchAllowedHosts: [String],
                                 opts: KistOptions, registry: ProviderRegistry) -> [any AgentTool] {
-        // --fast: a lean solo dev tool. Keep ONLY the core code tools (headless: read/write/edit/
-        // apply_patch/search_code/ast_grep/git/symbols/run_command…) + the cheap Cortex; drop the
-        // ~20 media/vision/browse/pentest/research/workflow extras that bloat the prompt and burn
-        // tokens when the user just wants quick dev help. Big prompt cut → cheaper + faster.
-        if opts.fast { return opts.noMemory ? [] : [CortexTool()] }
+        // --fast: core code tools plus temporal semantic memory when available. The timeless Cortex
+        // compatibility surface is intentionally absent.
+        if opts.fast {
+            guard let memory = Self.makeSemanticMemory(
+                root: root, opts: opts, registry: registry) else { return [] }
+            return [RememberTool(service: memory), RecallTool(service: memory)]
+        }
         var extraTools: [any AgentTool] = [ReadSpreadsheetTool(), QueryDataTool(), MediaClipTool(),
                                            SecurityAuditTool(), GovernanceReportTool(), WorkflowTool(),
                                            ManageTasksTool(), BrowserTool(allowedHosts: fetchAllowedHosts),
@@ -24,9 +26,6 @@ extension KistRunner {
                                            // calls this to generate the actual COBOL via the local cobol-jeeves
                                            // model (it writes COBOL but can't drive the agent loop — see the tool).
                                            CobolGenerateTool(providers: registry)]
-        // Agent-writable personal memory (the Cortex): the MODEL remembers durable preferences,
-        // project facts, and journals its work across sessions — Claude-style memory, more personal.
-        if !opts.noMemory { extraTools.append(CortexTool()) }
         if let geminiKey = registry.apiKey(forProviderId: "gemini") {
             extraTools.append(AnalyzeMediaTool(registry: registry, geminiKey: geminiKey))
             extraTools.append(GenerateAudioTool(geminiKey: geminiKey))   // Gemini native TTS → WAV
@@ -37,10 +36,7 @@ extension KistRunner {
         }
         // Durable semantic memory (file-backed vector store). Embedder: local Ollama when opted in
         // (KIST_EMBEDDER=ollama), else Gemini when its key is present, else off (no silent dependency).
-        if let embedder = Self.makeEmbedder(registry: registry) {
-            let memory = SemanticMemoryService(
-                embedder: embedder,
-                store: FileBackedVectorStore(path: root + "/.kist/memory/vectors.json"))
+        if let memory = Self.makeSemanticMemory(root: root, opts: opts, registry: registry) {
             extraTools.append(RememberTool(service: memory))
             extraTools.append(RecallTool(service: memory))
         }
@@ -102,6 +98,16 @@ extension KistRunner {
 
     // MARK: - MCP lifecycle
 
+    /// Pure admission decision for one discovered MCP tool. Explicit trusted-user configuration wins:
+    /// it fixes both neutral-name control tools (`guest_execute`, `vm_control`) and non-control homonyms
+    /// (`lsp-swift__hover`). Legacy configs retain the conservative name heuristic as defense in depth.
+    static func admitsMCPTool(name: String, explicitComputerUseRequirement: Bool?,
+                              enableComputerUse: Bool) -> Bool {
+        if enableComputerUse { return true }
+        if let explicitComputerUseRequirement { return !explicitComputerUseRequirement }
+        return !ReversibilityClassifier.isHostControlMCPTool(name)
+    }
+
     /// Build the tool registry = built-in headless tools + any external MCP server tools, run
     /// `body`, then guarantee MCP servers are shut down (no zombies). MCP is opt-in via config
     /// (`~/.mcp.json` etc.); with none configured this is just the headless tool set.
@@ -115,8 +121,11 @@ extension KistRunner {
         // Gate host-control (desktop actuation / screen capture) MCP tools behind --enable-computer-use, so a
         // user-configured desktop MCP can't drive the machine on an unarmed surface (council 2026-07-03).
         // Targeted by verb, so non-desktop MCP servers (github, db, filesystem) keep working unarmed.
-        let mcpTools = enableComputerUse ? discovered
-            : discovered.filter { !ReversibilityClassifier.isHostControlMCPTool($0.name) }
+        let mcpTools = discovered.filter {
+            Self.admitsMCPTool(name: $0.name,
+                               explicitComputerUseRequirement: $0.explicitComputerUseRequirement,
+                               enableComputerUse: enableComputerUse)
+        }
         if discovered.count != mcpTools.count {
             note("mcp · dropped \(discovered.count - mcpTools.count) host-control tool(s) — pass --enable-computer-use to allow")
         }

@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 public enum CaptainLearningSource: String, Codable, Sendable, Equatable {
     case benchmark
@@ -44,47 +49,52 @@ public struct CaptainLearningSample: Codable, Sendable, Equatable {
                 failureReason: String? = nil, failedAt: String? = nil,
                 loopKinds: [String] = [], wasStuck: Bool = false, failureRate: Double = 0) {
         self.taskSignature = Self.normalizeSignature(taskSignature)
-        self.taskTags = Array(Set(taskTags.map { $0.lowercased() })).sorted()
-        self.language = language
-        self.role = role.lowercased()
-        self.providerId = providerId
-        self.model = model
+        self.taskTags = Array(Set(taskTags.map(Self.canonicalDimension).filter { !$0.isEmpty })).sorted()
+        self.language = language.map(Self.canonicalDimension).flatMap { $0.isEmpty ? nil : $0 }
+        self.role = Self.canonicalDimension(role)
+        self.providerId = Self.canonicalDimension(providerId)
+        self.model = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.source = source
         self.success = success
-        self.judgeScore = judgeScore.map { min(1, max(0, $0)) }
+        self.judgeScore = judgeScore.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }
         self.tokens = max(0, tokens)
         self.latencyMs = max(0, latencyMs)
         self.toolFailures = max(0, toolFailures)
         self.atEpoch = atEpoch
-        self.failureReason = failureReason
-        self.failedAt = failedAt
+        self.failureReason = failureReason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.failedAt = failedAt?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.loopKinds = loopKinds
         self.wasStuck = wasStuck
-        self.failureRate = min(1, max(0, failureRate))
+        self.failureRate = failureRate.isFinite ? min(1, max(0, failureRate)) : 0
     }
 
     /// Backward-compatible decode: old JSONL lines lack the failure/loop fields → default them, so the
     /// whole (already-populated) store still reads instead of throwing and coming back empty.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        taskSignature = try c.decode(String.self, forKey: .taskSignature)
-        taskTags = try c.decode([String].self, forKey: .taskTags)
-        language = try c.decodeIfPresent(String.self, forKey: .language)
-        role = try c.decode(String.self, forKey: .role)
-        providerId = try c.decode(String.self, forKey: .providerId)
-        model = try c.decodeIfPresent(String.self, forKey: .model)
-        source = try c.decode(CaptainLearningSource.self, forKey: .source)
-        success = try c.decode(Bool.self, forKey: .success)
-        judgeScore = try c.decodeIfPresent(Double.self, forKey: .judgeScore)
-        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens) ?? 0
-        latencyMs = try c.decodeIfPresent(Int.self, forKey: .latencyMs) ?? 0
-        toolFailures = try c.decodeIfPresent(Int.self, forKey: .toolFailures) ?? 0
-        atEpoch = try c.decode(Double.self, forKey: .atEpoch)
-        failureReason = try c.decodeIfPresent(String.self, forKey: .failureReason)
-        failedAt = try c.decodeIfPresent(String.self, forKey: .failedAt)
-        loopKinds = try c.decodeIfPresent([String].self, forKey: .loopKinds) ?? []
-        wasStuck = try c.decodeIfPresent(Bool.self, forKey: .wasStuck) ?? false
-        failureRate = try c.decodeIfPresent(Double.self, forKey: .failureRate) ?? 0
+        self.init(
+            taskSignature: try c.decode(String.self, forKey: .taskSignature),
+            taskTags: try c.decode([String].self, forKey: .taskTags),
+            language: try c.decodeIfPresent(String.self, forKey: .language),
+            role: try c.decode(String.self, forKey: .role),
+            providerId: try c.decode(String.self, forKey: .providerId),
+            model: try c.decodeIfPresent(String.self, forKey: .model),
+            source: try c.decode(CaptainLearningSource.self, forKey: .source),
+            success: try c.decode(Bool.self, forKey: .success),
+            judgeScore: try c.decodeIfPresent(Double.self, forKey: .judgeScore),
+            tokens: try c.decodeIfPresent(Int.self, forKey: .tokens) ?? 0,
+            latencyMs: try c.decodeIfPresent(Int.self, forKey: .latencyMs) ?? 0,
+            toolFailures: try c.decodeIfPresent(Int.self, forKey: .toolFailures) ?? 0,
+            atEpoch: try c.decode(Double.self, forKey: .atEpoch),
+            failureReason: try c.decodeIfPresent(String.self, forKey: .failureReason),
+            failedAt: try c.decodeIfPresent(String.self, forKey: .failedAt),
+            loopKinds: try c.decodeIfPresent([String].self, forKey: .loopKinds) ?? [],
+            wasStuck: try c.decodeIfPresent(Bool.self, forKey: .wasStuck) ?? false,
+            failureRate: try c.decodeIfPresent(Double.self, forKey: .failureRate) ?? 0)
+    }
+
+    static func canonicalDimension(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     public static func normalizeSignature(_ text: String) -> String {
@@ -196,15 +206,15 @@ public struct ModelAssignmentLearningContext: Sendable, Equatable {
 
     public func evidence(providerId: String, role: String, taskTags: [String],
                          language: String?) -> CaptainLearningSummary? {
-        let wantedTags = Set(taskTags.map { $0.lowercased() })
-        let role = role.lowercased()
-        let provider = providerId.lowercased()
-        let lang = language?.lowercased()
+        let wantedTags = Set(taskTags.map(CaptainLearningSample.canonicalDimension))
+        let role = CaptainLearningSample.canonicalDimension(role)
+        let provider = CaptainLearningSample.canonicalDimension(providerId)
+        let lang = language.map(CaptainLearningSample.canonicalDimension)
         let matches = summaries.filter { summary in
-            summary.providerId.lowercased() == provider
+            summary.providerId == provider
                 && summary.role == role
                 && (!Set(summary.taskTags).isDisjoint(with: wantedTags))
-                && (lang == nil || summary.language?.lowercased() == lang || summary.language == nil)
+                && (lang == nil || summary.language == lang || summary.language == nil)
         }
         return matches.max { a, b in
             if a.promoted != b.promoted { return !a.promoted && b.promoted }
@@ -224,6 +234,14 @@ public struct ModelAssignmentLearningContext: Sendable, Equatable {
     }
 }
 
+/// One bounded temporal policy feeds both assignment summaries and provider verdicts. Samples are
+/// advisory observations, not confirmation authority; no seasonal or verified state is inferred here.
+public enum CaptainLearningRecencyPolicy {
+    public static let maximumSamplesPerBucket = 20
+    public static let maximumAgeSeconds: Double = 30 * 24 * 3_600
+    public static let maximumFutureSkewSeconds: Double = 5 * 60
+}
+
 /// Centralized scorecard gates so thresholds aren't re-derived across EffortController/great-loop/etc.
 public enum ScorecardThresholds {
     /// Below this many recent runs, a model is COLD-START NEUTRAL: no rank delta, no exclude — the system
@@ -234,7 +252,7 @@ public enum ScorecardThresholds {
     public static let chronicFailureRate = 0.6
     public static let chronicLoopRate = 0.5
     /// Judge on the last N runs so a model that recovered isn't punished forever for ancient faults.
-    public static let recencyWindow = 20
+    public static let recencyWindow = CaptainLearningRecencyPolicy.maximumSamplesPerBucket
     /// A chronic offender whose last failure is older than this gets a fresh probe (never a permanent
     /// blacklist — otherwise a down-ranked model runs less, never gets sampled, and can never recover).
     public static let staleSeconds: Double = 24 * 3600
@@ -267,40 +285,87 @@ public struct ModelVerdict: Sendable, Equatable {
 
 public final class CaptainLearningStore {
     public static let relativePath = ".kist/captain-learning.jsonl"
+    /// Hard audit budgets are deliberately separate from the 30-day routing window. The JSONL remains
+    /// unsigned advisory history, but reading it must never allocate in proportion to a hostile file.
+    static let maximumFileBytes = 16 * 1_024 * 1_024
+    static let maximumRowBytes = 64 * 1_024
+    static let maximumRows = 20_000
+
+    private struct BucketKey: Hashable {
+        let role: String
+        let providerId: String
+        let tag: String
+        let language: String?
+    }
+
+    private struct RetrievalBucketKey: Hashable {
+        let role: String
+        let providerId: String
+        let language: String?
+    }
+
+    private struct IndexedSample {
+        let offset: Int
+        let sample: CaptainLearningSample
+    }
+
+    /// Audit reads may return independently valid rows from a damaged file. Mutation is admitted only
+    /// for `missing` or `complete`, so fail-soft inspection can never become a destructive rewrite.
+    private enum JSONLLoadResult {
+        case missing
+        case complete([CaptainLearningSample])
+        case partial([CaptainLearningSample])
+        case refused
+
+        var auditRows: [CaptainLearningSample] {
+            switch self {
+            case .complete(let rows), .partial(let rows): return rows
+            case .missing, .refused: return []
+            }
+        }
+
+        var rowsForMutation: [CaptainLearningSample]? {
+            switch self {
+            case .missing: return []
+            case .complete(let rows): return rows
+            case .partial, .refused: return nil
+            }
+        }
+    }
 
     private let path: String
     private let maxSamples: Int
 
     public init(projectRoot: String, maxSamples: Int = 5000) {
         self.path = projectRoot + "/" + Self.relativePath
-        self.maxSamples = max(100, maxSamples)
+        self.maxSamples = min(Self.maximumRows, max(100, maxSamples))
     }
 
     public func load() -> [CaptainLearningSample] {
-        guard let data = FileManager.default.contents(atPath: path),
-              let text = String(data: data, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").compactMap { line in
-            line.data(using: .utf8).flatMap { try? JSONDecoder().decode(CaptainLearningSample.self, from: $0) }
-        }
+        loadJSONLResult().auditRows
     }
 
-    public func record(_ sample: CaptainLearningSample) {
-        var samples = load()
-        samples.append(sample)
-        if samples.count > maxSamples { samples = Array(samples.suffix(maxSamples)) }
-        persist(samples)
+    /// Return false when the existing archive cannot be proven safe to mutate. Callers may continue to
+    /// treat this unsigned scorecard as advisory, but they can now distinguish a durable observation from
+    /// a refused write when that distinction matters.
+    @discardableResult
+    public func record(_ sample: CaptainLearningSample) -> Bool {
+        record([sample])
     }
 
-    public func record(_ samples: [CaptainLearningSample]) {
-        guard !samples.isEmpty else { return }
-        var all = load()
-        all.append(contentsOf: samples)
-        if all.count > maxSamples { all = Array(all.suffix(maxSamples)) }
-        persist(all)
+    @discardableResult
+    public func record(_ samples: [CaptainLearningSample]) -> Bool {
+        guard !samples.isEmpty else { return true }
+        return withMutationLock {
+            guard var all = loadJSONLResult().rowsForMutation else { return false }
+            all.append(contentsOf: samples)
+            if all.count > maxSamples { all = Array(all.suffix(maxSamples)) }
+            return persistUnlocked(all)
+        } ?? false
     }
 
-    public func assignmentContext() -> ModelAssignmentLearningContext {
-        ModelAssignmentLearningContext(summaries: Self.summarize(load()))
+    public func assignmentContext(now: Double = Date().timeIntervalSince1970) -> ModelAssignmentLearningContext {
+        ModelAssignmentLearningContext(summaries: Self.summarize(load(), now: now))
     }
 
     /// Per-model verdicts the escalator reads to steer toward strong models and away from failers/loopers.
@@ -310,26 +375,42 @@ public final class CaptainLearningStore {
     }
 
     public static func modelVerdicts(_ samples: [CaptainLearningSample], now: Double) -> [String: ModelVerdict] {
-        var byProvider: [String: [CaptainLearningSample]] = [:]
-        for s in samples { byProvider[s.providerId.lowercased(), default: []].append(s) }
+        let eligible = routingEligibleSamples(samples, now: now)
+        var byProvider: [String: [IndexedSample]] = [:]
+        for indexed in eligible {
+            byProvider[indexed.sample.providerId, default: []].append(indexed)
+        }
         var out: [String: ModelVerdict] = [:]
-        for (pid, all) in byProvider { out[pid] = verdict(providerId: pid, samples: all, now: now) }
+        for (pid, all) in byProvider {
+            out[pid] = makeVerdict(providerId: pid, samples: all, now: now)
+        }
         return out
     }
 
     /// Deterministic per-model verdict over its recent runs. Cold-start neutral; chronic-exclude only;
     /// stale offenders get a probe. Pure (given `now`) so it is unit-testable without a clock.
     static func verdict(providerId: String, samples all: [CaptainLearningSample], now: Double) -> ModelVerdict {
-        let recent = all.sorted { $0.atEpoch < $1.atEpoch }.suffix(ScorecardThresholds.recencyWindow)
+        let provider = CaptainLearningSample.canonicalDimension(providerId)
+        let eligible = routingEligibleSamples(all, now: now).filter { $0.sample.providerId == provider }
+        return makeVerdict(providerId: provider, samples: eligible, now: now)
+    }
+
+    private static func makeVerdict(providerId: String, samples all: [IndexedSample],
+                                    now: Double) -> ModelVerdict {
+        // `all` is already the de-duplicated union of the shared, per-task-shape windows. Do not
+        // re-window by provider here: that would silently discard eligible roles/tags.
+        let recent = all.sorted(by: chronological)
         let n = recent.count
-        let successes = recent.filter(\.success).count
+        let successes = recent.filter { $0.sample.success }.count
         let successRate = n == 0 ? 0 : Double(successes) / Double(n)
         let failureRate = n == 0 ? 0 : 1 - successRate
-        let looped = recent.filter { !$0.loopKinds.isEmpty || $0.wasStuck }.count
+        let looped = recent.filter { !$0.sample.loopKinds.isEmpty || $0.sample.wasStuck }.count
         let loopRate = n == 0 ? 0 : Double(looped) / Double(n)
         var byReason: [String: Int] = [:]
-        for s in recent { if let r = s.failureReason { byReason[r, default: 0] += 1 } }
-        let lastFailure = recent.filter { !$0.success }.map(\.atEpoch).max()
+        for indexed in recent {
+            if let reason = indexed.sample.failureReason { byReason[reason, default: 0] += 1 }
+        }
+        let lastFailure = recent.filter { !$0.sample.success }.map { $0.sample.atEpoch }.max()
 
         // Cold-start neutral: not enough evidence ⇒ behave exactly like before the scorecard existed.
         guard n >= ScorecardThresholds.minSamples else {
@@ -361,51 +442,319 @@ public final class CaptainLearningStore {
                             lastFailureEpoch: lastFailure, rankDelta: rankDelta, exclude: exclude, reason: reason)
     }
 
-    public static func summarize(_ samples: [CaptainLearningSample]) -> [CaptainLearningSummary] {
-        struct BucketKey: Hashable {
-            let role: String
-            let providerId: String
-            let tag: String
-            let language: String?
+    public static func summarize(_ samples: [CaptainLearningSample],
+                                 now: Double = Date().timeIntervalSince1970) -> [CaptainLearningSummary] {
+        let summaries = routingBuckets(samples, now: now).map { key, values in
+            makeSummary(role: key.role, providerId: key.providerId,
+                        tags: [key.tag], language: key.language, values: values)
         }
-        var buckets: [BucketKey: [CaptainLearningSample]] = [:]
-        for sample in samples {
-            let tags = sample.taskTags.isEmpty ? ["coding"] : sample.taskTags
-            for tag in tags {
+        return sortSummaries(summaries)
+    }
+
+    /// Retrieval deliberately keeps one provider/role/language card while consuming the exact same
+    /// finite, 30-day, future-skew, per-task-bucket survivor set as assignment and verdict routing.
+    public static func summarizeForRetrieval(
+        _ samples: [CaptainLearningSample],
+        now: Double = Date().timeIntervalSince1970
+    ) -> [CaptainLearningSummary] {
+        var buckets: [RetrievalBucketKey: [IndexedSample]] = [:]
+        for indexed in routingEligibleSamples(samples, now: now) {
+            let sample = indexed.sample
+            let key = RetrievalBucketKey(role: sample.role, providerId: sample.providerId,
+                                         language: sample.language)
+            buckets[key, default: []].append(indexed)
+        }
+        let summaries = buckets.map { key, allValues -> CaptainLearningSummary in
+            // These are already shared per-task-bucket survivors, de-duplicated by append offset.
+            let values = allValues.sorted(by: chronological)
+            let tags = Array(Set(values.flatMap { sampleTags($0.sample) })).sorted()
+            return makeSummary(role: key.role, providerId: key.providerId,
+                               tags: tags, language: key.language, values: values)
+        }
+        return sortSummaries(summaries)
+    }
+
+    private static func routingBuckets(
+        _ samples: [CaptainLearningSample], now: Double
+    ) -> [BucketKey: [IndexedSample]] {
+        guard now.isFinite else { return [:] }
+        let oldest = now - CaptainLearningRecencyPolicy.maximumAgeSeconds
+        var buckets: [BucketKey: [IndexedSample]] = [:]
+        for (offset, sample) in samples.enumerated() {
+            guard sample.atEpoch.isFinite,
+                  sample.atEpoch >= oldest,
+                  sample.atEpoch <= now + CaptainLearningRecencyPolicy.maximumFutureSkewSeconds,
+                  !sample.providerId.isEmpty,
+                  !sample.role.isEmpty else { continue }
+            let indexed = IndexedSample(offset: offset, sample: sample)
+            for tag in sampleTags(sample) {
                 let key = BucketKey(role: sample.role, providerId: sample.providerId,
                                     tag: tag, language: sample.language)
-                buckets[key, default: []].append(sample)
+                buckets[key, default: []].append(indexed)
             }
         }
-        return buckets.map { key, values in
-            let successes = values.filter(\.success).count
-            let scored = values.compactMap(\.judgeScore)
-            let avgScore = scored.isEmpty ? nil : scored.reduce(0, +) / Double(scored.count)
-            let avgTokens = values.isEmpty ? 0 : values.reduce(0) { $0 + $1.tokens } / values.count
-            let avgLatency = values.isEmpty ? 0 : values.reduce(0) { $0 + $1.latencyMs } / values.count
-            let failures = values.reduce(0) { $0 + $1.toolFailures }
-            let latest = values.map(\.atEpoch).max() ?? 0
-            return CaptainLearningSummary(role: key.role, providerId: key.providerId,
-                                          taskTags: [key.tag], language: key.language,
-                                          samples: values.count, successes: successes,
-                                          averageJudgeScore: avgScore, averageTokens: avgTokens,
-                                          averageLatencyMs: avgLatency, toolFailures: failures,
-                                          latestEpoch: latest)
-        }.sorted { a, b in
-            if a.promoted != b.promoted { return a.promoted && !b.promoted }
-            if a.scoreBoost != b.scoreBoost { return a.scoreBoost > b.scoreBoost }
-            if a.samples != b.samples { return a.samples > b.samples }
-            return a.providerId < b.providerId
+        for key in Array(buckets.keys) {
+            guard let values = buckets[key] else { continue }
+            buckets[key] = Array(values.sorted(by: chronological)
+                .suffix(CaptainLearningRecencyPolicy.maximumSamplesPerBucket))
+        }
+        return buckets
+    }
+
+    /// Union by append offset prevents a multi-tag sample from being counted more than once in a
+    /// provider verdict or retrieval card after each task-shape bucket applies its own suffix cap.
+    private static func routingEligibleSamples(
+        _ samples: [CaptainLearningSample], now: Double
+    ) -> [IndexedSample] {
+        var selected: [Int: IndexedSample] = [:]
+        for values in routingBuckets(samples, now: now).values {
+            for value in values { selected[value.offset] = value }
+        }
+        return selected.values.sorted { $0.offset < $1.offset }
+    }
+
+    /// Internal deterministic seam used by regressions to prove every aggregate consumes the same
+    /// physical JSONL rows; a multi-tag row appears once in this list.
+    static func routingEligibleAppendOffsets(
+        _ samples: [CaptainLearningSample], now: Double
+    ) -> [Int] {
+        routingEligibleSamples(samples, now: now).map(\.offset)
+    }
+
+    private static func sampleTags(_ sample: CaptainLearningSample) -> [String] {
+        sample.taskTags.isEmpty ? ["coding"] : sample.taskTags
+    }
+
+    private static func chronological(_ lhs: IndexedSample, _ rhs: IndexedSample) -> Bool {
+        if lhs.sample.atEpoch != rhs.sample.atEpoch {
+            return lhs.sample.atEpoch < rhs.sample.atEpoch
+        }
+        return lhs.offset < rhs.offset
+    }
+
+    private static func makeSummary(role: String, providerId: String, tags: [String],
+                                    language: String?, values: [IndexedSample]) -> CaptainLearningSummary {
+        let samples = values.map(\.sample)
+        let successes = samples.filter(\.success).count
+        let scored = samples.compactMap(\.judgeScore)
+        let avgScore = scored.isEmpty ? nil : scored.reduce(0, +) / Double(scored.count)
+        return CaptainLearningSummary(
+            role: role, providerId: providerId,
+            taskTags: tags.isEmpty ? ["coding"] : tags,
+            language: language, samples: samples.count, successes: successes,
+            averageJudgeScore: avgScore,
+            averageTokens: boundedAverage(samples.map(\.tokens)),
+            averageLatencyMs: boundedAverage(samples.map(\.latencyMs)),
+            toolFailures: saturatingSum(samples.map(\.toolFailures)),
+            latestEpoch: samples.map(\.atEpoch).max() ?? 0)
+    }
+
+    private static func boundedAverage(_ values: [Int]) -> Int {
+        guard !values.isEmpty else { return 0 }
+        let total = values.reduce(0.0) { partial, value in
+            let next = partial + Double(value)
+            return next.isFinite ? next : Double.greatestFiniteMagnitude
+        }
+        let average = total / Double(values.count)
+        guard average < Double(Int.max) else { return Int.max }
+        return max(0, Int(average))
+    }
+
+    private static func saturatingSum(_ values: [Int]) -> Int {
+        values.reduce(0) { partial, value in
+            let (sum, overflow) = partial.addingReportingOverflow(value)
+            return overflow ? Int.max : sum
         }
     }
 
-    private func persist(_ samples: [CaptainLearningSample]) {
+    private static func sortSummaries(_ summaries: [CaptainLearningSummary]) -> [CaptainLearningSummary] {
+        summaries.sorted { a, b in
+            if a.promoted != b.promoted { return a.promoted && !b.promoted }
+            if a.scoreBoost != b.scoreBoost { return a.scoreBoost > b.scoreBoost }
+            if a.samples != b.samples { return a.samples > b.samples }
+            if a.providerId != b.providerId { return a.providerId < b.providerId }
+            if a.role != b.role { return a.role < b.role }
+            if a.taskTags != b.taskTags {
+                return a.taskTags.lexicographicallyPrecedes(b.taskTags)
+            }
+            return (a.language ?? "") < (b.language ?? "")
+        }
+    }
+
+    /// Bounded, descriptor-based JSONL inspection. A malformed/oversized row remains visible as a
+    /// partial audit state while neighboring valid rows can still be inspected. Missing terminal newline
+    /// is treated as a torn tail for mutation purposes, though its valid row remains audit-readable.
+    private func loadJSONLResult() -> JSONLLoadResult {
+#if canImport(Darwin) || canImport(Glibc)
+        var linkMetadata = stat()
+        guard lstat(path, &linkMetadata) == 0 else {
+            return errno == ENOENT ? .missing : .refused
+        }
+        guard (linkMetadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              linkMetadata.st_nlink == 1,
+              linkMetadata.st_uid == geteuid(),
+              linkMetadata.st_size >= 0,
+              linkMetadata.st_size <= off_t(Self.maximumFileBytes) else { return .refused }
+
+        let descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return .refused }
+        defer { _ = close(descriptor) }
+
+        var before = stat()
+        guard fstat(descriptor, &before) == 0,
+              (before.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              before.st_nlink == 1,
+              before.st_uid == geteuid(),
+              before.st_dev == linkMetadata.st_dev,
+              before.st_ino == linkMetadata.st_ino,
+              before.st_size >= 0,
+              before.st_size <= off_t(Self.maximumFileBytes) else { return .refused }
+
+        let data: Data
+        do {
+            data = try FileHandle(fileDescriptor: descriptor, closeOnDealloc: false).readToEnd() ?? Data()
+        } catch {
+            return .refused
+        }
+        var after = stat()
+        guard data.count <= Self.maximumFileBytes,
+              data.count == Int(before.st_size),
+              fstat(descriptor, &after) == 0,
+              after.st_dev == before.st_dev,
+              after.st_ino == before.st_ino,
+              after.st_size == before.st_size,
+              after.st_nlink == before.st_nlink else { return .refused }
+#else
+        guard let data = FileManager.default.contents(atPath: path),
+              data.count <= Self.maximumFileBytes else { return .refused }
+#endif
+
+        if data.isEmpty { return .complete([]) }
+        var rows: [CaptainLearningSample] = []
+        rows.reserveCapacity(min(maxSamples, 1_024))
+        var physicalRows = 0
+        var incomplete = data.last != 0x0a
+        let lines = data.split(separator: 0x0a, omittingEmptySubsequences: false)
+        for (ordinal, line) in lines.enumerated() {
+            if line.isEmpty, ordinal == lines.count - 1, data.last == 0x0a { continue }
+            physicalRows += 1
+            guard physicalRows <= Self.maximumRows else {
+                incomplete = true
+                break
+            }
+            guard !line.isEmpty,
+                  line.count <= Self.maximumRowBytes,
+                  let sample = try? JSONDecoder().decode(
+                    CaptainLearningSample.self, from: Data(line)) else {
+                incomplete = true
+                continue
+            }
+            rows.append(sample)
+        }
+        if physicalRows > maxSamples { incomplete = true }
+        return incomplete ? .partial(rows) : .complete(rows)
+    }
+
+    /// Encode and replace only after every row and aggregate byte budget succeeds. Until `rename(2)`,
+    /// the durable JSONL inode is untouched, so any encoding/write/fsync failure preserves exact bytes.
+    private func persistUnlocked(_ samples: [CaptainLearningSample]) -> Bool {
+        guard samples.count <= maxSamples, samples.count <= Self.maximumRows else { return false }
         let dir = (path as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+        } catch {
+            return false
+        }
         let encoder = JSONEncoder()
-        let text = samples.compactMap { sample -> String? in
-            (try? encoder.encode(sample)).flatMap { String(data: $0, encoding: .utf8) }
-        }.joined(separator: "\n")
-        try? (text + (text.isEmpty ? "" : "\n")).write(toFile: path, atomically: true, encoding: .utf8)
+        encoder.outputFormatting = [.sortedKeys]
+        var output = Data()
+        for sample in samples {
+            guard let row = try? encoder.encode(sample),
+                  row.count <= Self.maximumRowBytes,
+                  row.count + 1 <= Self.maximumFileBytes,
+                  output.count <= Self.maximumFileBytes - row.count - 1 else { return false }
+            output.append(row)
+            output.append(0x0a)
+        }
+
+#if canImport(Darwin) || canImport(Glibc)
+        let filename = (path as NSString).lastPathComponent
+        let temporaryPath = dir + "/.\(filename).\(ProcessInfo.processInfo.globallyUniqueString).tmp"
+        let descriptor = open(
+            temporaryPath, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            mode_t(0o600))
+        guard descriptor >= 0 else { return false }
+        var removeTemporary = true
+        defer {
+            _ = close(descriptor)
+            if removeTemporary { _ = unlink(temporaryPath) }
+        }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              metadata.st_nlink == 1,
+              metadata.st_uid == geteuid(),
+              fchmod(descriptor, mode_t(0o600)) == 0 else { return false }
+        let wrote = output.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return raw.count == 0 }
+            var offset = 0
+            while offset < raw.count {
+                let count = write(descriptor, base.advanced(by: offset), raw.count - offset)
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { return false }
+                offset += count
+            }
+            return true
+        }
+        guard wrote, fsync(descriptor) == 0, rename(temporaryPath, path) == 0 else { return false }
+        removeTemporary = false
+        return true
+#else
+        do {
+            try output.write(to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+#endif
+    }
+
+    /// The stable sidecar—not the destination inode, which atomic replacement changes—guards the full
+    /// read/modify/replace transaction. Lock acquisition is fail-closed; an unsafe symlink, foreign owner,
+    /// hard link, non-regular file, or failed flock never falls back to an unlocked mutation.
+    private func withMutationLock<T>(_ body: () -> T) -> T? {
+        let dir = (path as NSString).deletingLastPathComponent
+        do {
+            try FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+        } catch {
+            return nil
+        }
+#if canImport(Darwin) || canImport(Glibc)
+        let lockPath = path + ".lock"
+        let descriptor = open(
+            lockPath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+        guard descriptor >= 0 else { return nil }
+        defer {
+            _ = flock(descriptor, LOCK_UN)
+            _ = close(descriptor)
+        }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              metadata.st_nlink == 1,
+              metadata.st_uid == geteuid(),
+              fchmod(descriptor, mode_t(0o600)) == 0,
+              flock(descriptor, LOCK_EX) == 0 else { return nil }
+        var lockedMetadata = stat()
+        guard fstat(descriptor, &lockedMetadata) == 0,
+              lockedMetadata.st_dev == metadata.st_dev,
+              lockedMetadata.st_ino == metadata.st_ino,
+              lockedMetadata.st_nlink == 1 else { return nil }
+#endif
+        return body()
     }
 }

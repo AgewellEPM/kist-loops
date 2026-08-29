@@ -8,12 +8,44 @@ import AgentCore
 /// humans review the kept branches/worktrees.
 extension KistRunner {
 
+    /// Deliberate execution gate. Same-host macOS cannot yet prove hard CPU/memory/process-count
+    /// containment for a daemonizing adversary, the archive lacks an external monotonic rollback anchor,
+    /// and the paired held-out oracle is not wired. Neither manual nor unattended candidate execution may
+    /// spend model budget and then discover those facts only at benchmark time.
+    static var unattendedEvolutionSafetyBlocker: String {
+        EvolutionAutonomyReadinessAssessment.current.blockerSummary
+    }
+    static var unattendedEvolutionReady: Bool {
+        EvolutionAutonomyReadinessAssessment.current.ready
+    }
+
+    /// Positive capability ceiling for uncommitted evolution candidates. Every member is implemented
+    /// in-process on `ConfinedRoot`; no shell, custom code, MCP, research bridge, background-job,
+    /// browser, git, search-binary, or composite tool is reachable before the durable commit boundary.
+    /// Candidate-authored code executes only later, in the separately attested benchmark sandbox.
+    static let evolutionGenerationToolAllowlist: Set<String> = [
+        "read_file", "write_file", "edit_file", "notebook_edit", "apply_patch",
+        "move_file", "make_dir", "list_files", "glob_files",
+    ]
+
+    /// Construct from concrete trusted builtin types. Never filter an ambient registry by name: an MCP
+    /// tool can legally collide with a builtin name and ToolRegistry is last-wins.
+    static func evolutionGenerationTools() -> ToolRegistry {
+        ToolRegistry([
+            ReadFileTool(), WriteFileTool(), EditFileTool(), NotebookEditTool(), ApplyPatchTool(),
+            MoveFileTool(), MakeDirTool(), ListFilesTool(), GlobFilesTool(),
+        ])
+    }
+
     /// `--evolve-status`: render the evolution archive (best, blocked-conscience count, and the open-ended
     /// frontier of who the DGM would breed next) so a human can review the isolated candidate branches.
     /// Read-only; never touches git or spawns anything. Exit 0 (informational).
     static func runEvolutionStatus(root: String) -> Int32 {
         let archive = EvolutionArchiveStore(root: root)
-        print(EvolutionStatusReport.render(records: archive.records()))
+        let snapshot = archive.snapshot()
+        print(EvolutionStatusReport.render(records: snapshot.records,
+                                           authoritativeRecords: snapshot.authoritativeRecords,
+                                           authorityState: snapshot.state))
         return 0
     }
 
@@ -21,7 +53,10 @@ extension KistRunner {
     /// climbing?). Read-only; dispatched early like --evolve-status. Exit 0.
     static func runEvolutionTree(root: String) -> Int32 {
         let archive = EvolutionArchiveStore(root: root)
-        print(EvolutionLineage.render(records: archive.records()))
+        let snapshot = archive.snapshot()
+        print(EvolutionLineage.render(records: snapshot.records,
+                                      authoritativeRecords: snapshot.authoritativeRecords,
+                                      authorityState: snapshot.state))
         return 0
     }
 
@@ -30,6 +65,10 @@ extension KistRunner {
     /// `--evolve-arm --budget <tokens> --max-sessions N [--arm-hours H] [--generations G] "<objective>"`:
     /// the EXPLICIT human authorization for autonomous evolution. Writes bounded arming; nothing runs yet.
     static func runEvolveArm(_ opts: KistOptions, root: String) -> Int32 {
+        guard unattendedEvolutionReady else {
+            err("error: \(unattendedEvolutionSafetyBlocker)")
+            return 2
+        }
         guard let objective = opts.goal, !objective.trimmingCharacters(in: .whitespaces).isEmpty else {
             err("error: --evolve-arm needs an objective: kist --evolve-arm --budget <tokens> --max-sessions <N> \"<objective>\"")
             return 2
@@ -71,6 +110,10 @@ extension KistRunner {
     static func runEvolveSession(_ opts: KistOptions, registry: ProviderRegistry, root: String,
                                  tools: ToolRegistry, context: ToolContext,
                                  providerId: String, model: String?) async -> Int32 {
+        guard unattendedEvolutionReady else {
+            err("evolve-session · refused · \(unattendedEvolutionSafetyBlocker)")
+            return 2
+        }
         let store = EvolutionAutopilotStore(root: root)
         // (1) EXCLUSIVE interprocess lock for the WHOLE read-decide-run-write cycle — two overlapping cron
         // invocations must never both run (that would double-spend past the ceiling). Held until return.
@@ -116,7 +159,8 @@ extension KistRunner {
                                providerId: providerId, model: model, budgetOverride: ledger)
 
         let spent = await ledger.spentTokens()
-        let archiveBest = EvolutionRunProgress.bestPassingScore(EvolutionArchiveStore(root: root).records())
+        let archiveBest = EvolutionRunProgress.bestPassingScore(
+            EvolutionArchiveStore(root: root).authoritativeRecords())
         // (3) End time (captured AFTER the run) for accurate expiry/last-session accounting.
         let endNow = Date().timeIntervalSince1970
         let newState = state.recording(tokensSpentThisSession: spent, newBestScore: archiveBest, nowEpoch: endNow)
@@ -135,10 +179,29 @@ extension KistRunner {
                              tools: ToolRegistry, context: ToolContext,
                              providerId: String, model: String?,
                              budgetOverride: BudgetLedger? = nil) async -> Int32 {
+        let requiredManualGates: Set<EvolutionAutonomyGate> = [
+            .parentRelativeCapabilityFitness,
+            .externalRollbackWitness,
+            .hardProcessContainment,
+        ]
+        let safetyBlockers = EvolutionAutonomyReadinessAssessment.current.blockers.filter {
+            requiredManualGates.contains($0.gate)
+        }
+        guard safetyBlockers.isEmpty else {
+            let reason = safetyBlockers
+                .map { "\($0.gate.rawValue): \($0.reason)" }
+                .joined(separator: "; ")
+            err("error: evolution execution is fail-closed: \(reason). Nothing launched.")
+            return 2
+        }
         guard GitIsolation.isGitRepo(root) else {
             err("error: --evolve needs a git repo at \(root) (isolated candidate branches). Nothing launched."); return 2
         }
         guard let roles = resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
+        let rootSeedCommit = EvolutionLab.headSHA(worktreePath: root)
+        guard !rootSeedCommit.isEmpty else {
+            err("error: --evolve could not resolve the repository HEAD commit. Nothing launched."); return 2
+        }
 
         let objective = opts.goal ?? ""
         let variantCount = min(max(1, opts.variants), 10)
@@ -149,9 +212,14 @@ extension KistRunner {
             : opts.evolveBenchmarkCommands
         let policy = EvolutionPolicy(requiredBenchmarkCommands: benchmarkCommands)
         let archive = EvolutionArchiveStore(root: root)
+        let initialArchive = archive.snapshot()
+        if case .invalid(let reason) = initialArchive.state {
+            err("error: evolution archive authority is invalid; refusing to evolve or root-seed: \(reason)")
+            return 2
+        }
         let runID = String(UUID().uuidString.prefix(8))
-        let blockedEvolutionTools: Set<String> = ["computer_control", "spawn_agent"]
-        let safeTools = ToolRegistry(tools.all().filter { !blockedEvolutionTools.contains($0.name) })
+        _ = tools // ambient registry is intentionally not an authority source for evolution candidates
+        let safeTools = evolutionGenerationTools()
         let singleGeneration = generations == 1 && patience == 0
 
         if singleGeneration {
@@ -167,8 +235,16 @@ extension KistRunner {
         // not each candidate (a fresh ledger per candidate would silently allow N×X total spend).
         let evolveBudget = budgetOverride ?? opts.budgetTokens.map { BudgetLedger(maxTokens: $0) }
 
+        func discardFailedCandidate(_ worktree: GitWorktree, _ candidateID: String) -> Bool {
+            guard GitIsolation.discard(worktree) else {
+                err("candidate \(candidateID): CRITICAL cleanup failed; quarantined worktree may remain at \(worktree.path)")
+                return false
+            }
+            return true
+        }
+
         var allRecords: [EvolutionCandidateRecord] = []
-        var bestPassing = EvolutionRunProgress.bestPassingScore(archive.records())   // seed from prior runs
+        var bestPassing = EvolutionRunProgress.bestPassingScore(initialArchive.authoritativeRecords)
         var consecutiveStagnant = 0
 
         generationLoop: for generation in 1...generations {
@@ -188,25 +264,40 @@ extension KistRunner {
 
                 let candidateID = singleGeneration ? "\(runID)-v\(index)" : "\(runID)-g\(generation)-v\(index)"
                 let worktreeLabel = singleGeneration ? "evolve-\(index)" : "evolve-g\(generation)-\(index)"
-                guard let wt = GitIsolation.makeWorktree(repo: root, label: worktreeLabel,
-                                                         nowEpoch: Date().timeIntervalSince1970) else {
-                    if singleGeneration {
-                        err("candidate \(index): could not create isolated worktree")
-                    } else {
-                        err("candidate \(candidateID): could not create isolated worktree")
-                    }
-                    continue
-                }
 
                 // OPEN-ENDED DGM SELECTION: breed from an archive-SAMPLED parent (favouring under-explored
                 // stepping-stones), not the single greedy best. The seed is stable for the repo base,
                 // objective, generation, and candidate slot; earlier candidates are already appended so
                 // later generations build on the grown archive.
-                let parentSeed = EvolutionParentSelector.selectionSeed(baseSHA: wt.base, objective: objective,
+                let parentSeed = EvolutionParentSelector.selectionSeed(baseSHA: rootSeedCommit, objective: objective,
                                                                        variantIndex: index, variantCount: variantCount,
                                                                        generation: generation)
-                let selectedParent = archive.selectParent(seed: parentSeed)
-                let parentID = selectedParent?.candidateID
+                let selectedParent: EvolutionCandidateRecord?
+                switch archive.selectParentDecision(seed: parentSeed) {
+                case .rootSeed:
+                    selectedParent = nil
+                case .selected(let parent):
+                    selectedParent = parent
+                case .refused(let reason):
+                    err("candidate \(candidateID): refused authoritative parent selection: \(reason)")
+                    return 2
+                }
+                let lineageChild: EvolutionLineageWorkspace.Child
+                do {
+                    lineageChild = try EvolutionLineageWorkspace.createChild(
+                        repo: root,
+                        label: worktreeLabel,
+                        nowEpoch: Date().timeIntervalSince1970,
+                        rootCommitSHA: rootSeedCommit,
+                        selectedParent: selectedParent
+                    )
+                } catch {
+                    let reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                    err("candidate \(candidateID): refused evolution lineage: \(reason)")
+                    continue
+                }
+                let wt = lineageChild.worktree
+                let parentID = lineageChild.parentID
                 let candidateLabel = singleGeneration ? "candidate \(index)/\(variantCount)" : "g\(generation)·v\(index)"
                 if let selectedParent {
                     note("\(candidateLabel) · \(candidateID) · \(wt.branch) · parent \(selectedParent.candidateID) (score \(selectedParent.score))")
@@ -217,24 +308,15 @@ extension KistRunner {
                 let prompt = EvolutionLab.candidatePrompt(
                     objective: objective, variantIndex: index, variantCount: variantCount,
                     archiveContext: archive.context(selectedParent: selectedParent, limit: 5), policy: policy)
-                // Evolve candidates are autonomous self-modifying agents in ISOLATED worktrees, so run them
-                // in the BOXED self-improvement envelope: shell ENABLED + writes CONFINED to the worktree
-                // (network allowed for research). This gives them the FULL sandboxed tool set — incl.
-                // `custom_tool.run` (build+run generated Python helpers) — regardless of the outer
-                // --auto/--yolo flags. Confinement to the isolated worktree is what makes the capability
-                // safe; where the OS sandbox isn't available (Linux) the sandboxed tools fail closed at
-                // execution time, exactly as before.
-                // approval:{true} — raw shell strings are auto-permitted for this candidate because the
-                // KERNEL sandbox (writes confined to the throwaway worktree) is the real guard here, not the
-                // advisory deny-list; the deny-list still hard-blocks obviously-dangerous commands. Without
-                // this, a non-interactive candidate's raw `run_command` was refused ("requires interactive
-                // approval") and it couldn't run its own generated tools.
-                // deny defaults to ShellPolicy.defaultDeny (= baseDeny + hostControlDeny) → host-control
-                // (osascript/screencapture/…) is DENIED by default even for evolve candidates (no opt-out here).
+                // PRE-COMMIT candidates receive only the positive in-process capability ceiling above.
+                // There is deliberately no executable/MCP/research path here: a same-user setsid child cannot
+                // be proved dead by ProcessGroupRunner on macOS, so arbitrary candidate code is postponed to
+                // the exact-commit, one-use Builder verifier. The strict policy remains bound to the context
+                // as defense in depth for any future executable tool accidentally admitted by a code change.
                 let wtContext = ToolContext(projectRoot: wt.path,
-                                            shell: ShellPolicy(enabled: true, autoApprove: true, approval: { _ in true }),
-                                            sandbox: .confined(denyNetwork: false, confineWrites: true),
-                                            externalReadRoots: opts.allowReadPaths)
+                                            shell: .denied,
+                                            sandbox: .strictAutonomous(forbiddenReadPaths: [root]),
+                                            externalReadRoots: [], allowMediaDropInbox: false)
                 let memory = opts.noMemory ? nil : ProjectMemory(root: wt.path)
                 let recorder = TraceRecorder(traceId: TraceID.make())
                 let pxl = PlanExecuteLoop(providers: registry, roles: roles, tools: safeTools, context: wtContext,
@@ -246,31 +328,85 @@ extension KistRunner {
                 for line in await recorder.summary().terminalLines() { note(line) }
                 note("candidate \(candidateID) agent · \(outcome.message)")
 
-                if !GitIsolation.diff(wt).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    _ = GitIsolation.commit(wt, message: "evolution candidate \(candidateID)")
+                let durable: GitIsolation.EvolutionCommitSnapshot
+                do {
+                    durable = try GitIsolation.commitEvolutionCandidate(
+                        wt, message: "evolution candidate \(candidateID)")
+                } catch {
+                    err("candidate \(candidateID): refused non-durable candidate bytes: \(error.localizedDescription)")
+                    guard discardFailedCandidate(wt, candidateID) else { return 2 }
+                    continue
                 }
 
-                let changed = GitIsolation.committedChangedPaths(wt)
+                let changed = durable.changedFiles
                 // CONSCIENCE on the evolution path: reject a candidate that gamed its own tests — the same
                 // fail-closed integrity guard the fleet Foreman uses, before a candidate can score a "pass".
                 let integrityViolations = CIIntegrityGuard.inspect(committedFiles: changed,
-                                                                   committedDiff: GitIsolation.committedDiff(wt))
+                                                                   committedDiff: durable.committedDiff)
                     .map { "\($0.kind): \($0.claim)" }
-                let benchmarkResults = await EvolutionBenchmarkRunner.run(commands: benchmarkCommands,
-                                                                          cwd: wt.path, timeoutSeconds: opts.evolveTimeout)
+                let hostState: EvolutionBenchmarkRunner.ProtectedHostState
+                do {
+                    hostState = try EvolutionBenchmarkRunner.captureProtectedHostState(repoRoot: root)
+                } catch {
+                    err("candidate \(candidateID): could not attest protected host state: \(error.localizedDescription)")
+                    _ = discardFailedCandidate(wt, candidateID)
+                    return 2
+                }
+                let benchmarkResults: [EvolutionBenchmarkResult]
+                let benchmarkAuthority: EvolutionBenchmarkAuthorityReceipt?
+                if !policy.protectedFiles(in: changed).isEmpty || !integrityViolations.isEmpty {
+                    // Never execute a candidate-authored verifier after it touched its own gate. The
+                    // exact durable commit remains reviewable and may be sealed only as BLOCKED.
+                    benchmarkResults = []
+                    benchmarkAuthority = nil
+                } else {
+                    do {
+                        let batch = try await EvolutionBenchmarkRunner.run(
+                            commands: benchmarkCommands,
+                            candidate: durable,
+                            worktree: wt,
+                            hostRoot: root,
+                            expectedHostState: hostState,
+                            timeoutSeconds: opts.evolveTimeout)
+                        benchmarkResults = batch.results
+                        benchmarkAuthority = batch.authorityReceipt
+                    } catch {
+                        err("candidate \(candidateID): secure benchmark refused: \(error.localizedDescription)")
+                        _ = discardFailedCandidate(wt, candidateID)
+                        return 2
+                    }
+                }
+                do {
+                    try GitIsolation.validateEvolutionCandidate(wt, expected: durable)
+                    try EvolutionBenchmarkRunner.validateProtectedHostState(hostState)
+                } catch {
+                    err("candidate \(candidateID): post-evaluation attestation failed; refusing archive seal: \(error.localizedDescription)")
+                    _ = discardFailedCandidate(wt, candidateID)
+                    return 2
+                }
                 let benchmarks = [EvolutionBenchmarkResult(command: "agent_loop",
                                                            exitCode: outcome.success ? 0 : 1,
                                                            timedOut: false, output: outcome.message)] + benchmarkResults
                 let record = EvolutionEvaluator.evaluate(
                     runID: runID, candidateID: candidateID, parentID: parentID, objective: objective,
                     branch: wt.branch, worktreePath: wt.path, baseSHA: wt.base,
-                    commitSHA: EvolutionLab.headSHA(worktreePath: wt.path),
+                    commitSHA: durable.commitSHA,
+                    treeSHA: durable.treeSHA,
+                    gitControlDigest: durable.gitControlDigest,
+                    hostStateDigest: hostState.evidenceDigest,
+                    committedDiff: durable.committedDiff,
+                    benchmarkAuthority: benchmarkAuthority,
                     changedFiles: changed, benchmarks: benchmarks, policy: policy,
                     integrityViolations: integrityViolations, createdAtEpoch: Date().timeIntervalSince1970)
-                do { try archive.append(record) }
-                catch { err("candidate \(candidateID): failed to append evolution archive: \(error)") }
-                allRecords.append(record)
-                note("candidate \(candidateID) · \(record.status.rawValue) · score \(record.score) · \(record.summary)")
+                let persisted: EvolutionCandidateRecord
+                do { persisted = try archive.append(record) }
+                catch {
+                    err("candidate \(candidateID): failed to append authoritative evolution archive: \(error)")
+                    _ = discardFailedCandidate(wt, candidateID)
+                    return 2
+                }
+                allRecords.append(persisted)
+                note("candidate \(candidateID) · \(persisted.status.rawValue) · score \(persisted.score) · \(persisted.summary)")
             }
 
             // END OF GENERATION: did the frontier move? Track stagnation; optionally early-stop.
@@ -282,7 +418,7 @@ extension KistRunner {
                 note("generation \(generation) · produced no candidates (infra failure) — not counted toward stagnation")
                 continue
             }
-            let newBest = EvolutionRunProgress.bestPassingScore(archive.records())
+            let newBest = EvolutionRunProgress.bestPassingScore(archive.authoritativeRecords())
             let improved = EvolutionRunProgress.improved(from: bestPassing, to: newBest)
             consecutiveStagnant = EvolutionRunProgress.updateStagnation(consecutiveStagnant, improved: improved)
             bestPassing = newBest

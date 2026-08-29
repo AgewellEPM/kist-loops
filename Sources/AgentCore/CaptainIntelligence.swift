@@ -265,9 +265,15 @@ public enum ModelAssignmentEngine {
     /// confidence, and the task-profile capability flags so the CALLER can apply its own stability policy
     /// (e.g. only switch off the current model when a real capability signal is present — no churn on
     /// ordinary turns). Empty snapshot (no keyed providers) ⇒ the fallback, unchanged.
+    /// `unavailable` is the live availability gate (cooldown + daemon health). Candidates that are
+    /// known down/cooling are skipped during scoring, and an unavailable FALLBACK loses most of its
+    /// incumbent baseline so any warm candidate can out-score it — without this, the selector kept
+    /// nominating a dead session default and the caller's stability guard pinned it forever
+    /// (routing audit 2026-08-25). Fail-open: with every candidate unavailable, the fallback stands.
     public static func assignInteractive(turn: String, snapshot: ProjectSnapshot,
                                          fallback: ProviderBinding,
-                                         learning: ModelAssignmentLearningContext? = nil) -> InteractiveAssignment {
+                                         learning: ModelAssignmentLearningContext? = nil,
+                                         unavailable: (String) -> Bool = { _ in false }) -> InteractiveAssignment {
         let trimmed = turn.trimmingCharacters(in: .whitespacesAndNewlines)
         let subtask = FleetSubtask(title: String(trimmed.prefix(80)), intent: trimmed)
         let prof = profile(for: subtask)
@@ -282,7 +288,8 @@ public enum ModelAssignmentEngine {
         // which is the number the REPL's switch floor reads).
         let language = snapshot.languages.first
         let worker = choose(for: prof.prefersResearch ? .worker : .coder, profile: prof, snapshot: snapshot,
-                            fallback: fallback, learning: learning, language: language)
+                            fallback: fallback, learning: learning, language: language,
+                            unavailable: unavailable)
         let confidence = min(0.95, max(0.45, worker.score / 100.0))
         let evidence = worker.learningEvidence.map { "; learning: \($0.shortDescription)" } ?? ""
         let reason = "\(prof.reason); project: \(language ?? "unknown")\(evidence)"
@@ -343,13 +350,20 @@ public enum ModelAssignmentEngine {
     private static func choose(for role: RoleTarget, profile: TaskProfile, snapshot: ProjectSnapshot,
                                fallback: ProviderBinding, avoid: String? = nil,
                                learning: ModelAssignmentLearningContext? = nil,
-                               language: String? = nil) -> Scored {
+                               language: String? = nil,
+                               unavailable: (String) -> Bool = { _ in false }) -> Scored {
         let fallbackEvidence = learning?.evidence(providerId: fallback.providerId, role: role.learningRole,
                                                   taskTags: profile.tags, language: language)
+        // A down/cooling incumbent keeps only a token baseline: any warm keyed candidate (base 40+)
+        // out-scores it, but with nothing warm at all it still stands (fail-open last resort).
+        let fallbackBase: Double = unavailable(fallback.providerId) ? 20 : 45
         var best = Scored(binding: fallback,
-                          score: 45 + (fallbackEvidence?.scoreBoost ?? 0),
+                          score: fallbackBase + (fallbackEvidence?.scoreBoost ?? 0),
                           learningEvidence: fallbackEvidence)
+        var bestWarm: Scored?
         for candidate in snapshot.providers {
+            // Known-unavailable candidates never compete — selecting one guarantees a dead turn.
+            if unavailable(candidate.binding.providerId) { continue }
             let evidence = learning?.evidence(providerId: candidate.binding.providerId,
                                               role: role.learningRole,
                                               taskTags: profile.tags,
@@ -357,9 +371,16 @@ public enum ModelAssignmentEngine {
             let score = score(candidate, for: role, profile: profile,
                               defaultProvider: fallback.providerId, avoid: avoid,
                               learningEvidence: evidence)
-            if score > best.score {
-                best = Scored(binding: candidate.binding, score: score, learningEvidence: evidence)
-            }
+            let scored = Scored(binding: candidate.binding, score: score, learningEvidence: evidence)
+            if score > (bestWarm?.score ?? -.infinity) { bestWarm = scored }
+            if score > best.score { best = scored }
+        }
+        // A down incumbent may only stand when EVERY candidate is also unavailable (Codex P2,
+        // 2026-08-25: a promoted scoreBoost could hold a dead fallback above a warm candidate —
+        // reduced baseline + boost still out-scored a minimal-capability live model). If anything
+        // warm exists, the best warm candidate wins outright.
+        if unavailable(fallback.providerId), best.binding == fallback, let bestWarm {
+            return bestWarm
         }
         return best
     }

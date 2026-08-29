@@ -362,9 +362,7 @@ extension KistREPL {
                                            sessionStartedAt: sessionStart))
                     return .handled
                 case "cortex", "memory", "remember":
-                    // The Cortex: what kist knows about YOU (preferences/projects/journal, all .md you can see).
-                    // `/cortex` shows it · `/cortex files` lists the .md · `/cortex show <file>` ·
-                    // `/cortex remember <fact>` teaches it · `/cortex project <name> <fact>`.
+                    // Explicit audit of retired Cortex Markdown. Runtime recall and mutation are disabled.
                     print(Self.handleCortex(name == "remember" ? "remember " + args : args, cortex: cortex))
                     return .handled
                 case "agents", "agent", "specialists", "specialist":
@@ -571,7 +569,7 @@ extension KistREPL {
                         let completedTurn = recordVerificationAndFinal(outcome: oc, intent: intent)
                         selfMonitor(goal: step, intent: intent, success: completedTurn)
                         await printTurnUsage()
-                        recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+                        await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
                         if !completedTurn {
                             print("\u{001B}[31m⛓ step \(i + 1) did not succeed — stopping the chain. Remaining: \(steps.count - i - 1)\u{001B}[0m")
                             break
@@ -1189,12 +1187,13 @@ extension KistREPL {
                     return .handled
                 case "grow", "evolve-tool", "growtool":
                     // On-demand, transparent proof of the closed evolution loop: author a self__ tool →
-                    // gate → symbolic veto → INDEPENDENT adversary → activate only on surviving all. Prints
+                    // gate → symbolic veto → adversarial review → activate only on surviving all. The default
+                    // review is provider-independent; --review-grade explicitly selects weaker same-model proof.
                     // the authored script + verdict + activation. Standing autonomy is separate + flag-off.
                     // (Named /grow because /evolve is already the org board-meeting command.)
                     let brief = args.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !brief.isEmpty else {
-                        print("usage: /grow <capability the tool should provide> — kist authors a sandboxed self__ tool, has an INDEPENDENT model try to break it, activates only if it survives")
+                        print("usage: /grow <capability> — review defaults to an independent provider; use --review-grade fresh_context_same_model only with an exact same-model --critic")
                         return .handled
                     }
                     guard let evolve else { print("\u{001B}[31m/grow isn't available here\u{001B}[0m"); return .handled }
@@ -1271,7 +1270,7 @@ extension KistREPL {
                         let completedTurn = recordVerificationAndFinal(outcome: oc, intent: intent)
                         selfMonitor(goal: expanded, intent: intent, success: completedTurn)
                         await printTurnUsage()
-                        recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+                        await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
                     } else {
                         print("\u{001B}[31munknown command /\(name)\u{001B}[0m — try /help or /commands")
                     }

@@ -16,10 +16,8 @@ extension OrganizationalLearningStore {
         let seededTasks = seedLocalModelScoutTasks(objective: objective,
                                                    candidates: candidates,
                                                    reportPath: relativePath)
-        let memoryRecords = recordLocalModelScoutMemory(objective: objective,
-                                                        candidates: candidates,
-                                                        reportPath: relativePath)
-        let text = LocalModelScout.render(objective: objective,
+        var memoryRecords = 0
+        var text = LocalModelScout.render(objective: objective,
                                           hardwareMemoryGB: hardwareMemoryGB,
                                           candidates: candidates,
                                           reportPath: relativePath,
@@ -32,7 +30,20 @@ extension OrganizationalLearningStore {
                                                     withIntermediateDirectories: true)
             try (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
             writeSucceeded = true
+
+            memoryRecords = recordLocalModelScoutMemory(objective: objective,
+                                                        candidates: candidates,
+                                                        reportPath: relativePath)
+            let finalizedText = LocalModelScout.render(objective: objective,
+                                                       hardwareMemoryGB: hardwareMemoryGB,
+                                                       candidates: candidates,
+                                                       reportPath: relativePath,
+                                                       seededTasks: seededTasks,
+                                                       memoryRecords: memoryRecords)
+            try (finalizedText + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+            text = finalizedText
         } catch {
+            writeSucceeded = false
             writeError = String(describing: error)
         }
         return LocalModelScoutReport(path: relativePath,
@@ -106,12 +117,8 @@ extension OrganizationalLearningStore {
                                                          manifestWriteSucceeded: !manifestRequired || manifestWriteSucceeded,
                                                          manifestWriteError: manifestWriteError,
                                                          fetchError: fetchError)
-        let memoryRecords = recordLiveModelMetadataGateMemory(spec: displaySpec,
-                                                              metadata: metadata,
-                                                              decision: decision,
-                                                              reportPath: relativePath,
-                                                              fetchError: fetchError)
-        let text = LiveModelMetadataGate.render(spec: displaySpec,
+        var memoryRecords = 0
+        var text = LiveModelMetadataGate.render(spec: displaySpec,
                                                 metadata: metadata,
                                                 decision: decision,
                                                 fetchError: fetchError,
@@ -129,7 +136,28 @@ extension OrganizationalLearningStore {
                                                     withIntermediateDirectories: true)
             try (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
             writeSucceeded = true
+
+            memoryRecords = recordLiveModelMetadataGateMemory(spec: displaySpec,
+                                                              metadata: metadata,
+                                                              decision: decision,
+                                                              reportPath: relativePath,
+                                                              fetchError: fetchError)
+            let finalizedText = LiveModelMetadataGate.render(
+                spec: displaySpec,
+                metadata: metadata,
+                decision: decision,
+                fetchError: fetchError,
+                acquisitionManifest: acquisitionManifest,
+                acquisitionManifestPath: acquisitionManifestPath,
+                manifestWriteSucceeded: !manifestRequired || manifestWriteSucceeded,
+                manifestWriteError: manifestWriteError,
+                path: relativePath,
+                seededTasks: seededTasks,
+                memoryRecords: memoryRecords)
+            try (finalizedText + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+            text = finalizedText
         } catch {
+            writeSucceeded = false
             writeError = String(describing: error)
         }
         return LiveModelMetadataGateReport(path: relativePath,
@@ -212,13 +240,8 @@ extension OrganizationalLearningStore {
             impact: 4,
             tags: ["local-model", "hugging-face", "mlx", "ollama", "model-scout"]
         )
-        var records = loadJSONL(DiskMemoryRecord.self, path: knowledgeIndexPath)
-        if let idx = records.firstIndex(where: { $0.id == record.id }) {
-            records[idx] = record
-        } else {
-            records.append(record)
-        }
-        return saveJSONL(records, to: knowledgeIndexPath) ? 1 : 0
+        return upsertGenericMemory(
+            record, to: knowledgeIndexPath, decayRate: .fast) ? 1 : 0
     }
 
     func seedLiveModelMetadataGateTasks(spec: String,
@@ -320,13 +343,8 @@ extension OrganizationalLearningStore {
             impact: 4,
             tags: ["local-model", "metadata-gate", "license-gate", "provenance", metadata?.providerHint ?? "unknown"]
         )
-        var records = loadJSONL(DiskMemoryRecord.self, path: knowledgeIndexPath)
-        if let idx = records.firstIndex(where: { $0.id == record.id }) {
-            records[idx] = record
-        } else {
-            records.append(record)
-        }
-        return saveJSONL(records, to: knowledgeIndexPath) ? 1 : 0
+        return upsertGenericMemory(
+            record, to: knowledgeIndexPath, decayRate: .fast) ? 1 : 0
     }
 
 }

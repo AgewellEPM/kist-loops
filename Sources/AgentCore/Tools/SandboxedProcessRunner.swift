@@ -33,7 +33,8 @@ public enum SandboxedProcessRunner {
         let finalPath: String
         let finalArgs: [String]
         let sandboxName: String
-        switch SeatbeltSandbox.wrap(launchPath: launchPath, args: launchArgs, root: root, policy: policy) {
+        switch SeatbeltSandbox.wrap(launchPath: launchPath, args: launchArgs, root: root,
+                                    policy: policy, cwd: cwd) {
         case .passthrough:
             return Outcome(combined: "OS sandbox required but wrapper returned passthrough",
                            exitCode: 126,

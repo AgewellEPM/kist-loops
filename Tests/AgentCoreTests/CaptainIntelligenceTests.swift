@@ -217,7 +217,8 @@ final class CaptainIntelligenceTests: XCTestCase {
                                   role: "coder", providerId: "swiftbench", model: "swiftbench-code",
                                   source: .benchmark, success: true, atEpoch: Double(idx))
         }
-        let shadow = ModelAssignmentLearningContext(summaries: CaptainLearningStore.summarize(shadowSamples))
+        let shadow = ModelAssignmentLearningContext(
+            summaries: CaptainLearningStore.summarize(shadowSamples, now: 1))
 
         let shadowAssigned = ModelAssignmentEngine.assign(subtasks: [task], snapshot: snapshot,
                                                           defaultRoles: fallback, learning: shadow)
@@ -258,7 +259,8 @@ final class CaptainIntelligenceTests: XCTestCase {
                                   source: .fleetSignoff, success: true, judgeScore: 0.9,
                                   atEpoch: Double(idx))
         }
-        let learning = ModelAssignmentLearningContext(summaries: CaptainLearningStore.summarize(promotedSamples))
+        let learning = ModelAssignmentLearningContext(
+            summaries: CaptainLearningStore.summarize(promotedSamples, now: 2))
 
         let assigned = ModelAssignmentEngine.assign(subtasks: [task], snapshot: snapshot,
                                                     defaultRoles: fallback, learning: learning)
@@ -324,7 +326,8 @@ final class CaptainIntelligenceTests: XCTestCase {
                                       role: s.role.rawValue, providerId: s.favored, model: s.favModel,
                                       source: .benchmark, success: idx % 3 == 0, atEpoch: Double(idx))
             }
-            let learning = ModelAssignmentLearningContext(summaries: CaptainLearningStore.summarize(samples))
+            let learning = ModelAssignmentLearningContext(
+                summaries: CaptainLearningStore.summarize(samples, now: 59))
             let decayed = ModelAssignmentEngine.assign(subtasks: [task], snapshot: snapshot,
                                                        defaultRoles: fallback, learning: learning)
             XCTAssertEqual(decayed[0].roles.binding(for: s.role).providerId, "challenger",

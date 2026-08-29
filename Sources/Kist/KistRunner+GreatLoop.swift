@@ -114,11 +114,10 @@ extension KistRunner {
             let primer = lessons?.primer(forGoal: baseGoal)
             let policyHint = policy?.bestHint(forSignature: sig)
             let repoMap = RepoMap.build(projectRoot: root, goal: baseGoal)   // orientation: files → symbols
-            let sessionMem = Self.sessionMemory(root: root, opts: opts)       // cortex + project memory
+            let sessionMem = Self.sessionMemory(root: root, opts: opts)
             let fb = feedback.value
             // FENCE the user's task in the scope-source markers so AuthorizationScopeEngine classifies ONLY
-            // the task — NOT the injected memory/repo-map below. (Live-run bug: cortex memory containing
-            // "Production" made a plain create-task misfire as read-only serverDiagnostics, blocking all writes.)
+            // the task — NOT the injected project memory/repo-map below.
             var cycleGoal = PromptCompiler.scopeSourceStart + "\n" + baseGoal + "\n" + PromptCompiler.scopeSourceEnd
             // CONTINUITY across cycles: each cycle is a fresh conversation, so without this the model has
             // amnesia — it re-creates work a prior cycle already did (live dogfood: it built the package at
@@ -150,7 +149,9 @@ extension KistRunner {
                 let bestOfNGoal = cycleGoal
                 let won = await WorktreeBestOfN.run(root: root, width: effort.searchWidth, nowEpoch: Date().timeIntervalSince1970) { wtPath, _ in
                     let wtCtx = ToolContext(projectRoot: wtPath, shell: context.shell, sandbox: context.sandbox,
-                                            externalReadRoots: context.externalReadRoots)
+                                            externalReadRoots: context.externalReadRoots,
+                                            correlationID: context.correlationID,
+                                            traceRecorder: context.traceRecorder)
                     let rec = TrajectoryRecorder()
                     let wtLoop = makeLoop(registry: registry, providerId: cycleProvider, model: cycleModel, context: wtCtx,
                                           tools: loopTools, checkpoints: checkpoints, maxIterations: effort.iterationBudget,

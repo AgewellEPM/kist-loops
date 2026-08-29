@@ -20,19 +20,17 @@ extension OrganizationalLearningStore {
                                                     specialists: registry.load())
         let knowledgeDebt = seedDomainLearningKnowledgeDebt(strategy: strategy,
                                                             objective: strategy.objective)
-        let timestamp = Int(now().timeIntervalSince1970)
+        let instant = OrganizationalMemoryTemporal.canonicalInstant(now())
+        let timestamp = Int(instant.timeIntervalSince1970)
         let path = researchArchiveRoot + "/domain-learning/\(timestamp)-\(Self.slug(strategy.objective)).md"
         let relativePath = Self.projectRelative(path, root: projectRoot)
         let seededTasks = seedDomainLearningTasks(strategy: strategy,
                                                   assignments: assignments,
                                                   reportPath: relativePath,
                                                   trajectory: trajectory)
-        let memoryRecords = recordDomainLearningMemory(strategy: strategy,
-                                                       retrieval: retrieval,
-                                                       reportPath: relativePath,
-                                                       trajectory: trajectory)
         let dispatchCommand = "/domain run \(strategy.objective)"
-        let text = renderDomainLearningReport(strategy: strategy,
+        var memoryRecords = 0
+        var text = renderDomainLearningReport(strategy: strategy,
                                               retrieval: retrieval,
                                               assignments: assignments,
                                               reportPath: relativePath,
@@ -48,7 +46,26 @@ extension OrganizationalLearningStore {
                                                     withIntermediateDirectories: true)
             try (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
             writeSucceeded = true
+
+            memoryRecords = recordDomainLearningMemory(strategy: strategy,
+                                                       retrieval: retrieval,
+                                                       reportPath: relativePath,
+                                                       trajectory: trajectory,
+                                                       at: instant)
+            let finalizedText = renderDomainLearningReport(
+                strategy: strategy,
+                retrieval: retrieval,
+                assignments: assignments,
+                reportPath: relativePath,
+                seededTasks: seededTasks,
+                knowledgeDebtCreated: knowledgeDebt,
+                createdSpecialists: createdStrategySpecialists + createdLearningSpecialists,
+                memoryRecords: memoryRecords,
+                dispatchCommand: dispatchCommand)
+            try (finalizedText + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+            text = finalizedText
         } catch {
+            writeSucceeded = false
             writeError = String(describing: error)
         }
         return DomainLearningReport(path: relativePath,
@@ -78,7 +95,8 @@ extension OrganizationalLearningStore {
         let summary = Self.safe(rawSummary.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !summary.isEmpty else { return nil }
 
-        let timestamp = Int(now().timeIntervalSince1970)
+        let instant = OrganizationalMemoryTemporal.canonicalInstant(now())
+        let timestamp = Int(instant.timeIntervalSince1970)
         let path = researchArchiveRoot + "/domain-learning/specialists/"
             + "\(timestamp)-\(Self.slug(objective))-\(Self.slug(assignment.specialistName)).md"
         let relativePath = Self.projectRelative(path, root: projectRoot)
@@ -110,7 +128,7 @@ extension OrganizationalLearningStore {
             return nil
         }
 
-        let memoryRecorded = appendJSON(DiskMemoryRecord(
+        let memoryRecorded = appendGenericMemory(DiskMemoryRecord(
             id: "AA-domain-learning-specialist-\(timestamp)-\(Self.slug(assignment.specialistName))",
             title: "Domain Learning Specialist: \(assignment.specialistName)",
             summary: "\(assignment.role): \(excerpt(summary, limit: 180))",
@@ -124,7 +142,7 @@ extension OrganizationalLearningStore {
             confidence: 74,
             impact: 4,
             tags: ["domain-learning", "specialist-output", assignment.specialistName]
-        ), to: knowledgeIndexPath)
+        ), to: knowledgeIndexPath, decayRate: .medium, at: instant)
 
         let planStore = PlanStore(projectRoot: projectRoot)
         let plan = planStore.load()
@@ -298,24 +316,26 @@ extension OrganizationalLearningStore {
                                                  objective: String) -> Int {
         var count = 0
         for item in strategy.understanding.missingKnowledge.prefix(6) {
-            _ = addKnowledgeDebt(topic: "Domain learning: \(item)",
-                                 reason: "Captain is below the temporary subject-matter expert confidence gate for: \(objective)",
-                                 visit: "Primary docs, standards, competitors, papers, open source, and local project evidence.",
-                                 impact: 5,
-                                 priority: .high,
-                                 estimatedLearning: strategy.understanding.recommendedResearchTime,
-                                 expectedBenefit: ["raise Captain understanding above \(strategy.understanding.threshold)%", "avoid premature specialist assignment"])
-            count += 1
+            if addKnowledgeDebt(topic: "Domain learning: \(item)",
+                                reason: "Captain is below the temporary subject-matter expert confidence gate for: \(objective)",
+                                visit: "Primary docs, standards, competitors, papers, open source, and local project evidence.",
+                                impact: 5,
+                                priority: .high,
+                                estimatedLearning: strategy.understanding.recommendedResearchTime,
+                                expectedBenefit: ["raise Captain understanding above \(strategy.understanding.threshold)%", "avoid premature specialist assignment"]) != nil {
+                count += 1
+            }
         }
         for question in strategy.researchQuestions.prefix(4) {
-            _ = addKnowledgeDebt(topic: "Research question: \(question)",
-                                 reason: "Domain learning preflight requires this answer before execution.",
-                                 visit: "Official docs and primary sources for \(objective)",
-                                 impact: 4,
-                                 priority: .high,
-                                 estimatedLearning: "30-60 minutes",
-                                 expectedBenefit: ["turn uncertainty into evidence-backed planning"])
-            count += 1
+            if addKnowledgeDebt(topic: "Research question: \(question)",
+                                reason: "Domain learning preflight requires this answer before execution.",
+                                visit: "Official docs and primary sources for \(objective)",
+                                impact: 4,
+                                priority: .high,
+                                estimatedLearning: "30-60 minutes",
+                                expectedBenefit: ["turn uncertainty into evidence-backed planning"]) != nil {
+                count += 1
+            }
         }
         return count
     }
@@ -418,7 +438,8 @@ extension OrganizationalLearningStore {
     func recordDomainLearningMemory(strategy: CaptainStrategyPlan,
                                             retrieval: CaptainRetrievalContext,
                                             reportPath: String,
-                                            trajectory: [ActionRecord]) -> Int {
+                                            trajectory: [ActionRecord],
+                                            at instant: Date) -> Int {
         var count = 0
         let recordID = "AA-domain-learning-\(Self.slug(strategy.objective).prefix(48))"
         let record = DiskMemoryRecord(
@@ -438,13 +459,8 @@ extension OrganizationalLearningStore {
             impact: strategy.understanding.canOrganize ? 3 : 5,
             tags: ["domain-learning", "temporary-sme", "research-first", "captain"]
         )
-        var records = loadJSONL(DiskMemoryRecord.self, path: knowledgeIndexPath)
-        if let idx = records.firstIndex(where: { $0.id == recordID }) {
-            records[idx] = record
-        } else {
-            records.append(record)
-        }
-        if saveJSONL(records, to: knowledgeIndexPath) {
+        if upsertGenericMemory(
+            record, to: knowledgeIndexPath, decayRate: .fast, at: instant) {
             count += 1
         }
         return count

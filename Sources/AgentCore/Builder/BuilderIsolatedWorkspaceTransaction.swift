@@ -1076,7 +1076,8 @@ public actor BuilderIsolatedWorkspaceTransactionSource:
 
     func safeMutationPath(_ value: String) throws -> String {
         let path = try BuilderExecutionValidation.path(value)
-        guard !BuilderPathSecurity.containsControlComponent(path) else {
+        guard !BuilderPathSecurity.containsControlComponent(path),
+              !BuilderPathSecurity.containsGeneratedOutputComponent(path) else {
             throw BuilderWorkspaceTransactionError.controlPath(path)
         }
         return path

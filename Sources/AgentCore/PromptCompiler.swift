@@ -272,14 +272,22 @@ public enum PromptCompiler {
             "running inside", "capture proof", "prove it ran", "proof it ran", "proof that it ran",
         ])
         if !explicitlyReadOnly, namesGuestRuntime, asksToRunThere { return .desktop }
-        // A defect noun does not turn an explicit repair command into a read-only review. This check must
-        // precede both desktop nouns and the broad "bug"/"regression" review cues so requests such as
-        // "fix the desktop app crash" remain build work instead of becoming an answer-only desktop turn.
-        if !explicitlyReadOnly, isBuildDirective(lower) { return .build }
         let asksForExplanation = [
             "explain ", "describe ", "tell me ", "what ", "why ", "how ", "where ", "when ",
             "which ", "who ", "how would ", "what would ", "should i ", "should we ",
         ].contains { lower.hasPrefix($0) }
+        // A defect noun does not turn an explicit repair command into a read-only review. This check must
+        // precede both desktop nouns and the broad "bug"/"regression" review cues so requests such as
+        // "fix the desktop app crash" remain build work instead of becoming an answer-only desktop turn.
+        if !explicitlyReadOnly, isBuildDirective(lower) { return .build }
+        // Multi-clause repair requests often orient first ("inspect/diagnose") and place the explicit
+        // mutation second. Keep this deliberately phrase-bound instead of treating any occurrence of
+        // "fix" as write authority (for example, "explain how to fix" remains answer-only).
+        if !explicitlyReadOnly, !asksForExplanation, containsAny(lower, [
+            "then fix", "and fix", "start fixing", "start to fix", "apply the fix",
+            "make the smallest source fix", "make the required fix", "implement the fix",
+            "patch it", "repair it",
+        ]) { return .build }
         if isOwnCodeInspection(lower) {
             let asksForRepair = containsAny(lower, [
                 "fix it", "fix this", "then fix", "and fix", "need to fix", "repair it", "patch it"
@@ -315,7 +323,7 @@ public enum PromptCompiler {
     public static func expectedOutcome(intent: TaskBrief.Intent,
                                        mode: Mode = .inline) -> TaskBrief.ExpectedOutcome {
         if mode == .plan || intent == .plan { return .plan }
-        if intent == .research { return .evidence }
+        if intent == .research || intent == .review { return .evidence }
         if intent == .desktop { return .externalAction }
         if intent.expectsMutation || mode == .planExecute || mode == .fleet { return .mutation }
         return .answer

@@ -30,13 +30,7 @@ public struct SelfAuthoredManifest: Codable, Sendable, Equatable {
     }
 }
 
-/// Runs a self-authored script as a tool — with MANDATORY containment. A `self__` script is NOT a
-/// user-directed command, so it never inherits the session's `--allow-shell` permissiveness: EVERY run is
-/// wrapped in the confined Seatbelt/bubblewrap sandbox (network denied, writes confined to a fresh scratch
-/// dir — NEVER projectRoot — secret reads denied, time/output capped). If the sandbox is unavailable it
-/// REFUSES to run (fail-closed). The gates prove a tool WORKS; this is what keeps a working-but-harmful
-/// script from doing damage — the adversary hunts contract violations, not malice, so containment is the
-/// only safety layer and it cannot be optional.
+/// Candidate/activation manifest loading stays path-confined even while execution is disabled.
 extension SelfAuthoredManifest {
     /// Load a candidate's manifest + resolved script path from its workdir (where the author wrote
     /// `manifest.json` + the script). Used by the gate and adversary so they operate on whatever the author
@@ -55,6 +49,12 @@ extension SelfAuthoredManifest {
     }
 }
 
+/// A self-authored script tool. A `self__` script is NOT a user-directed command, so it never inherits the
+/// session's `--allow-shell` permissiveness. The current Seatbelt/Bubblewrap + process-group runner is only
+/// advisory: it cannot enforce aggregate CPU/RAM/PID ceilings or prove that every daemonizing descendant is
+/// dead. Production execution therefore refuses before launching an interpreter until a per-execution hard
+/// containment backend returns validated authority for the exact run. The old sandbox path survives only as
+/// an explicitly named DEBUG regression seam and is never promotion or activation evidence.
 public struct ScriptTool: AgentTool {
     public let manifest: SelfAuthoredManifest
     public let homeDir: String           // where the script lives
@@ -101,10 +101,32 @@ public struct ScriptTool: AgentTool {
                                         timeoutSeconds: timeoutSeconds, maxOutputBytes: maxOutputBytes)
     }
 
-    /// The one execution path — used by both `execute` and the gate's acceptance test, so what the gate
-    /// verifies is EXACTLY what will later run. Always sandboxed; refuses if the sandbox is unavailable.
+    /// Production execution boundary. No interpreter is launched until a qualifying hard-containment
+    /// runner is wired here and its exact execution receipt is validated. Backend availability alone is not
+    /// execution authority, so this remains fail-closed even if a future backend merely advertises itself.
     public static func runContained(interpreter: String, scriptPath: String, args: [String],
                                     timeoutSeconds: Int = 20, maxOutputBytes: Int = 256 * 1024) async -> ToolResult {
+        _ = interpreter
+        _ = scriptPath
+        _ = args
+        _ = timeoutSeconds
+        _ = maxOutputBytes
+        let availability = HardProcessContainmentRuntime.currentAvailability
+        let reason = availability.available
+            ? "a qualifying hard-containment backend is available, but self__ execution has no validated per-execution scope authority wired"
+            : availability.reason
+        return ToolResult(
+            success: false, output: "", error: "self__ execution refused: \(reason)",
+            metadata: ["sandboxed": "false", "hard_containment": "unavailable"])
+    }
+
+    #if DEBUG
+    /// DEBUG-only regression seam for testing the legacy advisory sandbox itself. It deliberately returns
+    /// ordinary `ToolResult` data and can never mint `ValidatedHardProcessContainment`, activation authority,
+    /// or evolution promotion authority. Production code must call `runContained`, which refuses above.
+    static func runAdvisoryForTesting(interpreter: String, scriptPath: String, args: [String],
+                                      timeoutSeconds: Int = 20,
+                                      maxOutputBytes: Int = 256 * 1024) async -> ToolResult {
         // Fresh scratch dir per run — the sandbox write-confinement root. NEVER projectRoot.
         let scratch = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("kist-self-run-\(scriptPath.hashValue &* 2654435761)")
@@ -140,6 +162,9 @@ public struct ScriptTool: AgentTool {
         return ToolResult(success: !outcome.timedOut && outcome.exitCode == 0,
                           output: outcome.combined.isEmpty ? "(no output)" : outcome.combined,
                           error: outcome.exitCode == 0 ? nil : "exit \(outcome.exitCode)\(outcome.timedOut ? " (timed out)" : "")",
-                          metadata: ["exit_code": String(outcome.exitCode), "sandboxed": "true"])
+                          metadata: ["exit_code": String(outcome.exitCode),
+                                     "sandboxed": "advisory-test-only",
+                                     "hard_containment": "false"])
     }
+    #endif
 }

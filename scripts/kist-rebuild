@@ -530,7 +530,7 @@ enterprise_evidence_evaluate() {
 import base64,binascii,hashlib,json,os,stat,sys,xml.etree.ElementTree as ET
 bundle_path,manifest_path,binary_path=sys.argv[1:]
 HEX=set("0123456789abcdef")
-BASE_REQUIRED={
+BASE_REQUIRED_LEGACY={
  "schema","stamp","deployed","worktree","branch","commit","remote-origin-sha256","repository-id",
  "source-dirty","source-state-sha256","binary-sha256","wrapper-sha256","dashboard-launcher-sha256",
  "rebuild-sha256","safe-rebuild-sha256","artifact-closure-sha256","artifact-closure-count","test-evidence",
@@ -538,6 +538,7 @@ BASE_REQUIRED={
  "signing-identity","notarization-status","notarization-submission-id","notarization-package-sha256",
  "deployment-evidence-sha256","product-version",
 }
+OPERATIONAL_REQUIRED={"dashboard-runtime-sha256","dashboard-cortex-sha256","dashboard-cortex-count"}
 ENTERPRISE_REQUIRED={
  "candidate-manifest-sha256","full-suite-evidence-sha256","full-suite-test-count","full-suite-failures",
  "full-suite-errors","five-canary-evidence-sha256","five-canary-count","five-canary-failures","sbom-sha256",
@@ -592,13 +593,19 @@ def digest(raw,claimed):
 manifest_raw=stable_read(manifest_path,262144)
 current=fields(manifest_raw)
 if current.get("schema")!="4" or current.get("deployment-assurance") not in {"pilot","enterprise"}: raise SystemExit(1)
-expected=BASE_REQUIRED|(ENTERPRISE_REQUIRED if current["deployment-assurance"]=="enterprise" else set())
+operational_bound=bool(OPERATIONAL_REQUIRED&set(current))
+base_required=BASE_REQUIRED_LEGACY|(OPERATIONAL_REQUIRED if operational_bound else set())
+expected=base_required|(ENTERPRISE_REQUIRED if current["deployment-assurance"]=="enterprise" else set())
 if set(current)!=expected or current.get("provenance-kind")!="local-candidate": raise SystemExit(1)
 import re
 semver=r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 if not re.fullmatch(semver,current.get("product-version","")): raise SystemExit(1)
 for key in ["source-state-sha256","unsigned-release-sha256","signed-installed-sha256","binary-sha256","deployment-evidence-sha256"]:
     if not valid_hash(current.get(key)): raise SystemExit(1)
+if operational_bound:
+    if not valid_hash(current.get("dashboard-runtime-sha256")) or not valid_hash(current.get("dashboard-cortex-sha256")): raise SystemExit(1)
+    cortex_count=current.get("dashboard-cortex-count","")
+    if not cortex_count.isdigit() or str(int(cortex_count))!=cortex_count: raise SystemExit(1)
 if current["signed-installed-sha256"]!=current["binary-sha256"]: raise SystemExit(1)
 if current.get("notarization-status")=="accepted":
     if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",current.get("notarization-submission-id","")) or not valid_hash(current.get("notarization-package-sha256")): raise SystemExit(1)
@@ -619,8 +626,8 @@ if bundle["source_state_sha256"]!=current["source-state-sha256"] or bundle["unsi
 
 candidate_raw=decode(bundle["candidate_manifest_base64"],262144); digest(candidate_raw,bundle["candidate_manifest_sha256"])
 candidate=fields(candidate_raw)
-if set(candidate)!=BASE_REQUIRED or candidate.get("schema")!="4" or candidate.get("deployment-assurance")!="pilot" or candidate.get("provenance-kind")!="local-candidate": raise SystemExit(1)
-for key in BASE_REQUIRED-{"deployment-assurance","test-evidence","deployment-evidence-sha256"}:
+if set(candidate)!=base_required or candidate.get("schema")!="4" or candidate.get("deployment-assurance")!="pilot" or candidate.get("provenance-kind")!="local-candidate": raise SystemExit(1)
+for key in base_required-{"deployment-assurance","test-evidence","deployment-evidence-sha256"}:
     if current.get(key)!=candidate.get(key): raise SystemExit(1)
 if current["deployment-assurance"]=="pilot" and candidate_raw!=manifest_raw: raise SystemExit(1)
 if current["deployment-assurance"]=="enterprise" and current.get("candidate-manifest-sha256")!=bundle["candidate_manifest_sha256"]: raise SystemExit(1)
@@ -880,20 +887,28 @@ schema4_extras = {
     "notarization-package-sha256", "deployment-evidence-sha256", "product-version",
 }
 schema4_legacy_base = schema3_required | schema4_extras
-schema4_v3_base = (schema3_required - {"dashboard-runtime-sha256"}) | schema4_extras | {
+schema4_v3_legacy_base = (schema3_required - {"dashboard-runtime-sha256"}) | schema4_extras | {
     "safe-rebuild-sha256",
 }
+schema4_v3_operational = {
+    "dashboard-runtime-sha256", "dashboard-cortex-sha256", "dashboard-cortex-count",
+}
+schema4_v3_base = schema4_v3_legacy_base | schema4_v3_operational
 schema4_enterprise = {
     "candidate-manifest-sha256", "full-suite-evidence-sha256", "full-suite-test-count",
     "full-suite-failures", "full-suite-errors", "five-canary-evidence-sha256", "five-canary-count",
     "five-canary-failures", "sbom-sha256", "sbom-format", "enterprise-evidence-sha256",
 }
-schema=fields.get("schema")
+schema=fields.get("schema"); operational_bound=False
 if schema=="3":
     required=schema3_required; closure_version=2
 elif schema=="4" and fields.get("deployment-assurance") in {"pilot","enterprise"}:
     if "safe-rebuild-sha256" in fields:
-        required=schema4_v3_base; closure_version=3
+        closure_version=3
+        if schema4_v3_operational&set(fields):
+            required=schema4_v3_base; operational_bound=True
+        else:
+            required=schema4_v3_legacy_base
     else:
         required=schema4_legacy_base; closure_version=2
     if fields["deployment-assurance"]=="enterprise": required=required|schema4_enterprise
@@ -919,8 +934,14 @@ hash_fields=["remote-origin-sha256", "repository-id", "source-state-sha256", "bi
              "wrapper-sha256", "dashboard-launcher-sha256", "rebuild-sha256",
              "artifact-closure-sha256"]
 hash_fields.append("safe-rebuild-sha256" if closure_version==3 else "dashboard-runtime-sha256")
+if operational_bound:
+    hash_fields.extend(["dashboard-runtime-sha256","dashboard-cortex-sha256"])
 for key in hash_fields:
     if not valid_hex(fields[key], 64, 64):
+        raise SystemExit(1)
+if operational_bound:
+    cortex_count=fields["dashboard-cortex-count"]
+    if not cortex_count.isdigit() or str(int(cortex_count))!=cortex_count:
         raise SystemExit(1)
 if schema=="4":
     import re
@@ -1029,6 +1050,8 @@ for line in evaluation.stdout.decode().splitlines():
 closure_keys=["binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
               "artifact-closure-sha256","artifact-closure-count"]
 closure_keys.append("safe-rebuild-sha256" if closure_version==3 else "dashboard-runtime-sha256")
+if operational_bound:
+    closure_keys.extend(["dashboard-runtime-sha256","dashboard-cortex-sha256","dashboard-cortex-count"])
 for key in closure_keys:
     if computed.get(key)!=fields[key]: raise SystemExit(1)
 print(root)
@@ -1834,6 +1857,19 @@ def parse_manifest(raw):
     for key in ["commit","artifact-closure-sha256","source-state-sha256"]:
         if not HEX.fullmatch(fields[key]) and not (key=="commit" and re.fullmatch(r"[0-9a-fA-F]{40,64}",fields[key])):
             fail("manifest identity is malformed")
+    operational={"dashboard-runtime-sha256","dashboard-cortex-sha256","dashboard-cortex-count"}
+    if "safe-rebuild-sha256" in fields:
+        if operational&set(fields) and not operational<=set(fields):
+            fail("v3 operational binding is incomplete")
+        if operational<=set(fields):
+            if (not HEX.fullmatch(fields["dashboard-runtime-sha256"])
+                    or not HEX.fullmatch(fields["dashboard-cortex-sha256"])):
+                fail("v3 operational digest is malformed")
+            count=fields["dashboard-cortex-count"]
+            if not count.isdigit() or str(int(count))!=count:
+                fail("v3 cortex count is malformed")
+    elif {"dashboard-cortex-sha256","dashboard-cortex-count"}&set(fields):
+        fail("legacy manifest carries v3 cortex fields")
     return fields
 def release_digest(files):
     digest=hashlib.sha256(b"kist-release-registry-v1\0")
@@ -2050,6 +2086,9 @@ elif action=="archive":
     if confirm!=identifier: fail("archive confirmation does not match the current deployment")
     if "safe-rebuild-sha256" not in manifest:
         fail("legacy transitional deployments may be validated but not archived; complete the v3 promotion")
+    operational={"dashboard-runtime-sha256","dashboard-cortex-sha256","dashboard-cortex-count"}
+    if not operational<=set(manifest):
+        fail("unbound v3 compatibility deployments may be validated but not archived; promote the exact operational binding")
     open_registry(True); cleanup_archive_staging(); names=release_names()
     if "release-"+identifier in names:
         record,raw,_=validate_release(identifier)
@@ -2280,15 +2319,24 @@ if [ "${1-}" = "--rollback-apply" ]; then
   TMP_ROLLBACK_MANIFEST=$(stage_value kist-current.manifest) || die "rollback staging omitted manifest"
   TMP_ROLLBACK_STAMP=$(stage_value .kist-build) || die "rollback staging omitted stamp"
   TMP_ROLLBACK_EVIDENCE=$(stage_value kist-current.provenance.json) || die "rollback staging omitted evidence"
-  if [ -z "$TMP_ROLLBACK_SAFE_REBUILD" ]; then
-    LEGACY_DRY_CLOSURE=$("$DASHBOARD_LAUNCHER" --provenance-evaluate \
+  if [ -n "$TMP_ROLLBACK_SAFE_REBUILD" ]; then
+    ROLLBACK_DRY_KIND=v3
+    ROLLBACK_DRY_CLOSURE=$("$DASHBOARD_LAUNCHER" --provenance-evaluate \
+      "$TMP_ROLLBACK_BINARY" "$TMP_ROLLBACK_WRAPPER" "$TMP_ROLLBACK_DASHBOARD" \
+      "$TMP_ROLLBACK_REBUILD" "$TMP_ROLLBACK_SAFE_REBUILD" 9>&-) \
+      || die "v3 rollback target cannot be evaluated against the current operational state"
+  else
+    ROLLBACK_DRY_KIND=v2
+    ROLLBACK_DRY_CLOSURE=$("$DASHBOARD_LAUNCHER" --provenance-evaluate \
       "$TMP_ROLLBACK_BINARY" "$TMP_ROLLBACK_WRAPPER" "$TMP_ROLLBACK_DASHBOARD" \
       "$TMP_ROLLBACK_REBUILD" 9>&-) \
       || die "legacy rollback target is not compatible with the current mutable runtime/cortex"
-    python_clean - "$TMP_ROLLBACK_MANIFEST" "$LEGACY_DRY_CLOSURE" <<'PY' \
-      || die "legacy rollback target is non-self-contained and its current operational closure does not match"
+  fi
+  python_clean - "$TMP_ROLLBACK_MANIFEST" "$ROLLBACK_DRY_CLOSURE" \
+    "$ROLLBACK_DRY_KIND" <<'PY' \
+    || die "rollback target artifact or operational closure does not match the current state"
 import os,stat,sys
-manifest_path,projection_text=sys.argv[1:]
+manifest_path,projection_text,kind=sys.argv[1:]
 st=os.lstat(manifest_path)
 if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid() or st.st_nlink!=1: raise SystemExit(1)
 fields={}
@@ -2302,12 +2350,24 @@ for raw in projection_text.splitlines():
     key,separator,value=raw.partition("=")
     if not separator or not key or not value or key in projection: raise SystemExit(1)
     projection[key]=value
-required={"binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
-          "dashboard-runtime-sha256","artifact-closure-sha256","artifact-closure-count"}
-if set(projection)!=required or any(fields.get(key)!=value for key,value in projection.items()):
+v2={"binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
+    "dashboard-runtime-sha256","artifact-closure-sha256","artifact-closure-count"}
+v3_legacy={"binary-sha256","wrapper-sha256","dashboard-launcher-sha256","rebuild-sha256",
+           "safe-rebuild-sha256","artifact-closure-sha256","artifact-closure-count"}
+operational={"dashboard-runtime-sha256","dashboard-cortex-sha256","dashboard-cortex-count"}
+if kind=="v2":
+    if set(projection)!=v2: raise SystemExit(1)
+    required=v2
+elif kind=="v3":
+    if set(projection)!=v3_legacy|operational: raise SystemExit(1)
+    present=operational&set(fields)
+    if present and present!=operational: raise SystemExit(1)
+    required=v3_legacy|(operational if present else set())
+else:
+    raise SystemExit(1)
+if any(fields.get(key)!=projection[key] for key in required):
     raise SystemExit(1)
 PY
-  fi
   ROLLBACK_TRANSACTION_ACTIVE=1
   if [ -n "$TMP_ROLLBACK_SAFE_REBUILD" ]; then
     ROLLBACK_TOKEN=$(transaction_control begin "$TMP_ROLLBACK_BINARY" "$TMP_ROLLBACK_WRAPPER" \
@@ -2918,6 +2978,9 @@ WRAPPER_HASH=$(closure_value wrapper-sha256) || die "missing wrapper closure has
 LAUNCHER_HASH=$(closure_value dashboard-launcher-sha256) || die "missing dashboard closure hash"
 REBUILD_HASH=$(closure_value rebuild-sha256) || die "missing rebuild closure hash"
 SAFE_REBUILD_HASH=$(closure_value safe-rebuild-sha256) || die "missing safe-rebuild closure hash"
+DASHBOARD_RUNTIME_HASH=$(closure_value dashboard-runtime-sha256) || die "missing dashboard runtime hash"
+DASHBOARD_CORTEX_HASH=$(closure_value dashboard-cortex-sha256) || die "missing dashboard cortex tree hash"
+DASHBOARD_CORTEX_COUNT=$(closure_value dashboard-cortex-count) || die "missing dashboard cortex tree count"
 ARTIFACT_CLOSURE_HASH=$(closure_value artifact-closure-sha256) || die "missing aggregate closure hash"
 ARTIFACT_CLOSURE_COUNT=$(closure_value artifact-closure-count) || die "missing aggregate closure count"
 python_clean - "$STATE_AFTER" "$UNSIGNED_RELEASE_HASH" "$BINARY_HASH" "$PRODUCT_VERSION" > "$TMP_EVIDENCE" <<'PY'
@@ -2946,6 +3009,9 @@ STAMP="$SHORT_SHA · $BRANCH · $DEPLOYED_AT · $REPO"
   printf 'dashboard-launcher-sha256: %s\n' "$LAUNCHER_HASH"
   printf 'rebuild-sha256: %s\n' "$REBUILD_HASH"
   printf 'safe-rebuild-sha256: %s\n' "$SAFE_REBUILD_HASH"
+  printf 'dashboard-runtime-sha256: %s\n' "$DASHBOARD_RUNTIME_HASH"
+  printf 'dashboard-cortex-sha256: %s\n' "$DASHBOARD_CORTEX_HASH"
+  printf 'dashboard-cortex-count: %s\n' "$DASHBOARD_CORTEX_COUNT"
   printf 'artifact-closure-sha256: %s\n' "$ARTIFACT_CLOSURE_HASH"
   printf 'artifact-closure-count: %s\n' "$ARTIFACT_CLOSURE_COUNT"
   printf 'test-evidence: %s\n' "$TEST_EVIDENCE"

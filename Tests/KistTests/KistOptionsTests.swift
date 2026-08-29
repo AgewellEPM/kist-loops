@@ -263,6 +263,24 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(KistOptions.helpText.contains("--coder mimo --worker deepseek --critic gemini"))
     }
 
+    func testReviewGradeParsesExplicitlyAndRejectsMalformedValues() {
+        let sameModel = KistOptions.parse([
+            "--critic", "codex-cli:gpt-5.6-sol",
+            "--review-grade", "fresh_context_same_model", "grow it",
+        ])
+        XCTAssertEqual(sameModel.reviewGrade, .freshContextSameModel)
+        XCTAssertTrue(sameModel.optionErrors.isEmpty)
+        XCTAssertNil(KistOptions.parse(["grow it"]).reviewGrade)
+
+        let malformed = KistOptions.parse(["--review-grade", "same-ish", "grow it"])
+        XCTAssertNil(malformed.reviewGrade)
+        XCTAssertTrue(malformed.optionErrors.contains { $0.contains("--review-grade") })
+        XCTAssertTrue(KistOptions.helpText.contains("fresh_context_same_model"))
+        XCTAssertTrue(KistOptions.helpText.contains("never independent"))
+        XCTAssertTrue(KistOptions.helpText.contains("non-Git disposable"))
+        XCTAssertTrue(KistOptions.helpText.contains("one deterministic verifier"))
+    }
+
     func testBuilderFlagIsCoderAlias() {
         let o = KistOptions.parse(["--builder", "deepseek:deepseek-coder", "build it"])
         XCTAssertEqual(o.coderSpec, "deepseek:deepseek-coder")

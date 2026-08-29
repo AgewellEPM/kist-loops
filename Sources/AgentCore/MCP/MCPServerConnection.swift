@@ -277,10 +277,11 @@ actor MCPServerConnection: MCPConnection {
     }
 
     /// Invoke a tool. Returns the raw result object (caller sanitizes).
-    func callTool(name: String, arguments: [String: Any]) async throws -> [String: Any] {
+    func callTool(name: String, arguments: [String: Any], correlationID: String? = nil) async throws -> [String: Any] {
         try await request(
             method: "tools/call",
-            params: Self.toolCallParams(name: name, arguments: arguments, config: config),
+            params: Self.toolCallParams(name: name, arguments: arguments, config: config,
+                                        correlationID: correlationID),
             timeoutSeconds: callTimeout
         )
     }
@@ -288,12 +289,15 @@ actor MCPServerConnection: MCPConnection {
     static func toolCallParams(
         name: String,
         arguments: [String: Any],
-        config: MCPServerConfig
+        config: MCPServerConfig,
+        correlationID: String? = nil
     ) -> [String: Any] {
         var params: [String: Any] = ["name": name, "arguments": arguments]
-        if let token = config.env["FCA_MCP_AUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !token.isEmpty {
-            params["_meta"] = ["authorization": "Bearer \(token)"]
+        let token = config.env["FCA_MCP_AUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authorization = token.flatMap { $0.isEmpty ? nil : "Bearer \($0)" }
+        if let metadata = MCPProtocol.toolCallMetadata(
+            correlationID: correlationID, authorization: authorization) {
+            params["_meta"] = metadata
         }
         return params
     }

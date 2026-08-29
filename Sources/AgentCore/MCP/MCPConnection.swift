@@ -13,7 +13,7 @@ protocol MCPConnection: AnyObject, Sendable {
     /// The server's advertised tools (`tools/list`).
     func listTools() async throws -> [RemoteToolSpec]
     /// Invoke a tool (`tools/call`), returning the raw JSON-RPC `result` object.
-    func callTool(name: String, arguments: [String: Any]) async throws -> [String: Any]
+    func callTool(name: String, arguments: [String: Any], correlationID: String?) async throws -> [String: Any]
     /// Tear down (idempotent). Best-effort; never throws.
     func shutdown() async
 }

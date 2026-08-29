@@ -6,9 +6,11 @@ extension OrganizationalLearningStore {
     func addKnowledgeDebt(topic: String, reason: String = "", visit: String = "",
                           impact: Int = 3, priority: KnowledgeDebtRecord.Priority = .medium,
                           estimatedLearning: String = "",
-                          expectedBenefit: [String] = []) -> KnowledgeDebtRecord {
-        let nowValue = now().timeIntervalSince1970
-        let record = KnowledgeDebtRecord(
+                          expectedBenefit: [String] = [],
+                          seasonalWindow: SeasonalMemoryWindow? = nil) -> KnowledgeDebtRecord? {
+        let instant = OrganizationalMemoryTemporal.canonicalInstant(now())
+        let nowValue = instant.timeIntervalSince1970
+        let record = Self.bounded(KnowledgeDebtRecord(
             id: Self.debtID(topic),
             topic: Self.safe(topic),
             reason: Self.safe(reason.isEmpty ? "Manual knowledge debt entry." : reason),
@@ -20,29 +22,42 @@ extension OrganizationalLearningStore {
             sourceCapsuleID: nil,
             status: .open,
             createdAt: nowValue,
-            updatedAt: nowValue
-        )
-        upsert(record)
+            updatedAt: nowValue,
+            temporal: OrganizationalMemoryTemporal.make(
+                createdAt: instant, decayRate: .slow, seasonalWindow: seasonalWindow)
+        ))
+        guard upsert(record, seasonalWindow: seasonalWindow) else { return nil }
         return record
     }
 
     @discardableResult
     func markKnowledgeDebtDone(_ rawID: String) -> Bool {
         let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
-        var records = loadJSONL(KnowledgeDebtRecord.self, path: debtPath)
-        guard let idx = records.firstIndex(where: { $0.id == id }) else { return false }
-        records[idx].status = .done
-        records[idx].updatedAt = now().timeIntervalSince1970
-        saveJSONL(records, to: debtPath)
-        return true
+        let instant = OrganizationalMemoryTemporal.canonicalInstant(now())
+        return mutateJSONL(KnowledgeDebtRecord.self, path: debtPath) { records in
+            guard let idx = records.firstIndex(where: { $0.id == id }),
+                  var envelope = records[idx].temporalProjection,
+                  instant >= envelope.updatedAt else { return false }
+            do {
+                try envelope.retire(reason: "knowledge debt completed", now: instant)
+            } catch {
+                return false
+            }
+            records[idx].status = .done
+            records[idx].updatedAt = envelope.updatedAt.timeIntervalSince1970
+            records[idx].temporal = envelope
+            return true
+        }
     }
 
     @discardableResult
     func promoteOrganizationalRule(lesson: String, confidence: Int = 90, reason: String = "",
-                                   evidence: [String] = [], sourceCapsuleID: String? = nil) -> OrganizationalRuleRecord {
-        let nowValue = now().timeIntervalSince1970
+                                   evidence: [String] = [], sourceCapsuleID: String? = nil,
+                                   seasonalWindow: SeasonalMemoryWindow? = nil) -> OrganizationalRuleRecord? {
+        let instant = OrganizationalMemoryTemporal.canonicalInstant(now())
+        let nowValue = instant.timeIntervalSince1970
         let cleanLesson = Self.safe(lesson)
-        let cleanReason = Self.safe(reason.isEmpty ? "Promoted by Teach Captain." : reason)
+        let cleanReason = Self.safe(reason.isEmpty ? "Proposed by Teach Captain." : reason)
         let cleanEvidence = evidence.map(Self.safe)
         let decision = organizationalRulePromotionDecision(lesson: cleanLesson,
                                                            confidence: confidence,
@@ -51,7 +66,7 @@ extension OrganizationalLearningStore {
         let finalReason = decision.accepted
             ? cleanReason
             : Self.safe(cleanReason + " Promotion blocked: " + decision.blockers.joined(separator: "; "))
-        let record = OrganizationalRuleRecord(
+        let record = Self.bounded(OrganizationalRuleRecord(
             id: Self.ruleID(cleanLesson),
             lesson: cleanLesson,
             confidence: min(100, max(1, confidence)),
@@ -60,13 +75,16 @@ extension OrganizationalLearningStore {
             sourceCapsuleID: sourceCapsuleID,
             status: status,
             createdAt: nowValue,
-            updatedAt: nowValue
-        )
-        upsert(record)
+            updatedAt: nowValue,
+            temporal: OrganizationalMemoryTemporal.make(
+                createdAt: instant, decayRate: .verySlow, seasonalWindow: seasonalWindow)
+        ))
+        let persisted = upsert(record, seasonalWindow: seasonalWindow)
+        guard persisted else { return nil }
         if status == .proposed {
             addKnowledgeDebt(topic: "Prove organizational rule: \(cleanLesson)",
                              reason: "Captain proposed this rule, but it lacks enough verified evidence to become permanent. Blockers: \(decision.blockers.joined(separator: "; "))",
-                             visit: "Run benchmark/live-eval/research proof, attach reports, then re-run /teach with evidence.",
+                             visit: "Preserve benchmark and review artifacts for a future exact receipt-bound rule verifier.",
                              impact: 4,
                              priority: .high,
                              estimatedLearning: "1-2 hours",
@@ -99,46 +117,10 @@ extension OrganizationalLearningStore {
     }
 
     func isVerifiedOrganizationalRuleEvidence(_ raw: String) -> Bool {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = value.lowercased()
-        guard !value.isEmpty else { return false }
-        let weakSignals = [
-            "evidence needed", "benchmark plan", "expected roi", "expected impact",
-            "proposed evolution", "teachable rule", "agenda", "hypothesis"
-        ]
-        if weakSignals.contains(where: { lower.contains($0) }) {
-            return false
-        }
-
-        if lower.contains("tests") || lower.contains("swift test") || lower.contains("xcodebuild") {
-            return lower.contains("pass") || lower.contains("0 failures") || lower.contains("succeeded")
-        }
-        if lower.contains("benchmark") || lower.contains("benchmarks:") || lower.contains("live-eval") || lower.contains("eval:") {
-            return lower.contains("pass") || lower.contains("win") || lower.contains("score") ||
-                lower.contains("improv") || lower.contains("regress") || lower.contains("latency") ||
-                lower.contains("verified")
-        }
-        if lower.contains("verified") || lower.contains("independent review") {
-            return true
-        }
-        if lower.contains(".kist/learning/research-archive/") || lower.contains(".kist/learning/benchmarks") {
-            return true
-        }
-        if lower.hasPrefix("report:") || lower.hasPrefix("artifact:") || lower.hasPrefix("source:") {
-            return true
-        }
-
-        let pathCandidates = value.split(whereSeparator: { $0 == " " || $0 == ";" || $0 == "," })
-            .map(String.init)
-            .filter { $0.hasPrefix(".kist/") || $0.hasPrefix("/") }
-        for path in pathCandidates {
-            let resolved = path.hasPrefix("/")
-                ? path
-                : (projectRoot as NSString).appendingPathComponent(path)
-            if FileManager.default.fileExists(atPath: resolved) {
-                return true
-            }
-        }
+        // Text that says "passed", and even a path that happens to exist, proves neither the
+        // claimed run nor this exact rule. Keep it as advisory evidence until a future verifier can
+        // bind an accepted receipt's digest and mission subject to the exact canonical rule text.
+        _ = raw
         return false
     }
 
@@ -192,6 +174,7 @@ extension OrganizationalLearningStore {
                 lines += [
                     "\(rule.id)  confidence \(rule.confidence)%  status proposed",
                     "Lesson: \(rule.lesson)",
+                    "Reason: \(rule.reason)",
                     "Blockers: \(decision.blockers.joined(separator: "; "))",
                 ]
                 if !rule.evidence.isEmpty {
@@ -200,7 +183,7 @@ extension OrganizationalLearningStore {
                 lines.append("")
             }
         }
-        lines.append("Use `/teach add <lesson> | confidence: 97 | reason: ... | evidence: tests passed; benchmark: passed` to promote a rule.")
+        lines.append("`/teach add` records an advisory proposal. Permanent promotion remains blocked until exact receipt-bound rule verification exists.")
         return lines.joined(separator: "\n")
     }
 

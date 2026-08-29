@@ -169,7 +169,8 @@ public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
             authorizationScope: context.authorizationScope,
             scopeOverrideApproved: context.scopeOverrideApproved,
             skillLocations: context.skillLocations, skillTracker: context.skillTracker,
-            auditLog: context.auditLog, externalReadRoots: context.externalReadRoots)
+            auditLog: context.auditLog, externalReadRoots: context.externalReadRoots,
+            correlationID: context.correlationID, traceRecorder: context.traceRecorder)
         let inboxName = DelegationInboxTool(mailbox: DelegationSteeringMailbox()).name
         let childNames = Set(childTools.names + [inboxName])
         let mcpServers = Set(childNames.compactMap { name -> String? in

@@ -3,6 +3,7 @@ import AgentCore
 
 extension OrganizationalLearningStore {
     func renderCaptainMemoryArchitecture() -> String {
+        let temporalReadiness = genericMemoryTemporalReadiness()
         let locations: [CaptainMemoryLayerID: String] = [
             .contextWindow: "current model context",
             .knowledgeIndex: Self.projectRelative(knowledgeIndexPath, root: projectRoot),
@@ -16,6 +17,7 @@ extension OrganizationalLearningStore {
             "Captain Memory Architecture",
             "Context Window is RAM. Everything else is disk.",
             "Retrieval policy: load only relevant records into working memory for the current objective.",
+            "Generic temporal admission: \(temporalReadiness.operational) clocked row(s); \(temporalReadiness.auditOnly) legacy or invalid row(s) remain raw audit-only.",
             ""
         ]
         for layer in CaptainMemoryArchitecture.default.layers {
@@ -38,12 +40,13 @@ extension OrganizationalLearningStore {
             Captain Learning
 
             No benchmark or live-eval samples yet.
-            Run `/bench <task>` or `/eval <task>` to create shadow evidence. Captain promotes evidence only after repeated verified wins.
+            Run `/bench <task>` or `/eval <task>` to create unsigned shadow observations. Repetition can make them eligible for route bias, but never turns them into signed proof.
             """
         }
 
-        let assignment = store.assignmentContext()
-        let summaries = captainLearningRetrievalSummaries()
+        let nowEpoch = now().timeIntervalSince1970
+        let assignment = store.assignmentContext(now: nowEpoch)
+        let summaries = captainLearningRetrievalSummaries(now: nowEpoch)
         let promoted = summaries.filter(\.promoted)
         let shadow = summaries.filter { !$0.promoted }
         var lines = [
@@ -53,19 +56,19 @@ extension OrganizationalLearningStore {
             "Samples: \(samples.count)",
             "Assignment status: \(assignment.statusLine)",
             "",
-            "Promotion gate",
+            "Unsigned route-bias eligibility gate",
             "- at least 3 samples",
             "- success rate >= 67%",
             "- tool failures <= max(1, samples / 2)",
             "",
-            "Promoted Evidence",
+            "Unsigned Route-Bias Profiles",
         ]
         if promoted.isEmpty {
             lines.append("- none yet")
         } else {
             lines += promoted.prefix(max(0, limit)).map(renderLearningSummary)
         }
-        lines += ["", "Shadow Evidence"]
+        lines += ["", "Unsigned Shadow Profiles"]
         if shadow.isEmpty {
             lines.append("- none")
         } else {
@@ -74,9 +77,10 @@ extension OrganizationalLearningStore {
         lines += [
             "",
             "How Captain uses this",
-            "- promoted evidence can bias fleet role assignment and appears in benchmark retrieval memory",
-            "- shadow evidence is visible but not trusted enough to steer policy",
-            "- every new /bench or /eval sample can move a provider/role toward or away from promotion",
+            "- route-eligible unsigned observations can bias fleet role assignment and appear in advisory retrieval memory",
+            "- shadow observations are visible but do not steer policy",
+            "- these profiles are not signed receipts, independent proof, or benchmark promotion authority",
+            "- every new /bench or /eval sample can move a provider/role toward or away from route-bias eligibility",
         ]
         return lines.joined(separator: "\n")
     }
@@ -136,39 +140,10 @@ extension OrganizationalLearningStore {
         return lines.joined(separator: "\n")
     }
 
-    func captainLearningRetrievalSummaries() -> [CaptainLearningSummary] {
-        struct Key: Hashable {
-            let role: String
-            let providerId: String
-            let language: String?
-        }
+    func captainLearningRetrievalSummaries(now nowEpoch: Double? = nil) -> [CaptainLearningSummary] {
         let samples = CaptainLearningStore(projectRoot: projectRoot).load()
-        var buckets: [Key: [CaptainLearningSample]] = [:]
-        for sample in samples {
-            buckets[Key(role: sample.role, providerId: sample.providerId, language: sample.language), default: []].append(sample)
-        }
-        return buckets.map { key, values in
-            let successes = values.filter(\.success).count
-            let scored = values.compactMap(\.judgeScore)
-            let tags = Array(Set(values.flatMap(\.taskTags))).sorted()
-            let avgScore = scored.isEmpty ? nil : scored.reduce(0, +) / Double(scored.count)
-            let avgTokens = values.isEmpty ? 0 : values.reduce(0) { $0 + $1.tokens } / values.count
-            let avgLatency = values.isEmpty ? 0 : values.reduce(0) { $0 + $1.latencyMs } / values.count
-            let failures = values.reduce(0) { $0 + $1.toolFailures }
-            let latest = values.map(\.atEpoch).max() ?? 0
-            return CaptainLearningSummary(role: key.role, providerId: key.providerId,
-                                          taskTags: tags.isEmpty ? ["coding"] : tags,
-                                          language: key.language, samples: values.count,
-                                          successes: successes, averageJudgeScore: avgScore,
-                                          averageTokens: avgTokens,
-                                          averageLatencyMs: avgLatency,
-                                          toolFailures: failures, latestEpoch: latest)
-        }.sorted { a, b in
-            if a.promoted != b.promoted { return a.promoted && !b.promoted }
-            if a.scoreBoost != b.scoreBoost { return a.scoreBoost > b.scoreBoost }
-            if a.samples != b.samples { return a.samples > b.samples }
-            return a.providerId < b.providerId
-        }
+        return CaptainLearningStore.summarizeForRetrieval(
+            samples, now: nowEpoch ?? now().timeIntervalSince1970)
     }
 
     func renderLearningSummary(_ summary: CaptainLearningSummary) -> String {
@@ -180,7 +155,8 @@ extension OrganizationalLearningStore {
         let tokens = summary.averageTokens > 0 ? " avgTokens=\(summary.averageTokens)" : ""
         return "- \(summary.providerId) / \(summary.role) [\(tags)] language=\(language) "
             + "\(summary.successes)/\(summary.samples) \(pct)%\(judge)\(tokens)\(latency) "
-            + "toolFailures=\(summary.toolFailures) status=\(summary.promoted ? "promoted" : "shadow")"
+            + "toolFailures=\(summary.toolFailures) status="
+            + (summary.promoted ? "route-bias-eligible" : "shadow-only")
     }
 
 }

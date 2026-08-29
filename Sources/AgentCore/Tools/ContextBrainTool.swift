@@ -7,11 +7,11 @@ public struct ContextBrainTool: AgentTool {
     public let name = "context_brain"
     public let description = """
     Build and query a project-local context index. Use this before large audits or repo-wide \
-    work: index every file, search relevant shards, get exact file chunks, or create a coverage \
-    plan that walks all chunks in batches sized for the current model context.
+    work: index every file, search relevant shards, get exact file chunks, create a coverage \
+    plan, or recall one bounded mission evidence graph without mutating memory or trust records.
     """
     public let parameters = [
-        ToolParameter(name: "action", type: "string", description: "index | search | get | coverage", required: true),
+        ToolParameter(name: "action", type: "string", description: "index | search | get | coverage | mission_graph", required: true),
         ToolParameter(name: "query", type: "string", description: "Search query for action=search.", required: false),
         ToolParameter(name: "id", type: "string", description: "Chunk id such as Sources/A.swift:L1-L120 for action=get.", required: false),
         ToolParameter(name: "path", type: "string", description: "Project-relative file path for action=get.", required: false),
@@ -20,11 +20,14 @@ public struct ContextBrainTool: AgentTool {
         ToolParameter(name: "limit", type: "integer", description: "Result limit for index/search.", required: false),
         ToolParameter(name: "chunk_chars", type: "integer", description: "Approximate characters per shard. Default 12000.", required: false),
         ToolParameter(name: "max_chars", type: "integer", description: "Coverage batch or get output budget.", required: false),
+        ToolParameter(name: "mission_id", type: "string", description: "Exact lowercase 64-hex PlanExecute mission for action=mission_graph.", required: false),
+        ToolParameter(name: "max_nodes", type: "integer", description: "Bounded graph node cap for action=mission_graph. Default 160, maximum 512.", required: false),
+        ToolParameter(name: "max_edges", type: "integer", description: "Bounded graph edge cap for action=mission_graph. Default 640, maximum 2048.", required: false),
         ToolParameter(name: "max_file_bytes", type: "integer", description: "Max file bytes to inline into the index. Default 2000000.", required: false),
         ToolParameter(name: "max_total_bytes", type: "integer", description: "Max aggregate text bytes to inline into the index. Default 64000000.", required: false),
     ]
 
-    public var supportedActions: [String] { ["index", "search", "get", "coverage"] }
+    public var supportedActions: [String] { ["index", "search", "get", "coverage", "mission_graph"] }
     public var unsupportedActions: [String] { ["write", "edit", "execute", "delete", "summarize_without_sources"] }
     public var capabilityNote: String? {
         "Read-only context/RAG layer. For exhaustive reviews, call coverage, then get each batch's chunk ids across chained turns."
@@ -34,13 +37,16 @@ public struct ContextBrainTool: AgentTool {
             "context_brain(action=\"coverage\", max_chars=120000)",
             "context_brain(action=\"search\", query=\"RunReplayStore concurrency append\", limit=8)",
             "context_brain(action=\"get\", id=\"Sources/Kist/UX/RunReplayStore.swift:L1-L120\")",
+            "context_brain(action=\"mission_graph\", mission_id=\"<64hex>\", max_nodes=160)",
         ]
     }
 
     private let cache: IndexCache
+    private let missionLessonPath: String
 
-    public init() {
+    public init(missionLessonPath: String = NSHomeDirectory() + "/.mythos/lessons.jsonl") {
         self.cache = IndexCache()
+        self.missionLessonPath = missionLessonPath
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
@@ -64,8 +70,27 @@ public struct ContextBrainTool: AgentTool {
             let maxChars = min(max(optionalInt("max_chars", from: arguments) ?? 120_000, 8_000), 800_000)
             return ToolResult(success: true, output: renderCoverage(index: index, maxChars: maxChars),
                               metadata: metadata(index))
+        case "mission_graph":
+            let missionID = try requireString("mission_id", from: arguments)
+            let maxNodes = min(max(optionalInt("max_nodes", from: arguments) ?? 160, 8), 512)
+            let maxEdges = min(max(optionalInt("max_edges", from: arguments) ?? 640, 8), 2_048)
+            let maxChars = min(max(optionalInt("max_chars", from: arguments) ?? 48_000, 2_000), 160_000)
+            let graph = try MissionEvidenceGraphProjector(
+                projectRoot: context.projectRoot, lessonPath: missionLessonPath)
+                .project(missionID: missionID, maxNodes: maxNodes, maxEdges: maxEdges)
+            return ToolResult(
+                success: true, output: graph.rendered(maxCharacters: maxChars),
+                metadata: [
+                    "mission_id": graph.missionID,
+                    "mission_acceptance_authority": graph.missionAcceptanceAuthority.rawValue,
+                    "mission_sealed_acceptance": graph.missionSealedAcceptance ? "true" : "false",
+                    "mission_fresh_acceptance": graph.missionSealedAcceptance ? "true" : "false",
+                    "nodes": "\(graph.nodes.count)",
+                    "edges": "\(graph.edges.count)",
+                    "truncated": graph.truncated ? "true" : "false",
+                ])
         default:
-            return .failure("unknown context_brain action '\(action)'; use index, search, get, or coverage")
+            return .failure("unknown context_brain action '\(action)'; use index, search, get, coverage, or mission_graph")
         }
     }
 

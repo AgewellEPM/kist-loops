@@ -125,12 +125,6 @@ struct LegalResearchWorkflow: Sendable {
                                               documentType: documentType,
                                               sources: sources,
                                               blockers: blockers)
-        let memoryRecords = recordMemory(objective: objective,
-                                         jurisdiction: jurisdiction,
-                                         documentType: documentType,
-                                         reportPath: relativePath,
-                                         ready: ready,
-                                         blockers: blockers)
         let dispatchCommand = "/legal-research run \(objective)"
         let text = renderReport(objective: objective,
                                 jurisdiction: jurisdiction,
@@ -143,6 +137,7 @@ struct LegalResearchWorkflow: Sendable {
                                 reportPath: relativePath,
                                 blockers: blockers,
                                 dispatchCommand: dispatchCommand)
+        var memoryRecords = 0
         var writeSucceeded = false
         var writeError: String?
         do {
@@ -150,6 +145,12 @@ struct LegalResearchWorkflow: Sendable {
                                                     withIntermediateDirectories: true)
             try (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
             writeSucceeded = true
+            memoryRecords = recordMemory(objective: objective,
+                                         jurisdiction: jurisdiction,
+                                         documentType: documentType,
+                                         reportPath: relativePath,
+                                         ready: ready,
+                                         blockers: blockers)
         } catch {
             writeError = String(describing: error)
         }
@@ -492,42 +493,46 @@ struct LegalResearchWorkflow: Sendable {
         let store = OrganizationalLearningStore(projectRoot: projectRoot, now: now)
         var count = 0
         if jurisdiction == nil {
-            _ = store.addKnowledgeDebt(topic: "Legal jurisdiction for: \(objective)",
-                                       reason: "Legal research cannot make jurisdiction-specific conclusions until venue/state/country is known.",
-                                       visit: "Ask user; inspect document caption/address; court/agency records when authorized.",
-                                       impact: 5,
-                                       priority: .high,
-                                       estimatedLearning: "5-15 minutes",
-                                       expectedBenefit: ["prevent wrong-jurisdiction legal conclusions"])
+            if store.addKnowledgeDebt(topic: "Legal jurisdiction for: \(objective)",
+                                      reason: "Legal research cannot make jurisdiction-specific conclusions until venue/state/country is known.",
+                                      visit: "Ask user; inspect document caption/address; court/agency records when authorized.",
+                                      impact: 5,
+                                      priority: .high,
+                                      estimatedLearning: "5-15 minutes",
+                                      expectedBenefit: ["prevent wrong-jurisdiction legal conclusions"]) != nil {
+                count += 1
+            }
+        }
+        if store.addKnowledgeDebt(topic: "Official legal sources for \(documentType): \(objective)",
+                                  reason: "Legal workflow requires source-backed research, not model memory.",
+                                  visit: "Official statutes, court rules, agency guidance, government/legal-aid resources, and primary materials.",
+                                  impact: 5,
+                                  priority: .high,
+                                  estimatedLearning: "1-3 hours",
+                                  expectedBenefit: ["produce a citation-backed memo", "surface deadlines and risk"]) != nil {
             count += 1
         }
-        _ = store.addKnowledgeDebt(topic: "Official legal sources for \(documentType): \(objective)",
-                                   reason: "Legal workflow requires source-backed research, not model memory.",
-                                   visit: "Official statutes, court rules, agency guidance, government/legal-aid resources, and primary materials.",
-                                   impact: 5,
-                                   priority: .high,
-                                   estimatedLearning: "1-3 hours",
-                                   expectedBenefit: ["produce a citation-backed memo", "surface deadlines and risk"])
-        count += 1
         if sources.contains(where: { !$0.hasExtractedText }) {
-            _ = store.addKnowledgeDebt(topic: "Extract/OCR legal document text for: \(objective)",
-                                       reason: "At least one legal document could not be fully extracted locally.",
-                                       visit: "Convert to text/searchable PDF or use vision/OCR, then rerun /legal-research.",
-                                       impact: 4,
-                                       priority: .high,
-                                       estimatedLearning: "15-30 minutes",
-                                       expectedBenefit: ["ground research in actual document facts"])
-            count += 1
+            if store.addKnowledgeDebt(topic: "Extract/OCR legal document text for: \(objective)",
+                                      reason: "At least one legal document could not be fully extracted locally.",
+                                      visit: "Convert to text/searchable PDF or use vision/OCR, then rerun /legal-research.",
+                                      impact: 4,
+                                      priority: .high,
+                                      estimatedLearning: "15-30 minutes",
+                                      expectedBenefit: ["ground research in actual document facts"]) != nil {
+                count += 1
+            }
         }
         if !blockers.isEmpty && blockers.allSatisfy({ !$0.lowercased().contains("jurisdiction") }) {
-            _ = store.addKnowledgeDebt(topic: "Legal research blockers for: \(objective)",
-                                       reason: blockers.joined(separator: "; "),
-                                       visit: "Resolve blockers in the legal research dossier before final memo.",
-                                       impact: 4,
-                                       priority: .high,
-                                       estimatedLearning: "30-60 minutes",
-                                       expectedBenefit: ["avoid premature legal conclusions"])
-            count += 1
+            if store.addKnowledgeDebt(topic: "Legal research blockers for: \(objective)",
+                                      reason: blockers.joined(separator: "; "),
+                                      visit: "Resolve blockers in the legal research dossier before final memo.",
+                                      impact: 4,
+                                      priority: .high,
+                                      estimatedLearning: "30-60 minutes",
+                                      expectedBenefit: ["avoid premature legal conclusions"]) != nil {
+                count += 1
+            }
         }
         return count
     }
@@ -554,7 +559,9 @@ struct LegalResearchWorkflow: Sendable {
             impact: 5,
             tags: ["legal-research", "regulated-domain", "citation-required", "captain"]
         )
-        return Self.appendJSON(record, to: projectRoot + "/.kist/learning/knowledge-index.jsonl") ? 1 : 0
+        let store = OrganizationalLearningStore(projectRoot: projectRoot, now: now)
+        return store.upsertGenericMemory(
+            record, to: store.knowledgeIndexPath, decayRate: .fast) ? 1 : 0
     }
 
     private func renderReport(objective: String,
@@ -923,51 +930,6 @@ struct LegalResearchWorkflow: Sendable {
         let pattern = #"(?<![A-Za-z])"# + NSRegularExpression.escapedPattern(for: word) + #"(?![A-Za-z])"#
         return (try? NSRegularExpression(pattern: pattern))
             .flatMap { $0.firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length)) } != nil
-    }
-
-    private static func appendJSON<T: Encodable>(_ value: T, to path: String) -> Bool {
-        do {
-            try withFileLock(path: path) {
-                try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
-                                                        withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(value)
-                if !FileManager.default.fileExists(atPath: path) {
-                    FileManager.default.createFile(atPath: path, contents: nil,
-                                                   attributes: [.posixPermissions: 0o600])
-                }
-                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                var line = data
-                line.append(0x0a)
-                try handle.write(contentsOf: line)
-            }
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    private static func withFileLock(path: String, _ body: () throws -> Void) throws {
-        #if canImport(Darwin) || canImport(Glibc)
-        let dir = (path as NSString).deletingLastPathComponent
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let fd = open(path + ".lock", O_CREAT | O_RDWR, 0o600)
-        if fd >= 0 { flock(fd, LOCK_EX) }
-        defer { if fd >= 0 { flock(fd, LOCK_UN); close(fd) } }
-        #endif
-        try body()
-    }
-
-    private struct DiskMemoryRecord: Codable, Equatable, Sendable {
-        var id: String?
-        var title: String?
-        var summary: String?
-        var body: String?
-        var source: String?
-        var confidence: Int?
-        var impact: Int?
-        var tags: [String]?
     }
 
     private static func projectRelative(_ path: String, root: String) -> String {

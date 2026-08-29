@@ -46,7 +46,8 @@ public struct BuilderOSProcessSandboxAttestor: BuilderSandboxAttestor, Sendable 
         do {
             let backend = try BuilderSandboxBackend.make(
                 stagedRoot: normalized.stagedRoot, stage: normalized.request.stage,
-                privatePaths: paths)
+                privatePaths: paths,
+                forbiddenReadPaths: normalized.request.forbiddenReadPaths)
             try backend.writePrivatePolicy(to: paths.policyURL)
             try backend.proveUsable(
                 stagedRoot: normalized.stagedRoot, privatePaths: paths)
@@ -67,12 +68,13 @@ public struct BuilderOSProcessSandboxAttestor: BuilderSandboxAttestor, Sendable 
             let session = BuilderSandboxRegisteredSession(
                 request: normalized.request, attestation: attestation,
                 sessionID: sessionID, backend: backend, privatePaths: paths,
-                canonicalEvidence: canonical)
+                stagedIdentity: try BuilderWorkspaceRootIdentity.capture(
+                    rootPath: normalized.stagedRoot), canonicalEvidence: canonical)
             try session.validateEvidence()
             try BuilderSandboxSessionRegistry.shared.register(session)
             return attestation
         } catch {
-            paths.remove()
+            try? paths.remove()
             throw error
         }
     }
@@ -119,9 +121,16 @@ public struct BuilderOSProcessSandboxAttestor: BuilderSandboxAttestor, Sendable 
         let normalized = try BuilderSandboxRequestBinding(request).request
         let activation = try BuilderSandboxSessionRegistry.shared.activate(
             request: normalized, attestation: attestation)
-        defer { BuilderSandboxSessionRegistry.shared.deactivate(token: activation.token) }
-        return try await BuilderSandboxTaskScope.$token.withValue(activation.token) {
-            try await operation()
+        do {
+            let value = try await BuilderSandboxTaskScope.$token.withValue(activation.token) {
+                try await operation()
+            }
+            try BuilderSandboxSessionRegistry.shared.deactivate(token: activation.token)
+            return value
+        } catch {
+            do { try BuilderSandboxSessionRegistry.shared.deactivate(token: activation.token) }
+            catch { throw error }
+            throw error
         }
     }
 }
@@ -137,22 +146,47 @@ struct BuilderSandboxPreparedLaunch {
     let environment: [String: String]
     let environmentDigest: String
     let sandboxProfileDigest: String
+    let validation: BuilderSandboxLaunchValidation
+}
+
+/// Unforgeable in-process authority captured while the one-use Builder scope is active. Passing this
+/// value explicitly across a GCD hop is required; cwd/path inference never grants sandbox authority.
+struct BuilderSandboxExecutionAuthority: Sendable {
+    fileprivate let token: String
+    fileprivate let attestationDigest: String
 }
 
 extension BuilderOSProcessSandboxAttestor {
+    static func currentExecutionAuthority() throws -> BuilderSandboxExecutionAuthority? {
+        guard let token = BuilderSandboxTaskScope.token else { return nil }
+        guard let session = BuilderSandboxSessionRegistry.shared.active(token: token) else {
+            throw BuilderOSProcessSandboxError.sessionUnavailable
+        }
+        try session.validateEvidence()
+        return BuilderSandboxExecutionAuthority(
+            token: token, attestationDigest: session.attestation.evidenceDigest)
+    }
+
     static func preparedLaunch(launchPath: String, launchArgs: [String], cwd: String,
-                               environment: [String: String]) throws
+                               environment: [String: String],
+                               authority: BuilderSandboxExecutionAuthority? = nil,
+                               requireSandbox: Bool = false) throws
         -> BuilderSandboxPreparedLaunch? {
         let session: BuilderSandboxRegisteredSession?
-        if let token = BuilderSandboxTaskScope.token {
+        if let authority {
+            guard let exact = BuilderSandboxSessionRegistry.shared.active(token: authority.token),
+                  exact.attestation.evidenceDigest == authority.attestationDigest else {
+                throw BuilderOSProcessSandboxError.sessionUnavailable
+            }
+            session = exact
+        } else if let token = BuilderSandboxTaskScope.token {
             guard let exact = BuilderSandboxSessionRegistry.shared.active(token: token) else {
                 throw BuilderOSProcessSandboxError.sessionUnavailable
             }
             session = exact
         } else {
-            // Existing tool implementations sometimes hop from a Swift Task to GCD before calling
-            // ProcessGroupRunner. Resolve only an unambiguous active staged root in that case.
-            session = try BuilderSandboxSessionRegistry.shared.active(containing: cwd)
+            guard !requireSandbox else { throw BuilderOSProcessSandboxError.sessionUnavailable }
+            session = nil
         }
         guard let session else { return nil }
         try session.validateEvidence()
@@ -163,7 +197,7 @@ extension BuilderOSProcessSandboxAttestor {
             launchPath: launchPath, launchArgs: launchArgs, cwd: cwd,
             environment: environment,
             stagedRoot: BuilderSandboxPath.canonical(session.request.stagedRoot),
-            privatePaths: session.privatePaths)
+            privatePaths: session.privatePaths, stagedIdentity: session.stagedIdentity)
     }
 }
 
@@ -201,12 +235,42 @@ private struct BuilderSandboxRequestBinding {
             throw BuilderOSProcessSandboxError.invalidRequest(
                 "staged root must be an existing canonical absolute directory")
         }
+        let forbidden = try Array(Set(request.forbiddenReadPaths.map { raw -> String in
+            let standardized = URL(fileURLWithPath: raw).standardizedFileURL.path
+            guard raw.hasPrefix("/"), standardized != "/", standardized.utf8.count <= 4_096,
+                  !standardized.unicodeScalars.contains(where: {
+                      CharacterSet.controlCharacters.contains($0)
+                  }) else {
+                throw BuilderOSProcessSandboxError.invalidRequest(
+                    "forbidden read paths must be bounded absolute paths below /")
+            }
+            let canonical = BuilderSandboxPath.canonical(standardized)
+            guard canonical != resolved,
+                  !BuilderSandboxPath.contains(parent: canonical, child: resolved),
+                  !BuilderSandboxPath.contains(parent: resolved, child: canonical) else {
+                throw BuilderOSProcessSandboxError.invalidRequest(
+                    "a forbidden read path overlaps the staged workspace")
+            }
+            return canonical
+        })).sorted()
+        guard forbidden.count <= 32 else {
+            throw BuilderOSProcessSandboxError.invalidRequest("too many forbidden read paths")
+        }
         self.stagedRoot = resolved
-        self.request = request
+        self.request = BuilderSandboxAttestationRequest(
+            contractFingerprint: request.contractFingerprint,
+            builderContractID: request.builderContractID,
+            nodeID: request.nodeID,
+            attempt: request.attempt,
+            stagedRoot: resolved,
+            governedRootDigest: request.governedRootDigest,
+            challenge: request.challenge,
+            stage: request.stage,
+            forbiddenReadPaths: forbidden)
     }
 }
 
-private struct BuilderSandboxPrivatePaths: Sendable {
+struct BuilderSandboxPrivatePaths: Sendable {
     let root: String
     let temp: String
     let home: String
@@ -215,6 +279,7 @@ private struct BuilderSandboxPrivatePaths: Sendable {
     let clangCache: String
     let control: String
     let policyURL: URL
+    let identities: [BuilderSandboxPathIdentity]
 
     init(sessionID: String) throws {
         let base = FileManager.default.temporaryDirectory
@@ -245,16 +310,74 @@ private struct BuilderSandboxPrivatePaths: Sendable {
         self.clangCache = clangCache.path
         self.control = control.path
         self.policyURL = control.appendingPathComponent("profile.sb")
+        self.identities = try [resolved, temp, home, cache, swiftCache, clangCache, control]
+            .map { try BuilderSandboxPathIdentity.capture($0.path) }
     }
 
-    func remove() {
+    func validate() throws {
+        guard identities.allSatisfy({ $0.isCurrent }) else {
+            throw BuilderOSProcessSandboxError.mechanismUntrusted(
+                "private sandbox directory identity changed")
+        }
+    }
+
+    func remove() throws {
+        try validate()
         let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+        try FileManager.default.removeItem(at: rootURL)
+        guard !FileManager.default.fileExists(atPath: root) else {
+            throw BuilderOSProcessSandboxError.mechanismUntrusted(
+                "private sandbox directory cleanup was incomplete")
+        }
+        try BuilderSandboxSecureIO.fsyncDirectory(rootURL.deletingLastPathComponent())
+    }
+}
+
+struct BuilderSandboxPathIdentity: Sendable {
+    let path: String
+    let device: UInt64
+    let inode: UInt64
+    let owner: UInt32
+    let mode: UInt16
+
+    static func capture(_ path: String) throws -> Self {
         var status = stat()
-        guard lstat(root, &status) == 0,
-              (status.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
-              status.st_uid == geteuid() else { return }
-        try? FileManager.default.removeItem(at: rootURL)
-        try? BuilderSandboxSecureIO.fsyncDirectory(rootURL.deletingLastPathComponent())
+        guard lstat(path, &status) == 0,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+              status.st_uid == geteuid(), (status.st_mode & mode_t(0o077)) == 0,
+              BuilderSandboxPath.canonical(path) == path else {
+            throw BuilderOSProcessSandboxError.mechanismUntrusted(
+                "private sandbox directory is not a canonical owner-only directory")
+        }
+        return Self(path: path, device: UInt64(status.st_dev), inode: UInt64(status.st_ino),
+                    owner: UInt32(status.st_uid), mode: UInt16(status.st_mode & mode_t(0o777)))
+    }
+
+    var isCurrent: Bool {
+        var status = stat()
+        return lstat(path, &status) == 0
+            && status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+            && UInt64(status.st_dev) == device && UInt64(status.st_ino) == inode
+            && UInt32(status.st_uid) == owner
+            && UInt16(status.st_mode & mode_t(0o777)) == mode
+            && BuilderSandboxPath.canonical(path) == path
+    }
+}
+
+struct BuilderSandboxLaunchValidation: Sendable {
+    let stagedIdentity: BuilderWorkspaceRootIdentity
+    let privatePaths: BuilderSandboxPrivatePaths
+    let generatedIdentities: [BuilderWorkspaceRootIdentity]
+
+    func validate() throws {
+        guard try BuilderWorkspaceRootIdentity.capture(
+            rootPath: stagedIdentity.canonicalPath) == stagedIdentity else {
+            throw BuilderOSProcessSandboxError.workspaceMismatch
+        }
+        try privatePaths.validate()
+        guard try generatedIdentities.allSatisfy({ identity in
+            try BuilderWorkspaceRootIdentity.capture(rootPath: identity.canonicalPath) == identity
+        }) else { throw BuilderOSProcessSandboxError.workspaceMismatch }
     }
 }
 
@@ -316,23 +439,56 @@ private struct BuilderSandboxBackend: Sendable {
     let policyDigest: String
     let stage: BuilderExecutionStage
     let stagedWritable: Bool
+    let writableGeneratedPaths: [String]
+    let forbiddenReadPaths: [String]
 
     var mechanism: String {
-        "builder-os-sandbox/v2;backend=\(kind.rawValue);binary=\(binaryDigest);policy=\(policyDigest);stage=\(stage.rawValue);staged=\(stagedWritable ? "rw" : "ro")"
+        "builder-os-sandbox/v3;backend=\(kind.rawValue);binary=\(binaryDigest);policy=\(policyDigest);stage=\(stage.rawValue);staged=\(stagedWritable ? "rw" : "ro");generated_rw=\(writableGeneratedPaths.count);read_deny=\(forbiddenReadPaths.count)"
     }
 
     static func make(stagedRoot: String, stage: BuilderExecutionStage,
-                     privatePaths: BuilderSandboxPrivatePaths) throws -> Self {
+                     privatePaths: BuilderSandboxPrivatePaths,
+                     forbiddenReadPaths: [String]) throws -> Self {
         let stagedWritable = stage == .build
+        let generatedPaths = stagedWritable ? [] : try writableGeneratedDirectories(
+            stagedRoot: stagedRoot)
+        let home = BuilderSandboxPath.canonical(NSHomeDirectory())
+        #if os(Linux)
+        guard !BuilderSandboxPath.contains(parent: home, child: stagedRoot) else {
+            throw BuilderOSProcessSandboxError.mechanismUnavailable(
+                "a Linux staged workspace below the real home cannot prove unrelated-home masking")
+        }
+        #endif
+        let requestedReadDenies = Array(Set(
+            forbiddenReadPaths + [home, "/Library/Keychains"]
+        )).filter { $0 != stagedRoot }.sorted()
+        // If an ancestor directory is already masked, attempting to mount a nested key file after the
+        // ancestor tmpfs would fail because that pathname no longer exists. Retain only minimal roots;
+        // the broader directory deny is strictly stronger and keeps bwrap construction fail-closed.
+        let directoryDenies = requestedReadDenies.filter { path in
+            var status = stat()
+            return lstat(path, &status) == 0
+                && status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+        }
+        let readDenyPaths = requestedReadDenies.filter { candidate in
+            !directoryDenies.contains(where: { ancestor in
+                ancestor != candidate
+                    && BuilderSandboxPath.contains(parent: ancestor, child: candidate)
+            })
+        }
         #if os(macOS)
         let binary = "/usr/bin/sandbox-exec"
         let digest = try trustedBinaryDigest(binary)
         let policy = try seatbeltPolicy(
             stagedRoot: stagedRoot, stagedWritable: stagedWritable,
-            writablePrivatePaths: [privatePaths.temp, privatePaths.home, privatePaths.cache])
+            writableGeneratedPaths: generatedPaths,
+            writablePrivatePaths: [privatePaths.temp, privatePaths.home, privatePaths.cache],
+            forbiddenReadPaths: readDenyPaths)
         return Self(kind: .seatbelt, binaryPath: binary, binaryDigest: digest,
                     policy: policy, policyDigest: BuilderEvidenceDigest.sha256(policy),
-                    stage: stage, stagedWritable: stagedWritable)
+                    stage: stage, stagedWritable: stagedWritable,
+                    writableGeneratedPaths: generatedPaths,
+                    forbiddenReadPaths: readDenyPaths)
         #elseif os(Linux)
         guard let binary = ["/usr/bin/bwrap", "/bin/bwrap"].first(where: {
             FileManager.default.isExecutableFile(atPath: $0)
@@ -340,10 +496,13 @@ private struct BuilderSandboxBackend: Sendable {
             throw BuilderOSProcessSandboxError.mechanismUnavailable("bubblewrap is not installed")
         }
         let digest = try trustedBinaryDigest(binary)
-        let policy = "bwrap-v2|root=ro|staged=\(stagedWritable ? "rw" : "ro")|private=rw|network=deny|process=new-session|stage=\(stage.rawValue)"
+        let readPolicy = BuilderEvidenceDigest.sha256(readDenyPaths.joined(separator: "\u{0}"))
+        let policy = "bwrap-v3|root=ro|staged=\(stagedWritable ? "rw" : "ro")|private=rw|network=deny|process=new-session|stage=\(stage.rawValue)|read_deny=\(readPolicy)"
         return Self(kind: .bubblewrap, binaryPath: binary, binaryDigest: digest,
                     policy: policy, policyDigest: BuilderEvidenceDigest.sha256(policy),
-                    stage: stage, stagedWritable: stagedWritable)
+                    stage: stage, stagedWritable: stagedWritable,
+                    writableGeneratedPaths: generatedPaths,
+                    forbiddenReadPaths: readDenyPaths)
         #else
         throw BuilderOSProcessSandboxError.mechanismUnavailable("unsupported operating system")
         #endif
@@ -369,8 +528,15 @@ private struct BuilderSandboxBackend: Sendable {
 
     func prepare(launchPath: String, launchArgs: [String], cwd: String,
                  environment: [String: String], stagedRoot: String,
-                 privatePaths: BuilderSandboxPrivatePaths) throws
+                 privatePaths: BuilderSandboxPrivatePaths,
+                 stagedIdentity: BuilderWorkspaceRootIdentity) throws
         -> BuilderSandboxPreparedLaunch {
+        let validation = BuilderSandboxLaunchValidation(
+            stagedIdentity: stagedIdentity, privatePaths: privatePaths,
+            generatedIdentities: try writableGeneratedPaths.map {
+                try BuilderWorkspaceRootIdentity.capture(rootPath: $0)
+            })
+        try validation.validate()
         guard try Self.trustedBinaryDigest(binaryPath) == binaryDigest else {
             throw BuilderOSProcessSandboxError.mechanismUntrusted("binary identity changed")
         }
@@ -388,12 +554,32 @@ private struct BuilderSandboxBackend: Sendable {
                 launchArgs: ["-p", policy, launchPath] + launchArgs,
                 cwd: cwd, environment: env,
                 environmentDigest: environmentDigest,
-                sandboxProfileDigest: policyDigest)
+                sandboxProfileDigest: policyDigest, validation: validation)
         case .bubblewrap:
             var args = [
                 "--die-with-parent", "--new-session", "--unshare-all",
                 "--clearenv",
                 "--ro-bind", "/", "/",
+                "--dev", "/dev", "--proc", "/proc",
+                "--tmpfs", "/run", "--tmpfs", "/tmp",
+            ]
+            for path in forbiddenReadPaths where FileManager.default.fileExists(atPath: path) {
+                var status = stat()
+                guard lstat(path, &status) == 0 else {
+                    throw BuilderOSProcessSandboxError.policyInvalid
+                }
+                switch status.st_mode & mode_t(S_IFMT) {
+                case mode_t(S_IFDIR): args += ["--tmpfs", path]
+                case mode_t(S_IFREG): args += ["--ro-bind", "/dev/null", path]
+                default: throw BuilderOSProcessSandboxError.policyInvalid
+                }
+            }
+            for path in [privatePaths.root, privatePaths.temp, privatePaths.home,
+                         privatePaths.cache, privatePaths.swiftCache,
+                         privatePaths.clangCache, privatePaths.control] {
+                args += ["--dir", path]
+            }
+            args += [
                 "--bind", privatePaths.temp, privatePaths.temp,
                 "--bind", privatePaths.home, privatePaths.home,
                 "--bind", privatePaths.cache, privatePaths.cache,
@@ -403,11 +589,14 @@ private struct BuilderSandboxBackend: Sendable {
             for key in env.keys.sorted() {
                 args += ["--setenv", key, env[key] ?? ""]
             }
+            for path in writableGeneratedPaths {
+                args += ["--bind", path, path]
+            }
             args += ["--", launchPath] + launchArgs
             return BuilderSandboxPreparedLaunch(
                 launchPath: binaryPath, launchArgs: args, cwd: cwd, environment: env,
                 environmentDigest: environmentDigest,
-                sandboxProfileDigest: policyDigest)
+                sandboxProfileDigest: policyDigest, validation: validation)
         }
     }
 
@@ -447,7 +636,8 @@ private struct BuilderSandboxBackend: Sendable {
         let launch = try prepare(
             launchPath: truePath, launchArgs: [], cwd: stagedRoot,
             environment: ["PATH": "/usr/bin:/bin"], stagedRoot: stagedRoot,
-            privatePaths: privatePaths)
+            privatePaths: privatePaths,
+            stagedIdentity: try BuilderWorkspaceRootIdentity.capture(rootPath: stagedRoot))
         let result = ProcessGroupRunner.run(
             launchPath: launch.launchPath, launchArgs: launch.launchArgs,
             cwd: launch.cwd, env: launch.environment,
@@ -456,28 +646,82 @@ private struct BuilderSandboxBackend: Sendable {
             throw BuilderOSProcessSandboxError.mechanismUnavailable(
                 "sandbox self-test failed: \(result.combined)")
         }
+        for forbidden in forbiddenReadPaths where FileManager.default.fileExists(atPath: forbidden) {
+            var status = stat()
+            guard lstat(forbidden, &status) == 0 else {
+                throw BuilderOSProcessSandboxError.mechanismUnavailable(
+                    "cannot inspect a forbidden read path")
+            }
+            let command: String
+            switch status.st_mode & mode_t(S_IFMT) {
+            case mode_t(S_IFDIR): command = "/bin/ls"
+            case mode_t(S_IFREG): command = "/bin/cat"
+            default: throw BuilderOSProcessSandboxError.mechanismUnavailable(
+                "unsupported forbidden read path type")
+            }
+            let denied = try prepare(
+                launchPath: command, launchArgs: [forbidden], cwd: stagedRoot,
+                environment: ["PATH": "/usr/bin:/bin"], stagedRoot: stagedRoot,
+                privatePaths: privatePaths,
+                stagedIdentity: try BuilderWorkspaceRootIdentity.capture(rootPath: stagedRoot))
+            let probe = ProcessGroupRunner.run(
+                launchPath: denied.launchPath, launchArgs: denied.launchArgs,
+                cwd: denied.cwd, env: denied.environment,
+                timeoutSeconds: 10, capPerStream: 16_384)
+            guard probe.exitCode != 0, !probe.timedOut else {
+                throw BuilderOSProcessSandboxError.mechanismUnavailable(
+                    "sandbox read-denial self-test failed for a host authority path")
+            }
+        }
     }
 
     private static func seatbeltPolicy(stagedRoot: String, stagedWritable: Bool,
-                                       writablePrivatePaths: [String]) throws -> String {
+                                       writableGeneratedPaths: [String],
+                                       writablePrivatePaths: [String],
+                                       forbiddenReadPaths: [String]) throws -> String {
         let staged = try seatbeltString(stagedRoot)
         var lines = [
         """
         (version 1)
         (deny default)
         (import "system.sb")
-        (allow process*)
+        (allow process-exec)
+        (allow process-fork)
+        (deny process-info*)
+        (allow process-info* (target self))
         (allow signal (target self))
-        (allow sysctl-read)
-        (allow mach-lookup)
+        (deny sysctl-read (sysctl-name "kern.procargs"))
+        (deny sysctl-read (sysctl-name "kern.procargs2"))
+        (deny mach-lookup (global-name "com.apple.pboard"))
+        (deny mach-lookup (global-name "com.apple.pasteboard.1"))
+        (deny file-link)
         (allow ipc-posix-shm*)
         (allow file-read*)
         (deny network*)
         """
         ]
+        for path in forbiddenReadPaths {
+            let escaped = try seatbeltString(path)
+            lines.append("(deny file-read* (literal \"\(escaped)\"))")
+            lines.append("(deny file-read* (subpath \"\(escaped)\"))")
+        }
+        // A staged worktree may itself live below the real home. Re-allow only that exact tree and
+        // the host-created private sandbox roots after masking the rest of home.
+        lines.append("(allow file-read* (literal \"\(staged)\"))")
+        lines.append("(allow file-read* (subpath \"\(staged)\"))")
+        for path in writablePrivatePaths {
+            let escaped = try seatbeltString(path)
+            lines.append("(allow file-read* (literal \"\(escaped)\"))")
+            lines.append("(allow file-read* (subpath \"\(escaped)\"))")
+        }
         if stagedWritable {
             lines.append("(allow file-write* (literal \"\(staged)\"))")
             lines.append("(allow file-write* (subpath \"\(staged)\"))")
+        }
+        for path in writableGeneratedPaths {
+            let escaped = try seatbeltString(path)
+            lines.append("(allow file-write* (literal \"\(escaped)\"))")
+            lines.append("(allow file-write* (subpath \"\(escaped)\"))")
         }
         for path in writablePrivatePaths {
             let escaped = try seatbeltString(path)
@@ -485,6 +729,40 @@ private struct BuilderSandboxBackend: Sendable {
             lines.append("(allow file-write* (subpath \"\(escaped)\"))")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Verification replays real build/test commands. Those commands may refresh only generated
+    /// output directories that already existed after the build stage and that the governed manifest
+    /// deliberately excludes. The source tree itself remains read-only, and absent output roots are
+    /// not created here, so a verifier cannot mint a new write surface.
+    private static func writableGeneratedDirectories(stagedRoot: String) throws -> [String] {
+        let root = BuilderSandboxPath.canonical(stagedRoot)
+        var failure: Error?
+        guard let enumerator = FileManager.default.enumerator(
+            at: URL(fileURLWithPath: root, isDirectory: true),
+            includingPropertiesForKeys: nil, options: [],
+            errorHandler: { _, error in failure = error; return false }) else {
+            throw BuilderOSProcessSandboxError.policyInvalid
+        }
+        var paths: [String] = []
+        while let item = enumerator.nextObject() as? URL {
+            guard BuilderPathSecurity.isGeneratedOutputComponent(item.lastPathComponent) else {
+                continue
+            }
+            enumerator.skipDescendants()
+            var status = stat()
+            guard lstat(item.path, &status) == 0,
+                  status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                throw BuilderOSProcessSandboxError.policyInvalid
+            }
+            let resolved = BuilderSandboxPath.canonical(item.path)
+            guard BuilderSandboxPath.contains(parent: root, child: resolved) else {
+                throw BuilderOSProcessSandboxError.policyInvalid
+            }
+            paths.append(resolved)
+        }
+        if failure != nil { throw BuilderOSProcessSandboxError.policyInvalid }
+        return Array(Set(paths)).sorted()
     }
 
     private static func seatbeltString(_ value: String) throws -> String {
@@ -515,10 +793,16 @@ private struct BuilderSandboxRegisteredSession: Sendable {
     let sessionID: String
     let backend: BuilderSandboxBackend
     let privatePaths: BuilderSandboxPrivatePaths
+    let stagedIdentity: BuilderWorkspaceRootIdentity
     let canonicalEvidence: String
 
     func validateEvidence() throws {
         try attestation.validate(request)
+        guard try BuilderWorkspaceRootIdentity.capture(
+            rootPath: stagedIdentity.canonicalPath) == stagedIdentity else {
+            throw BuilderOSProcessSandboxError.workspaceMismatch
+        }
+        try privatePaths.validate()
         guard attestation.mechanism == backend.mechanism,
               ForgeSeal.verify(canonicalEvidence, seal: attestation.evidenceDigest),
               backend.policyDigest == BuilderEvidenceDigest.sha256(backend.policy) else {
@@ -598,11 +882,12 @@ private final class BuilderSandboxSessionRegistry: @unchecked Sendable {
         return BuilderSandboxActivation(token: token)
     }
 
-    func deactivate(token: String) {
+    func deactivate(token: String) throws {
         lock.lock()
         let session = activeSessions.removeValue(forKey: token)
         lock.unlock()
-        session?.privatePaths.remove()
+        guard let session else { return }
+        try session.privatePaths.remove()
     }
 
     func active(token: String) -> BuilderSandboxRegisteredSession? {
@@ -610,14 +895,6 @@ private final class BuilderSandboxSessionRegistry: @unchecked Sendable {
         return activeSessions[token]
     }
 
-    func active(containing cwd: String) throws -> BuilderSandboxRegisteredSession? {
-        lock.lock(); defer { lock.unlock() }
-        let matches = activeSessions.values.filter {
-            BuilderSandboxPath.contains(parent: $0.request.stagedRoot, child: cwd)
-        }
-        guard matches.count <= 1 else { throw BuilderOSProcessSandboxError.sessionUnavailable }
-        return matches.first
-    }
 }
 
 private enum BuilderSandboxPath {

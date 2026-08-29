@@ -16,6 +16,7 @@ extension KistRunner {
                               verificationSubject: String? = nil,
                               verificationDigest: String? = nil,
                               completionEvidence: PromotionCompletionEvidence? = nil,
+                              reviewRoutePolicy: ProviderRoutePolicy = .sameProviderAdaptive,
                               confirmDeployment: Bool = true) async -> ShipPipeline.Decision {
         // Git is optional reviewer context, never Builder completion evidence. Prepublication
         // transaction workspaces intentionally have no .git directory. Only successful git output is
@@ -110,7 +111,8 @@ extension KistRunner {
             completionEvidence: completedEvidence)
         note("")
         note("ship · council of minds reviewing the build…")
-        let decision = await ShipPipeline(council: CouncilPromotionJudge(providers: registry, roles: roles))
+        let decision = await ShipPipeline(council: CouncilPromotionJudge(
+            providers: registry, roles: roles, routePolicy: reviewRoutePolicy))
             .review(goal: goal, build: build, allowVerifiedReadOnly: allowVerifiedReadOnly)
         if let v = decision.verdict {
             for vote in v.votes {

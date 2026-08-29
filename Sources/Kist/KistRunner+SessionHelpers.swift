@@ -3,24 +3,22 @@ import AgentCore
 
 /// Pure session/cycle helpers, extracted from KistRunner (RED-zone modular split, behavior-preserving):
 /// memory refresh/injection, per-cycle budgeting, cross-cycle continuity, last-failure carry-forward,
-/// the coding-loop tool filter, the cortex journal writer, and runtime-lesson recording. All small and
+/// the coding-loop tool filter, the retired journal shim, and runtime-lesson recording. All small and
 /// side-effect-light — the reusable primitives the run routes lean on.
 extension KistRunner {
 
-    /// On --resume, surface the CURRENT cortex memory so the agent starts the resumed turn already
-    /// knowing (its toolset includes `cortex` too, so this is a convenience, not the only path).
+    /// On --resume, surface current operator-owned project context and eligible clocked episodes.
     /// GUARDED: append only after an ASSISTANT turn so provider message-alternation stays valid;
     /// no-op when memory is off or empty. Pure → unit-tested.
     static func withMemoryRefresh(_ cp: LoopCheckpoint, memory: String, enabled: Bool) -> LoopCheckpoint {
         guard enabled, !memory.isEmpty, cp.messages.last?.role == .assistant else { return cp }
         var out = cp
-        out.messages.append(ChatMessage(role: .user, content: "MEMORY REFRESH — what kist knows about you now:\n" + memory))
+        out.messages.append(ChatMessage(
+            role: .user, content: "MEMORY REFRESH — current operator/project context:\n" + memory))
         return out
     }
 
-    /// The full session memory injected into a run's brief: the Cortex (who Luke is + this project +
-    /// recent journal) folded with ProjectMemory (this repo's planning notes). Used by the one-shot
-    /// and TUI paths so cortex is injected in EVERY mode, not only the interactive REPL.
+    /// Session memory is operator-owned project configuration plus eligible clocked episodes.
     /// Per-cycle token budget: an even share of what REMAINS across the cycles LEFT, floored so a cycle is
     /// never starved below a unit of real work, and capped at the full remaining (the last cycle can use it
     /// all). Adaptive (uses the live remaining), so budget unspent by cheap early cycles flows forward to
@@ -72,23 +70,18 @@ extension KistRunner {
 
     static func sessionMemory(root: String, opts: KistOptions) -> String? {
         guard !opts.noMemory else { return nil }
-        let projectName = (root as NSString).lastPathComponent
-        let parts = [CortexMemory().context(projectName: projectName), ProjectMemory(root: root).planningContext()]
-            .compactMap { $0 }.filter { !$0.isEmpty }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+        // Operator-owned project configuration and clocked episodes remain available. Legacy Cortex
+        // Markdown is raw audit-only and must never enter a model prompt.
+        return ProjectMemory(root: root).planningContext()
     }
 
-    /// Auto-log a completed goal run to the cortex JOURNAL, so the work log fills itself instead of
-    /// only when the model remembers to call the cortex tool. One bounded line; no-op under
-    /// --no-memory; best-effort (a journal write must never fail the run). Secrets in the goal are
-    /// redacted at CortexMemory's write choke point.
+    /// Retained as a source-compatible no-op. Legacy Cortex Markdown is raw audit-only; completion
+    /// evidence already flows through clocked ProjectMemory/LessonStore paths.
     static func autoJournalRun(goal: String, success: Bool, root: String, enabled: Bool) {
-        guard enabled, !goal.isEmpty else { return }
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"; df.timeZone = .current
-        df.locale = Locale(identifier: "en_US_POSIX")
-        let g = goal.split(separator: "\n").first.map(String.init) ?? goal
-        try? CortexMemory().logWork("[\(success ? "done" : "paused")] \(g.prefix(100)) · \((root as NSString).lastPathComponent)",
-                                    date: df.string(from: Date()))
+        _ = goal
+        _ = success
+        _ = root
+        _ = enabled
     }
 
     static func recordRuntimeLessons(goal: String, success: Bool, recorder: TrajectoryRecorder,

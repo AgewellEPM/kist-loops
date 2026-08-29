@@ -3,9 +3,10 @@ import Foundation
 /// R3 (2026-07-28): the unit-of-work contract — a LUMPY PLAN NEVER EXECUTES unrepaired. Every step
 /// must be SINGULAR: one tool, one intent, one visible unit of progress. The lint runs in
 /// `obtainPlan` after structural validation; findings go back to the planner as repair feedback
-/// (bounded by `maxPlanRepairs`), so a bundled plan is re-split before execution. Lint findings are
-/// ADVISORY at exhaustion: a structurally-valid plan that still lints executes with a visible
-/// warning rather than failing the goal (a lint false positive must never brick a mission).
+/// (bounded by `maxPlanRepairs`), so a bundled plan is re-split before execution. Findings are a
+/// fail-closed execution boundary: exhausting the repair budget returns the plan as rejected instead
+/// of quietly running a unit of work the host has already classified as too broad. The caller can
+/// resume/re-plan from that explicit blocker; it cannot turn a lumpy plan into accepted evidence.
 public enum PlanLint {
     /// Human-readable contract violations; empty = the plan may execute.
     public static func findings(for plan: ExecutablePlan) -> [String] {

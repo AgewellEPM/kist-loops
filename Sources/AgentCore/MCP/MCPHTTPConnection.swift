@@ -74,8 +74,12 @@ actor MCPHTTPConnection: MCPConnection {
         }
     }
 
-    func callTool(name: String, arguments: [String: Any]) async throws -> [String: Any] {
-        try await request(method: "tools/call", params: ["name": name, "arguments": arguments], expectResponse: true)
+    func callTool(name: String, arguments: [String: Any], correlationID: String? = nil) async throws -> [String: Any] {
+        var params: [String: Any] = ["name": name, "arguments": arguments]
+        if let metadata = MCPProtocol.toolCallMetadata(correlationID: correlationID) {
+            params["_meta"] = metadata
+        }
+        return try await request(method: "tools/call", params: params, expectResponse: true)
     }
 
     func shutdown() async {

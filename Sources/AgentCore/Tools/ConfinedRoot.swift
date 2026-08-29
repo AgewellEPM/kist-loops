@@ -136,6 +136,9 @@ public final class ConfinedRoot: Sendable {
         guard before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
             throw ToolError.execution("not a regular file: \(path)")
         }
+        guard before.st_nlink == 1 else {
+            throw ToolError.execution("multiply-linked file refused: \(path)")
+        }
         guard before.st_size >= 0, before.st_size <= maxBytes else {
             throw ToolError.execution("file exceeds \(maxBytes) bytes: \(path)")
         }
@@ -191,12 +194,16 @@ public final class ConfinedRoot: Sendable {
             close(fd)
             throw ToolError.execution("cannot stat \(path): \(Self.strerr())")
         }
-        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), st.st_nlink == 1 else {
             close(fd)
-            throw ToolError.execution("not a regular file: \(path)")
+            throw ToolError.execution("not a private regular file: \(path)")
         }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         let captured = handle.readData(ofLength: maxBytes + 1)
+        var after = stat()
+        guard fstat(fd, &after) == 0, Self.sameStableFile(st, after) else {
+            throw ToolError.execution("file changed while being read: \(path)")
+        }
         return (Data(captured.prefix(maxBytes)), captured.count > maxBytes)
     }
 
@@ -216,20 +223,32 @@ public final class ConfinedRoot: Sendable {
             close(fd)
             throw ToolError.execution("cannot stat \(path): \(Self.strerr())")
         }
-        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), st.st_nlink == 1 else {
             close(fd)
-            throw ToolError.execution("not a regular file: \(path)")
+            throw ToolError.execution("not a private regular file: \(path)")
         }
         if let maxBytes, st.st_size > maxBytes {
             close(fd)
             throw ToolError.execution("file exceeds \(maxBytes) bytes: \(path)")
         }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-        guard let maxBytes else { return handle.readDataToEndOfFile() }
+        if maxBytes == nil {
+            let data = handle.readDataToEndOfFile()
+            var after = stat()
+            guard fstat(fd, &after) == 0, Self.sameStableFile(st, after) else {
+                throw ToolError.execution("file changed while being read: \(path)")
+            }
+            return data
+        }
+        guard let maxBytes else { preconditionFailure("checked above") }
         // Read one past the cap so a file that grew since fstat is caught by the actual byte count.
         let data = handle.readData(ofLength: maxBytes + 1)
         guard data.count <= maxBytes else {
             throw ToolError.execution("file exceeds \(maxBytes) bytes: \(path)")
+        }
+        var after = stat()
+        guard fstat(fd, &after) == 0, Self.sameStableFile(st, after) else {
+            throw ToolError.execution("file changed while being read: \(path)")
         }
         return data
     }
@@ -256,9 +275,9 @@ public final class ConfinedRoot: Sendable {
             close(fd)
             throw ToolError.execution("cannot stat \(path): \(Self.strerr())")
         }
-        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+        guard st.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), st.st_nlink == 1 else {
             close(fd)
-            throw ToolError.execution("not a regular file: \(path)")
+            throw ToolError.execution("not a private regular file: \(path)")
         }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         var hasher = SHA256()
@@ -268,6 +287,10 @@ public final class ConfinedRoot: Sendable {
             hasher.update(data: data)
             return true
         }) {}
+        var after = stat()
+        guard fstat(fd, &after) == 0, Self.sameStableFile(st, after) else {
+            throw ToolError.execution("file changed while being hashed: \(path)")
+        }
         return Data(hasher.finalize())
     }
 
@@ -765,6 +788,14 @@ public final class ConfinedRoot: Sendable {
     /// Split a caller path into safe components relative to the root. Absolute paths must
     /// already be inside the canonical root; `..` is rejected outright.
     func relativeComponents(_ path: String) throws -> [String] {
+        guard !path.unicodeScalars.contains(where: {
+            $0.value == 0 || $0.value < 0x20 || $0.value == 0x7f
+        }) else {
+            throw ToolError.pathEscape(path: path, root: rootPath)
+        }
+        // Directory APIs use the empty relative path for the already-open trusted root.
+        // File APIs still reject it later because they require a leaf component.
+        if path.isEmpty { return [] }
         let rel: String
         if path.hasPrefix("/") {
             // rootPath + "/" becomes "//" when rootPath == "/"; handle that case explicitly.
@@ -775,11 +806,26 @@ public final class ConfinedRoot: Sendable {
         } else {
             rel = path
         }
+        if rel.isEmpty {
+            guard path == rootPath else {
+                throw ToolError.pathEscape(path: path, root: rootPath)
+            }
+            return []
+        }
+        if rel.contains("//") || (rel.hasSuffix("/") && !rel.isEmpty) {
+            throw ToolError.pathEscape(path: path, root: rootPath)
+        }
         var comps: [String] = []
-        for part in rel.split(separator: "/", omittingEmptySubsequences: true) {
+        for part in rel.split(separator: "/", omittingEmptySubsequences: false) {
             let s = String(part)
+            if s.isEmpty { throw ToolError.pathEscape(path: path, root: rootPath) }
             if s == "." { continue }
             if s == ".." { throw ToolError.pathEscape(path: path, root: rootPath) }
+            // Git's linked-worktree control file is host authority, not project content. Deny it at
+            // the descriptor chokepoint for reads AND every mutating primitive, case/Unicode folded.
+            if s.precomposedStringWithCanonicalMapping.lowercased() == ".git" {
+                throw ToolError.permissionDenied("access to git control metadata is forbidden")
+            }
             comps.append(s)
         }
         return comps
@@ -894,6 +940,7 @@ public final class ConfinedRoot: Sendable {
         lhs.st_dev == rhs.st_dev
             && lhs.st_ino == rhs.st_ino
             && lhs.st_mode & mode_t(S_IFMT) == rhs.st_mode & mode_t(S_IFMT)
+            && lhs.st_nlink == rhs.st_nlink
             && lhs.st_size == rhs.st_size
             && modifiedNanos(lhs) == modifiedNanos(rhs)
             && changedNanos(lhs) == changedNanos(rhs)
@@ -918,6 +965,9 @@ public final class ConfinedRoot: Sendable {
         }
         guard before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
             throw ToolError.execution("not a regular file: \(path)")
+        }
+        guard before.st_nlink == 1 else {
+            throw ToolError.execution("multiply-linked file refused: \(path)")
         }
 
         var hasher = SHA256()

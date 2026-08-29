@@ -3,6 +3,13 @@
 **Status: PLANNING DOC (not code).** Snapshot date 2026‑07‑01. Sources: Claude Code live
 docs (`code.claude.com/docs` — commands, settings), kist repo `main` @ `815525a`.
 
+> **Superseded safety warning (2026-08-28):** capability labels below are historical planning
+> shorthand, not current execution authority. Hardened source now refuses production self-authored
+> activation/execution until six readiness gates have fresh authority, and the installed binary is
+> older than that source. Do not run `/grow`, `--evolve`, evolve autopilot, or `--arm-hours` based on
+> this document. See `docs/KIST_AUTONOMY_FLATLINE_AUTOPSY_2026-08-27.md` and
+> `docs/self-evolving-loop-plan.md` for current status.
+
 kist is a **BYOK, provider‑agnostic, open‑source terminal agent**. Claude Code is Anthropic's
 first‑party CLI wired to Anthropic accounts + cloud. So parity is **not** "clone every command."
 A large slice of Claude Code's surface is account/plan/cloud‑tied and *irrelevant by design* for
@@ -67,7 +74,7 @@ beats Claude Code** — then a prioritized build plan.
 | `/review`, `/security-review`, `/code-review` | `/review` board step + `/copilot` co‑review + `bug-bounty` + **pentest tool** ✓ |
 | `/agents` (subagent mgr) | `/agents` + `/agent new` (AgentForge NL→specialist) ✓ |
 | `/tasks` (`/bashes`) | `/tasks` shared board + `/fleet-status` cockpit ✓ |
-| `/loop` (scheduled/self‑paced) | evolve autopilot / `--arm-hours` ✓ (different shape) |
+| `/loop` (scheduled/self‑paced) | historical evolve autopilot / `--arm-hours`; **disabled and not readiness-authorized** |
 | `/deep-research` (workflow) | `/research` evidence dossier + council ✓ |
 | `/batch` (parallel worktrees) | `/fleet` supervised disjoint‑lease fleet ✓ (kist deeper: signoff/merge‑gate) |
 | custom commands `.claude/commands/` | `.kist/commands` + `/commands` ✓ |
@@ -110,8 +117,10 @@ static paste. Filed under P2.
 - **`/fleet` merge gate** — disjoint‑lease agents with **forge‑proof signoff + committed‑diff
   measurement + integration‑branch join that refuses off‑lease work.** Claude Code `/batch` opens
   PRs; kist enforces scope + provenance. Deeper safety story.
-- **`--evolve` (DGM / Darwin‑Gödel)** — self‑improvement loop over an archive with sandboxed
-  candidates. Nothing like it in Claude Code.
+- **`--evolve` (DGM / Darwin‑Gödel)** — historical experimental surface. Current hardened source
+  quarantines/refuses production promotion because the real oracle, witness, hard runner, distinct
+  reviewer, activation, and budget authorities are unavailable; the installed older binary must not
+  be used as evidence that this capability is safe or live.
 - **`/bench` + `/eval`** — provider bake‑off + deterministic agent‑behavior eval. Claude Code has
   no built‑in provider comparison (it's single‑vendor).
 - **AgentForge** — NL role description → validated spawnable specialist, in‑session.

@@ -265,7 +265,7 @@ extension KistREPL {
             let completedTurn = recordVerificationAndFinal(outcome: oc, intent: mediaIntent)
             selfMonitor(goal: text, intent: mediaIntent, success: completedTurn)
             await printTurnUsage()
-            recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+            await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
         }
 
         // SELF-MONITOR: analyze the just-finished turn's trajectory for reliability issues (runaway

@@ -1,18 +1,20 @@
-# kist — The Self-Evolving Learning Loop (0.17.45)
+# kist — The Self-Evolving Learning Loop (living status)
 
-**Tier: PROTOTYPE overall** (one PILOT slice inside it: the promote gate — verified live on disk). Nothing new here is built; this is the DESIGN. Every claim below was checked against `/Volumes/PRO-G40/kist-loops/Sources` on 2026-08-07. The ambition is that it's *real* — a loop that measures its own improvement with an oracle it cannot fake — not that it's flashy.
+**Tier: PROTOTYPE overall; standing autonomy remains off.** This began as the 2026-08-07 design and was reconciled against `/Volumes/PRO-G40/kist-loops/Sources` on 2026-08-28. Several bounded organs and fail-closed data contracts now exist in the current source checkout; source status does not imply installation, production authority, or promotion. Exact-parent paired fitness, external rollback, aggregate containment, identity-distinct review, sealed activation, and witnessed-budget contracts are represented, but their production witnesses/runners are not wired. The ambition is that it's *real* — a loop that measures its own improvement with an oracle it cannot fake — not that it's flashy.
 
 ---
 
 ## 1. THE ONE-LINE VISION
 
-Every verified win deposits a lesson, a skill sample, and (on a capability gap) a sandboxed `self__` tool; those deposits are read back into the next task's plan, route, and toolset; and the net compounding is proven by an **ablation-controlled COLD-vs-WARM held-out transfer oracle over a corpus disjoint from the eval set** — a number minted only from an execution-grounded `GroundedVerdict` that can go *down* (negative transfer, or losing to a frontier agent) and therefore cannot be growth-hacked upward.
+Every locally checked grounded win may deposit an unsigned advisory lesson, a skill sample, and (on a capability gap) a sandboxed `self__` tool; those deposits can be read back into the next task's plan, route, and toolset, while receipt authority stays separate; and net compounding must be proven by a **parent-relative, ablation-controlled held-out transfer oracle over a corpus disjoint from the eval set** — a number minted only from execution-grounded evidence that can go *down* and therefore cannot be growth-hacked upward.
 
 ---
 
 ## 2. THE ARCHITECTURE — ONE CLOSED LOOP
 
-One loop, eight stages. Each names the **existing kist component** and the **ONE new thing** that stage needs. `[live]` = wired today, `[NEW]` = unbuilt.
+One loop, eight stages. Each names the current kist component and its remaining seam. `[live]` =
+wired in the current source checkout, not necessarily installed or promoted; `[opt-in]` = deliberately
+not a default; and `[NEW]` = unbuilt.
 
 ```
 PERCEIVE ─► ACT ─► VERIFY ─► CLASSIFY ─► LEARN ─► SELF-DIRECT ─► MEASURE ─┐
@@ -22,14 +24,14 @@ PERCEIVE ─► ACT ─► VERIFY ─► CLASSIFY ─► LEARN ─► SELF-DIREC
 
 | Stage | Existing kist component | The ONE new thing |
 |---|---|---|
-| **PERCEIVE** | `FlywheelStages.plan` seam; `SemanticMemoryService` (vector store) | **recall→plan wire**: call `.recall(taskShape)`, inject top *verified* lessons into the plan prompt. `[NEW]` — `.recall` is invoked nowhere outside its own tool wrapper (verified: only hit is `SemanticMemory.swift:80`). |
-| **ACT** | `FlywheelStages.build`; `SelfAuthoredToolStore` (`self__` tools load at startup) | **self__→toolset wire**: surface promoted tools *matching the task-shape* into the build toolset. `[NEW]` — promoted tools load globally at startup, not task-targeted. |
+| **PERCEIVE** | `SemanticMemoryService`; `HeadlessAgentLoop.recallLessons`; REPL/runner wiring | **recall→plan wire**: inject top typed locally checked, unsigned advisory lessons inside an untrusted-data frame. `[live, opt-in]` in the current source checkout — `KIST_RECALL_INJECT=1`; `--no-memory` hard-disables the service, tools, and injection. Semantic V2 is not installed or promoted. |
+| **ACT** | `FlywheelStages.build`; hardened `SelfAuthoredToolStore` | **self__→toolset wire**: surface receipt-authorized tools *matching the task-shape* into the build toolset. `[UNAVAILABLE]` — the repaired public loader returns no legacy/test-authorized tool, production activation is unavailable, and the older installed loader must not be trusted. |
 | **VERIFY (oracle)** | `GreatLoopVerifier` / `CompletionVerifier` — execution-grounded done-gate (real build/test after last edit) + anti-gaming blocklist | — (already the referee currency; reused as-is) `[live]` |
 | **CLASSIFY** | `FailureClassifier` → `FailureRouter` → `SelfEvolutionEngine` (taskBug / knowledgeGap / toolLimit / blocked → distinct recovery) | — (already routes; feeds curriculum in Self-Direct) `[live]` |
-| **LEARN — deposit** | `SemanticMemory.remember` (auto-lesson on verified win); `CaptainLearningStore.record` (referee-measured); `ClosedEvolutionLoop` (gap→`self__` tool) | **the triangle close**: repeated obstacle in recall → nominate a capability; promoted skill → recallable "winning approach" lesson. `[NEW]` (deposit sides exist; the *edges between corners* don't) |
+| **LEARN — deposit** | `SemanticMemory.rememberLocallyCheckedLesson`; `CaptainLearningStore.record`; `ClosedEvolutionLoop` (gap→`self__` tool) | Grounded promotion → content-bound, unsigned advisory "winning approach" lesson is `[live]` in the current source checkout; persistence is awaited and surfaced. Semantic V2 is not installed or promoted. Recurring-obstacle curriculum remains incomplete. |
 | **LEARN — read-back** | `CaptainLearningStore.modelVerdicts` → **routing (`KistRunner+GreatLoop.swift:71`)** | — this is the **one live read-back wire**. `[live]` The other two read-backs are the PERCEIVE/ACT rows above. |
 | **SELF-DIRECT** | `CaptainLearningStore.byReason` histogram; `EvalHistoryStore`; `TrajectoryAnalyzer`; `/evolve` path into `ClosedEvolutionLoop.run` | **`CurriculumSelector`**: read own aggregate failure taxonomy, author the evolution brief itself (today the brief is human-supplied). `[NEW]` — no such symbol in tree. |
-| **MEASURE** | `EvalRunner` / `EvalGoldenSuite` / `EvalHistoryStore`; `GroundedVerdict.fromCode` (private-init `.code` verdict, `GroundedVerdict.swift:59/71`); `CompetitiveBenchmark.CostPerVerifiedSuccess`; `RunAnalytics.lift`; `FleetHeldOutRunner` | **ablation COLD/WARM + slope + head-to-head scoreboard**. `[NEW]` — `EvalRegression.compare` only compares vs the *immediately-prior same-version* baseline (verified `EvalGolden.swift:90–102`); it cannot see cross-epoch transfer. |
+| **MEASURE** | `EvalRunner` / `EvalGoldenSuite` / `EvalHistoryStore`; pure COLD/WARM and exact-parent paired validators; `GroundedVerdict.fromCode`; `CostPerVerifiedSuccess`; `RunAnalytics.lift`; `FleetHeldOutRunner` | **production measurement authority**. `[PARTIAL]` — validators and fixtures exist, but no host-owned runner can mint a real paired fitness receipt or a longitudinal head-to-head result. |
 
 The synthesis insight: **PERCEIVE + LEARN-read-back + MEASURE are one held-out, author-blind, corpus-disjoint measurement spine, not three.** The facets' "ablation oracle," "universal promotion gate," and "scoreboard" collapse into a single `GroundedVerdict`-minted harness. Building it once is the synthesis.
 
@@ -39,13 +41,13 @@ The synthesis insight: **PERCEIVE + LEARN-read-back + MEASURE are one held-out, 
 
 ### Phase 0 — The Ablation Harness (COLD/WARM) — *do this first*
 - **Goal:** a measurement that turns every later wire into a proven delta, not a hope.
-- **Mechanism:** each epoch, run every `EvalGoldenSuite` case in two arms — **COLD** (all three stores ablated: empty `.recall`, no promoted profiles, no `self__` tools) and **WARM** (full accumulated state). Extend `EvalRunner`/`EvalHistoryStore` with an arm tag and a `CurriculumTarget`-style epoch key. Metrics are `GreatLoopVerifier`-grounded (rounds + tokens to VERIFIED), never self-reported.
+- **Mechanism:** the source now has pure COLD/WARM and exact-parent paired comparison contracts. The remaining work is a host-owned runner that executes every `EvalGoldenSuite` case in two arms — **COLD** (all three stores ablated: empty `.recall`, no promoted profiles, no `self__` tools) and **WARM** (full accumulated state) — and durably binds arm, epoch, frozen inputs, and evidence. Metrics must be execution-grounded, never self-reported.
 - **THE ORACLE:** verdicts are machine-checked: **TURNING** = `WARM.passRate ≥ COLD.passRate` AND `WARM.median_rounds < COLD`; **ACCELERATING** = slope of `advantage_t = (WARM−COLD)` vs `knowledge_size_t` across epochs is `> 0`; **PLATEAUED** = slope ≈ 0 (reported honestly — real flywheels plateau); **NEGATIVE TRANSFER** = `WARM < COLD` → alarm + quarantine. **Integrity linchpin:** the lesson/skill/tool corpus feeding WARM must be content-hash **disjoint** from the eval corpus, itself test-pinned — else WARM wins by memorization.
-- **Tier:** PROTOTYPE. **Reuses:** `EvalRunner`, `EvalGoldenSuite`, `EvalHistoryStore`, `GreatLoopVerifier`. **Depends on:** nothing — can run **today** against routing-only state to establish COLD.
+- **Tier:** VALIDATOR PROTOTYPE / RUNNER MISSING. **Reuses:** `EvalRunner`, `EvalGoldenSuite`, `EvalHistoryStore`, `GreatLoopVerifier`. **Depends on:** host-owned execution and evidence authority; it cannot establish production fitness today.
 
-### Phase 1 — recall→plan read-back (the cheapest missing wire)
-- **Goal:** close the second read-back edge (memory→plan).
-- **Mechanism:** at `FlywheelStages.plan`, call `SemanticMemoryService.recall(taskShape)`, inject top verified lessons into the plan prompt.
+### Phase 1 — recall→plan read-back (implemented, opt-in)
+- **Goal:** close the second read-back edge (memory→plan) without turning advisory memory into authority.
+- **Mechanism:** `HeadlessAgentLoop.recallLessons` calls temporal `SemanticMemoryService` recall and injects only typed locally checked, content-bound unsigned advisory lessons in an untrusted-data frame.
 - **THE ORACLE:** the Phase-0 COLD/WARM advantage on the disjoint held-out set moves up **and** no case regresses (`EvalRegression`). If the delta is flat, the wire is inert — reported as PLATEAUED, not spun.
 - **Tier:** PROTOTYPE. **Reuses:** `SemanticMemory.recall`, `FlywheelStages.plan`. **Depends on:** Phase 0 (else unfalsifiable).
 
@@ -63,35 +65,41 @@ The synthesis insight: **PERCEIVE + LEARN-read-back + MEASURE are one held-out, 
 
 ### Phase 4 — Capability Graph + retirement
 - **Goal:** flat `self__` store → a composing, self-pruning capability graph that grows *more capable*, not just bigger.
-- **Mechanism:** add `composes: [String]` to `SelfAuthoredManifest`; new `CompositeTool` runs each child through the existing `ScriptTool.runContained` (network-denied, writes-confined, fail-closed); discovery-before-authoring via `SemanticMemory` embedding of manifests; wild-failure ledger (via `CompletionVerifier`) retires rotted tools + transitively re-gates dependents.
+- **Mechanism:** add `composes: [String]` to `SelfAuthoredManifest`; new `CompositeTool` runs each child through `ScriptTool.runContained`; discovery-before-authoring via `SemanticMemory` embedding of manifests; wild-failure ledger (via `CompletionVerifier`) retires rotted tools + transitively re-gates dependents. The current production `runContained` path intentionally refuses because no qualifying hard runner exists; a composite runner is not live until that backend can mint validated aggregate-containment authority.
 - **THE ORACLE:** (A) composite correctness = end-to-end re-execution by the adversary on adversary-chosen input, never inheritance; (B) "more capable not bigger" = `EvalRunner` held-out solved-count strictly **up** at equal-or-lower tool count — else the addition is pruned.
 - **Tier:** PROTOTYPE. **Reuses:** `ScriptTool.runContained`, `SelfAuthoredToolStore`, `CapabilityDiscovery`, `SelfEvolutionLedger`. **Depends on:** Phase 3 (spine) + `CurriculumSelector` optional.
 
-### Phase 5 — `CurriculumSelector` (self-directed target) + **FLIP STANDING AUTONOMY**
-- **Goal:** kist picks its own weakest capability and authors its own brief; then flip the already-built autonomy flag.
+### Phase 5 — `CurriculumSelector` (self-directed target) + **EARN A SEPARATE WAKE-UP DECISION**
+- **Goal:** kist picks its own weakest capability and authors its own brief; only then can an operator consider a separately authorized wake-up.
 - **Mechanism:** deterministic `CurriculumSelector` reads `CaptainLearningStore.byReason` + `EvalHistoryStore` trend + `TrajectoryAnalyzer` frequency → highest `(frequency × severity × recency)` bucket (excluding ledger-resolved/rate-capped) → pre-registers a hash-pinned held-out slice → hands the brief to `ClosedEvolutionLoop.run`. Post-check credits the target ONLY if the held-out slice improved AND nothing else regressed; a miss deprioritizes re-selection.
 - **THE ORACLE:** pre-registration + held-out + counterfactual — the selector cannot mark its own pick correct by self-report; `targetMissed` is a first-class recorded outcome.
-- **⚑ FLIP STANDING AUTONOMY:** this is **not** new code — standing autonomy is **already built, off-by-default**. This phase *flips the flag*, gated on Phases 0/5 oracles having run on **real held-out cases** (COLD/WARM proven to compound, curriculum post-check green). Autonomy turns on because the proof exists, not because the code got written.
+- **⚑ WAKE-UP REMAINS A DISTINCT OPERATION:** a green curriculum result is necessary but not sufficient. All six machine-readable readiness gates must carry fresh production authority: parent-relative held-out fitness, external rollback witness, hard aggregate containment, actual-route identity-distinct review, sealed activation, and witnessed pre-spawn budget reservation. The current source reports them blocked, and the installed binary is older than this hardened source. No document or model may flip the flags implicitly.
 - **Tier:** PROTOTYPE (selector) → the flip itself is a config gate on proof. **Reuses:** `byReason`, `EvalHistoryStore`, `SelfEvolutionLedger` rate-cap, `/evolve`. **Depends on:** Phase 0 + 3.
 
-**Dependency order:** 0 → 1 → 2 → 3 → (4, 5). Phase 0 gates everything (it's the oracle). Phase 5's second half is the autonomy flip.
+**Dependency order:** 0 → 1 → 2 → 3 → (4, 5). Phase 0 gates everything, but its production runner is still missing. Phase 5 can only earn evidence for a separate wake-up decision.
 
 ---
 
 ## 4. THE MOAT + THE SCOREBOARD
 
-Two things make "kist is best" a **measured fact**, both anti-growth-hack:
+Two mechanisms are proposed to test whether Kist improves. No host-owned production run has yet made
+"kist is best" a measured fact:
 
-**THE MOAT — a promote gate that structurally cannot self-certify.** Verified live on disk: `.kist/self-evolution.jsonl` shows `self__reverse` REJECTED, `self__add` REJECTED then PROMOTED; the promoted tool is durable at `.kist/self-tools/self__add/` and loads at startup. Provider-distinctness is **fail-closed** (`guard adversary.provider != cand.authorProvider`, `ClosedEvolutionLoop.swift:116`) — an adversary sharing the author's provider returns `.rejectedSameProvider`. This is the one PILOT slice.
+**THE MOAT — a proposed promote gate that must not self-certify.** Historical disk state contains `self__reverse` rejection and an old `self__add` “promoted” row plus manifest/script. That pair has no hardened activation receipt and is sterile under the repaired public loader; it is evidence of a legacy experiment, not a valid promotion. The current source requires opaque host-validated identity-distinct review, one-use hard-containment authority, sealed activation bindings, and exact artifact digests. Production validation/execution intentionally refuses because those authorities are unavailable. The older installed binary may not enforce this boundary and must not run `/grow` or `--evolve`.
 
-**THE SCOREBOARD — the un-fakeable metric.** It is **not** a rising success curve. It is:
+**THE SCOREBOARD — the proposed falsifiable metric.** It is **not** a rising success curve. It is:
 1. **COLD-vs-WARM advantage slope** on a content-hash-disjoint, author-blind held-out corpus, minted **only** through `GroundedVerdict.fromCode` (`source == .code`, private init — no public path forges a `.green`, so a self-reported pass is *type-impossible*).
 2. **Head-to-head vs a single frontier agent** in the *identical* `EvalRunner` harness, scored by `CostPerVerifiedSuccess` (`CompetitiveBenchmark.swift:44`) — the row shows **$/verified-success for both**, and can show **kist LOSING**.
 3. **Per-case ratchet:** any previously-green held-out case regressing flips the curve **down** and is un-hideable (not averaged away).
 
-The honesty signature: **the metric can go down** — negative transfer alarms, kist loses to frontier, a red case drops the count. A metric that can only rise is the growth-hack the whole design rejects.
+The intended honesty signature is that **the metric can go down** — negative transfer alarms, Kist
+can lose to frontier, and a red case drops the count. Those properties are contract/test behavior,
+not evidence that a production scoreboard has run.
 
-**Honest ceiling (do not round up):** the gate is execution-grounded + a KNOWN-attack blocklist + a probabilistic LLM adversary + a domain-limited abstaining symbolic veto. It is **NOT** sound like AlphaProof's Lean checker. Correct claim: *"structurally cannot self-certify, and raises the bar past shipped self-improvers that got gamed"* — **never** *"cannot be gamed."*
+**Honest ceiling (do not round up):** the proposed gate combines execution evidence, a known-attack
+blocklist, probabilistic review, and a domain-limited abstaining symbolic veto. It is **not** sound
+like AlphaProof's Lean checker, and production authority is absent. Correct claim: *"the source
+contracts are designed to reject self-certification"* — never *"cannot be gamed"* or *"shipped."*
 
 ---
 
@@ -99,37 +107,40 @@ The honesty signature: **the metric can go down** — negative transfer alarms, 
 
 | # | Claim | Rating | Why (prior art named) |
 |---|---|---|---|
-| 1 | **Promotion that is structurally impossible to self-certify** — fail-closed on provider identity + a blocklist built against DGM's *exact documented cheats* (faked logs, deleted detectors), shipped & live-proven on disk. | **Rare** (uncommon composition of known parts, shipped-and-enforced). Not world-first: DGM/AlphaEvolve shipped the closed loop (and got gamed); Voyager shipped persistent verified skills; multi-agent debate exists. The *composition as one enforced gate* is what no shipped self-improver combines. | The single "I wish ours did that" for a frontier engineer. |
-| 2 | **Ablation-controlled COLD-vs-WARM held-out *transfer* oracle** with corpus-disjointness guard + explicit **negative-transfer alarm**, over three self-improvement stores. | **Rare — closest to world-first at the shipped-composition level.** The field ships the loop and reports rising (confounded, saturating) success curves. I found no shipped self-improver proving compounding via an ablation-arm causal transfer measurement with a disjointness guard. Not claiming the flywheel concept is new — claiming *this causal oracle over these stores*. | Kills the growth-hack the field lives on. |
+| 1 | **Promotion contract designed not to self-certify** — exact identities, held-out evidence, anti-tamper checks, identity-distinct review, hard-containment authority, and sealed activation are fail-closed in source. | **Promising prototype, not shipped proof.** The composition is unusual, but production reviewers, runners, witnesses, and activation are unavailable; legacy on-disk “promoted” rows are sterile. | The contract is valuable only after real host/external authorities exercise it end to end. |
+| 2 | **Ablation-controlled COLD-vs-WARM held-out transfer contract** with corpus-disjointness guard and explicit negative-transfer result. | **Interesting prototype, not a field result.** Pure validators/fixtures exist; the host-owned runner and production evidence do not. | It can challenge growth-hacked curves only after real frozen-corpus executions are published. |
 | 3 | **Routed failure taxonomy** (`FailureClassifier`→`FailureRouter`: taskBug/knowledgeGap/toolLimit/blocked → *distinct* recovery). | **Rare.** The field retries on "score didn't move." | Cheap, already live, genuinely uncommon. |
 
 **Hype killed:** "self-improves / remembers / sandboxes" (labs ship all three), "runs local" (common), "Luke owns it" (ownership, not a technical edge), "owns its loop" (so do Claude Code and Codex).
 
 ---
 
-## 6. WHAT'S DONE vs WHAT'S NEW (we're ~60%+ there)
+## 6. CURRENT IMPLEMENTATION SNAPSHOT
 
 | Component | State | Verified |
 |---|---|---|
-| `ClosedEvolutionLoop` (author→gate→veto→adversary→promote, fail-closed) | **DONE (PILOT, live on disk)** | `.jsonl` ledger + `.kist/self-tools/self__add` |
+| `ClosedEvolutionLoop` (author→gate→veto→review→activation) | **QUARANTINED / source-only** | current production path cannot promote; legacy `self__add` lacks a hardened activation receipt and does not load through the repaired public authority path |
 | `modelVerdicts` → routing read-back | **DONE (live)** | `KistRunner+GreatLoop.swift:71` |
-| `SemanticMemory.remember` (deposit) | **DONE** | write side live |
+| `SemanticMemory.remember` (deposit) | **DONE in source; not installed/promoted** | write side is source-wired |
 | `CaptainLearningStore` referee scorecard + `byReason` | **DONE** | `CaptainLearning.swift:308` |
 | `FailureClassifier`/`FailureRouter`/`SelfEvolutionEngine` | **DONE** | `SelfEvolution/*` |
 | `EvalRunner`/`EvalGolden`/`EvalHistoryStore` (adjacent-baseline regression) | **DONE** | `EvalGolden.swift:90` |
 | `GreatLoopVerifier`/`CompletionVerifier`, `GroundedVerdict.fromCode`, `CompetitiveBenchmark.CostPerVerifiedSuccess`, `RunAnalytics.lift`, `FleetHeldOutRunner` | **DONE (reusable)** | all present in tree |
-| **`.recall`→plan wire** | **NEW** | `.recall` unwired (`SemanticMemory.swift:80` only) |
-| **`self__`→toolset wire + triangle close** | **NEW** | promoted tools not task-targeted |
-| **Ablation COLD/WARM harness + slope + disjointness guard** | **NEW** | `compare()` is adjacent-baseline only |
+| **`.recall`→plan wire** | **DONE in source, opt-in; not installed/promoted** | temporal V2 recall is wired into the source loop; `--no-memory` removes every memory surface |
+| **`self__`→toolset wire + triangle close** | **QUARANTINED** | targeted source seams exist, but no production-authorized tool currently loads or executes; broader autonomous curriculum does not exist |
+| **Ablation COLD/WARM harness + slope + disjointness guard** | **DONE, not sufficient for autonomy** | fixed/moving corpus probes and a pure exact-parent paired-delta validator exist; no host-owned runner can mint production fitness authority |
 | **Universal `SelfChange` spine + growing ratchet** | **NEW** | loop is `extendTool`-only (`:89`) |
 | **`CapabilityGraph` + `composes` + retirement** | **NEW** | no such field/symbol |
 | **`CurriculumSelector` + pre-registration** | **NEW** | no such symbol |
-| **Autonomy flip** | **Built, off-by-default** | flag flip gated on proof, not new code |
+| **Autonomy wake-up** | **UNAVAILABLE** | all six readiness gates require fresh production authority plus a separate operator-approved deployment/wake-up operation |
 
-Accumulators, deposit seams, the referee currency, the gate, and one read-back wire all exist. The missing pieces are two read-back wires, the triangle edges, and the measurement spine.
+Accumulators, temporal advisory deposit/read-back, the ablation harness, and bounded evolution seams exist. Pure contracts also exist for parent-relative fitness, rollback anchoring, hard containment, identity-distinct review, activation, and budget witnessing. The blockers are the real authorities behind them: host-owned oracle execution, an external monotonic witness/CAS, a qualifying hard runner, an actual-route distinct reviewer, composed sealed activation, and an external pre-spawn budget reservation.
+
+These implementation states describe the current source checkout. Semantic V2 has not been installed
+into the live CLI, no live V2 store exists, and standing autonomy remains disabled.
 
 ---
 
 ## HIGHEST-LEVERAGE NEXT MOVE
 
-**Build the ablation harness (Phase 0) — COLD/WARM on the existing `EvalGoldenSuite`, run today against routing-only state to establish the COLD baseline.** It reuses `EvalRunner`/`EvalHistoryStore` with only an arm tag + epoch key, needs no other phase, and converts every subsequent wire (recall→plan, self__→toolset, curriculum) from an unfalsifiable hope into a measured delta on a disjoint held-out corpus. Per Luke's rule #1, no improvement counts until a machine-checkable oracle proves it — so the oracle is the thing that unlocks the rest.
+**Wire and independently operate the authorities behind the contracts before considering any wake-up.** First supply a host-owned paired held-out oracle and configured external monotonic rollback witness; then add a qualifying aggregate descendant/resource runner, an actual-route identity-distinct reviewer, composed activation, and witnessed pre-spawn budget reservation. The existing COLD/WARM probes and pure validators are useful evidence, but they do not make a self-authored runtime change safe to promote unattended.

@@ -134,6 +134,19 @@ enum BuilderWorkspaceManifestScanner {
                 enumerator.skipDescendants()
                 continue
             }
+            if BuilderPathSecurity.isGeneratedOutputComponent(item.lastPathComponent) {
+                enumerator.skipDescendants()
+                var excludedInfo = stat()
+                guard lstat(absolute, &excludedInfo) == 0 else {
+                    throw BuilderWorkspaceTransactionError.stateMismatch(
+                        "cannot lstat excluded build output \(relative)")
+                }
+                guard excludedInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                    throw BuilderWorkspaceTransactionError.specialFile(
+                        "build output has an invalid type: \(relative)")
+                }
+                continue
+            }
             let depth = relative.split(separator: "/", omittingEmptySubsequences: false).count
             guard depth <= limits.maxDepth else {
                 throw BuilderWorkspaceTransactionError.traversalLimit
@@ -232,7 +245,8 @@ enum BuilderWorkspaceManifestScanner {
                 }
                 resolved.removeLast()
             } else {
-                guard !BuilderPathSecurity.isControlComponent(value) else {
+                guard !BuilderPathSecurity.isControlComponent(value),
+                      !BuilderPathSecurity.isGeneratedOutputComponent(value) else {
                     throw BuilderWorkspaceTransactionError.controlPath(path)
                 }
                 resolved.append(value)
@@ -261,6 +275,9 @@ enum BuilderWorkspaceManifestScanner {
 
 enum BuilderPathSecurity {
     private static let control = Set([".git", ".kist"])
+    /// Generated directories are outside governed source identity at any depth. Keep this set
+    /// aligned with the deployment source snapshot so staged builds cannot manufacture drift.
+    private static let generatedOutput = Set([".build", ".build-local", "deriveddata"])
 
     static func canonicalComponent(_ value: String) -> String {
         value.precomposedStringWithCompatibilityMapping
@@ -272,15 +289,26 @@ enum BuilderPathSecurity {
         control.contains(canonicalComponent(value))
     }
 
+    static func isGeneratedOutputComponent(_ value: String) -> Bool {
+        generatedOutput.contains(canonicalComponent(value))
+    }
+
     static func containsControlComponent(_ path: String) -> Bool {
         path.replacingOccurrences(of: "\\", with: "/")
             .split(separator: "/", omittingEmptySubsequences: true)
             .contains { isControlComponent(String($0)) }
     }
 
+    static func containsGeneratedOutputComponent(_ path: String) -> Bool {
+        path.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .contains { isGeneratedOutputComponent(String($0)) }
+    }
+
     static func authorityKey(_ path: String) throws -> String {
         let normalized = try BuilderExecutionValidation.path(path)
-        guard !containsControlComponent(normalized) else {
+        guard !containsControlComponent(normalized),
+              !containsGeneratedOutputComponent(normalized) else {
             throw BuilderWorkspaceTransactionError.controlPath(normalized)
         }
         return normalized.split(separator: "/").map { canonicalComponent(String($0)) }

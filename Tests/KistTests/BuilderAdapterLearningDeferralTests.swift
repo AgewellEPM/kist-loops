@@ -2,18 +2,17 @@ import XCTest
 @testable import AgentCore
 @testable import Kist
 
-/// Regression coverage for Codex finding P2-F: nested headless adapter learning (global "task failed"
-/// lessons + paused journal entries) must be DEFERRED until the final Builder receipt is accepted.
+/// Regression coverage for nested headless adapter learning. Clocked LessonStore writes are deferred
+/// until the final Builder receipt; retired Cortex Markdown never receives runtime writes.
 ///
 /// On the sealed-headless-mutation path a `.stoppedUnverified` outcome that satisfies
 /// `builderHeadlessCanHandOffToDeterministicVerification` is the EXPECTED handoff: the outer BuilderRun
 /// keeps going to node verification, final verification, and independent review before it decides
 /// acceptance. `outcome.success` is still false at that point, so the previous code eagerly recorded a
-/// failure lesson and a paused journal entry — poisoning retrieval for builds that go on to be accepted.
+/// failure lesson and a paused legacy journal entry — poisoning retrieval for builds that go on to be accepted.
 ///
 /// A genuinely-final headless failure (no handoff) must STILL record, so real failures are never
-/// swallowed. There are two learning SURFACES (LessonStore + cortex journal); this file pins each one
-/// on BOTH the handoff site and the final-failure site, so a regression names the exact surface + site.
+/// swallowed by the temporal LessonStore. The Cortex checks pin its raw-audit-only boundary.
 final class BuilderAdapterLearningDeferralTests: XCTestCase {
 
     // A sealed headless plan whose stopped-unverified outcome is a legitimate deterministic-verification
@@ -100,7 +99,7 @@ final class BuilderAdapterLearningDeferralTests: XCTestCase {
             "LessonStore [final-failure] must record a failure lesson so real failures aren't swallowed")
     }
 
-    // MARK: - Surface 2 (cortex journal) — per-site assertions
+    // MARK: - Retired Cortex journal — raw audit only
 
     /// Journal surface, HANDOFF site: no paused journal entry is written.
     func testJournalSurfaceDefersOnHandoffSite() throws {
@@ -119,17 +118,18 @@ final class BuilderAdapterLearningDeferralTests: XCTestCase {
         }
     }
 
-    /// Journal surface, FINAL-FAILURE site: the paused journal entry IS written.
-    func testJournalSurfaceRecordsOnFinalFailureSite() throws {
+    /// Even a genuine final failure cannot manufacture an undated raw Markdown memory.
+    func testJournalSurfaceStaysRawAuditOnlyOnFinalFailureSite() throws {
         try withTemporaryCortexHome { home in
             let handoff = KistRunner.builderHeadlessCanHandOffToDeterministicVerification(
                 outcome: genuinelyFailedOutcome(), sealedPlan: nil)
             recordUnderProductionGuard(
                 goal: "modify Sources/Target.swift to add a symbols exporter",
                 success: false, handoff: handoff, lessonStore: nil, root: "/tmp/kist-final")
-            XCTAssertTrue(
-                journalContains("[paused]", home: home),
-                "journal [final-failure] must write a paused entry so real failures aren't swallowed")
+            XCTAssertFalse(journalContains("[paused]", home: home))
+            XCTAssertFalse(
+                journalDirectoryExists(home: home),
+                "final failures remain in clocked LessonStore, never raw Cortex Markdown")
         }
     }
 

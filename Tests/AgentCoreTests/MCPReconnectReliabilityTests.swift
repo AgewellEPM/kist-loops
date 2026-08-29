@@ -3,6 +3,43 @@ import XCTest
 @testable import AgentCore
 
 final class MCPReconnectReliabilityTests: XCTestCase {
+    func testRemoteToolForwardsHostOwnedMissionCorrelation() async throws {
+        let config = MCPServerConfig(name: "linked", command: "/bin/sh")
+        let factory = ReconnectFactory(startOutcomes: [true])
+        let manager = MCPClientManager(
+            serversForTesting: [config], connectionFactory: { factory.make($0) })
+        let discovered = await manager.discoverAndWrapTools(projectRoot: "/tmp")
+        let tool = try XCTUnwrap(discovered.first)
+        let mission = try XCTUnwrap(PlanExecuteMissionID(
+            rawValue: String(repeating: "c", count: 64)))
+        let recorder = TraceRecorder(traceId: mission.rawValue)
+        let context = ToolContext(projectRoot: "/tmp")
+            .withPlanExecuteMission(mission, traceRecorder: recorder)
+
+        _ = try await tool.execute(
+            arguments: [MCPProtocol.correlationMetadataKey: String(repeating: "d", count: 64)],
+            context: context)
+
+        let connection = try XCTUnwrap(factory.connection(at: 0))
+        let receivedCorrelationID = await connection.lastCorrelationID()
+        XCTAssertEqual(receivedCorrelationID, mission.rawValue)
+        await manager.shutdownAll()
+    }
+
+    func testComputerUsePolicyFlowsFromServerConfigIntoDiscoveredTools() async throws {
+        let config = MCPServerConfig(
+            name: "mixed", command: "/bin/sh",
+            computerUsePolicy: .selectedTools(["echo"]))
+        let factory = ReconnectFactory(startOutcomes: [true])
+        let manager = MCPClientManager(
+            serversForTesting: [config], connectionFactory: { factory.make($0) })
+        let tools = await manager.discoverAndWrapTools(projectRoot: "/tmp")
+        let tool = try XCTUnwrap(tools.first)
+        XCTAssertEqual(tool.name, "mixed__echo")
+        XCTAssertEqual(tool.explicitComputerUseRequirement, true)
+        await manager.shutdownAll()
+    }
+
     func testDeadCachedConnectionIsReplacedBeforeNextCall() async throws {
         let config = MCPServerConfig(name: "retry", command: "/bin/sh", args: [], env: [:])
         let factory = ReconnectFactory(startOutcomes: [true, true])
@@ -79,6 +116,7 @@ private actor ReconnectTestConnection: MCPConnection {
     let config: MCPServerConfig
     private let startSucceeds: Bool
     private var alive = false
+    private var receivedCorrelationID: String?
     init(config: MCPServerConfig, startSucceeds: Bool) {
         self.config = config; self.startSucceeds = startSucceeds
     }
@@ -90,10 +128,12 @@ private actor ReconnectTestConnection: MCPConnection {
     func listTools() async throws -> [RemoteToolSpec] {
         [RemoteToolSpec(name: "echo", description: "echo", inputSchema: [:])]
     }
-    func callTool(name: String, arguments: [String: Any]) async throws -> [String: Any] {
+    func callTool(name: String, arguments: [String: Any], correlationID: String?) async throws -> [String: Any] {
         guard alive else { throw MCPConnectionError.serverClosed }
+        receivedCorrelationID = correlationID
         return ["content": [["type": "text", "text": "ok"]]]
     }
+    func lastCorrelationID() -> String? { receivedCorrelationID }
     func shutdown() async { alive = false }
     func kill() { alive = false }
 }

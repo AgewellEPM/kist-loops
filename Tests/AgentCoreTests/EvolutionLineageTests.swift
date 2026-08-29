@@ -7,9 +7,9 @@ final class EvolutionLineageTests: XCTestCase {
 
     private func rec(_ id: String, status: EvolutionCandidateStatus = .passed, score: Int = 100,
                      parent: String? = nil, at: Double = 0, summary: String = "s") -> EvolutionCandidateRecord {
-        EvolutionCandidateRecord(runID: "r", candidateID: id, parentID: parent, objective: "o", branch: "b",
+        EvolutionTestAuthority.seal(EvolutionCandidateRecord(runID: "r", candidateID: id, parentID: parent, objective: "o", branch: "b",
                                  worktreePath: "/w", baseSHA: "0", commitSHA: "1", status: status, score: score,
-                                 changedFiles: ["a.swift"], protectedFiles: [], benchmarks: [], summary: summary, createdAtEpoch: at)
+                                 changedFiles: ["a.swift"], protectedFiles: [], benchmarks: [], summary: summary, createdAtEpoch: at))
     }
 
     func testEmpty() {

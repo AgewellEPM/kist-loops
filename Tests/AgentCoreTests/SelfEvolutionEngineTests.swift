@@ -67,6 +67,16 @@ final class SelfEvolutionEngineTests: XCTestCase {
         XCTAssertTrue(d.promote, "the ONLY path that ships: green gate AND confident independent survival")
     }
 
+    func testSameModelSurvivalIsAdvisoryAndNeverPromotes() {
+        let d = AdversarialPromoteGate.decide(
+            ownTestsPassed: true,
+            adversary: AdversaryVerdict(survived: true, confidence: 1.0),
+            reviewGrade: .freshContextSameModel)
+        XCTAssertFalse(d.promote)
+        XCTAssertTrue(d.reason.contains("identity-distinct"), d.reason)
+        XCTAssertTrue(d.reason.contains("quarantined"), d.reason)
+    }
+
     // MARK: - Engine end-to-end
 
     func testEnginePerslisKnowledgeGapProducesDiscoverAndRetry() {

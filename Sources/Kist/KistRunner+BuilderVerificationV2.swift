@@ -33,11 +33,13 @@ extension KistRunner {
 
     static func builderFinalReplayEvidence(
         receipt: PlanFinalVerificationReceipt?,
+        missionInstanceID: String,
         contractID: String,
         contractFingerprint: String,
         subjectDigest: String
     ) -> BuilderCommandEvidenceReceipt? {
         guard let receipt,
+              receipt.missionInstanceID == missionInstanceID,
               receipt.contractID == contractID,
               receipt.tool == "run_command",
               receipt.hasValidEvidenceDigest,
@@ -49,7 +51,12 @@ extension KistRunner {
               !receipt.commandFingerprint.isEmpty,
               !receipt.outputDigest.isEmpty,
               !receipt.completionContractFingerprint.isEmpty,
-              !receipt.executionPolicyFingerprint.isEmpty else { return nil }
+              !receipt.executionPolicyFingerprint.isEmpty,
+              let reference = receipt.trustedCommandReference,
+              reference.isValid,
+              reference.exitCode == receipt.actualExitCode,
+              !reference.timedOut, !reference.wasSignalled,
+              receipt.outputDigest == reference.fullStreamDigest else { return nil }
         return .boundPrehashed(
             tool: receipt.tool,
             verifierStatus: .passed,
@@ -64,6 +71,20 @@ extension KistRunner {
             trustedCommandReference: receipt.trustedCommandReference,
             completedAt: receipt.verifiedAt
         )
+    }
+
+    /// A successful PlanExecute process is not itself an acceptance fact. The adapter worker may
+    /// advance only when the host also observed the exact mission and authenticated its final replay.
+    static func builderPlanExecuteCompletionGatePassed(
+        adapterPassed: Bool,
+        observedMissionID: String?,
+        expectedMissionID: String?,
+        finalReplay: BuilderCommandEvidenceReceipt?
+    ) -> Bool {
+        guard adapterPassed, let expectedMissionID, !expectedMissionID.isEmpty else {
+            return false
+        }
+        return observedMissionID == expectedMissionID && finalReplay != nil
     }
 
     static func bindBuilderWorkspaceEvidence(
@@ -228,6 +249,61 @@ extension KistRunner {
             payload["missionInstanceID"] = missionInstanceID
         }
         return payload
+    }
+
+    /// Machine-readable proof for the narrow same-model Builder exception. Invocation IDs are the
+    /// ForgeSeal-bound CLI telemetry observation IDs, not operating-system process identifiers.
+    static func builderSameModelReviewReceiptPayload(
+        _ final: BuilderFinalReceipt
+    ) -> [String: Any]? {
+        let review = final.review
+        let votes = review.votes ?? []
+        let completedVotes = votes.filter { !$0.failed }
+        let expectedLenses: Set<String> = ["Correctness", "Security", "Worth", "Completeness"]
+        guard final.hasValidBuilderFinalAuthority,
+              final.accepted, review.accepted, review.checks.allSatisfy(\.passed),
+              review.reviewGrade == .freshContextSameModel,
+              review.independent == false,
+              review.freshConversation == true,
+              review.separateInvocation == true,
+              let producers = review.workerIdentities, producers.count == 1,
+              let reviewer = review.reviewerIdentity, !reviewer.isEmpty,
+              Set(producers) == [reviewer],
+              providerModelIdentity(provider: review.provider, model: review.model) == reviewer,
+              review.reviewThreshold == 3,
+              votes.count == expectedLenses.count,
+              Set(votes.map(\.lens)) == expectedLenses,
+              completedVotes.count >= 3,
+              completedVotes.allSatisfy(\.accepted),
+              votes.allSatisfy({ !$0.failed || !$0.accepted }),
+              let producerInvocations = review.producerInvocationIDs,
+              !producerInvocations.isEmpty,
+              let reviewerInvocations = review.reviewerInvocationIDs,
+              !reviewerInvocations.isEmpty,
+              reviewerInvocations.count == completedVotes.count,
+              Set(producerInvocations).count == producerInvocations.count,
+              Set(reviewerInvocations).count == reviewerInvocations.count,
+              Set(producerInvocations).isDisjoint(with: Set(reviewerInvocations)),
+              let digest = review.evidencePacketDigest,
+              digest.count == 64,
+              digest.allSatisfy({ "0123456789abcdef".contains($0) }) else { return nil }
+        return [
+            "receiptType": "kist.builder-review",
+            "schemaVersion": 1,
+            "decision": final.accepted ? "approve" : "reject",
+            "accepted": final.accepted,
+            "grade": EvolutionReviewGrade.freshContextSameModel.rawValue,
+            "independent": false,
+            "freshConversation": true,
+            "separateInvocation": true,
+            "reviewThreshold": 3,
+            "producerIdentities": producers,
+            "reviewerIdentity": reviewer,
+            "producerInvocationIDs": producerInvocations,
+            "reviewerInvocationIDs": reviewerInvocations,
+            "invocationIDKind": "sealed_cli_telemetry_observation_id",
+            "evidencePacketDigest": digest,
+        ]
     }
 
     static func emitBuilderRunRecord(contractID: String, missionInstanceID: String? = nil,
@@ -471,6 +547,7 @@ extension KistRunner {
         verificationSubject: String? = nil,
         verificationDigest: String? = nil,
         completionEvidence: PromotionCompletionEvidence? = nil,
+        reviewRoutePolicy: ProviderRoutePolicy = .sameProviderAdaptive,
         confirmDeployment: Bool = false
     ) async -> BuilderBudgetedShipReviewResult {
         guard let reservation = await builderReserveOuterReview(
@@ -489,6 +566,7 @@ extension KistRunner {
             verificationSubject: verificationSubject,
             verificationDigest: verificationDigest,
             completionEvidence: completionEvidence,
+            reviewRoutePolicy: reviewRoutePolicy,
             confirmDeployment: confirmDeployment)
         // runShipReview does not expose provider usage. Commit the full bounded
         // four-lens estimate on both GO and NO-GO rather than under-accounting.
@@ -969,7 +1047,9 @@ extension KistRunner {
     static func builderAuthoritativeReviewRoute(
         _ decision: ShipPipeline.Decision,
         expectedProviderID: String,
-        producingIdentities: Set<String>
+        producingIdentities: Set<String>,
+        expectedReviewerIdentity: String? = nil,
+        reviewGrade: EvolutionReviewGrade = .independent
     ) -> BuilderAuthoritativeReviewRoute? {
         guard let votes = decision.verdict?.votes else { return nil }
         let completed = votes.filter { !$0.failed }
@@ -985,15 +1065,26 @@ extension KistRunner {
         }
         guard routes.count == completed.count,
               Set(routes.map(\.identity)).count == 1,
-              routes[0].provider.caseInsensitiveCompare(expectedProviderID) == .orderedSame,
-              !producingIdentities.contains(routes[0].identity) else { return nil }
+              routes[0].provider.caseInsensitiveCompare(expectedProviderID) == .orderedSame else {
+            return nil
+        }
+        switch reviewGrade {
+        case .independent:
+            guard !producingIdentities.contains(routes[0].identity) else { return nil }
+        case .freshContextSameModel:
+            guard expectedReviewerIdentity == routes[0].identity,
+                  producingIdentities == [routes[0].identity] else { return nil }
+        }
         return routes[0]
     }
 
     static func builderReviewRouteFailureFindings(
-        _ decision: ShipPipeline.Decision
+        _ decision: ShipPipeline.Decision,
+        reviewGrade: EvolutionReviewGrade = .independent
     ) -> [String] {
-        let headline = "Outer review did not produce one distinct concrete reviewer route"
+        let headline = reviewGrade == .freshContextSameModel
+            ? "Outer review did not produce the exact fresh-context same-model reviewer route (independent=false)"
+            : "Outer review did not produce one distinct concrete reviewer route"
         let lensFailures = (decision.verdict?.votes ?? []).filter(\.failed).map {
             "\($0.name): \($0.reason)"
         }
@@ -1122,17 +1213,28 @@ extension KistRunner {
                     }
                     let producingIdentities = Set(
                         workerIdentities + (request.contract.producerIdentities ?? []))
-                    guard workerIdentities.count == request.workers.count,
-                          let selection = independentReviewerSelection(
+                    let reviewPolicy = finalizedContract.effectiveReviewPolicy
+                    let reviewCheckName = reviewPolicy.grade.evidenceLabel
+                    let selection = reviewPolicy.grade == .freshContextSameModel
+                        ? freshContextSameModelReviewerSelection(
                             preferred: criticBinding,
                             producingIdentities: producingIdentities,
-                            registry: registry
-                    ) else {
-                        let reason = "No available configured reviewer is distinct from every producing worker: "
-                            + producingIdentities.sorted().joined(separator: ", ")
+                            registry: registry,
+                            policy: reviewPolicy)
+                        : independentReviewerSelection(
+                            preferred: criticBinding,
+                            producingIdentities: producingIdentities,
+                            registry: registry)
+                    guard workerIdentities.count == request.workers.count,
+                          let selection else {
+                        let reason = reviewPolicy.grade == .freshContextSameModel
+                            ? "Fresh-context same-model reviewer does not exactly match the sole producing worker: "
+                                + producingIdentities.sorted().joined(separator: ", ")
+                            : "No available configured reviewer is distinct from every producing worker: "
+                                + producingIdentities.sorted().joined(separator: ", ")
                         return BuilderReviewReceipt(
                             provider: "", model: "", accepted: false,
-                            checks: [.init(name: "independent critic review", passed: false,
+                            checks: [.init(name: reviewCheckName, passed: false,
                                            details: reason)],
                             findings: [reason], workerIdentities: producingIdentities.sorted(),
                             reviewerIdentity: nil
@@ -1156,7 +1258,7 @@ extension KistRunner {
                         let reason = "Typed outer review evidence is incomplete"
                         return BuilderReviewReceipt(provider: selection.binding.providerId,
                             model: selection.binding.model ?? "", accepted: false,
-                            checks: [.init(name: "independent critic review", passed: false, details: reason)],
+                            checks: [.init(name: reviewCheckName, passed: false, details: reason)],
                             findings: [reason], workerIdentities: selection.workerIdentities,
                             reviewerIdentity: selection.identity)
                     }
@@ -1174,7 +1276,7 @@ extension KistRunner {
                         let reason = "Typed outer review mutation evidence rejected: \(failure)"
                         return BuilderReviewReceipt(provider: selection.binding.providerId,
                             model: selection.binding.model ?? "", accepted: false,
-                            checks: [.init(name: "independent critic review", passed: false,
+                            checks: [.init(name: reviewCheckName, passed: false,
                                            details: reason)],
                             findings: [reason], workerIdentities: selection.workerIdentities,
                             reviewerIdentity: selection.identity)
@@ -1196,6 +1298,7 @@ extension KistRunner {
                         hostChecks: request.verification.checks,
                         producerIdentities: selection.workerIdentities,
                         reviewerIdentity: selection.identity,
+                        reviewGrade: selection.reviewGrade,
                         hadChanges: mutationFacts.hadChanges,
                         changedPaths: mutationFacts.paths,
                         mutationReceipts: mutationFacts.receipts,
@@ -1214,7 +1317,7 @@ extension KistRunner {
                         let reason = "Typed outer review evidence rejected: \(failure)"
                         return BuilderReviewReceipt(provider: selection.binding.providerId,
                             model: selection.binding.model ?? "", accepted: false,
-                            checks: [.init(name: "independent critic review", passed: false, details: reason)],
+                            checks: [.init(name: reviewCheckName, passed: false, details: reason)],
                             findings: [reason], workerIdentities: selection.workerIdentities,
                             reviewerIdentity: selection.identity,
                             evidencePacketDigest: completionEvidence.packetDigest)
@@ -1224,7 +1327,7 @@ extension KistRunner {
                         return BuilderReviewReceipt(
                             provider: selection.binding.providerId,
                             model: selection.binding.model ?? "", accepted: false,
-                            checks: [.init(name: "independent critic review", passed: false,
+                            checks: [.init(name: reviewCheckName, passed: false,
                                            details: reason)], findings: [reason],
                             usage: .init(aggregateTokens: 0),
                             workerIdentities: selection.workerIdentities,
@@ -1241,6 +1344,8 @@ extension KistRunner {
                         verificationSubject: request.verification.verificationSubject,
                         verificationDigest: request.verification.subjectDigest,
                         completionEvidence: completionEvidence,
+                        reviewRoutePolicy: selection.reviewGrade == .freshContextSameModel
+                            ? .exact : .sameProviderAdaptive,
                         confirmDeployment: false
                     )
                     guard let decision = budgetedReview.decision else {
@@ -1249,7 +1354,7 @@ extension KistRunner {
                         return BuilderReviewReceipt(
                             provider: selection.binding.providerId,
                             model: selection.binding.model ?? "", accepted: false,
-                            checks: [.init(name: "independent critic review", passed: false,
+                            checks: [.init(name: reviewCheckName, passed: false,
                                            details: reason)], findings: [reason],
                             usage: budgetedReview.usage,
                             workerIdentities: selection.workerIdentities,
@@ -1258,12 +1363,15 @@ extension KistRunner {
                     }
                     guard let authoritativeRoute = builderAuthoritativeReviewRoute(
                         decision, expectedProviderID: selection.binding.providerId,
-                        producingIdentities: producingIdentities) else {
-                        let findings = builderReviewRouteFailureFindings(decision)
+                        producingIdentities: producingIdentities,
+                        expectedReviewerIdentity: selection.identity,
+                        reviewGrade: selection.reviewGrade) else {
+                        let findings = builderReviewRouteFailureFindings(
+                            decision, reviewGrade: selection.reviewGrade)
                         let reason = findings.joined(separator: "; ")
                         return BuilderReviewReceipt(
                             provider: "", model: "", accepted: false,
-                            checks: [.init(name: "independent critic review", passed: false,
+                            checks: [.init(name: reviewCheckName, passed: false,
                                            details: reason)], findings: findings,
                             usage: budgetedReview.usage,
                             workerIdentities: selection.workerIdentities,
@@ -1273,10 +1381,13 @@ extension KistRunner {
                                 BuilderReviewVoteReceipt(
                                     lens: $0.name, accepted: $0.shipWorthy,
                                     reason: $0.reason, failed: $0.failed,
-                                    provider: $0.providerID, model: $0.modelID)
-                            })
+                                    provider: $0.providerID, model: $0.modelID,
+                                    invocationID: $0.invocationID,
+                                    freshConversation: $0.freshConversation)
+                            },
+                            reviewThreshold: decision.verdict?.threshold)
                     }
-                    let check = BuilderCheckReceipt(name: "independent critic review",
+                    let check = BuilderCheckReceipt(name: reviewCheckName,
                                                     passed: decision.canDeploy,
                                                     details: decision.reason)
                     return BuilderReviewReceipt(
@@ -1293,8 +1404,11 @@ extension KistRunner {
                             BuilderReviewVoteReceipt(
                                 lens: $0.name, accepted: $0.shipWorthy,
                                 reason: $0.reason, failed: $0.failed,
-                                provider: $0.providerID, model: $0.modelID)
-                        }
+                                provider: $0.providerID, model: $0.modelID,
+                                invocationID: $0.invocationID,
+                                freshConversation: $0.freshConversation)
+                        },
+                        reviewThreshold: decision.verdict?.threshold
                     )
     }
 }

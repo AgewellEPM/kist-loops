@@ -45,6 +45,32 @@ final class KistBuilderReviewRouteTests: XCTestCase {
             expectedProviderID: "qwen", producingIdentities: ["builder:model"]))
     }
 
+    func testSameIdentityRouteIsAllowedOnlyForExplicitFreshContextSameModelGrade() throws {
+        let identity = "codex-cli:gpt-5.6-sol"
+        let votes = ["Correctness", "Security", "Worth", "Completeness"].map {
+            PromotionMindVote(
+                name: $0, shipWorthy: true, reason: "reviewed",
+                providerID: "codex-cli", modelID: "gpt-5.6-sol",
+                invocationID: "lens-\($0)", freshConversation: true)
+        }
+        let decision = ShipPipeline.Decision(
+            verdict: CouncilPromotionVerdict(
+                votes: votes, isShipWorthy: true, threshold: 3, summary: "approved"),
+            canDeploy: true, reason: "approved", evidencePacketDigest: nil)
+
+        XCTAssertNil(KistRunner.builderAuthoritativeReviewRoute(
+            decision, expectedProviderID: "codex-cli", producingIdentities: [identity]),
+            "independent remains the default and must reject a producer/reviewer identity collision")
+        let sameModel = try XCTUnwrap(KistRunner.builderAuthoritativeReviewRoute(
+            decision, expectedProviderID: "codex-cli", producingIdentities: [identity],
+            expectedReviewerIdentity: identity, reviewGrade: .freshContextSameModel))
+        XCTAssertEqual(sameModel.identity, identity)
+        XCTAssertNil(KistRunner.builderAuthoritativeReviewRoute(
+            decision, expectedProviderID: "codex-cli", producingIdentities: [identity],
+            expectedReviewerIdentity: "codex-cli:other-model",
+            reviewGrade: .freshContextSameModel))
+    }
+
     func testRouteFailureFindingsPreserveEveryFailedLensReason() {
         let votes = ["Correctness", "Security"].map {
             PromotionMindVote(

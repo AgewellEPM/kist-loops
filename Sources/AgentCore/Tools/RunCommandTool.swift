@@ -273,6 +273,9 @@ public struct RunCommandTool: AgentTool {
         // agent polls output / kills it via the `job` tool. Same resolved+gated+sandboxed command; the
         // timeout doesn't apply (a background job runs until it exits or is killed).
         if (arguments["background"] as? Bool) == true {
+            guard context.sandbox.allowBackgroundProcesses else {
+                return .failure("background processes are forbidden by this sandbox policy")
+            }
             let display = (arguments["executable"] as? String).map { "\($0) \((arguments["args"] as? [String] ?? []).joined(separator: " "))" }
                 ?? (arguments["command"] as? String) ?? limited.launchPath
             // Refuse past the concurrent-job cap with a clear message (the store also enforces it as a
@@ -329,6 +332,12 @@ public struct RunCommandTool: AgentTool {
         // ProcessGroupRunner.run blocks (posix_spawn + group teardown + reap), so run it on
         // a background queue and await the outcome.
         let telemetrySink = BuilderTrustedTelemetry.captureCommandSink()
+        let builderSandboxAuthority: BuilderSandboxExecutionAuthority?
+        do {
+            builderSandboxAuthority = try BuilderOSProcessSandboxAttestor.currentExecutionAuthority()
+        } catch {
+            return .failure("Builder OS sandbox activation is invalid: \(error.localizedDescription)")
+        }
         let requestedDigest = Self.requestedCommandDigest(
             launchPath: requestedLaunchPath ?? launchPath,
             launchArgs: requestedLaunchArgs ?? launchArgs,
@@ -341,7 +350,9 @@ public struct RunCommandTool: AgentTool {
                     env: scrubbedEnvironment(), timeoutSeconds: timeout, capPerStream: maxOutputBytes,
                     stdinData: standardInput.data, stdinByteLimit: maxStdinBytes,
                     telemetrySink: telemetrySink,
-                    requestedArgumentsDigest: requestedDigest
+                    requestedArgumentsDigest: requestedDigest,
+                    builderSandboxAuthority: builderSandboxAuthority,
+                    requireBuilderSandbox: builderSandboxAuthority != nil
                 )
                 cont.resume(returning: o)
             }

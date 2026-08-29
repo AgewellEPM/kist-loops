@@ -181,6 +181,46 @@ final class MCPClientTests: XCTestCase {
         XCTAssertEqual(servers.first?.command, sh)
     }
 
+    func testConfig_computerUseMetadataSupportsDedicatedAndMixedServers() throws {
+        let executable = FileManager.default.fileExists(atPath: "/bin/echo") ? "/bin/echo" : "/usr/bin/true"
+        try writeConfig("""
+        {"mcpServers":{
+          "control":{"command":"\(executable)","computerUse":true},
+          "lsp":{"command":"\(executable)","computerUse":false},
+          "mixed":{"command":"\(executable)","computerUseTools":["vm_control","vm_launch"]}
+        }}
+        """)
+        let (servers, issues) = MCPClientConfig.load(
+            projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+        XCTAssertTrue(issues.isEmpty, issues.map(\.reason).joined(separator: "; "))
+        let policies = Dictionary(uniqueKeysWithValues: servers.map { ($0.name, $0.computerUsePolicy) })
+        XCTAssertEqual(policies["control"], .allTools)
+        XCTAssertEqual(policies["lsp"], .noTools)
+        XCTAssertEqual(policies["mixed"], .selectedTools(["vm_control", "vm_launch"]))
+        XCTAssertEqual(policies["mixed"]?.explicitRequirement(for: "vm_control"), true)
+        XCTAssertNil(policies["mixed"]?.explicitRequirement(for: "unknown_future_tool"),
+                     "unlisted mixed-server tools must retain heuristic defense in depth")
+    }
+
+    func testConfig_malformedComputerUseMetadataRejectsServerFailClosed() throws {
+        let executable = FileManager.default.fileExists(atPath: "/bin/echo") ? "/bin/echo" : "/usr/bin/true"
+        let invalidEntries = [
+            "\"computerUse\":\"yes\"",
+            "\"computerUse\":1",
+            "\"computerUseTools\":\"vm_control\"",
+            "\"computerUseTools\":[\"vm_control\",\"vm_control\"]",
+            "\"computerUse\":true,\"computerUseTools\":[\"vm_control\"]",
+            "\"computerUseTools\":[\"\"]",
+        ]
+        for invalid in invalidEntries {
+            try writeConfig("{\"mcpServers\":{\"bad\":{\"command\":\"\(executable)\",\(invalid)}}}")
+            let (servers, issues) = MCPClientConfig.load(
+                projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+            XCTAssertTrue(servers.isEmpty, "malformed metadata must not leave a runnable server: \(invalid)")
+            XCTAssertTrue(issues.contains { $0.server == "bad" }, "missing issue for: \(invalid)")
+        }
+    }
+
     func testConfig_secretEnvKeyWarnsButAccepts() throws {
         let sh = FileManager.default.fileExists(atPath: "/bin/sh") ? "/bin/sh" : "/bin/bash"
         try writeConfig(#"{"mcpServers":{"gh":{"command":"\#(sh)","env":{"GITHUB_TOKEN":"abc"}}}}"#)

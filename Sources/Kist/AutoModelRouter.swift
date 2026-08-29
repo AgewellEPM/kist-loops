@@ -53,6 +53,16 @@ struct AutoModelRouter: Equatable {
         // dogfooding ("everything flips to gemini"). Vision (media) and reasoning above are the ONLY
         // reasons to switch models; everything else stays put. It also keeps a model that streams
         // reasoning (so the "thinking" display keeps working) instead of a silent flash model.
+        //
+        // EXCEPTION (routing audit 2026-08-25): "stay" must not mean "stay on a provider we already
+        // KNOW is down/cooling". Before this, avoid() was consulted only when SWITCHING, so ordinary
+        // no-signal turns — the majority — re-picked a dead provider every turn and died identically.
+        // Fail-open: if every candidate is also unavailable, stay put (last resort, loud failure).
+        if avoid(stayTarget.providerId),
+           let warm = candidates.first(where: { !avoid($0.binding.providerId) }) {
+            return Decision(binding: warm.binding, tier: .fast,
+                            reason: "current provider \(stayTarget.providerId) unavailable (health/cooldown) → \(warm.binding.providerId)")
+        }
         return Decision(binding: stayTarget, tier: .fast, reason: "staying on current model")
     }
 
@@ -96,6 +106,14 @@ struct AutoModelRouter: Equatable {
         // is not confident enough to switch to — stay put rather than walk into the wall.
         if signal, a.binding != fallback, a.confidence >= 0.5, !avoid(a.binding.providerId) {
             return Decision(binding: a.binding, tier: .reasoning, reason: "captain · \(a.reason)")
+        }
+        // The stability default must not pin a provider we already KNOW is down/cooling (routing
+        // audit 2026-08-25: avoid() previously applied only to the switch branch, so no-signal turns
+        // stayed on dead ollama forever). If the Captain's pick is warm, take it regardless of
+        // signal/confidence — a live model beats a dead favourite. Fail-open when both are cold.
+        if avoid(fallback.providerId), a.binding != fallback, !avoid(a.binding.providerId) {
+            return Decision(binding: a.binding, tier: .reasoning,
+                            reason: "current provider \(fallback.providerId) unavailable (health/cooldown) → captain pick · \(a.reason)")
         }
         return Decision(binding: fallback, tier: .fast, reason: "staying on current model")
     }

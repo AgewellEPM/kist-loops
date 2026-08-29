@@ -432,7 +432,8 @@ public struct PlanExecuteLoop: Sendable {
         // would teach future planning runs a false "this goal fails".
         if !outcome.interrupted {
             memory?.recordEpisode(Episode(goal: checkpointGoal, success: outcome.success,
-                                          summary: outcome.message, at: Date()))
+                                          summary: outcome.message, at: Date(),
+                                          missionID: missionInstanceID))
         }
         return outcome
     }
@@ -494,12 +495,21 @@ public struct PlanExecuteLoop: Sendable {
                     canonicalFunctionalObjectiveFingerprint,
                 "executionPolicyFingerprint": executionPolicyFingerprint,
             ])
+        let checkpointProjectIdentity: String
+        do {
+            checkpointProjectIdentity = try AcceptedRunReceipt.computeProjectIdentity(
+                projectRoot: context.projectRoot)
+        } catch {
+            throw ReasoningControlError.invalidState(
+                "active project identity is unavailable: \(error.localizedDescription)")
+        }
         var control: ReasoningControlState
         switch launchMode {
         case .fresh:
             var initial = ReasoningControlState(
                 id: runID, route: .planned, goalFingerprint: goalFingerprint,
-                missionInstanceID: missionInstanceID)
+                missionInstanceID: missionInstanceID,
+                projectIdentity: checkpointProjectIdentity)
             try initial.configureWorkspaceLifecycle(
                 canonicalFunctionalObjectiveFingerprint: canonicalFunctionalObjectiveFingerprint,
                 workspaceManifestPolicyFingerprint: workspaceManifest.policyFingerprint,
@@ -512,6 +522,10 @@ public struct PlanExecuteLoop: Sendable {
                 throw ReasoningControlError.invalidState(
                     "explicit resume mission checkpoint was not found")
             }
+            guard restored.schemaVersion == ReasoningControlState.currentSchemaVersion else {
+                throw ReasoningControlError.invalidState(
+                    "legacy checkpoint schema is not resumable")
+            }
             guard let storedMission = restored.missionInstanceID else {
                 throw ReasoningControlError.invalidState(
                     "legacy checkpoint has no mission instance ID and is not resumable")
@@ -519,6 +533,10 @@ public struct PlanExecuteLoop: Sendable {
             guard storedMission == missionInstanceID else {
                 throw ReasoningControlError.invalidState(
                     "resume mission instance ID does not match checkpoint")
+            }
+            guard restored.projectIdentity == checkpointProjectIdentity else {
+                throw ReasoningControlError.invalidState(
+                    "checkpoint belongs to a different physical project")
             }
             if let stored = restored.goalFingerprint, stored != goalFingerprint {
                 throw ReasoningControlError.invalidState("checkpoint belongs to a different goal")
@@ -671,7 +689,10 @@ public struct PlanExecuteLoop: Sendable {
             // 1) Obtain a VALID plan (propose or replan, with bounded repair).
             let planResult: PlanResult
             if let snapshot = resumeSnapshot {
-                planResult = .ok(snapshot.plan, lintWarnings: snapshot.lintWarnings)
+                let resumedLint = PlanLint.findings(for: snapshot.plan)
+                planResult = resumedLint.isEmpty
+                    ? .ok(snapshot.plan, lintWarnings: [])
+                    : .decompositionExhausted(snapshot.plan, findings: resumedLint)
                 resumeSnapshot = nil
             } else {
                 planResult = await obtainPlan(&messages, context: scopedContext)
@@ -699,6 +720,12 @@ public struct PlanExecuteLoop: Sendable {
                 return PlanOutcome(success: false, plan: lastPlan, execution: lastExecution,
                                    message: "could not produce a valid plan after \(maxPlanRepairs + 1) attempts",
                                    replansUsed: replansUsed)
+            case .decompositionExhausted(let rejected, let findings):
+                let reason = "singular-step decomposition exhausted; refusing to execute lumpy plan:\n- "
+                    + findings.joined(separator: "\n- ")
+                sink.emit(.failed(reason))
+                return PlanOutcome(success: false, plan: rejected, execution: lastExecution,
+                                   message: reason, replansUsed: replansUsed)
             case .ok(let plan, let lintWarnings):
                 let ownershipErrors = plan.validate(hostOwnedFinalReview: hostOwnedFinalReview)
                 let durabilityPreflight = Self.durablePlanPersistencePreflight(plan)
@@ -1661,10 +1688,10 @@ public struct PlanExecuteLoop: Sendable {
     // MARK: - Planning (propose + repair)
 
     private enum PlanResult {
-        /// `lintWarnings` non-empty ⇒ the plan is structurally valid but still violates the
-        /// SINGULAR-STEP lint after all re-split attempts — executed anyway (advisory), with the
-        /// findings surfaced in the plan summary. A lint false positive must never brick a run.
+        /// `lintWarnings` remains in the shape for durable legacy snapshots, but newly accepted plans
+        /// always carry an empty list. A plan that violates the singular-step contract never executes.
         case ok(ExecutablePlan, lintWarnings: [String])
+        case decompositionExhausted(ExecutablePlan, findings: [String])
         case invalid, providerError(String), budgetExceeded(Int)
     }
 
@@ -1695,8 +1722,8 @@ public struct PlanExecuteLoop: Sendable {
             }
             let errors = parsed.validate(hostOwnedFinalReview: hostOwnedFinalReview)
             if errors.isEmpty {
-                // R3: a lumpy plan is re-split before it executes — violations fed back for a
-                // bounded repair (same budget as validation). Lint is ADVISORY at exhaustion.
+                // R3: a lumpy plan is re-split before it executes — violations feed a bounded repair
+                // loop. Exhaustion is fail-closed below; no rejected lump can become executable proof.
                 let lint = PlanLint.findings(for: parsed)
                 if lint.isEmpty { return .ok(parsed, lintWarnings: []) }
                 lastLintRejected = (parsed, lint)
@@ -1708,10 +1735,11 @@ public struct PlanExecuteLoop: Sendable {
             messages.append(ChatMessage(role: .user, content:
                 "Your plan has these problems:\n\(Self.describe(errors))\nOutput a corrected JSON plan (same format)."))
         }
-        // Repairs exhausted. A structurally-VALID plan that only failed the singular-step lint is
-        // degraded, not useless — execute it with the findings surfaced instead of failing the
-        // goal (protects real missions from lint false positives, e.g. exotic quoting).
-        if let last = lastLintRejected { return .ok(last.plan, lintWarnings: last.findings) }
+        // Repairs exhausted. Preserve the rejected plan/findings as diagnostic context, but do not
+        // execute it. A later bounded re-plan can shrink the work without laundering this rejection.
+        if let last = lastLintRejected {
+            return .decompositionExhausted(last.plan, findings: last.findings)
+        }
         return .invalid
     }
 

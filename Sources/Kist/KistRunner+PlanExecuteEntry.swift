@@ -9,6 +9,35 @@ import Glibc
 // plan-execute entry points — extracted from KistRunner.swift to keep the core orchestration file under the
 // size limit. Part of `enum KistRunner`.
 extension KistRunner {
+    struct PlanExecuteCorrelationBundle {
+        let missionID: PlanExecuteMissionID
+        let recorder: TraceRecorder
+        let runReplay: RunReplayStore
+        let context: ToolContext
+    }
+
+    static func makePlanExecuteCorrelation(
+        launchMode: PlanExecuteLaunchMode,
+        freshMissionInstanceID: PlanExecuteMissionID?,
+        projectRoot: String,
+        providerID: String,
+        model: String?,
+        context: ToolContext
+    ) -> PlanExecuteCorrelationBundle {
+        let missionID: PlanExecuteMissionID
+        switch launchMode {
+        case .fresh: missionID = freshMissionInstanceID ?? .fresh()
+        case .resume(let resumed): missionID = resumed
+        }
+        let recorder = TraceRecorder(traceId: missionID.rawValue)
+        return PlanExecuteCorrelationBundle(
+            missionID: missionID,
+            recorder: recorder,
+            runReplay: RunReplayStore(projectRoot: projectRoot, provider: providerID,
+                                      model: model, runID: missionID.rawValue),
+            context: context.withPlanExecuteMission(missionID, traceRecorder: recorder))
+    }
+
     /// Run a plan→execute: the planner emits a typed DAG, you approve it (unless --yolo), then the team
     /// builds it. Shared by the `--plan-execute` one-shot and the REPL's `/plan-execute` escalation.
     static func runPlanExecute(_ opts: KistOptions, goal: String, registry: ProviderRegistry,
@@ -74,11 +103,18 @@ extension KistRunner {
             err("captain refused to execute: simulation gate did not accept this plan.")
             return 1
         }
-        let recorder = TraceRecorder(traceId: TraceID.make())
+        let correlation = makePlanExecuteCorrelation(
+            launchMode: launchMode,
+            freshMissionInstanceID: freshMissionInstanceID,
+            projectRoot: root,
+            providerID: providerId,
+            model: model,
+            context: context)
+        let recorder = correlation.recorder
         // Reuse the caller's ledger when handed one (e.g. --council-execute) so the whole run shares a
         // single cap; otherwise create this run's own (Codex gate C3#1).
         let budget = budgetOverride ?? opts.makeBudget()
-        let runReplay = RunReplayStore(projectRoot: root, provider: providerId, model: model)
+        let runReplay = correlation.runReplay
         let proofStore = TurnProofStore(replayStore: runReplay)
         proofStore.startTurn(goal: goal)
         // R2a: plan-execute is the LONGEST-running surface — typing must render there too, not
@@ -98,12 +134,13 @@ extension KistRunner {
         let functionalPlanGoal = functionalObjective.map(withSessionContext)
         let canonicalFunctionalPlanGoal = canonicalFunctionalObjective
             ?? PlanExecuteCompletionContract.functionalObjective(from: checkpointGoal ?? goal)
-        let pxl = PlanExecuteLoop(providers: registry, roles: roles, tools: tools, context: context,
+        let pxl = PlanExecuteLoop(providers: registry, roles: roles, tools: tools,
+                                  context: correlation.context,
                                   sink: planSink,
                                   interactor: opts.yolo ? AutoApproveInteractor() : terminalInteractor(for: opts),
                                   requireApproval: !opts.yolo, recorder: recorder, budget: budget, memory: memory,
                                   launchMode: launchMode,
-                                  freshMissionInstanceID: freshMissionInstanceID,
+                                  freshMissionInstanceID: correlation.missionID,
                                   completionContract: completionContract,
                                   hostOwnedFinalReview: hostOwnedFinalReview,
                                   functionalObjective: functionalPlanGoal,
@@ -118,20 +155,28 @@ extension KistRunner {
         }
         let pOut = await pxl.run(goal: planGoal, checkpointGoal: checkpointGoal ?? goal)
         outcomeCapture?(pOut)
+        let missionSpans = await recorder.all()
         for line in await recorder.summary().terminalLines() { note(line) }
+        // Persist both LLM and tool spans. Their traceId is the mission/run root, so the dashboard can
+        // join usage activity to the matching `.kist/runs/<mission>/` replay without a second id.
+        printUsageDelta(from: [], to: missionSpans, label: "plan-execute usage", projectRoot: root)
         note(pOut.success ? "✓ \(pOut.message)" : "✗ \(pOut.message)")
         note("replay · kist --replay \(runReplay.manifest.runID)")
         // Learn from the VERIFIED outcome: plan-execute success is critic-verified, so it's a PROVEN
         // lesson (with a real source); a failure is an obstacle. Memory stays advisory.
-        if !opts.noMemory {
+        if !opts.noMemory,
+           let projectIdentity = try? AcceptedRunReceipt.computeProjectIdentity(
+               projectRoot: root) {
             let store = LessonStore(); let at = Date().timeIntervalSince1970
+            let lessonSource = "plan-execute:\(missionToken):\(projectIdentity)"
             if pOut.success {
                 store.record(Lesson(kind: .proven, text: "accomplished via plan→execute: \(goal.prefix(120))",
-                                    source: "plan-execute", at: at))
+                                    source: lessonSource, at: at))
             } else if !pOut.interrupted {
                 // R1: an ESC'd run must NOT book an obstacle lesson — a user cancel is zero
                 // evidence the goal fails, and obstacle lessons outrank proven ones in retrieval.
-                store.record(Lesson(kind: .obstacle, text: "plan→execute failed: \(goal.prefix(120))", source: nil, at: at))
+                store.record(Lesson(kind: .obstacle, text: "plan→execute failed: \(goal.prefix(120))",
+                                    source: lessonSource, at: at))
             }
         }
         return pOut.success ? 0 : 1

@@ -17,6 +17,15 @@ func builderFinalVerifierIdentitiesMatch(
                 provider: rhs.providerID, model: rhs.modelID)
     )
 }
+private struct BuilderReviewProvenanceFacts {
+    let reviewGrade: EvolutionReviewGrade
+    let independent: Bool
+    let freshConversation: Bool?
+    let separateInvocation: Bool?
+    let producerInvocationIDs: [String]?
+    let reviewerInvocationIDs: [String]?
+    let reviewThreshold: Int?
+}
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -36,6 +45,7 @@ public actor BuilderRun {
     private let nodeObservationSourceProvider: (any BuilderNodeObservationSourceProvider)?
     private let readOnlyObservationSourceProvider: (any BuilderReadOnlyObservationSourceProvider)?
     private let configuredAggregateTransaction: BuilderAggregateTransactionDescriptor?
+    private let finalAcceptanceCommit: BuilderFinalAcceptanceCommit?
     public init(
         contract: BuilderContract,
         graph: BuilderGraph,
@@ -50,6 +60,7 @@ public actor BuilderRun {
         readOnlyObservationSourceProvider: (any BuilderReadOnlyObservationSourceProvider)? = nil,
         aggregateTransaction: BuilderAggregateTransactionDescriptor? = nil,
         stageObservationSource: (any BuilderStageObservationSource)? = nil,
+        finalAcceptanceCommit: BuilderFinalAcceptanceCommit? = nil,
         execute: @escaping BuilderExecute,
         verify: @escaping BuilderVerify,
         review: @escaping BuilderReview
@@ -60,6 +71,8 @@ public actor BuilderRun {
         guard identicalFailureLimit > 0 else {
             throw BuilderRunError.invalidConfiguration("identicalFailureLimit must be positive")
         }
+        try validateBuilderReviewConfiguration(
+            contract: contract, graph: graph, graphExecutionPolicy: graphExecutionPolicy)
         if contract.effectiveCompletionMode == .build, graphExecutionPolicy == nil {
             throw BuilderRunError.invalidConfiguration(
                 "build/mutation runs require an explicit graph execution policy; legacy execution is read-only only")
@@ -128,6 +141,10 @@ public actor BuilderRun {
                 try executionContract.validate(
                     builderContractID: contract.id,
                     graphNodeIDs: graph.nodes.map(\.id))
+                try validateBuilderExecutionReviewPolicy(
+                    executionContract.contract, parent: contract)
+                try validateBuilderDisposableReviewSource(
+                    stageObservationSource, parent: contract)
             } catch {
                 throw BuilderRunError.invalidConfiguration(
                     "invalid sealed execution contract: \(error.localizedDescription)")
@@ -146,6 +163,7 @@ public actor BuilderRun {
         self.nodeObservationSourceProvider = nodeObservationSourceProvider
         self.readOnlyObservationSourceProvider = readOnlyObservationSourceProvider
         self.configuredAggregateTransaction = aggregateTransaction
+        self.finalAcceptanceCommit = finalAcceptanceCommit
         if let sealed = contract.executionContract {
             self.executionGovernance = try BuilderExecutionGovernanceRuntime(
                 sealed: sealed, source: stageObservationSource, beside: store.fileURL)
@@ -245,6 +263,14 @@ public actor BuilderRun {
             selection = derived
         }
 
+        do {
+            try validateBuilderExecutionReviewPolicy(
+                selection.sealedContract.contract, parent: contract)
+        } catch {
+            throw BuilderDynamicContractError.invalidSealedContract(
+                "child review policy drifted from its parent: \(error.localizedDescription)")
+        }
+
         let source = try await sourceProvider.source(for: .init(
             builderContractID: contract.id,
             graphNodeIDs: graphNodeIDs,
@@ -252,6 +278,7 @@ public actor BuilderRun {
             attempt: attempt,
             contractFingerprint: selection.contractFingerprint,
             contractSealReference: selection.contractSealReference))
+        try validateBuilderDisposableReviewSource(source, parent: contract)
         let runtime = try BuilderExecutionGovernanceRuntime(
             sealed: selection.sealedContract,
             source: source,
@@ -290,6 +317,13 @@ public actor BuilderRun {
                 providerIdentity: provider.identity,
                 parentAllowedPaths: contract.allowedPaths,
                 nodeWriteClaims: node.resources.filter { $0.access == .write }.map(\.path))
+            do {
+                try validateBuilderExecutionReviewPolicy(
+                    selection.sealedContract.contract, parent: contract)
+            } catch {
+                throw BuilderRunError.persistedStateInvalid(
+                    "persisted child review policy drifted from its parent: \(error.localizedDescription)")
+            }
             let source = try await sourceProvider.source(for: .init(
                 builderContractID: contract.id,
                 graphNodeIDs: graphNodeIDs,
@@ -297,6 +331,13 @@ public actor BuilderRun {
                 attempt: selection.attempt,
                 contractFingerprint: selection.contractFingerprint,
                 contractSealReference: selection.contractSealReference))
+            do {
+                try validateBuilderDisposableReviewSource(source, parent: contract)
+            } catch {
+                throw BuilderRunError.persistedStateInvalid(
+                    "persisted same-model review source is no longer eligible: "
+                        + error.localizedDescription)
+            }
             let runtime = try BuilderExecutionGovernanceRuntime(
                 sealed: selection.sealedContract,
                 source: source,
@@ -488,6 +529,8 @@ public actor BuilderRun {
                 throw BuilderRunError.persistedStateInvalid(
                     "pending final receipt lacks a durable global acceptance decision")
             }
+            try validatePersistedReviewProvenance(
+                pending.review, workers: pending.workers, snapshot: snapshot)
             do {
                 let refreshed: BuilderVerifierReceipt
                 if let aggregate {
@@ -511,10 +554,12 @@ public actor BuilderRun {
                     throw BuilderRunError.finalVerificationFailed(
                         "finalized workspace does not match the pending acceptance digest")
                 }
-                let receipt = BuilderFinalReceipt(
+                let unsignedReceipt = BuilderFinalReceipt(
                     contractID: pending.contractID, route: pending.route,
                     workers: pending.workers, verification: refreshed,
                     review: pending.review, accepted: true, completedAt: pending.completedAt)
+                let receipt = try authorizePublishedFinal(
+                    unsignedReceipt, snapshot: snapshot)
                 snapshot.finalReceipt = receipt
                 snapshot.pendingFinalReceipt = nil
                 snapshot.finalizationPending = false
@@ -538,13 +583,9 @@ public actor BuilderRun {
             }
         }
         if let completed = snapshot.finalReceipt, completed.accepted {
-            let producers = try canonicalProducerIdentities(contract: contract, workers: completed.workers)
-            guard let storedReviewer = canonicalIdentity(completed.review.reviewerIdentity ?? ""),
-                  let storedProducers = canonicalIdentitySet(completed.review.workerIdentities ?? []),
-                  storedProducers == producers, !producers.contains(storedReviewer) else {
-                throw BuilderRunError.reviewerNotIndependent(
-                    "persisted completion receipt has missing, unknown, self-reviewing, or mismatched provenance")
-            }
+            try validatePublishedFinalAuthority(completed, snapshot: snapshot)
+            try validatePersistedReviewProvenance(
+                completed.review, workers: completed.workers, snapshot: snapshot)
             if let aggregate {
                 guard let aggregateSource else {
                     throw BuilderRunError.persistedStateInvalid(
@@ -563,6 +604,7 @@ public actor BuilderRun {
                         "persisted verification is stale for the current governed workspace digest")
                 }
             }
+            try await commitAcceptedFinalExternally(completed, snapshot: snapshot)
             await releaseAcceptedRetainedData(
                 aggregate: aggregate, aggregateSource: aggregateSource,
                 runtimes: governedRuntimes, snapshot: snapshot)
@@ -964,9 +1006,34 @@ let executionRequest = BuilderExecutionRequest(
                 }
             }
         }
+        if let threshold = submittedReview.reviewThreshold,
+           !builderCouncilReviewVoteSemantics(
+                submittedReview.votes ?? [], threshold: threshold) {
+            throw BuilderRunError.reviewRejected([
+                "review receipt does not preserve the 3-of-4 zero-veto council decision",
+            ])
+        }
         let builderIdentities = try canonicalProducerIdentities(contract: contract, workers: workers)
-        guard !builderIdentities.contains(reviewerIdentity) else {
-            throw BuilderRunError.reviewerNotIndependent(reviewerIdentity)
+        let provenance: BuilderReviewProvenanceFacts
+        switch contract.effectiveReviewPolicy.grade {
+        case .independent:
+            guard !builderIdentities.contains(reviewerIdentity) else {
+                throw BuilderRunError.reviewerNotIndependent(reviewerIdentity)
+            }
+            provenance = BuilderReviewProvenanceFacts(
+                reviewGrade: .independent, independent: true,
+                freshConversation: nil, separateInvocation: nil,
+                producerInvocationIDs: nil, reviewerInvocationIDs: nil,
+                reviewThreshold: submittedReview.reviewThreshold)
+        case .freshContextSameModel:
+            provenance = try sameModelReviewProvenance(
+                reviewerIdentity: reviewerIdentity,
+                producerIdentities: builderIdentities,
+                workers: workers,
+                votes: submittedReview.votes ?? [],
+                reviewThreshold: submittedReview.reviewThreshold,
+                rawReviewTelemetry: rawReviewTelemetry,
+                snapshot: snapshot)
         }
         let reviewReceipt = BuilderReviewReceipt(
             provider: submittedReview.provider,
@@ -978,7 +1045,14 @@ let executionRequest = BuilderExecutionRequest(
             workerIdentities: builderIdentities.sorted(),
             reviewerIdentity: reviewerIdentity,
             evidencePacketDigest: submittedReview.evidencePacketDigest,
-            votes: submittedReview.votes
+            votes: submittedReview.votes,
+            reviewGrade: provenance.reviewGrade,
+            independent: provenance.independent,
+            freshConversation: provenance.freshConversation,
+            separateInvocation: provenance.separateInvocation,
+            producerInvocationIDs: provenance.producerInvocationIDs,
+            reviewerInvocationIDs: provenance.reviewerInvocationIDs,
+            reviewThreshold: provenance.reviewThreshold
         )
         if contract.producerIdentities != nil,
            reviewReceipt.evidencePacketDigest?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
@@ -993,7 +1067,14 @@ let executionRequest = BuilderExecutionRequest(
             missionInstanceID: contract.checkpointIdentity.flatMap { value in
                 value.count == 64 && value.allSatisfy { "0123456789abcdef".contains($0) }
                     ? value : nil
-            })
+            },
+            reviewGrade: provenance.reviewGrade,
+            independent: provenance.independent,
+            freshConversation: provenance.freshConversation,
+            separateInvocation: provenance.separateInvocation,
+            producerInvocationIDs: provenance.producerInvocationIDs,
+            reviewerInvocationIDs: provenance.reviewerInvocationIDs,
+            reviewThreshold: provenance.reviewThreshold)
         try await persist(&snapshot)
         guard reviewReceipt.accepted, reviewReceipt.checks.allSatisfy(\.passed) else {
             var rollbackFailures: [String] = []
@@ -1099,6 +1180,8 @@ let executionRequest = BuilderExecutionRequest(
             }
         }
         try validateTrustedTelemetry(snapshot)
+        try validatePersistedReviewProvenance(
+            reviewReceipt, workers: workers, snapshot: snapshot)
         let commitEpoch = BuilderEvidenceDigest.sha256(
             "\(contract.id):\(try parentContractFingerprint(contract)):\(Date().timeIntervalSince1970):\(UUID().uuidString)")
         let pendingFinal = BuilderFinalReceipt(
@@ -1122,11 +1205,13 @@ let executionRequest = BuilderExecutionRequest(
                     aggregate, source: aggregateSource, commitEpoch: commitEpoch,
                     workers: workers, expected: acceptedProof,
                     runtimes: governedRuntimes, snapshot: &snapshot)
-                let publishedFinal = BuilderFinalReceipt(
+                let unsignedFinal = BuilderFinalReceipt(
                     contractID: pendingFinal.contractID, route: pendingFinal.route,
                     workers: pendingFinal.workers, verification: finalizedProof,
                     review: pendingFinal.review, accepted: true,
                     completedAt: pendingFinal.completedAt)
+                let publishedFinal = try authorizePublishedFinal(
+                    unsignedFinal, snapshot: snapshot)
                 snapshot.finalizationPending = false
                 snapshot.pendingFinalReceipt = nil
                 snapshot.finalReceipt = publishedFinal
@@ -1179,11 +1264,13 @@ let executionRequest = BuilderExecutionRequest(
                 throw BuilderRunError.finalVerificationFailed(
                     "finalized workspace changed after the pending acceptance decision")
             }
-            let publishedFinal = BuilderFinalReceipt(
+            let unsignedFinal = BuilderFinalReceipt(
                 contractID: pendingFinal.contractID, route: pendingFinal.route,
                 workers: pendingFinal.workers, verification: finalizedProof,
                 review: pendingFinal.review, accepted: true,
                 completedAt: pendingFinal.completedAt)
+            let publishedFinal = try authorizePublishedFinal(
+                unsignedFinal, snapshot: snapshot)
             snapshot.finalizationPending = false
             snapshot.pendingFinalReceipt = nil
             snapshot.finalReceipt = publishedFinal
@@ -1498,6 +1585,219 @@ let executionRequest = BuilderExecutionRequest(
         }
     }
 
+    private func sameModelReviewProvenance(
+        reviewerIdentity: String,
+        producerIdentities: Set<String>,
+        workers: [BuilderWorkerReceipt],
+        votes: [BuilderReviewVoteReceipt],
+        reviewThreshold: Int?,
+        rawReviewTelemetry: [BuilderTrustedTelemetryObservation],
+        snapshot: BuilderRunSnapshot
+    ) throws -> BuilderReviewProvenanceFacts {
+        let policy = contract.effectiveReviewPolicy
+        guard policy.authorizesDisposableFreshContextSameModel,
+              producerIdentities == [reviewerIdentity],
+              workers.count == 1,
+              identity(workers[0].provider, workers[0].model) == reviewerIdentity,
+              workers[0].claimsSubscriptionCLI else {
+            throw BuilderRunError.reviewRejected([
+                "fresh_context_same_model provenance is not bound to one exact subscription-CLI producer",
+            ])
+        }
+
+        guard reviewThreshold == 3,
+              builderCouncilReviewVoteSemantics(votes, threshold: 3) else {
+            throw BuilderRunError.reviewRejected([
+                "fresh_context_same_model requires the sealed 3-of-4 zero-veto council protocol",
+            ])
+        }
+        let completedVotes = votes.filter { !$0.failed }
+        let lensInvocationIDs = completedVotes.compactMap(\.invocationID)
+        let voteRoutes = completedVotes.compactMap { vote -> String? in
+            guard let provider = vote.provider, let model = vote.model else { return nil }
+            return identity(provider, model)
+        }
+        guard !completedVotes.isEmpty,
+              completedVotes.allSatisfy({ $0.freshConversation == true }),
+              lensInvocationIDs.count == completedVotes.count,
+              Set(lensInvocationIDs).count == completedVotes.count,
+              voteRoutes.count == completedVotes.count,
+              voteRoutes.allSatisfy({ $0 == reviewerIdentity }) else {
+            throw BuilderRunError.reviewRejected([
+                "fresh_context_same_model votes lack unique fresh-call provenance on the exact route",
+            ])
+        }
+
+        let expectedParent = try parentContractFingerprint(contract)
+        guard !rawReviewTelemetry.isEmpty,
+              rawReviewTelemetry.allSatisfy({
+                  $0.contractFingerprint == expectedParent && $0.stage == .review
+              }) else {
+            throw BuilderRunError.reviewRejected([
+                "fresh_context_same_model telemetry is not bound to the parent review stage",
+            ])
+        }
+        for observation in rawReviewTelemetry {
+            try observation.validate(binding: .init(
+                contractFingerprint: observation.contractFingerprint,
+                nodeID: observation.nodeID, attempt: observation.attempt,
+                stage: observation.stage))
+        }
+        let providerObservations = rawReviewTelemetry.filter { $0.kind == .provider }
+        let successfulProviders = providerObservations.filter(\.success)
+        guard providerObservations.allSatisfy({
+                  identity($0.providerID ?? "", $0.modelID ?? "") == reviewerIdentity
+                      && $0.name.hasPrefix("completion")
+              }),
+              successfulProviders.count == completedVotes.count,
+              successfulProviders.allSatisfy({ $0.name == "completion" }) else {
+            throw BuilderRunError.reviewRejected([
+                "fresh_context_same_model provider telemetry is missing, extra, or not exact-route",
+            ])
+        }
+        let reviewerCLI = rawReviewTelemetry.filter { $0.kind == .cliProviderInvocation }
+        guard reviewerCLI.count == completedVotes.count,
+              reviewerCLI.allSatisfy({ observation in
+                  guard observation.success,
+                        identity(observation.providerID ?? "", observation.modelID ?? "")
+                            == reviewerIdentity,
+                        let receipt = observation.cliRouteReceipt else { return false }
+                  return receipt.isValid && receipt.observationID == observation.id
+                      && receipt.stage == .review
+              }),
+              Set(reviewerCLI.map(\.id)).count == reviewerCLI.count else {
+            throw BuilderRunError.reviewRejected([
+                "fresh_context_same_model lacks one authenticated CLI process observation per completed vote",
+            ])
+        }
+
+        var producerInvocationIDs: [String] = []
+        for worker in workers {
+            guard let receipts = worker.trustedCLIRouteReceipts, !receipts.isEmpty,
+                  let stateTelemetry = snapshot.nodeStates[worker.nodeID]?.trustedTelemetry else {
+                throw BuilderRunError.reviewRejected([
+                    "fresh_context_same_model producer CLI invocation evidence is unavailable",
+                ])
+            }
+            let producerCLI = stateTelemetry.filter { $0.kind == .cliProviderInvocation }
+            guard receipts.allSatisfy({ receipt in
+                      receipt.isValid && receipt.stage == .build
+                          && identity(receipt.providerID, receipt.modelID) == reviewerIdentity
+                  }),
+                  producerCLI.allSatisfy({ observation in
+                      observation.success
+                          && identity(observation.providerID ?? "", observation.modelID ?? "")
+                              == reviewerIdentity
+                          && observation.cliRouteReceipt?.isValid == true
+                  }),
+                  Set(receipts.map(\.observationID)) == Set(producerCLI.map(\.id)),
+                  receipts.allSatisfy({ receipt in
+                      producerCLI.contains(where: {
+                          $0.id == receipt.observationID && $0.cliRouteReceipt == receipt
+                      })
+                  }) else {
+                throw BuilderRunError.reviewRejected([
+                    "fresh_context_same_model producer CLI receipts are missing, extra, or unmatched",
+                ])
+            }
+            producerInvocationIDs.append(contentsOf: receipts.map(\.observationID))
+        }
+        let producerSet = Set(producerInvocationIDs)
+        let reviewerSet = Set(reviewerCLI.map(\.id))
+        guard !producerSet.isEmpty,
+              producerSet.count == producerInvocationIDs.count,
+              producerSet.isDisjoint(with: reviewerSet) else {
+            throw BuilderRunError.reviewRejected([
+                "fresh_context_same_model producer and reviewer process invocations are not separate",
+            ])
+        }
+        return BuilderReviewProvenanceFacts(
+            reviewGrade: .freshContextSameModel, independent: false,
+            freshConversation: true, separateInvocation: true,
+            producerInvocationIDs: producerSet.sorted(),
+            reviewerInvocationIDs: reviewerSet.sorted(), reviewThreshold: 3)
+    }
+
+    private func validatePersistedReviewProvenance(
+        _ review: BuilderReviewReceipt,
+        workers: [BuilderWorkerReceipt],
+        snapshot: BuilderRunSnapshot
+    ) throws {
+        let producers = try canonicalProducerIdentities(contract: contract, workers: workers)
+        guard let storedReviewer = canonicalIdentity(review.reviewerIdentity ?? ""),
+              identity(review.provider, review.model) == storedReviewer,
+              let storedProducers = canonicalIdentitySet(review.workerIdentities ?? []),
+              storedProducers == producers else {
+            throw BuilderRunError.persistedStateInvalid(
+                "completion review has missing or mismatched provider:model provenance")
+        }
+        switch contract.effectiveReviewPolicy.grade {
+        case .independent:
+            guard !producers.contains(storedReviewer),
+                  review.reviewGrade == nil || review.reviewGrade == .independent,
+                  review.independent == nil || review.independent == true else {
+                throw BuilderRunError.reviewerNotIndependent(
+                    "persisted completion reviewer is not distinct from every producer")
+            }
+            if let threshold = review.reviewThreshold {
+                guard builderCouncilReviewVoteSemantics(
+                          review.votes ?? [], threshold: threshold),
+                      snapshot.reviewAttempt?.reviewThreshold == threshold else {
+                    throw BuilderRunError.persistedStateInvalid(
+                        "persisted independent review lost its council threshold or zero-veto decision")
+                }
+            }
+        case .freshContextSameModel:
+            let parent = try parentContractFingerprint(contract)
+            let reviewTelemetry = snapshot.trustedTelemetry.filter { $0.stage == .review }
+            guard reviewTelemetry.allSatisfy({ $0.contractFingerprint == parent }) else {
+                throw BuilderRunError.persistedStateInvalid(
+                    "persisted review contains telemetry outside the parent contract")
+            }
+            let facts: BuilderReviewProvenanceFacts
+            do {
+                facts = try sameModelReviewProvenance(
+                    reviewerIdentity: storedReviewer,
+                    producerIdentities: producers,
+                    workers: workers,
+                    votes: review.votes ?? [],
+                    reviewThreshold: review.reviewThreshold,
+                    rawReviewTelemetry: reviewTelemetry,
+                    snapshot: snapshot)
+            } catch {
+                throw BuilderRunError.persistedStateInvalid(
+                    "persisted same-model review provenance is invalid: \(error.localizedDescription)")
+            }
+            guard review.reviewGrade == facts.reviewGrade,
+                  review.independent == facts.independent,
+                  review.freshConversation == facts.freshConversation,
+                  review.separateInvocation == facts.separateInvocation,
+                  review.producerInvocationIDs == facts.producerInvocationIDs,
+                  review.reviewerInvocationIDs == facts.reviewerInvocationIDs,
+                  review.reviewThreshold == facts.reviewThreshold,
+                  review.accepted, review.checks.allSatisfy(\.passed),
+                  let digest = review.evidencePacketDigest,
+                  digest.count == 64,
+                  digest.allSatisfy({ "0123456789abcdef".contains($0) }),
+                  let attempt = snapshot.reviewAttempt,
+                  attempt.reviewerIdentity == storedReviewer,
+                  Set(attempt.producerIdentities) == producers,
+                  attempt.evidencePacketDigest == digest,
+                  attempt.votes == (review.votes ?? []),
+                  attempt.accepted,
+                  attempt.reviewGrade == facts.reviewGrade,
+                  attempt.independent == facts.independent,
+                  attempt.freshConversation == facts.freshConversation,
+                  attempt.separateInvocation == facts.separateInvocation,
+                  attempt.producerInvocationIDs == facts.producerInvocationIDs,
+                  attempt.reviewerInvocationIDs == facts.reviewerInvocationIDs,
+                  attempt.reviewThreshold == facts.reviewThreshold else {
+                throw BuilderRunError.persistedStateInvalid(
+                    "persisted same-model review receipt does not match its authenticated evidence")
+            }
+        }
+    }
+
     private func validateTrustedTelemetry(_ snapshot: BuilderRunSnapshot) throws {
         let ids = snapshot.trustedTelemetry.map(\.id)
         guard Set(ids).count == ids.count else {
@@ -1681,6 +1981,7 @@ let executionRequest = BuilderExecutionRequest(
         runtimes: [String: BuilderExecutionGovernanceRuntime],
         snapshot: inout BuilderRunSnapshot
     ) async throws {
+        try validatePublishedFinalAuthority(receipt, snapshot: snapshot)
         do {
             try await persist(&snapshot)
         } catch {
@@ -1690,7 +1991,9 @@ let executionRequest = BuilderExecutionRequest(
                durable.pendingFinalReceipt == nil,
                durable.finalizationPending == false,
                durable.reviewAccepted == true {
+                try validatePublishedFinalAuthority(receipt, snapshot: durable)
                 snapshot = durable
+                try await commitAcceptedFinalExternally(receipt, snapshot: snapshot)
                 await releaseAcceptedRetainedData(
                     aggregate: aggregate, aggregateSource: aggregateSource,
                     runtimes: runtimes, snapshot: snapshot)
@@ -1713,9 +2016,74 @@ let executionRequest = BuilderExecutionRequest(
             }
             throw persistenceError
         }
+        try await commitAcceptedFinalExternally(receipt, snapshot: snapshot)
         await releaseAcceptedRetainedData(
             aggregate: aggregate, aggregateSource: aggregateSource,
             runtimes: runtimes, snapshot: snapshot)
+    }
+
+    private func authorizePublishedFinal(
+        _ receipt: BuilderFinalReceipt,
+        snapshot: BuilderRunSnapshot
+    ) throws -> BuilderFinalReceipt {
+        guard let parent = snapshot.parentContractFingerprint,
+              let graph = snapshot.graphFingerprint,
+              let epoch = snapshot.commitEpoch else {
+            throw BuilderRunError.persistedStateInvalid(
+                "accepted Builder final lacks parent, graph, or commit authority")
+        }
+        let authorized = try receipt.authorizing(
+            parentContractFingerprint: parent,
+            graphFingerprint: graph,
+            objectiveFingerprint: builderFinalObjectiveFingerprint(contract),
+            commitEpoch: epoch,
+            trustedTelemetry: snapshot.trustedTelemetry)
+        try validatePublishedFinalAuthority(authorized, snapshot: snapshot)
+        return authorized
+    }
+
+    private func validatePublishedFinalAuthority(
+        _ receipt: BuilderFinalReceipt,
+        snapshot: BuilderRunSnapshot
+    ) throws {
+        let telemetryDigest = try BuilderEvidenceDigest.sha256(String(
+            decoding: BuilderDurableIO.canonicalData(snapshot.trustedTelemetry), as: UTF8.self))
+        guard receipt.hasValidBuilderFinalAuthority,
+              let authority = receipt.authority,
+              authority.parentContractFingerprint == snapshot.parentContractFingerprint,
+              authority.graphFingerprint == snapshot.graphFingerprint,
+              authority.objectiveFingerprint == builderFinalObjectiveFingerprint(contract),
+              authority.commitEpoch == snapshot.commitEpoch,
+              authority.trustedTelemetryDigest == telemetryDigest else {
+            throw BuilderRunError.persistedStateInvalid(
+                "published Builder final authority is missing, forged, or detached from durable telemetry")
+        }
+    }
+
+    private func commitAcceptedFinalExternally(
+        _ receipt: BuilderFinalReceipt,
+        snapshot: BuilderRunSnapshot
+    ) async throws {
+        guard let finalAcceptanceCommit else { return }
+        guard let parent = snapshot.parentContractFingerprint,
+              let graph = snapshot.graphFingerprint,
+              let epoch = snapshot.commitEpoch else {
+            throw BuilderRunError.persistedStateInvalid(
+                "external Builder acceptance lacks durable parent, graph, or commit identity")
+        }
+        let authority = try BuilderFinalAcceptanceAuthority(
+            finalReceipt: receipt,
+            trustedTelemetry: snapshot.trustedTelemetry,
+            parentContractFingerprint: parent,
+            graphFingerprint: graph,
+            objectiveFingerprint: builderFinalObjectiveFingerprint(contract),
+            commitEpoch: epoch)
+        do {
+            try await finalAcceptanceCommit(authority)
+        } catch {
+            throw BuilderRunError.acceptancePersistencePending(
+                error.localizedDescription)
+        }
     }
 
     private func releaseAcceptedRetainedData(
@@ -1788,6 +2156,162 @@ private func canonicalProducerIdentities(
     }
     return Set(workerIdentities).union(declared)
 }
+private func validateBuilderReviewConfiguration(
+    contract: BuilderContract,
+    graph: BuilderGraph,
+    graphExecutionPolicy: BuilderGraphExecutionPolicy?
+) throws {
+    let policy = contract.effectiveReviewPolicy
+    guard policy.grade == .freshContextSameModel else { return }
+    guard contract.reviewPolicy != nil,
+          policy.authorizesDisposableFreshContextSameModel else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model requires the exact disposable low-risk review policy")
+    }
+    guard contract.effectiveCompletionMode == .build,
+          contract.routeHint.resolve() == .direct,
+          contract.routeHint.risk != .high,
+          contract.routeHint.risk != .critical,
+          !contract.routeHint.requiresResearch,
+          !contract.routeHint.requiresSimulation else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model is limited to a direct low-effect-risk build")
+    }
+    guard contract.allowedPaths.count == 1,
+          let allowed = contract.allowedPaths.first,
+          (try? BuilderExecutionValidation.path(allowed)) == allowed else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model requires one normalized file path")
+    }
+    guard let declared = canonicalIdentitySet(contract.producerIdentities ?? []),
+          declared.count == 1,
+          let producer = declared.first,
+          producer.hasPrefix("codex-cli:") || producer.hasPrefix("claude-cli:") else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model requires one exact subscription-CLI producer identity")
+    }
+    guard graph.nodes.count == 1,
+          let node = graph.nodes.first,
+          node.isolation == .sandbox,
+          node.role == .builder,
+          node.resources == [BuilderResourceClaim(path: allowed, access: .write)],
+          graphExecutionPolicy?.executionClass(for: node.id) == .mutation else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model requires one sandboxed mutation node with one exact write claim")
+    }
+}
+private func validateBuilderExecutionReviewPolicy(
+    _ child: BuilderExecutionContract,
+    parent: BuilderContract
+) throws {
+    let policy = parent.effectiveReviewPolicy
+    guard child.identities.effectiveReviewGrade == policy.grade else {
+        throw BuilderRunError.invalidConfiguration(
+            "sealed child review grade does not match its parent BuilderContract")
+    }
+    guard policy.grade == .freshContextSameModel else { return }
+    guard policy.authorizesDisposableFreshContextSameModel,
+          child.mutations.count == policy.maximumMutationPaths,
+          child.identities.producers.count == 1,
+          child.identities.reviewers.count == 1,
+          let producer = canonicalIdentity(child.identities.producers[0].canonicalID),
+          let reviewer = canonicalIdentity(child.identities.reviewers[0].canonicalID),
+          producer == reviewer,
+          canonicalIdentitySet(parent.producerIdentities ?? []) == [producer] else {
+        throw BuilderRunError.invalidConfiguration(
+            "sealed child does not preserve the exact same-model disposable review authority")
+    }
+}
+private func validateBuilderDisposableReviewSource(
+    _ source: (any BuilderStageObservationSource)?,
+    parent: BuilderContract
+) throws {
+    let policy = parent.effectiveReviewPolicy
+    guard policy.grade == .freshContextSameModel else { return }
+    guard policy.authorizesDisposableFreshContextSameModel,
+          let transaction = source as? BuilderIsolatedWorkspaceTransactionSource,
+          transaction.usesOSProcessSandbox else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model requires the exact OS-sandboxed isolated workspace source")
+    }
+
+    let rootIdentity = try BuilderWorkspaceRootIdentity.capture(
+        rootPath: transaction.projectRoot.path)
+    let boundIdentity = BuilderEvidenceDigest.sha256([
+        rootIdentity.canonicalPath,
+        String(rootIdentity.deviceID),
+        String(rootIdentity.inode),
+    ].joined(separator: "\u{0}"))
+    guard boundIdentity == policy.disposableRootIdentity else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model governed root does not match its sealed filesystem identity")
+    }
+
+    let fm = FileManager.default
+    let root = URL(fileURLWithPath: rootIdentity.canonicalPath, isDirectory: true)
+    let tempRoots = Set([
+        "/private/tmp", "/tmp", NSTemporaryDirectory(),
+    ].compactMap { raw -> String? in
+        try? BuilderWorkspaceRootIdentity.capture(rootPath: raw).canonicalPath
+    })
+    guard let boundary = tempRoots
+        .filter({ root.path.hasPrefix($0 + "/") })
+        .max(by: { $0.count < $1.count }) else {
+        throw BuilderRunError.invalidConfiguration(
+            "fresh_context_same_model governed root is not a disposable temp descendant")
+    }
+
+    var rootCursor = root
+    while rootCursor.path != boundary {
+        guard rootCursor.path.hasPrefix(boundary + "/"),
+              !fm.fileExists(atPath: rootCursor.appendingPathComponent(".git").path) else {
+            throw BuilderRunError.invalidConfiguration(
+                "fresh_context_same_model governed root is inside a Git worktree")
+        }
+        let parentURL = rootCursor.deletingLastPathComponent()
+        guard parentURL.path != rootCursor.path else {
+            throw BuilderRunError.invalidConfiguration(
+                "fresh_context_same_model governed root escaped its temp boundary")
+        }
+        rootCursor = parentURL
+    }
+
+    for rawPath in parent.allowedPaths {
+        guard (try? BuilderExecutionValidation.path(rawPath)) == rawPath else {
+            throw BuilderRunError.invalidConfiguration(
+                "fresh_context_same_model target path is not canonical")
+        }
+        var targetCursor = root
+        for component in rawPath.split(separator: "/").dropLast() {
+            targetCursor.appendPathComponent(String(component), isDirectory: true)
+            if fm.fileExists(atPath: targetCursor.path) {
+                let resolved = try BuilderWorkspaceRootIdentity.capture(
+                    rootPath: targetCursor.path).canonicalPath
+                guard resolved == root.path || resolved.hasPrefix(root.path + "/") else {
+                    throw BuilderRunError.invalidConfiguration(
+                        "fresh_context_same_model target ancestor escapes its governed root")
+                }
+                targetCursor = URL(fileURLWithPath: resolved, isDirectory: true)
+            }
+            guard !fm.fileExists(
+                atPath: targetCursor.appendingPathComponent(".git").path) else {
+                throw BuilderRunError.invalidConfiguration(
+                    "fresh_context_same_model target is inside a nested Git worktree")
+            }
+        }
+    }
+}
+private func builderCouncilReviewVoteSemantics(
+    _ votes: [BuilderReviewVoteReceipt], threshold: Int
+) -> Bool {
+    let expectedLenses: Set<String> = ["Correctness", "Security", "Worth", "Completeness"]
+    guard threshold == 3,
+          votes.count == expectedLenses.count,
+          Set(votes.map(\.lens)) == expectedLenses,
+          votes.allSatisfy({ !$0.failed || !$0.accepted }) else { return false }
+    let completed = votes.filter { !$0.failed }
+    return completed.count >= threshold && completed.allSatisfy(\.accepted)
+}
 private func governedMutationObserved(_ worker: BuilderWorkerReceipt) -> Bool {
     if !worker.changedPaths.isEmpty { return true }
     let before = worker.artifacts.first { $0.kind == "governed-workspace-baseline" }?.digest
@@ -1810,6 +2334,9 @@ private func stableFingerprint(_ value: String) -> String {
 }
 private func parentContractFingerprint(_ contract: BuilderContract) throws -> String {
     try BuilderContractFingerprint.canonical(contract)
+}
+private func builderFinalObjectiveFingerprint(_ contract: BuilderContract) -> String {
+    BuilderEvidenceDigest.sha256(contract.id + "\u{0}" + contract.objective)
 }
 private func builderGraphFingerprint(_ graph: BuilderGraph) throws -> String {
     BuilderEvidenceDigest.sha256(String(

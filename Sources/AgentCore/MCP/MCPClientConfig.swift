@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 // MARK: - MCP Client Config (AgentCore)
 //
@@ -6,6 +7,13 @@ import Foundation
 // allowed to spawn as a client. Mirrors the Claude Code / `.mcp.json` shape:
 //
 //   { "mcpServers": { "<name>": { "command": "...", "args": [...], "env": {...} } } }
+//
+// Computer-use admission is explicit when configured:
+//   - `"computerUse": true` marks every tool on a dedicated control server.
+//   - `"computerUse": false` marks a server as having no computer-use tools.
+//   - `"computerUseTools": ["click", ...]` marks selected tools on a mixed server.
+// Omitting both keeps the conservative legacy name heuristic. Supplying both, or malformed
+// metadata, rejects the server entry before it can be started.
 //
 // SECURITY: spawning an external process from on-disk config is the single most
 // dangerous thing this feature does. Every entry is validated + allowlisted here
@@ -29,6 +37,28 @@ import Foundation
 
 /// One external MCP server definition, post-validation. Sendable so it can be
 /// handed to the connection actor.
+public enum MCPComputerUsePolicy: Sendable, Equatable {
+    /// Backward-compatible defense in depth for configs that predate explicit metadata.
+    case legacyNameHeuristic
+    /// Dedicated control/readback server: every advertised tool requires explicit computer-use arming.
+    case allTools
+    /// The server is explicitly known to expose no computer-use capability.
+    case noTools
+    /// Mixed server (for example Perslis): these raw server tool names require arming;
+    /// unlisted names remain unknown and fall back to the conservative heuristic.
+    case selectedTools(Set<String>)
+
+    /// `nil` means the caller must apply its conservative legacy heuristic.
+    public func explicitRequirement(for remoteToolName: String) -> Bool? {
+        switch self {
+        case .legacyNameHeuristic: return nil
+        case .allTools: return true
+        case .noTools: return false
+        case .selectedTools(let names): return names.contains(remoteToolName) ? true : nil
+        }
+    }
+}
+
 public struct MCPServerConfig: Sendable, Equatable {
     public let name: String
     public let command: String
@@ -38,11 +68,14 @@ public struct MCPServerConfig: Sendable, Equatable {
     /// `url` (command/args/env unused). `headers` are sent on every request (auth, e.g. Authorization).
     public let url: String?
     public let headers: [String: String]
+    public let computerUsePolicy: MCPComputerUsePolicy
 
     public init(name: String, command: String = "", args: [String] = [], env: [String: String] = [:],
-                url: String? = nil, headers: [String: String] = [:]) {
+                url: String? = nil, headers: [String: String] = [:],
+                computerUsePolicy: MCPComputerUsePolicy = .legacyNameHeuristic) {
         self.name = name; self.command = command; self.args = args; self.env = env
         self.url = url; self.headers = headers
+        self.computerUsePolicy = computerUsePolicy
     }
 
     /// True for the HTTP transport (vs stdio subprocess).
@@ -158,10 +191,46 @@ public enum MCPClientConfig {
         case failure(reason: String)
     }
 
+    private enum ComputerUsePolicyOutcome {
+        case success(MCPComputerUsePolicy)
+        case failure(reason: String)
+    }
+
+    private static func computerUsePolicy(from entry: [String: Any]) -> ComputerUsePolicyOutcome {
+        let hasServerPolicy = entry["computerUse"] != nil
+        let hasToolPolicy = entry["computerUseTools"] != nil
+        guard !(hasServerPolicy && hasToolPolicy) else {
+            return .failure(reason: "'computerUse' and 'computerUseTools' are mutually exclusive")
+        }
+        if hasServerPolicy {
+            guard let number = entry["computerUse"] as? NSNumber,
+                  CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                return .failure(reason: "'computerUse' must be a boolean")
+            }
+            let allTools = number.boolValue
+            return .success(allTools ? .allTools : .noTools)
+        }
+        guard hasToolPolicy else { return .success(.legacyNameHeuristic) }
+        guard let names = entry["computerUseTools"] as? [String] else {
+            return .failure(reason: "'computerUseTools' must be an array of strings")
+        }
+        guard Set(names).count == names.count else {
+            return .failure(reason: "'computerUseTools' must not contain duplicate names")
+        }
+        for name in names {
+            let hasControl = name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+            guard !name.isEmpty, name.utf8.count <= 256, !hasControl else {
+                return .failure(reason: "'computerUseTools' contains an invalid tool name")
+            }
+        }
+        return .success(.selectedTools(Set(names)))
+    }
+
     /// Validate an HTTP-transport server entry: an http(s) `url` (SSRF-guarded so a config can't point at
     /// internal/link-local hosts) + optional `headers` for auth. Header values expand `${ENV}` so secrets
     /// live in the environment, not the config file on disk.
     private static func validateHTTP(name: String, entry: [String: Any],
+                                     computerUsePolicy: MCPComputerUsePolicy,
                                      hostEnvironment: [String: String],
                                      ssrfBlockReason: (String) -> String?) -> ValidationOutcome {
         guard let urlStr = (entry["url"] as? String)?.trimmingCharacters(in: .whitespaces), !urlStr.isEmpty else {
@@ -203,7 +272,8 @@ public enum MCPClientConfig {
         if scheme == "http", !loopback {
             return .failure(reason: "http (cleartext) url is refused for a non-loopback MCP server — use https (also the DNS-rebinding pin)")
         }
-        return .success(MCPServerConfig(name: name, url: urlStr, headers: headers), warnings: warnings)
+        return .success(MCPServerConfig(name: name, url: urlStr, headers: headers,
+                                        computerUsePolicy: computerUsePolicy), warnings: warnings)
     }
 
     /// True when a host explicitly names loopback (localhost / 127.0.0.0/8 / ::1) — a user's own local
@@ -259,11 +329,17 @@ public enum MCPClientConfig {
         guard isSafeIdentifier(name) else {
             return .failure(reason: "server name '\(name)' is not a safe identifier (letters, digits, _ , -)")
         }
+        let computerUsePolicy: MCPComputerUsePolicy
+        switch Self.computerUsePolicy(from: entry) {
+        case .success(let policy): computerUsePolicy = policy
+        case .failure(let reason): return .failure(reason: reason)
+        }
         // HTTP (Streamable-HTTP) transport: a `url` is present, or transport is http/streamable-http/sse.
         let transport = (entry["transport"] as? String)?.lowercased()
         if entry["url"] != nil || transport == "http" || transport == "streamable-http" || transport == "sse" {
             return validateHTTP(
-                name: name, entry: entry, hostEnvironment: hostEnvironment,
+                name: name, entry: entry, computerUsePolicy: computerUsePolicy,
+                hostEnvironment: hostEnvironment,
                 ssrfBlockReason: ssrfBlockReason)
         }
         // Otherwise stdio: a spawned subprocess.
@@ -319,7 +395,8 @@ public enum MCPClientConfig {
             }
         }
 
-        return .success(MCPServerConfig(name: name, command: command, args: args, env: env), warnings: warnings)
+        return .success(MCPServerConfig(name: name, command: command, args: args, env: env,
+                                        computerUsePolicy: computerUsePolicy), warnings: warnings)
     }
 
     /// Final environment for `Process`: allowlisted host vars + the server's explicit

@@ -44,7 +44,7 @@ extension KistREPL {
     }
 
 
-    /// `/cortex` — view + teach the personal memory. Default shows what kist knows; subcommands edit/list.
+    /// `/cortex` — explicit operator audit of the retired Markdown archive. It is never prompt context.
     static func handleCortex(_ args: String, cortex: CortexMemory?) -> String {
         guard let cortex else { return "cortex memory is off (started with --no-memory)." }
         let parts = args.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
@@ -52,14 +52,11 @@ extension KistREPL {
         let rest = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
         switch sub {
         case "remember":
-            guard !rest.isEmpty else { return "usage: /cortex remember <fact about how you work>" }
-            do { try cortex.remember(rest); return "\u{001B}[32mremembered\u{001B}[0m · \(rest)" }
-            catch { return "couldn't save: \(error)" }
+            _ = rest
+            return "legacy cortex Markdown is raw audit-only; use temporal semantic memory or operator-owned AGENTS.md"
         case "project":
-            let p = rest.split(separator: " ", maxSplits: 1).map(String.init)
-            guard p.count == 2 else { return "usage: /cortex project <name> <fact>" }
-            do { try cortex.rememberProject(p[0], p[1]); return "\u{001B}[32msaved to project \(p[0])\u{001B}[0m" }
-            catch { return "couldn't save: \(error)" }
+            _ = rest
+            return "legacy cortex Markdown is raw audit-only; use temporal semantic memory or operator-owned project facts"
         case "files", "ls":
             let fs = cortex.files()
             return fs.isEmpty ? "no cortex files yet." : "cortex files (\(cortex.root)):\n" + fs.map { "  " + $0 }.joined(separator: "\n")
@@ -67,10 +64,11 @@ extension KistREPL {
             guard !rest.isEmpty else { return "usage: /cortex show <file> (see /cortex files)" }
             return cortex.show(rest) ?? "no such cortex file: \(rest)"
         default:
-            // bare /cortex → show the assembled memory (what gets injected so kist knows you).
-            let ctx = cortex.context()
-            return ctx.isEmpty ? "cortex is empty — teach it with `/cortex remember <fact>`." :
-                ctx + "\n\u{001B}[2m/cortex files · /cortex show <file> · /cortex remember <fact>\u{001B}[0m"
+            let fs = cortex.files()
+            let listing = fs.isEmpty ? "no legacy cortex files." :
+                fs.map { "  " + $0 }.joined(separator: "\n")
+            return "legacy cortex Markdown is raw audit-only (never injected into prompts):\n"
+                + listing + "\n\u{001B}[2m/cortex files · /cortex show <file>\u{001B}[0m"
         }
     }
 
@@ -89,13 +87,15 @@ extension KistREPL {
                 return "usage: /knowledge add <topic> | reason: ... | visit: ... | impact: 1-5 | priority: high|medium | benefit: ..."
             }
             let fields = parseKnowledgeDebt(rest)
-            let record = store.addKnowledgeDebt(topic: fields.topic,
-                                                reason: fields.reason,
-                                                visit: fields.visit,
-                                                impact: fields.impact,
-                                                priority: fields.priority,
-                                                estimatedLearning: fields.estimatedLearning,
-                                                expectedBenefit: fields.expectedBenefit)
+            guard let record = store.addKnowledgeDebt(topic: fields.topic,
+                                                      reason: fields.reason,
+                                                      visit: fields.visit,
+                                                      impact: fields.impact,
+                                                      priority: fields.priority,
+                                                      estimatedLearning: fields.estimatedLearning,
+                                                      expectedBenefit: fields.expectedBenefit) else {
+                return "knowledge debt NOT added · persistence refused; existing ledger preserved"
+            }
             return "knowledge debt added · \(record.id)\n" + store.renderKnowledgeDebt(limit: 6)
         case "done", "close", "paid":
             guard !rest.isEmpty else { return "usage: /knowledge done <id>" }
@@ -123,10 +123,12 @@ extension KistREPL {
                 return "usage: /teach add <lesson> | confidence: 97 | reason: ... | evidence: ..."
             }
             let fields = parseOrganizationalRule(rest)
-            let rule = store.promoteOrganizationalRule(lesson: fields.lesson,
-                                                       confidence: fields.confidence,
-                                                       reason: fields.reason,
-                                                       evidence: fields.evidence)
+            guard let rule = store.promoteOrganizationalRule(lesson: fields.lesson,
+                                                             confidence: fields.confidence,
+                                                             reason: fields.reason,
+                                                             evidence: fields.evidence) else {
+                return "organizational rule NOT recorded · persistence refused; existing ledger preserved"
+            }
             let status = rule.status == .active ? "promoted" : "proposed — awaiting verified evidence"
             return "organizational rule \(status) · \(rule.id)\n" + store.renderOrganizationalRules(limit: 6)
         default:
@@ -144,20 +146,26 @@ extension KistREPL {
         return plan.briefing + "\n\n" + retrieval.briefing
     }
 
-    static func handleRetrieveCommand(_ objective: String, projectRoot: String) -> String {
+    static func handleRetrieveCommand(
+        _ objective: String, projectRoot: String,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) -> String {
         let clean = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return "usage: /retrieve <objective>" }
         let evidence = CaptainProjectEvidence.capture(projectRoot: projectRoot)
         let specialists = SpecialistRegistry(projectRoot: projectRoot).load()
         let plan = CaptainStrategist.plan(objective: clean, evidence: evidence,
                                           specialists: specialists)
-        return OrganizationalLearningStore(projectRoot: projectRoot)
+        return OrganizationalLearningStore(projectRoot: projectRoot, now: now)
             .retrievalContext(objective: clean, strategy: plan)
             .briefing
     }
 
-    static func handleCaptainLearningCommand(_ args: String, projectRoot: String) -> String {
-        OrganizationalLearningStore(projectRoot: projectRoot).renderCaptainLearning()
+    static func handleCaptainLearningCommand(
+        _ args: String, projectRoot: String,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) -> String {
+        OrganizationalLearningStore(projectRoot: projectRoot, now: now).renderCaptainLearning()
     }
 
     static func handleStrategicIntelligenceCommand(_ args: String, projectRoot: String) -> String {

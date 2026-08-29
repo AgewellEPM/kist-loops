@@ -390,14 +390,21 @@ final class DeploymentProvenanceTests: XCTestCase {
         }
     }
 
-    func testV3ClosureEvaluatorHasExactArityAndBindsSafeRebuildBytes() throws {
+    func testV3ClosureEvaluatorBindsPayloadAndExactOperationalStateSeparately() throws {
         let root = try evaluatorScratchDirectory(named: "closure-v3")
+        let dashboard = try installPatchedScript(
+            "scripts/kist-dashboard", in: root, named: "kist-dashboard")
+        let runtime = root.appendingPathComponent(".kist/scripts/kist_runtime.py")
+        let cortexApp = root.appendingPathComponent(".kist/cortex/live/app.py")
+        let cortexAsset = root.appendingPathComponent(".kist/cortex/live/assets/app.js")
+        try write("#!/usr/bin/python3\n# runtime v1\n", to: runtime, executable: true)
+        try write("# cortex v1\n", to: cortexApp)
+        try write("const cortexV1 = true;\n", to: cortexAsset)
         let payloads = try (0..<5).map { index -> URL in
             let path = root.appendingPathComponent("payload-\(index)")
             try write("#!/bin/sh\n# payload \(index)\n", to: path, executable: true)
             return path
         }
-        let dashboard = repositoryRoot.appendingPathComponent("scripts/kist-dashboard")
 
         func evaluate(_ paths: [URL]) throws -> ProcessResult {
             try run(
@@ -424,10 +431,14 @@ final class DeploymentProvenanceTests: XCTestCase {
             Set([
                 "binary-sha256", "wrapper-sha256", "dashboard-launcher-sha256",
                 "rebuild-sha256", "safe-rebuild-sha256",
+                "dashboard-runtime-sha256", "dashboard-cortex-sha256",
+                "dashboard-cortex-count",
                 "artifact-closure-sha256", "artifact-closure-count",
             ]))
         XCTAssertEqual(before["artifact-closure-count"], "5")
-        XCTAssertNil(before["dashboard-runtime-sha256"])
+        XCTAssertEqual(before["dashboard-cortex-count"], "2")
+        XCTAssertEqual(before["dashboard-runtime-sha256"]?.count, 64)
+        XCTAssertEqual(before["dashboard-cortex-sha256"]?.count, 64)
 
         try write(
             "#!/bin/sh\n# payload 4 changed\n",
@@ -444,6 +455,41 @@ final class DeploymentProvenanceTests: XCTestCase {
         ] {
             XCTAssertEqual(after[key], before[key], key)
         }
+        XCTAssertEqual(after["dashboard-runtime-sha256"], before["dashboard-runtime-sha256"])
+        XCTAssertEqual(after["dashboard-cortex-sha256"], before["dashboard-cortex-sha256"])
+        XCTAssertEqual(after["dashboard-cortex-count"], before["dashboard-cortex-count"])
+
+        try write("#!/usr/bin/python3\n# runtime v2\n", to: runtime, executable: true)
+        result = try evaluate(payloads)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let afterRuntime = try projection(result.stdout)
+        XCTAssertNotEqual(
+            afterRuntime["dashboard-runtime-sha256"], after["dashboard-runtime-sha256"])
+        XCTAssertEqual(
+            afterRuntime["dashboard-cortex-sha256"], after["dashboard-cortex-sha256"])
+        XCTAssertEqual(afterRuntime["dashboard-cortex-count"], "2")
+        XCTAssertEqual(afterRuntime["artifact-closure-sha256"], after["artifact-closure-sha256"])
+
+        try write("# cortex v2\n", to: cortexApp)
+        result = try evaluate(payloads)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let afterCortex = try projection(result.stdout)
+        XCTAssertEqual(
+            afterCortex["dashboard-runtime-sha256"], afterRuntime["dashboard-runtime-sha256"])
+        XCTAssertNotEqual(
+            afterCortex["dashboard-cortex-sha256"], afterRuntime["dashboard-cortex-sha256"])
+        XCTAssertEqual(afterCortex["dashboard-cortex-count"], "2")
+        XCTAssertEqual(afterCortex["artifact-closure-sha256"], afterRuntime["artifact-closure-sha256"])
+
+        try write("# selected addition\n", to: root.appendingPathComponent(".kist/cortex/live/added.py"))
+        result = try evaluate(payloads)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let afterAddition = try projection(result.stdout)
+        XCTAssertEqual(afterAddition["dashboard-cortex-count"], "3")
+        XCTAssertNotEqual(
+            afterAddition["dashboard-cortex-sha256"], afterCortex["dashboard-cortex-sha256"])
+        XCTAssertEqual(
+            afterAddition["artifact-closure-sha256"], afterCortex["artifact-closure-sha256"])
 
         for invalid in [Array(payloads.prefix(3)), payloads + [payloads[0]]] {
             result = try evaluate(invalid)
@@ -535,6 +581,13 @@ final class DeploymentProvenanceTests: XCTestCase {
             "scripts/kist-dashboard", in: home, named: "kist-dashboard-real")
         let rebuild = try installPatchedScript(
             "scripts/kist-rebuild", in: home, named: "kist-rebuild-real")
+        try write(
+            "#!/usr/bin/python3\n# trusted fixture runtime\n",
+            to: home.appendingPathComponent(".kist/scripts/kist_runtime.py"),
+            executable: true)
+        try write(
+            "# trusted fixture cortex\n",
+            to: home.appendingPathComponent(".kist/cortex/live/app.py"))
         let attacker = root.appendingPathComponent("attacker", isDirectory: true)
         let marker = root.appendingPathComponent("startup-marker")
         let startup = root.appendingPathComponent("startup")
@@ -1148,9 +1201,15 @@ final class DeploymentProvenanceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
     }
 
-    func testDeploymentProtocolFixtureCoversV3AndLegacyRecovery() throws {
+    func testDeploymentProtocolFixtureCoversBoundV3OldV3AndLegacyRecovery() throws {
         let fixture = repositoryRoot
             .appendingPathComponent("scripts/tests/kist-deployment-protocol.sh")
+        let fixtureSource = try source("scripts/tests/kist-deployment-protocol.sh")
+        XCTAssertTrue(fixtureSource.contains("partial-v3-operational-binding"))
+        XCTAssertTrue(fixtureSource.contains("UNBOUND_V3_ARCHIVE_ID"))
+        XCTAssertTrue(fixtureSource.contains("bound-operational-rollback"))
+        XCTAssertTrue(fixtureSource.contains("post-validation-cortex-drift"))
+        XCTAssertTrue(fixtureSource.contains("legacy-operational-closure"))
         let result = try run(fixture)
         XCTAssertEqual(result.status, 0, result.stderr)
         XCTAssertTrue(

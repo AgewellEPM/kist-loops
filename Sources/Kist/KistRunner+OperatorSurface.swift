@@ -14,7 +14,7 @@ extension KistRunner {
     /// Live model-id preflight: GET /models per keyed provider, diff vs the catalog, flag dead ids.
     static func providerDoctorReport(_ registry: ProviderRegistry) async -> String {
         let reports = await ProviderDoctor.check(
-            providers: ProviderCatalog.openAICompatible,
+            providers: registry.providers.compactMap { $0 as? OpenAICompatibleProvider },
             apiKey: { registry.apiKey(forProviderId: $0.id) },
             fetch: { url, key in await ProviderDoctor.liveFetch(modelsURL: url, apiKey: key) })
         return ProviderDoctor.render(reports)

@@ -45,7 +45,7 @@ public enum EvalGoldenSuite {
         capabilityBuiltIn + loadCustom(projectRoot: projectRoot, file: "capability-suite.json")
     }
 
-    /// P1 — the RECALL corpus: memory-dependent tasks answerable only from a recalled VERIFIED lesson (not
+    /// P1 — the RECALL corpus: memory-dependent tasks answerable only from a locally checked advisory lesson (not
     /// general knowledge, not a self__ tool). This is the surface `/ablation recall` uses to isolate the P1
     /// injection A/B (injection-OFF vs injection-ON, toolset held constant). Empty built-in on purpose:
     /// seeded from `.kist/eval/recall-suite.json` with project-specific facts whose only source is memory.

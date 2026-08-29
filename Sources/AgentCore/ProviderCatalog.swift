@@ -266,6 +266,12 @@ public final class ProviderRegistry: Sendable {
     /// Live `/models` fetch for Layer-B model-id reconciliation. Called REACTIVELY (only on a
     /// model-not-found error), so there's no per-call network. Injected for tests.
     private let modelListFetch: @Sendable (_ modelsURL: String, _ apiKey: String?) async -> Result<[String], Error>
+    /// Availability gate for the cross-provider FALLBACK chain (Codex P2, 2026-08-25): without it a
+    /// fresh health-daemon "down" verdict couldn't stop the stream retry lane from walking into a
+    /// dead fallback. Default no-gate keeps tests hermetic; the runner wires the live combined gate
+    /// (cooldowns + health daemon) in `makeRegistry`. Never applied to the PRIMARY (explicit choice),
+    /// and fails open when every fallback is benched.
+    private let providerUnavailable: @Sendable (String) -> Bool
 
     public init(providers: [any ChatProvider] = ProviderCatalog.all,
                 keyStore: KeyStore = DefaultKeyStore.make(),
@@ -277,13 +283,15 @@ public final class ProviderRegistry: Sendable {
                 },
                 modelListFetch: @escaping @Sendable (String, String?) async -> Result<[String], Error> = {
                     url, key in await ProviderDoctor.liveFetch(modelsURL: url, apiKey: key)
-                }) {
+                },
+                providerUnavailable: @escaping @Sendable (String) -> Bool = { _ in false }) {
         self.providers = providers
         self.keyStore = keyStore
         self.retryDelaysNanoseconds = retryDelaysNanoseconds
         self.retrySleep = retrySleep
         self.fallbackProviderIds = fallbackProviderIds
         self.modelListFetch = modelListFetch
+        self.providerUnavailable = providerUnavailable
     }
 
     /// Resolve a valid model id on the SAME provider after a model-not-found error (Layer B). Returns the
@@ -363,8 +371,16 @@ public final class ProviderRegistry: Sendable {
     /// are absorbed here and would otherwise surface only as budget-exhaustion (never a terminal fault).
     public func retryCount(providerId: String) -> Int { retryTally.count(providerId) }
 
+    /// Whether the provider has usable local credentials. API providers need a stored key; keyless
+    /// subscription CLIs need both their executable and a live, non-interactive login. Treating an
+    /// installed-but-logged-out CLI as configured lets reviewer/evolution selection pick a route that
+    /// cannot answer, which can roll back an otherwise verified repair. Other genuinely local providers
+    /// remain keyless and available.
     public func hasKey(for provider: any ChatProvider) -> Bool {
-        !provider.requiresAPIKey || keyStore.containsKey(forAccount: provider.keyAccount)
+        if let cli = provider as? CLIChatProvider {
+            return cli.isLocallyAvailable()
+        }
+        return !provider.requiresAPIKey || keyStore.containsKey(forAccount: provider.keyAccount)
     }
 
     /// Resolve the API key for a provider id (nil if unknown or unset). Needed by out-of-band
@@ -703,11 +719,22 @@ public final class ProviderRegistry: Sendable {
                                     apiKey: keyStore.key(forAccount: primary.keyAccount))]
         }
         let fallbackIds = fallbackProviderIds[providerId] ?? fallbackProviderIds[primary.id] ?? []
-        let orderedProviders = [primary] + fallbackIds.compactMap { id in
+        let fallbacks = fallbackIds.compactMap { id in
             provider(id: id)
         }.filter { fallback in
             fallback.id != primary.id
         }
+        // Benched fallbacks (health daemon "down" / live cooldown) yield to warm ones; the primary
+        // is never filtered (explicit choice). "Warm" must also mean USABLE (Codex P2, 2026-08-25):
+        // an unconfigured API provider (no key) is not a real alternative and must not displace a
+        // benched-but-CONFIGURED fallback. Ranking, not removal: warm+usable → benched-but-usable
+        // (fail-open last resort when health/cooldown data lags a recovery) → unconfigured tail
+        // (cheap auth-fail; preserves the pre-gate candidate superset).
+        let usable: (any ChatProvider) -> Bool = { [self] p in hasKey(for: p) }
+        let warmUsable = fallbacks.filter { usable($0) && !providerUnavailable($0.id) }
+        let benchedUsable = fallbacks.filter { usable($0) && providerUnavailable($0.id) }
+        let unusable = fallbacks.filter { !usable($0) }
+        let orderedProviders = [primary] + warmUsable + benchedUsable + unusable
         return orderedProviders.map { provider in
             let resolvedModel = provider.id == primary.id ? provider.resolvedModel(requestedModel) : provider.resolvedModel(nil)
             return StreamCandidate(provider: provider, model: resolvedModel, apiKey: keyStore.key(forAccount: provider.keyAccount))

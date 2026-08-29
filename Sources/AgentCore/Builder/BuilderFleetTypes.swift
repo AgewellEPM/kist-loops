@@ -215,6 +215,14 @@ public struct BuilderReviewReceipt: Codable, Sendable, Equatable {
     public let reviewerIdentity: String?
     public let evidencePacketDigest: String?
     public let votes: [BuilderReviewVoteReceipt]?
+    /// Explicit review provenance. Older snapshots decode these as nil and remain independent-only.
+    public let reviewGrade: EvolutionReviewGrade?
+    public let independent: Bool?
+    public let freshConversation: Bool?
+    public let separateInvocation: Bool?
+    public let producerInvocationIDs: [String]?
+    public let reviewerInvocationIDs: [String]?
+    public let reviewThreshold: Int?
     public init(
         provider: String,
         model: String,
@@ -225,7 +233,14 @@ public struct BuilderReviewReceipt: Codable, Sendable, Equatable {
         workerIdentities: [String]? = nil,
         reviewerIdentity: String? = nil,
         evidencePacketDigest: String? = nil,
-        votes: [BuilderReviewVoteReceipt]? = nil
+        votes: [BuilderReviewVoteReceipt]? = nil,
+        reviewGrade: EvolutionReviewGrade? = nil,
+        independent: Bool? = nil,
+        freshConversation: Bool? = nil,
+        separateInvocation: Bool? = nil,
+        producerInvocationIDs: [String]? = nil,
+        reviewerInvocationIDs: [String]? = nil,
+        reviewThreshold: Int? = nil
     ) {
         self.provider = provider
         self.model = model
@@ -237,16 +252,27 @@ public struct BuilderReviewReceipt: Codable, Sendable, Equatable {
         self.reviewerIdentity = reviewerIdentity
         self.evidencePacketDigest = evidencePacketDigest
         self.votes = votes
+        self.reviewGrade = reviewGrade
+        self.independent = independent
+        self.freshConversation = freshConversation
+        self.separateInvocation = separateInvocation
+        self.producerInvocationIDs = producerInvocationIDs
+        self.reviewerInvocationIDs = reviewerInvocationIDs
+        self.reviewThreshold = reviewThreshold
     }
 }
 public struct BuilderReviewVoteReceipt: Codable, Sendable, Equatable {
     public let lens: String; public let accepted: Bool; public let reason: String; public let failed: Bool
     public let provider: String?
     public let model: String?
+    public let invocationID: String?
+    public let freshConversation: Bool?
     public init(lens: String, accepted: Bool, reason: String, failed: Bool,
-                provider: String? = nil, model: String? = nil) {
+                provider: String? = nil, model: String? = nil,
+                invocationID: String? = nil, freshConversation: Bool? = nil) {
         self.lens = lens; self.accepted = accepted; self.reason = reason; self.failed = failed
         self.provider = provider; self.model = model
+        self.invocationID = invocationID; self.freshConversation = freshConversation
     }
 }
 public struct BuilderReviewAttemptReceipt: Codable, Sendable, Equatable {
@@ -254,17 +280,119 @@ public struct BuilderReviewAttemptReceipt: Codable, Sendable, Equatable {
     public let evidencePacketDigest: String; public let votes: [BuilderReviewVoteReceipt]
     public let accepted: Bool; public let attemptedAt: Date
     public let missionInstanceID: String?
+    public let reviewGrade: EvolutionReviewGrade?
+    public let independent: Bool?
+    public let freshConversation: Bool?
+    public let separateInvocation: Bool?
+    public let producerInvocationIDs: [String]?
+    public let reviewerInvocationIDs: [String]?
+    public let reviewThreshold: Int?
     public init(reviewerIdentity: String, producerIdentities: [String],
                 evidencePacketDigest: String, votes: [BuilderReviewVoteReceipt],
-                accepted: Bool, attemptedAt: Date, missionInstanceID: String? = nil) {
+                accepted: Bool, attemptedAt: Date, missionInstanceID: String? = nil,
+                reviewGrade: EvolutionReviewGrade? = nil, independent: Bool? = nil,
+                freshConversation: Bool? = nil, separateInvocation: Bool? = nil,
+                producerInvocationIDs: [String]? = nil,
+                reviewerInvocationIDs: [String]? = nil,
+                reviewThreshold: Int? = nil) {
         self.reviewerIdentity = reviewerIdentity; self.producerIdentities = producerIdentities
         self.evidencePacketDigest = evidencePacketDigest; self.votes = votes
         self.accepted = accepted; self.attemptedAt = attemptedAt
         self.missionInstanceID = missionInstanceID
+        self.reviewGrade = reviewGrade; self.independent = independent
+        self.freshConversation = freshConversation; self.separateInvocation = separateInvocation
+        self.producerInvocationIDs = producerInvocationIDs
+        self.reviewerInvocationIDs = reviewerInvocationIDs
+        self.reviewThreshold = reviewThreshold
     }
 }
+public struct BuilderFinalAuthority: Codable, Sendable, Equatable {
+    public let schemaVersion: Int
+    public let parentContractFingerprint: String
+    public let graphFingerprint: String
+    public let objectiveFingerprint: String
+    public let commitEpoch: String
+    public let trustedTelemetryDigest: String
+    public let finalReceiptDigest: String
+    public let seal: String
+
+    init(parentContractFingerprint: String, graphFingerprint: String,
+         objectiveFingerprint: String, commitEpoch: String,
+         trustedTelemetryDigest: String,
+         finalReceiptDigest: String) throws {
+        self.schemaVersion = 1
+        self.parentContractFingerprint = parentContractFingerprint
+        self.graphFingerprint = graphFingerprint
+        self.objectiveFingerprint = objectiveFingerprint
+        self.commitEpoch = commitEpoch
+        self.trustedTelemetryDigest = trustedTelemetryDigest
+        self.finalReceiptDigest = finalReceiptDigest
+        self.seal = ForgeSeal.sign(try Self.canonicalBinding(
+            schemaVersion: 1,
+            parentContractFingerprint: parentContractFingerprint,
+            graphFingerprint: graphFingerprint,
+            objectiveFingerprint: objectiveFingerprint,
+            commitEpoch: commitEpoch,
+            trustedTelemetryDigest: trustedTelemetryDigest,
+            finalReceiptDigest: finalReceiptDigest))
+        guard !seal.isEmpty else {
+            throw BuilderRunError.persistedStateInvalid(
+                "Builder final authority could not be sealed")
+        }
+    }
+
+    func validates(finalReceiptDigest expectedFinalDigest: String) -> Bool {
+        let digests = [parentContractFingerprint, graphFingerprint, objectiveFingerprint,
+                       commitEpoch, trustedTelemetryDigest, finalReceiptDigest]
+        guard schemaVersion == 1,
+              finalReceiptDigest == expectedFinalDigest,
+              digests.allSatisfy({ value in
+                  value.utf8.count == 64 && value.utf8.allSatisfy {
+                      (48...57).contains($0) || (97...102).contains($0)
+                  }
+              }),
+              let canonical = try? Self.canonicalBinding(
+                schemaVersion: schemaVersion,
+                parentContractFingerprint: parentContractFingerprint,
+                graphFingerprint: graphFingerprint,
+                objectiveFingerprint: objectiveFingerprint,
+                commitEpoch: commitEpoch,
+                trustedTelemetryDigest: trustedTelemetryDigest,
+                finalReceiptDigest: finalReceiptDigest) else { return false }
+        return ForgeSeal.verify(canonical, seal: seal)
+    }
+
+    private static func canonicalBinding(
+        schemaVersion: Int, parentContractFingerprint: String,
+        graphFingerprint: String, objectiveFingerprint: String,
+        commitEpoch: String,
+        trustedTelemetryDigest: String, finalReceiptDigest: String
+    ) throws -> String {
+        struct Binding: Codable {
+            let receiptType: String
+            let schemaVersion: Int
+            let parentContractFingerprint: String
+            let graphFingerprint: String
+            let objectiveFingerprint: String
+            let commitEpoch: String
+            let trustedTelemetryDigest: String
+            let finalReceiptDigest: String
+        }
+        return String(decoding: try BuilderDurableIO.canonicalData(Binding(
+            receiptType: "kist.builder-final-authority",
+            schemaVersion: schemaVersion,
+            parentContractFingerprint: parentContractFingerprint,
+            graphFingerprint: graphFingerprint,
+            objectiveFingerprint: objectiveFingerprint,
+            commitEpoch: commitEpoch,
+            trustedTelemetryDigest: trustedTelemetryDigest,
+            finalReceiptDigest: finalReceiptDigest)), as: UTF8.self)
+    }
+}
+
 public struct BuilderFinalReceipt: Codable, Sendable, Equatable {
     public let contractID: String; public let route: BuilderRoute; public let workers: [BuilderWorkerReceipt]; public let verification: BuilderVerifierReceipt; public let review: BuilderReviewReceipt; public let accepted: Bool; public let completedAt: Date
+    public let authority: BuilderFinalAuthority?
     public init(
         contractID: String,
         route: BuilderRoute,
@@ -272,7 +400,8 @@ public struct BuilderFinalReceipt: Codable, Sendable, Equatable {
         verification: BuilderVerifierReceipt,
         review: BuilderReviewReceipt,
         accepted: Bool,
-        completedAt: Date
+        completedAt: Date,
+        authority: BuilderFinalAuthority? = nil
     ) {
         self.contractID = contractID
         self.route = route
@@ -281,6 +410,93 @@ public struct BuilderFinalReceipt: Codable, Sendable, Equatable {
         self.review = review
         self.accepted = accepted
         self.completedAt = completedAt
+        self.authority = authority
+    }
+
+    /// True only for a final published by BuilderRun under the current install's ForgeSeal key.
+    /// Publicly constructed and legacy receipts intentionally return false.
+    public var hasValidBuilderFinalAuthority: Bool {
+        guard let authority,
+              let digest = try? unsignedAuthorityPayloadDigest() else { return false }
+        return authority.validates(finalReceiptDigest: digest)
+    }
+
+    func authorizing(
+        parentContractFingerprint: String,
+        graphFingerprint: String,
+        objectiveFingerprint: String,
+        commitEpoch: String,
+        trustedTelemetry: [BuilderTrustedTelemetryObservation]
+    ) throws -> Self {
+        guard accepted, authority == nil else {
+            throw BuilderRunError.persistedStateInvalid(
+                "only an unsigned accepted Builder final can be authorized")
+        }
+        let telemetryDigest = BuilderEvidenceDigest.sha256(String(
+            decoding: try BuilderDurableIO.canonicalData(trustedTelemetry), as: UTF8.self))
+        let finalDigest = try unsignedAuthorityPayloadDigest()
+        let authority = try BuilderFinalAuthority(
+            parentContractFingerprint: parentContractFingerprint,
+            graphFingerprint: graphFingerprint,
+            objectiveFingerprint: objectiveFingerprint,
+            commitEpoch: commitEpoch,
+            trustedTelemetryDigest: telemetryDigest,
+            finalReceiptDigest: finalDigest)
+        return Self(
+            contractID: contractID, route: route, workers: workers,
+            verification: verification, review: review, accepted: accepted,
+            completedAt: completedAt, authority: authority)
+    }
+
+    private func unsignedAuthorityPayloadDigest() throws -> String {
+        let unsigned = Self(
+            contractID: contractID, route: route, workers: workers,
+            verification: verification, review: review, accepted: accepted,
+            completedAt: completedAt, authority: nil)
+        return BuilderEvidenceDigest.sha256(String(
+            decoding: try BuilderDurableIO.canonicalData(unsigned), as: UTF8.self))
+    }
+}
+
+/// Non-forgeable cross-module handoff for an accepted Builder final. Only BuilderRun can construct
+/// this value; consumers can inspect and revalidate the exact sealed final plus its authenticated
+/// telemetry binding, but cannot turn a public BuilderFinalReceipt initializer into authority.
+public struct BuilderFinalAcceptanceAuthority: Sendable, Equatable {
+    public let finalReceipt: BuilderFinalReceipt
+    public let trustedTelemetry: [BuilderTrustedTelemetryObservation]
+    public let parentContractFingerprint: String
+    public let graphFingerprint: String
+    public let objectiveFingerprint: String
+    public let commitEpoch: String
+
+    init(finalReceipt: BuilderFinalReceipt,
+         trustedTelemetry: [BuilderTrustedTelemetryObservation],
+         parentContractFingerprint: String,
+         graphFingerprint: String,
+         objectiveFingerprint: String,
+         commitEpoch: String) throws {
+        self.finalReceipt = finalReceipt
+        self.trustedTelemetry = trustedTelemetry
+        self.parentContractFingerprint = parentContractFingerprint
+        self.graphFingerprint = graphFingerprint
+        self.objectiveFingerprint = objectiveFingerprint
+        self.commitEpoch = commitEpoch
+        guard isValid else {
+            throw BuilderRunError.persistedStateInvalid(
+                "Builder final acceptance authority is invalid")
+        }
+    }
+
+    public var isValid: Bool {
+        guard finalReceipt.hasValidBuilderFinalAuthority,
+              let authority = finalReceipt.authority,
+              authority.parentContractFingerprint == parentContractFingerprint,
+              authority.graphFingerprint == graphFingerprint,
+              authority.objectiveFingerprint == objectiveFingerprint,
+              authority.commitEpoch == commitEpoch,
+              let data = try? BuilderDurableIO.canonicalData(trustedTelemetry) else { return false }
+        let telemetryDigest = BuilderEvidenceDigest.sha256(String(decoding: data, as: UTF8.self))
+        return authority.trustedTelemetryDigest == telemetryDigest
     }
 }
 public struct BuilderNodeState: Codable, Sendable, Equatable {
@@ -681,6 +897,9 @@ public struct BuilderReviewRequest: Sendable {
 public typealias BuilderExecute = @Sendable (BuilderExecutionRequest) async throws -> BuilderWorkerReceipt
 public typealias BuilderVerify = @Sendable (BuilderVerificationRequest) async throws -> BuilderVerifierReceipt
 public typealias BuilderReview = @Sendable (BuilderReviewRequest) async throws -> BuilderReviewReceipt
+/// Optional idempotent commit which publishes an already-durable accepted Builder receipt to an
+/// external authority store. Builder invokes it before releasing retained rollback material.
+public typealias BuilderFinalAcceptanceCommit = @Sendable (BuilderFinalAcceptanceAuthority) async throws -> Void
 public enum BuilderRunError: Error, LocalizedError, Sendable {
     case invalidConfiguration(String)
     case persistedStateMismatch
@@ -690,6 +909,7 @@ public enum BuilderRunError: Error, LocalizedError, Sendable {
     case finalVerificationFailed(String)
     case reviewRejected([String])
     case reviewerNotIndependent(String)
+    case acceptancePersistencePending(String)
     public var errorDescription: String? {
         switch self {
         case .invalidConfiguration(let value): return value
@@ -702,6 +922,8 @@ public enum BuilderRunError: Error, LocalizedError, Sendable {
         case .reviewRejected(let findings): return "Independent review rejected: \(findings.joined(separator: "; "))"
         case .reviewerNotIndependent(let identity):
             return "Independent completion review unavailable: \(identity). Configure an available reviewer with a provider:model identity distinct from every producing worker."
+        case .acceptancePersistencePending(let value):
+            return "Builder acceptance is durable but external persistence is pending: \(value)"
         }
     }
 }

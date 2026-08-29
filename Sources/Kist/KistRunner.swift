@@ -16,24 +16,79 @@ enum KistRunner {
 
     /// Built-in providers + any user-added custom providers, behind the default key resolver.
     /// Rebuilt after a model is added so the new one is immediately selectable.
-    static func makeRegistry() -> ProviderRegistry {
-        ProviderRegistry(providers: ProviderCatalog.all + CustomProviderStore.load(),
-                         fallbackProviderIds: ModelRouter.defaultFallbackProviderIds)
+    static func makeRegistry(config: KistConfig) -> ProviderRegistry {
+        // The registry's cross-provider fallback chain honors the same combined availability gate
+        // as routing (Codex P2, 2026-08-25): a stream retry must not walk into a provider the
+        // health daemon already knows is down. Both stores re-read their files per call.
+        let cooldowns = ProviderCooldownStore()
+        let health = ProviderHealthFileStore()
+        return makeRegistry(
+            config: config, providers: ProviderCatalog.all + CustomProviderStore.load(),
+            keyStore: DefaultKeyStore.make(),
+            fallbackProviderIds: ModelRouter.defaultFallbackProviderIds,
+            providerUnavailable: { cooldowns.coolingDown($0) || health.down($0) })
+    }
+
+    /// One construction seam for production and focused policy tests. Filtering the providers AND
+    /// fallback graph here means every registry lookup/readiness probe/route sees the same boundary;
+    /// non-allowed implementations remain compiled and can be admitted later (for example Onyx).
+    static func makeRegistry(
+        config: KistConfig,
+        providers: [any ChatProvider],
+        keyStore: KeyStore,
+        fallbackProviderIds: [String: [String]] = [:],
+        retryDelaysNanoseconds: [UInt64] = [250_000_000, 750_000_000],
+        providerUnavailable: @escaping @Sendable (String) -> Bool = { _ in false }
+    ) -> ProviderRegistry {
+        let admitted = providers.filter { config.permitsProvider($0.id) }
+        let admittedIDs = Set(admitted.map { $0.id.lowercased() })
+        let admittedFallbacks = fallbackProviderIds.reduce(into: [String: [String]]()) { result, entry in
+            let primary = entry.key.lowercased()
+            guard admittedIDs.contains(primary) else { return }
+            result[primary] = entry.value.filter { admittedIDs.contains($0.lowercased()) }
+        }
+        return ProviderRegistry(
+            providers: admitted, keyStore: keyStore,
+            fallbackProviderIds: admittedFallbacks,
+            retryDelaysNanoseconds: retryDelaysNanoseconds,
+            providerUnavailable: providerUnavailable)
     }
 
     /// Choose the semantic-memory embedder. `KIST_EMBEDDER=ollama` opts into LOCAL embeddings
     /// (offline, free, no key — requires a running Ollama); otherwise Gemini when its key is
     /// present. Returns nil (semantic memory off) when neither applies — no silent local dependency.
-    static func makeEmbedder(registry: ProviderRegistry) -> EmbeddingProviding? {
-        let choice = (ProcessInfo.processInfo.environment["KIST_EMBEDDER"] ?? "").lowercased()
+    static func makeEmbedder(
+        registry: ProviderRegistry,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> EmbeddingProviding? {
+        let choice = (environment["KIST_EMBEDDER"] ?? "").lowercased()
         if choice == "ollama" {
-            let model = ProcessInfo.processInfo.environment["KIST_EMBED_MODEL"] ?? OllamaEmbeddingClient.defaultModel
+            // The environment opt-in chooses an implementation but cannot widen the provider
+            // policy. This closes the one provider-backed helper that does not call through the
+            // chat registry for each request.
+            guard registry.provider(id: "ollama") != nil else { return nil }
+            let model = environment["KIST_EMBED_MODEL"] ?? OllamaEmbeddingClient.defaultModel
             return OllamaEmbeddingClient(model: model)
         }
         if let geminiKey = registry.apiKey(forProviderId: "gemini") {
             return GeminiEmbeddingClient(apiKey: geminiKey)
         }
         return nil
+    }
+
+    static func makeSemanticMemory(
+        root: String, opts: KistOptions, registry: ProviderRegistry,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> SemanticMemoryService? {
+        guard !opts.noMemory,
+              let embedder = makeEmbedder(registry: registry, environment: environment) else {
+            return nil
+        }
+        return SemanticMemoryService(
+            embedder: embedder,
+            store: FileBackedVectorStore(
+                path: SemanticMemoryService.defaultStorePath(projectRoot: root),
+                confinementRoot: root))
     }
     struct ProviderPick { let providerId: String; let model: String? }
 
@@ -73,9 +128,12 @@ enum KistRunner {
             return await runStickyBarSelfTest()
         }
 
-        var registry = makeRegistry()
-        let checkpoints = LoopCheckpointStore()
         let config = KistConfig.load()
+        var registry = makeRegistry(config: config)
+        let checkpoints = LoopCheckpointStore()
+        if let policyError = config.providerPolicyError {
+            err("error: provider policy is fail-closed: \(policyError)")
+        }
         var model = opts.model ?? config.model       // flags > config > provider default (goal pin may override below)
         let toolMode = ToolMode(rawValue: opts.toolMode) ?? .auto
         let fetchAllowedHosts = opts.fetchAllowedHosts.isEmpty ? config.fetchAllowedHosts : opts.fetchAllowedHosts
@@ -95,8 +153,10 @@ enum KistRunner {
             // Offline health must be instant/noninteractive. Do not touch the macOS Keychain here:
             // locked/UI-gated items can block a CLI with no prompt. Real runs and live probes still
             // use the default Keychain+env resolver.
-            let noninteractive = ProviderRegistry(keyStore: FileKeyStore(),
-                                                  fallbackProviderIds: ModelRouter.defaultFallbackProviderIds)
+            let noninteractive = makeRegistry(
+                config: config, providers: ProviderCatalog.all + CustomProviderStore.load(),
+                keyStore: FileKeyStore(),
+                fallbackProviderIds: ModelRouter.defaultFallbackProviderIds)
             return await providerHealth(noninteractive, probe: false)
         }
         if opts.probeProviders { return await providerHealth(registry, probe: true) }
@@ -169,6 +229,10 @@ enum KistRunner {
                 guard let c = checkpoints.resumable().first else { err("error: no resumable runs. (--list)"); return 2 }
                 cp = c
             }
+            guard registry.provider(id: cp.providerId) != nil else {
+                err("error: checkpoint provider '\(cp.providerId)' is not permitted or available under the current provider policy")
+                return 2
+            }
             guard let root = ToolContext.canonicalize(cp.projectRoot) else {
                 err("error: the run's project path no longer exists: \(cp.projectRoot)"); return 2
             }
@@ -178,7 +242,7 @@ enum KistRunner {
                                       auditLog: auditLog, externalReadRoots: opts.allowReadPaths)
             note("tool audit · \(auditLog.path)")
             note("kist · resuming \(cp.title) · \(cp.providerId) · iter \(cp.iteration)")
-            // Resume with the SAME full tool set as a fresh run (previously it lost cortex/browse/tasks/etc.).
+            // Resume with the SAME full tool set as a fresh run (previously it lost browse/tasks/etc.).
             let resumeExtraTools = Self.buildExtraTools(root: root, fetchAllowedHosts: fetchAllowedHosts, opts: opts, registry: registry)
             return await withTools(projectRoot: root, fetchAllowedHosts: fetchAllowedHosts, extraTools: resumeExtraTools, enableComputerUse: opts.enableComputerUse) { tools in
                 let recorder = TrajectoryRecorder()
@@ -190,7 +254,7 @@ enum KistRunner {
                                     extendedThinking: opts.extendedThinking,
                                     toolMode: toolMode, delegationDepth: opts.delegationDepth, recorder: recorder,
                                     traceRecorder: traceRecorder)
-                let mem = opts.noMemory ? "" : CortexMemory().context(projectName: (root as NSString).lastPathComponent)
+                let mem = Self.sessionMemory(root: root, opts: opts) ?? ""
                 let outcome = await loop.resume(from: Self.withMemoryRefresh(cp, memory: mem, enabled: !opts.noMemory))
                 recordRuntimeLessons(goal: cp.title, success: outcome.success, recorder: recorder,
                                      lessonStore: lessonStore, maxIterations: opts.maxIterations,
@@ -227,7 +291,7 @@ enum KistRunner {
         let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
                                   auditLog: auditLog, externalReadRoots: opts.allowReadPaths)
         note("tool audit · \(auditLog.path)")
-        // Full tool set (media/data/memory/vision + agent-writable Cortex). Extracted so the
+        // Full tool set (media/data/temporal-memory/vision). Extracted so the
         // --resume path gets the SAME tools (it previously ran with only the headless set).
         let extraTools = Self.buildExtraTools(root: root, fetchAllowedHosts: fetchAllowedHosts, opts: opts, registry: registry)
 
@@ -245,8 +309,9 @@ enum KistRunner {
                 // per request). No forced menu. The legacy picker is still reachable with KIST_PICK_MODEL=1,
                 // and any explicit --provider / config default pins a model (auto off).
                 let forcePicker = ProcessInfo.processInfo.environment["KIST_PICK_MODEL"] == "1"
-                let pick = (forcePicker && opts.providerId == nil && config.provider == nil) ? await pickProvider(registry) : nil
-                if pick != nil { registry = makeRegistry() }   // pick up a model added during the picker
+                let pick = (forcePicker && opts.providerId == nil && config.provider == nil)
+                    ? await pickProvider(registry, config: config) : nil
+                if pick != nil { registry = makeRegistry(config: config) }   // pick up an allowed model added during the picker
                 let providerId = pick?.providerId ?? providerId
                 let model = pick?.model ?? model
                 let chosen = registry.provider(id: providerId)
@@ -262,6 +327,15 @@ enum KistRunner {
                 // before this the REPL neither read nor fed it, so a rate-limited gemini stayed "ready"
                 // and every media turn walked into the same wall (2026-08-14 screenshot).
                 let liveCooldowns = ProviderCooldownStore()
+                // The daemon's health snapshot joins the cooldown ledger in ONE avoid gate used by
+                // every routing lane below. provider-health.json was written-but-never-read on the
+                // request path, so a provider known-down at startup (ollama, 2026-08-25) was selected
+                // every turn and every turn died identically. Both stores re-read their files per
+                // call, so a provider the user restarts mid-session comes back without a relaunch.
+                let providerHealth = ProviderHealthFileStore()
+                let avoidProvider: @Sendable (String) -> Bool = {
+                    liveCooldowns.coolingDown($0) || providerHealth.down($0)
+                }
                 // Candidate models for the heuristic router: every configured/local provider's default
                 // model, tagged with capabilities. Vision engine (gemini) ordered first for the vision tier.
                 let preferredVision = registry.provider(id: "gemini").flatMap { registry.hasKey(for: $0) ? "gemini" : nil }
@@ -306,7 +380,7 @@ enum KistRunner {
                                            planMode: opts.planMode, extendedThinking: opts.extendedThinking, toolMode: toolMode,
                                            roles: roleSelection.bindings, delegationDepth: opts.delegationDepth,
                                            sinkOverride: tuiSink, recorder: recorder, traceRecorder: traceRecorder)
-                    let memoryContext = Self.sessionMemory(root: root, opts: opts)   // cortex + project memory
+                    let memoryContext = Self.sessionMemory(root: root, opts: opts)
                     let personaMatcher = TaskPersonaMatcher(projectRoot: root)
                     let convo = TUIConversation(
                         ui: ui, loop: tuiLoop,
@@ -345,20 +419,28 @@ enum KistRunner {
                     return sink
                 }
                 // P1 / Roadmap #3 — ONE embedder-gated semantic-memory service (fail-soft; nil under
-                // --no-memory or no embedder) shared by the verified-win DEPOSIT (rememberLesson, below) and
+                // --no-memory or no embedder) shared by the locally-checked advisory deposit and
                 // the P1 recall→plan READ-BACK injection. Same store the `recall` tool reads.
-                let semanticMemory: SemanticMemoryService? = opts.noMemory
-                    ? nil
-                    : Self.makeEmbedder(registry: registry).map {
-                        SemanticMemoryService(embedder: $0,
-                                              store: FileBackedVectorStore(path: root + "/.kist/memory/vectors.json"))
-                      }
+                let semanticMemory = Self.makeSemanticMemory(
+                    root: root, opts: opts, registry: registry)
                 // P1 injection is OFF by default (zero per-turn cost, no behavior change) until `/ablation
                 // recall` proves the wire compounds (advantage>0); opt in with KIST_RECALL_INJECT=1. When on,
-                // each turn's system prompt gains an ADVISORY block of recalled VERIFIED lessons for the goal.
+                // each turn's system prompt gains an explicitly untrusted data block of locally checked lessons.
                 let recallInject: (@Sendable (_ q: String) async -> String)?
                 if ProcessInfo.processInfo.environment["KIST_RECALL_INJECT"] == "1", let s = semanticMemory {
-                    recallInject = { q in await s.recallBlock(for: q) }
+                    recallInject = { q in
+                        do {
+                            let block = try await s.recallBlockChecked(for: q)
+                            if let warning = s.lastFailure {
+                                Self.err("semantic recall degraded: \(warning)")
+                            }
+                            return block
+                        }
+                        catch {
+                            Self.err("semantic recall unavailable (fail-closed): \(error)")
+                            return ""
+                        }
+                    }
                 } else {
                     recallInject = nil
                 }
@@ -404,23 +486,29 @@ enum KistRunner {
                         // No keyed providers to reason over ⇒ the standalone heuristic (one-provider setups).
                         guard !snapshot.providers.isEmpty else {
                             return autoRouter.route(text, hasMedia: false, current: current,
-                                                    avoid: liveCooldowns.coolingDown)
+                                                    avoid: avoidProvider)
                         }
                         // Fall back to the CURRENT model (not the startup default): "stay" must mean stay on
                         // whatever we're on now, or a no-signal turn route-flips back after any switch (Codex HIGH).
                         let a = ModelAssignmentEngine.assignInteractive(turn: text, snapshot: snapshot,
-                                                                        fallback: current, learning: learning)
+                                                                        fallback: current, learning: learning,
+                                                                        unavailable: avoidProvider)
                         return AutoModelRouter.captainDecision(a, fallback: current,
-                                                               avoid: liveCooldowns.coolingDown)
+                                                               avoid: avoidProvider)
                     }
                 } else {
                     repl.autoRoute = { text, hasMedia, current in
                         autoRouter.route(text, hasMedia: hasMedia, current: current,
-                                         avoid: liveCooldowns.coolingDown)
+                                         avoid: avoidProvider)
                     }
                 }
-                repl.addModelFlow = { _ = await AddModelFlow.run() }
-                repl.importModelFlow = { url in await ImportModelWizard.run(url: url) }
+                // Model onboarding constructs a temporary registry around an unsaved draft. Keep
+                // that intentionally broad setup surface unreachable while an allowlist is active;
+                // widening the catalog requires an explicit config edit + restart.
+                if config.allowedProviders == nil {
+                    repl.addModelFlow = { _ = await AddModelFlow.run() }
+                    repl.importModelFlow = { url in await ImportModelWizard.run(url: url) }
+                }
                 // Add a key to an existing (red) provider from the picker → green + usable live.
                 repl.saveProviderKey = { pid, key in
                     guard let p = registry.provider(id: pid) else { return false }
@@ -483,7 +571,11 @@ enum KistRunner {
                         // escalating to them would route a repair to a server that isn't running (Codex P2).
                         let subscriptionHitters: Set<String> = ["claude-cli", "codex-cli"]
                         let available = specialistRegistry.providers
-                            .filter { ($0.requiresAPIKey && specialistRegistry.hasKey(for: $0)) || subscriptionHitters.contains($0.id) }
+                            .filter {
+                                ($0.requiresAPIKey && specialistRegistry.hasKey(for: $0))
+                                    || (subscriptionHitters.contains($0.id)
+                                        && specialistRegistry.hasKey(for: $0))
+                            }
                             .map { $0.id }
                         let shVerdicts: [String: ModelVerdict] = opts.noMemory
                             ? [:] : CaptainLearningStore(projectRoot: root).modelVerdicts()
@@ -514,22 +606,17 @@ enum KistRunner {
                 repl.personaDisplay = { input in
                     TaskPersonaMatcher.display(matches: personaMatcher.matches(for: input, limit: 3))
                 }
-                // The Cortex: human-readable .md memory of Luke (preferences/projects/journal). Seeded on
-                // first run; folded into ProjectMemory so kist knows him; viewable via /cortex.
+                // Legacy Cortex Markdown remains available through explicit operator audit commands only.
+                // It is never seeded, mutated, or folded into a model prompt.
                 let cortex = opts.noMemory ? nil : CortexMemory()
-                try? cortex?.seedIfNeeded()
                 repl.cortex = cortex
-                let projectName = (root as NSString).lastPathComponent
                 repl.briefCompiler = { input, roles, mode, transcript, intent in
                     let personaContext = TaskPersonaMatcher.promptContext(
                         matches: personaMatcher.matches(for: input, limit: 3))
                     let reviewContext = ReviewContext.renderIfNeeded(request: input, projectRoot: root)
-                    // Cortex (who Luke is) + ProjectMemory (this repo) folded into one memory block.
-                    let combinedMemory = [cortex?.context(projectName: projectName), memoryContext]
-                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
                     return PromptCompiler.compiledPrompt(input, mode: mode,
                                                          conversationContext: PromptCompiler.conversationContext(from: transcript),
-                                                         projectContext: briefContext(memoryContext: combinedMemory.isEmpty ? nil : combinedMemory,
+                                                         projectContext: briefContext(memoryContext: memoryContext,
                                                                                       roles: roles,
                                                                                       lessons: lessonStore?.primer(forGoal: input),
                                                                                       specialists: personaContext,
@@ -583,11 +670,14 @@ enum KistRunner {
                     _ = await runEvalSuite(opts, registry: registry, root: root, tools: tools,
                                            context: context, providerId: providerId, model: model)
                 }
-                // Roadmap #3 — auto-capture verified wins into SEMANTIC (vector) memory so a future session
-                // can recall them. Same store the `recall` tool reads (`.kist/memory/vectors.json`), so what
-                // gets auto-saved is auto-findable. Gated on an embedder (local Ollama / Gemini); fail-soft.
+                // Roadmap #3 — capture locally checked wins into advisory semantic memory so a future session
+                // can recall them as unsigned advisory context. The typed deposit carries the captured
+                // verification clock and replay locator; metadata alone can never manufacture a checked lesson.
                 if let semanticMemory {   // reuse the ONE hoisted service (deposit side of the same store)
-                    repl.rememberLesson = { text in try? await semanticMemory.remember(text, metadata: ["kind": "auto-lesson"]) }
+                    repl.rememberLesson = { deposit in
+                        do { _ = try await semanticMemory.rememberLocallyCheckedLesson(deposit) }
+                        catch { Self.err("semantic lesson was not persisted: \(error)") }
+                    }
                 }
                 repl.providerAliases = providerAliases
                 repl.providerLabels = registry.providers
@@ -618,8 +708,10 @@ enum KistRunner {
                 repl.visionProviderId = repl.visionProviderCandidates.first
                 // The REPL both CONSULTS the ledger (media reroute, substitution, auto-route tiers skip
                 // cooling providers) and FEEDS it (a transient live failure benches the provider for
-                // every kist process — the one-shot lanes previously wrote it alone).
-                repl.providerCoolingDown = liveCooldowns.coolingDown
+                // every kist process — the one-shot lanes previously wrote it alone). The consult side
+                // is the COMBINED gate (cooldowns + health daemon) so substitution never lands on a
+                // provider the daemon already knows is down.
+                repl.providerCoolingDown = avoidProvider
                 repl.recordProviderCooldown = { liveCooldowns.record($0) }
                 // Files-API uploader for big/long media (video, >20MB), only when a Gemini key exists.
                 if let geminiKey = registry.apiKey(forProviderId: "gemini") {
@@ -693,7 +785,11 @@ enum KistRunner {
                         ? CaptainLearningStore(projectRoot: scorecardRoot).modelVerdicts() : [:]
                     let subscriptionHitters: Set<String> = ["claude-cli", "codex-cli"]
                     let available = strongRegistry.providers
-                        .filter { ($0.requiresAPIKey && strongRegistry.hasKey(for: $0)) || subscriptionHitters.contains($0.id) }
+                        .filter {
+                            ($0.requiresAPIKey && strongRegistry.hasKey(for: $0))
+                                || (subscriptionHitters.contains($0.id)
+                                    && strongRegistry.hasKey(for: $0))
+                        }
                         .map { $0.id }
                     let strong = ModelEscalator.pick(tier: .frontier, keyed: available, preferred: providerId,
                                                      verdicts: verdicts)
@@ -932,12 +1028,20 @@ enum KistRunner {
                     }
                 }
                 let plannerBinding = roleSelection.bindings.binding(for: .planner)
+                // A dead classifier provider must announce itself (routing audit 2026-08-25: it
+                // silently disabled every escalation route — plan/fleet/council/research were
+                // unreachable and the degrade was indistinguishable from "nothing to escalate").
+                let classifierDown: (String) -> Void = { note("router · \($0)") }
                 if registry.provider(id: plannerBinding.providerId) != nil {
-                    repl.router = ConversationRouter(providers: registry, binding: plannerBinding, defaultFleetAgents: min(3, opts.agents))
+                    var router = ConversationRouter(providers: registry, binding: plannerBinding, defaultFleetAgents: min(3, opts.agents))
+                    router.onClassifierUnavailable = classifierDown
+                    repl.router = router
                 }
                 repl.routerFactory = { binding in
                     guard registry.provider(id: binding.providerId) != nil else { return nil }
-                    return ConversationRouter(providers: registry, binding: binding, defaultFleetAgents: min(3, opts.agents))
+                    var router = ConversationRouter(providers: registry, binding: binding, defaultFleetAgents: min(3, opts.agents))
+                    router.onClassifierUnavailable = classifierDown
+                    return router
                 }
                 await repl.run()
                 return 0

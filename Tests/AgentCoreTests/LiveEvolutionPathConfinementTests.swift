@@ -127,14 +127,15 @@ final class LiveEvolutionPathConfinementTests: XCTestCase {
                              parameters: [], contract: "c", testArgs: [:], testExpectSubstring: "x")
     }
 
-    /// ACTIVATION-WRITE SITE (`SelfAuthoredToolStore.save`): a traversal scriptFile throws and creates
-    /// NO tool home — the promote-time write the finding actually names.
+    /// Candidate staging uses the same confined artifact writer as sealed activation. A traversal
+    /// scriptFile throws and creates NO tool home before any promotion authority is considered.
     func testActivationStore_save_RejectsTraversalScriptFile_createsNoHome() {
         let projectRoot = tmpRoot()
         let store = SelfAuthoredToolStore(projectRoot: projectRoot)
-        XCTAssertThrowsError(try store.save(manifest: manifest(name: "self__evil", scriptFile: "../../pwned.sh"),
-                                            scriptBody: "#!/bin/bash\necho hi"),
-                             "ACTIVATION-WRITE SITE (save): a traversal scriptFile must be refused")
+        XCTAssertThrowsError(try store.stageForTesting(
+            manifest: manifest(name: "self__evil", scriptFile: "../../pwned.sh"),
+            scriptBody: "#!/bin/bash\necho hi"),
+            "ACTIVATION-WRITE SITE (staging writer): a traversal scriptFile must be refused")
         // The guard throws BEFORE createDirectory, so the home is never made and nothing is written.
         let storeRoot = (projectRoot as NSString).appendingPathComponent(".kist/self-tools")
         let evilHome = (storeRoot as NSString).appendingPathComponent("self__evil")
@@ -145,11 +146,20 @@ final class LiveEvolutionPathConfinementTests: XCTestCase {
     func testActivationStore_save_AcceptsBenignManifestUnderRoot() throws {
         let projectRoot = tmpRoot()
         let store = SelfAuthoredToolStore(projectRoot: projectRoot)
-        let home = try store.save(manifest: manifest(name: "self__ok", scriptFile: "tool.sh"),
-                                  scriptBody: "#!/bin/bash\necho hi")
-        let storeRoot = URL(fileURLWithPath: (projectRoot as NSString).appendingPathComponent(".kist/self-tools"))
-            .standardizedFileURL.resolvingSymlinksInPath().path
-        XCTAssertTrue(home.hasPrefix(storeRoot + "/"), "benign tool home must stay under the store root: \(home)")
+        let home = try store.stageForTesting(
+            manifest: manifest(name: "self__ok", scriptFile: "tool.sh"),
+            scriptBody: "#!/bin/bash\necho hi")
+        let homeURL = URL(fileURLWithPath: home)
+        XCTAssertEqual(homeURL.deletingLastPathComponent().lastPathComponent, "self-tools")
+        XCTAssertEqual(homeURL.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent, ".kist")
+        let physicalProject = homeURL.deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().path
+        let expectedIdentity = try FileManager.default.attributesOfItem(atPath: projectRoot)
+        let actualIdentity = try FileManager.default.attributesOfItem(atPath: physicalProject)
+        XCTAssertEqual(expectedIdentity[.systemNumber] as? NSNumber, actualIdentity[.systemNumber] as? NSNumber)
+        XCTAssertEqual(expectedIdentity[.systemFileNumber] as? NSNumber,
+                       actualIdentity[.systemFileNumber] as? NSNumber,
+                       "benign tool home must remain under the same physical project root: \(home)")
         XCTAssertTrue(FileManager.default.fileExists(atPath: (home as NSString).appendingPathComponent("tool.sh")))
     }
 

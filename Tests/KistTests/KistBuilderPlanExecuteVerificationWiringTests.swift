@@ -139,6 +139,94 @@ final class KistBuilderPlanExecuteVerificationWiringTests: XCTestCase {
         XCTAssertFalse(legacy.check.passed)
     }
 
+    func testPlanExecuteReplayUsesRealFullStreamDigestAndBuildRetainsTypedReceipt() throws {
+        ForgeSeal.forceEphemeralKeyForTesting()
+        defer { ForgeSeal.resetCacheForTesting() }
+        let reference = try BuilderTrustedCommandReference(
+            observationID: "plan-final-observation", invocationID: "plan-final-invocation",
+            gateArgumentsDigest: String(repeating: "1", count: 64),
+            requestedArgumentsDigest: String(repeating: "2", count: 64),
+            effectiveLauncherDigest: String(repeating: "3", count: 64),
+            effectiveEnvironmentDigest: String(repeating: "4", count: 64),
+            sandboxProfileDigest: String(repeating: "5", count: 64),
+            stdoutDigest: BuilderEvidenceDigest.sha256("stdout"),
+            stderrDigest: BuilderEvidenceDigest.sha256("stderr"),
+            stdoutByteCount: 6, stderrByteCount: 6, exitCode: 0,
+            timedOut: false, wasSignalled: false, wallTimeMilliseconds: 1)
+        XCTAssertNotEqual(reference.fullStreamDigest, reference.stdoutDigest)
+        let mission = String(repeating: "a", count: 64)
+        let contract = "kist-builder-fixture"
+        let subject = String(repeating: "c", count: 64)
+        let receipt = PlanFinalVerificationReceipt(
+            missionInstanceID: mission, contractID: contract, stepID: "final",
+            tool: "run_command",
+            invocation: .init(executable: "/usr/bin/true", argv: [],
+                              hasStandardInput: false),
+            commandFingerprint: String(repeating: "6", count: 64),
+            expectedExitCode: 0, actualExitCode: 0,
+            outputDigest: reference.fullStreamDigest,
+            boundedRedactedOutputExcerpt: "verified",
+            governedWorkspaceDigest: subject,
+            completionContractFingerprint: String(repeating: "7", count: 64),
+            executionPolicyFingerprint: String(repeating: "8", count: 64),
+            verifiedAt: Date(), freshAfterMutationFrontier: true,
+            captureOrdinal: 2, mutationFrontierOrdinal: 1,
+            trustedCommandReference: reference)
+
+        let evidence = try XCTUnwrap(KistRunner.builderFinalReplayEvidence(
+            receipt: receipt, missionInstanceID: mission, contractID: contract,
+            contractFingerprint: String(repeating: "9", count: 64),
+            subjectDigest: subject))
+        XCTAssertEqual(evidence.outputDigest, reference.fullStreamDigest)
+        XCTAssertTrue(evidence.isBound(
+            contractFingerprint: String(repeating: "9", count: 64),
+            subjectDigest: subject))
+        XCTAssertTrue(KistRunner.builderPlanExecuteCompletionGatePassed(
+            adapterPassed: true, observedMissionID: mission,
+            expectedMissionID: mission, finalReplay: evidence))
+
+        let source = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/Kist/KistRunner+BuilderAdapters.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(source.contains("planFinalVerificationReceipt = replay != nil"))
+        XCTAssertTrue(source.contains("? outcome?.finalVerificationReceipt : nil"))
+    }
+
+    func testPlanExecuteBuildCannotPassCompletionGateWithNilTypedReplay() {
+        let mission = String(repeating: "a", count: 64)
+        XCTAssertFalse(KistRunner.builderPlanExecuteCompletionGatePassed(
+            adapterPassed: true, observedMissionID: mission,
+            expectedMissionID: mission, finalReplay: nil))
+        XCTAssertFalse(KistRunner.builderPlanExecuteCompletionGatePassed(
+            adapterPassed: true, observedMissionID: String(repeating: "b", count: 64),
+            expectedMissionID: mission, finalReplay: nil))
+    }
+
+    func testAcceptedPersistenceIsPlanExecuteOnlyInsideBuilderPreReleaseHook() throws {
+        let source = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/Kist/KistRunner+Builder.swift"),
+            encoding: .utf8)
+        let hook = try XCTUnwrap(source.range(of: "if launch.adapter == .planExecute"))
+        let persistence = try XCTUnwrap(
+            source.range(of: "persistAcceptedPlanExecuteRun("))
+        let runConstruction = try XCTUnwrap(source.range(of: "let run = try BuilderRun("))
+        let execution = try XCTUnwrap(source.range(of: "let final = try await run.run()"))
+
+        XCTAssertLessThan(hook.lowerBound, persistence.lowerBound)
+        XCTAssertLessThan(persistence.lowerBound, runConstruction.lowerBound,
+                          "persistence must be supplied as a BuilderRun hook, not called post-run")
+        XCTAssertLessThan(runConstruction.lowerBound, execution.lowerBound)
+        XCTAssertEqual(source.components(separatedBy: "persistAcceptedPlanExecuteRun(").count - 1,
+                       1)
+        XCTAssertTrue(source.contains("finalAcceptanceCommit: finalAcceptanceCommit"))
+        XCTAssertTrue(source.contains("finalAcceptanceCommit = nil"),
+                      "non-PlanExecute Builder adapters must not receive the trust hook")
+        XCTAssertTrue(source.contains("case .acceptancePersistencePending"))
+        XCTAssertTrue(source.contains("outcome: \"acceptance-persistence-pending\""))
+    }
+
     private func verifierArguments() throws -> [String: Any] {
         let data = Data(
             #"{"executable":"python3","args":["test_plan.py"],"cwd":".","allowed_exit_codes":[0]}"#.utf8)

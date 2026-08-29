@@ -35,6 +35,15 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
     public let provider: String?
     public let model: String?
 
+    /// Optional trust bindings for runs which crossed the host-owned accepted-run boundary. Legacy
+    /// and advisory-only rows intentionally decode these as nil. A dashboard must never infer these
+    /// values from `success`/`verified`; it joins them to a unique sealed `AcceptedRunReceipt`.
+    public let projectIdentity: String?
+    public let contractID: String?
+    public let objectiveFingerprint: String?
+    public let verificationSubject: String?
+    public let verificationDigest: String?
+
     // The OUTCOME (measured by the referee AFTER the work ran)
     public let success: Bool               // did the run complete its goal (referee verdict)
     public let verified: Bool              // did a critic independently verify (distinct from success)
@@ -55,11 +64,17 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
                 provider: String? = nil, model: String? = nil,
                 success: Bool, verified: Bool, failureRate: Double, iterationsUsed: Int,
                 iterationBudget: Int, replansUsed: Int, wasStuck: Bool, toolCalls: Int,
-                durationMs: Double, totalTokens: Int, failureStage: String? = nil) {
+                durationMs: Double, totalTokens: Int, failureStage: String? = nil,
+                projectIdentity: String? = nil,
+                contractID: String? = nil, objectiveFingerprint: String? = nil,
+                verificationSubject: String? = nil, verificationDigest: String? = nil) {
         self.id = id; self.at = at; self.goal = goal; self.signature = signature; self.orgVersion = orgVersion
         self.route = route; self.complexity = complexity; self.thinking = thinking; self.planning = planning
         self.team = team; self.modelTier = modelTier; self.decisionReason = decisionReason
         self.specialists = specialists; self.provider = provider; self.model = model
+        self.projectIdentity = projectIdentity
+        self.contractID = contractID; self.objectiveFingerprint = objectiveFingerprint
+        self.verificationSubject = verificationSubject; self.verificationDigest = verificationDigest
         self.success = success; self.verified = verified; self.failureRate = failureRate
         self.iterationsUsed = iterationsUsed; self.iterationBudget = iterationBudget
         self.replansUsed = replansUsed; self.wasStuck = wasStuck; self.toolCalls = toolCalls

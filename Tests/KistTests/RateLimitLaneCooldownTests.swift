@@ -186,10 +186,15 @@ final class RateLimitLaneCooldownTests: XCTestCase {
 
     func testSiteDefaultProviderSelectionConsultsCooldowns() throws {
         let src = kistRunnerFamilySource()
-        XCTAssertTrue(src.contains("cooldowns.coolingDown($0.id)"),
-                      "default provider selection must skip cooling providers (0.17.58)")
-        XCTAssertTrue(src.contains("avoid: liveCooldowns.coolingDown"),
-                      "REPL auto-route wiring must thread the live cooldown ledger into the router")
+        // 0.17.60: the cooldown ledger is consulted through the COMBINED availability gate
+        // (cooldowns + health daemon) — the ledger must still be inside it, and the gate must
+        // be what the routing lanes receive. ProviderAvailabilityGateTests pins the health half.
+        XCTAssertTrue(src.contains("cooldowns.coolingDown($0) || health.down($0)"),
+                      "default provider selection must skip cooling providers (0.17.58) via the combined gate")
+        XCTAssertTrue(src.contains("liveCooldowns.coolingDown($0) || providerHealth.down($0)"),
+                      "REPL auto-route wiring must thread the live cooldown ledger into the combined avoid gate")
+        XCTAssertTrue(src.contains("avoid: avoidProvider"),
+                      "REPL auto-route wiring must hand the combined gate to the router")
         XCTAssertTrue(src.contains("repl.recordProviderCooldown"),
                       "runner must wire the REPL's cooldown-record hook")
     }

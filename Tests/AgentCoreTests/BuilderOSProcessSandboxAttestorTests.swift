@@ -33,10 +33,12 @@ final class BuilderOSProcessSandboxAttestorTests: XCTestCase {
             stage: stage)
     }
 
-    private func run(_ path: String, _ args: [String], cwd: URL? = nil) -> ProcessGroupRunner.Outcome {
+    private func run(_ path: String, _ args: [String], cwd: URL? = nil,
+                     env: [String: String] = ["PATH": "/usr/bin:/bin"])
+        -> ProcessGroupRunner.Outcome {
         ProcessGroupRunner.run(
             launchPath: path, launchArgs: args, cwd: (cwd ?? staged).path,
-            env: ["PATH": "/usr/bin:/bin"], timeoutSeconds: 20, capPerStream: 100_000)
+            env: env, timeoutSeconds: 20, capPerStream: 100_000)
     }
 
     private func withScope<T: Sendable>(
@@ -108,6 +110,44 @@ final class BuilderOSProcessSandboxAttestorTests: XCTestCase {
         #endif
     }
 
+    func testParentProcessArgumentsCannotBeInspected() async throws {
+        #if os(macOS)
+        let parentPID = getpid()
+        let outcome = try await withScope {
+            self.run("/bin/ps", ["eww", "-p", "\(parentPID)", "-o", "command="])
+        }
+        XCTAssertNotEqual(outcome.exitCode, 0, outcome.combined)
+        XCTAssertFalse(outcome.combined.contains("AgentCorePackageTests"), outcome.combined)
+        #else
+        throw XCTSkip("real Seatbelt process-inspection test requires macOS")
+        #endif
+    }
+
+    func testChildEnvironmentAndArgvDoNotInheritCallerSecretsOrHostPath() async throws {
+        #if os(macOS)
+        let staged = try XCTUnwrap(staged)
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
+            throw XCTSkip("system Python is unavailable")
+        }
+        let probe = staged.appendingPathComponent("environment_probe.py")
+        try Data("import json, os, sys\nprint(json.dumps({'argv': sys.argv, 'env': dict(os.environ)}, sort_keys=True))\n".utf8)
+            .write(to: probe)
+        let secret = "EVOLUTION_CALLER_SECRET_\(UUID().uuidString)"
+        let hostPath = FileManager.default.currentDirectoryPath
+        let outcome = try await withScope {
+            self.run(
+                "/usr/bin/python3", ["environment_probe.py", "benign-argument"],
+                env: ["PATH": "/attacker", "SECRET": secret, "PWD": hostPath])
+        }
+        XCTAssertEqual(outcome.exitCode, 0, outcome.combined)
+        XCTAssertTrue(outcome.stdout.contains("benign-argument"), outcome.stdout)
+        XCTAssertFalse(outcome.combined.contains(secret), outcome.combined)
+        XCTAssertFalse(outcome.combined.contains(hostPath), outcome.combined)
+        #else
+        throw XCTSkip("real Seatbelt environment test requires macOS")
+        #endif
+    }
+
     func testUnregisteredForgedAndReplayedAttestationsAreRejected() async throws {
         let originalRequest = request()
         let forged = try BuilderSandboxAttestation(
@@ -147,6 +187,37 @@ final class BuilderOSProcessSandboxAttestorTests: XCTestCase {
         XCTAssertEqual(outcome.exitCode, 0, outcome.combined)
         XCTAssertEqual(outcome.stdout, payload)
         XCTAssertFalse(FileManager.default.fileExists(atPath: injected.path))
+        #else
+        throw XCTSkip("real Seatbelt integration test requires macOS")
+        #endif
+    }
+
+    func testVerificationCanRefreshExistingGeneratedOutputButNotSourceOrEscapeLink() async throws {
+        #if os(macOS)
+        let staged = try XCTUnwrap(staged)
+        let governed = try XCTUnwrap(governed)
+        let generated = staged.appendingPathComponent(".build", isDirectory: true)
+        try FileManager.default.createDirectory(at: generated, withIntermediateDirectories: true)
+        try Data("source\n".utf8).write(to: staged.appendingPathComponent("source.txt"))
+        try FileManager.default.createSymbolicLink(
+            at: generated.appendingPathComponent("escape"), withDestinationURL: governed)
+        let request = request(stage: .verification)
+        let attestation = try await BuilderOSProcessSandboxAttestor().attest(request)
+        let outcomes = try await BuilderOSProcessSandboxAttestor.withRegisteredScope(
+            request: request, attestation: attestation) {
+                let generatedWrite = self.run(
+                    "/usr/bin/touch", [generated.appendingPathComponent("refreshed").path])
+                let sourceWrite = self.run(
+                    "/usr/bin/touch", [staged.appendingPathComponent("source.txt").path])
+                let escapeWrite = self.run(
+                    "/usr/bin/touch", [generated.appendingPathComponent("escape/outside").path])
+                return (generatedWrite.exitCode, sourceWrite.exitCode, escapeWrite.exitCode)
+            }
+        XCTAssertEqual(outcomes.0, 0)
+        XCTAssertNotEqual(outcomes.1, 0)
+        XCTAssertNotEqual(outcomes.2, 0)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: governed.appendingPathComponent("outside").path))
         #else
         throw XCTSkip("real Seatbelt integration test requires macOS")
         #endif

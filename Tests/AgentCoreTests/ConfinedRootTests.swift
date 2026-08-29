@@ -247,6 +247,21 @@ final class ConfinedRootTests: XCTestCase {
         assertPathEscape("leak") { _ = try c.readData("leak") }
     }
 
+    func testEveryContentReadRefusesPreexistingHardlinkedLeaf() throws {
+        let outside = external + "/hardlink-secret.txt"
+        let inside = root + "/hardlink-secret.txt"
+        try "TOP-SECRET".write(
+            toFile: outside, atomically: true, encoding: .utf8)
+        try FileManager.default.linkItem(atPath: outside, toPath: inside)
+        let c = try cr()
+
+        XCTAssertThrowsError(try c.readData("hardlink-secret.txt"))
+        XCTAssertThrowsError(try c.readData("hardlink-secret.txt", maxBytes: 64))
+        XCTAssertThrowsError(try c.readStableData("hardlink-secret.txt", maxBytes: 64))
+        XCTAssertThrowsError(try c.readDataPrefix("hardlink-secret.txt", maxBytes: 64))
+        XCTAssertThrowsError(try c.fileSHA256("hardlink-secret.txt"))
+    }
+
     func testWriteDoesNotClobberSymlinkTarget() throws {
         // A symlinked leaf must have the LINK replaced, never the external target written through.
         let target = external + "/target.txt"

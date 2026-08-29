@@ -3,7 +3,7 @@ import XCTest
 
 /// Read-only git tool. Tests: pure argv construction, the safety rails (subcommand
 /// whitelist, rev-flag rejection, path confinement, blame-needs-path), registration,
-/// and a live run against this real repository.
+/// and a real run against an isolated temporary repository.
 final class GitToolTests: XCTestCase {
 
     private var root: String!
@@ -96,15 +96,20 @@ final class GitToolTests: XCTestCase {
         XCTAssertTrue(HeadlessAgentLoop.readOnlyTools.contains("git"))
     }
 
-    // MARK: - live run against THIS repo
+    // MARK: - real process run
 
-    func testLiveStatusOnRealRepo() async throws {
-        guard GitTool.gitPath() != nil else { throw XCTSkip("git not installed") }
-        // Point the context at the actual project checkout (a real git repo).
-        let repo = FileManager.default.currentDirectoryPath
-        guard ToolContext.canonicalize(repo + "/.git") != nil else { throw XCTSkip("cwd is not a git repo") }
+    func testStatusOnIsolatedRealRepoDoesNotDependOnCheckoutMetadata() async throws {
+        guard let git = GitTool.gitPath() else { throw XCTSkip("git not installed") }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: git)
+        process.arguments = ["init", "-q"]
+        process.currentDirectoryURL = URL(fileURLWithPath: root, isDirectory: true)
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, "fixture git init failed")
+
         let r = try await GitTool().execute(arguments: ["subcommand": "status"],
-                                            context: ToolContext(projectRoot: repo, shell: .denied))
+                                            context: ToolContext(projectRoot: root, shell: .denied))
         XCTAssertTrue(r.success)
         XCTAssertEqual(r.metadata["subcommand"], "status")
     }

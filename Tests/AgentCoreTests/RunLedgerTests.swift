@@ -187,6 +187,38 @@ final class RunLedgerTests: XCTestCase {
         XCTAssertEqual(loaded.first, r)
     }
 
+    func testLegacyRunRecordWithoutTrustBindingsStillDecodesWithNilBindings() throws {
+        let legacy = rec(id: "legacy", route: "standard")
+        let encoded = try JSONEncoder().encode(legacy)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        for key in ["projectIdentity", "contractID", "objectiveFingerprint",
+                    "verificationSubject", "verificationDigest"] {
+            XCTAssertNil(object[key], "nil trust field must remain absent for legacy JSON")
+        }
+        let decoded = try JSONDecoder().decode(RunRecord.self, from: encoded)
+        XCTAssertEqual(decoded, legacy)
+        XCTAssertNil(decoded.projectIdentity)
+        XCTAssertNil(decoded.contractID)
+        XCTAssertNil(decoded.objectiveFingerprint)
+        XCTAssertNil(decoded.verificationSubject)
+        XCTAssertNil(decoded.verificationDigest)
+    }
+
+    func testNonpositiveAdvisoryCapacityIsNoOpAndPreservesExistingLedger() throws {
+        let root = tmpRoot(); defer { try? FileManager.default.removeItem(atPath: root) }
+        let existing = rec(id: "existing", route: "fast")
+        RunLedger(projectRoot: root).record(existing)
+        let path = root + "/.kist/run-ledger.jsonl"
+        let before = try Data(contentsOf: URL(fileURLWithPath: path))
+
+        RunLedger(projectRoot: root, maxRecords: -1)
+            .record(rec(id: "ignored", route: "fast"))
+
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), before)
+        XCTAssertEqual(RunLedger(projectRoot: root).load(), [existing])
+    }
+
     func testLedgerIsBounded() {
         let root = tmpRoot(); defer { try? FileManager.default.removeItem(atPath: root) }
         let ledger = RunLedger(projectRoot: root, maxRecords: 5)

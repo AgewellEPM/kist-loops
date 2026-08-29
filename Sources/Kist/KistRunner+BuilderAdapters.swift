@@ -43,6 +43,11 @@ extension KistRunner {
         let leanHeadless: Bool
         /// Host-minted route capability. Completion mode alone is descriptive and never grants it.
         let allowsVerifiedReadOnlyPromotion: Bool
+        /// Effect risk is separate from `routeHint.risk`, whose medium value can mean only prompt
+        /// complexity. This host-owned capability is the first gate for the narrow disposable-temp
+        /// same-model review exception; root and sealed-preflight checks run later.
+        let effectSafetyRisk: BuilderRisk
+        let allowsFreshContextSameModelReviewCandidate: Bool
     }
 
     struct BuilderCaptainDecisionReceipt: Sendable, Equatable {
@@ -337,6 +342,16 @@ extension KistRunner {
         let builderRisk: BuilderRisk = opts.mission ? .critical
             : (route == .highAssurance ? .high
                 : (effort.complexity >= 40 ? .medium : .low))
+        let effectSafetyRisk: BuilderRisk = opts.mission ? .critical : (highRisk ? .high : .low)
+        let sameModelCandidate = adapter == .headless
+            && route == .direct
+            && mutationIntent
+            && effectSafetyRisk == .low
+            && builderRisk != .high && builderRisk != .critical
+            && !opts.ship && !opts.mission && !opts.fleet && !opts.planExecute
+            && !opts.greatLoop && !opts.cobolo && !opts.enableComputerUse
+            && opts.auto && opts.sandbox
+            && !captainControl.requiresResearch && !captainControl.requiresSimulation
         let estimatedFiles = effort.planning == .direct ? 1 : max(2, opts.agents)
         return BuilderCompatibilityLaunch(
             routeHint: .init(preferred: route,
@@ -352,7 +367,9 @@ extension KistRunner {
             leanHeadless: lean,
             allowsVerifiedReadOnlyPromotion: verifiedReadOnlyPromotionCapability(
                 adapter: adapter, leanHeadless: lean,
-                completionMode: builderCompletionMode(for: goal))
+                completionMode: builderCompletionMode(for: goal)),
+            effectSafetyRisk: effectSafetyRisk,
+            allowsFreshContextSameModelReviewCandidate: sameModelCandidate
         )
     }
 
@@ -1096,18 +1113,29 @@ extension KistRunner {
                             matches: TaskPersonaMatcher(projectRoot: adapterRoot).matches(for: goal, limit: 3))
                         let reviewContext = opts.fast ? nil
                             : ReviewContext.renderIfNeeded(request: goal, projectRoot: adapterRoot)
+                        let executionIntent: TaskBrief.Intent = completionMode == .build
+                            ? .build : .review
+                        let boundedUserGoal = builderBoundedMutationAttemptGoal(
+                            goal, attempt: request.attempt)
+                        let baseProjectContext = briefContext(
+                            memoryContext: memoryContext,
+                            roles: roles,
+                            lessons: opts.fast ? nil : lessonStore?.primer(forGoal: goal),
+                            specialists: personaContext,
+                            reviewTargets: reviewContext
+                        ) ?? ""
                         let compiledGoal = PromptCompiler.compiledPrompt(
-                            boundedExecutionGoal,
+                            boundedUserGoal,
                             mode: opts.planMode ? .plan : .inline,
-                            projectContext: briefContext(
-                                memoryContext: memoryContext,
-                                roles: roles,
-                                lessons: opts.fast ? nil : lessonStore?.primer(forGoal: goal),
-                                specialists: personaContext,
-                                reviewTargets: reviewContext
-                            )
+                            projectContext: builderEffortContext(launch.effort)
+                                + "\n\n" + baseProjectContext,
+                            resolvedIntent: executionIntent
                         )
-                        let outcome = await loop.run(goal: compiledGoal)
+                        // Builder already performed the host-owned mutation-intent and preflight gates.
+                        // Do not let generated effort/project context reclassify that sealed contract.
+                        let outcome = await loop.run(
+                            goal: compiledGoal, rawRequest: goal,
+                            resolvedIntent: executionIntent)
                         headlessVerificationHandoff = builderHeadlessCanHandOffToDeterministicVerification(
                             outcome: outcome, sealedPlan: preflightEnvelope?.plan)
                         let executionStagePassed = outcome.success || headlessVerificationHandoff
@@ -1154,12 +1182,35 @@ extension KistRunner {
                         unmeteredStages = []
                     }
                     let adapterPassed = status == 0
-                    let observedPlanMission = launch.adapter == .planExecute
-                        ? planOutcomeBox.get()?.missionInstanceID : nil
+                    let observedPlanOutcome = launch.adapter == .planExecute
+                        ? planOutcomeBox.get() : nil
+                    let observedPlanMission = observedPlanOutcome?.missionInstanceID
+                    let subjectDigest = PlanExecuteLoop.governedWorkspaceDigest(
+                        projectRoot: adapterRoot)
+                    let planFinalReplay = launch.adapter == .planExecute
+                        ? builderFinalReplayEvidence(
+                            receipt: observedPlanOutcome?.finalVerificationReceipt,
+                            missionInstanceID: planExecuteMissionID?.rawValue ?? "",
+                            contractID: finalizedContract.id,
+                            contractFingerprint: objectiveFingerprint,
+                            subjectDigest: subjectDigest)
+                        : nil
                     let planMissionBound = launch.adapter != .planExecute
                         || (observedPlanMission != nil
                             && observedPlanMission == finalizedContract.checkpointIdentity)
-                    let passed = adapterPassed && planMissionBound
+                    // PlanExecute's host-owned final review promises one exact post-mutation replay.
+                    // Make that promise part of worker admission for both build and verification-only
+                    // modes, so a successful adapter exit cannot later become an accepted Builder final
+                    // with nil/unbound typed evidence.
+                    let planFinalReplayBound = launch.adapter != .planExecute
+                        || planFinalReplay != nil
+                    let passed = launch.adapter == .planExecute
+                        ? builderPlanExecuteCompletionGatePassed(
+                            adapterPassed: adapterPassed,
+                            observedMissionID: observedPlanMission,
+                            expectedMissionID: finalizedContract.checkpointIdentity,
+                            finalReplay: planFinalReplay)
+                        : adapterPassed
                     if launch.adapter == .cobolo, passed {
                         guard let evidence = coboloEvidenceBox.get() else {
                             throw BuilderRunError.finalVerificationFailed(
@@ -1225,7 +1276,10 @@ extension KistRunner {
                                 : "adapter exit 0; its internal deterministic gate passed")
                             : (!planMissionBound
                                 ? "plan mission identity missing or mismatched host contract"
+                                : (!planFinalReplayBound
+                                    ? "PlanExecute final replay receipt missing or unbound"
                                 : "adapter exited \(status)")
+                            )
                     )
                     let workerProvider = fleetWorkerRoute?.providerID
                         ?? builderBinding.providerId
@@ -1252,18 +1306,13 @@ extension KistRunner {
                             advisoryTaskBoard: nil)
                         worker = builderWorker(worker, adding: artifact)
                     }
-                    let subjectDigest = PlanExecuteLoop.governedWorkspaceDigest(projectRoot: root)
                     let commandEvidence: [BuilderCommandEvidenceReceipt]
                     let requiredSupportingObligations: [PlanSupportingObligation]?
                     let supportingCommandReceipts: [PlanSupportingCommandReceipt]?
                     let planFinalVerificationReceipt: PlanFinalVerificationReceipt?
                     if launch.adapter == .planExecute {
-                        let outcome = planOutcomeBox.get()
-                        let replay = builderFinalReplayEvidence(
-                            receipt: outcome?.finalVerificationReceipt,
-                            contractID: finalizedContract.id,
-                            contractFingerprint: objectiveFingerprint,
-                            subjectDigest: subjectDigest)
+                        let outcome = observedPlanOutcome
+                        let replay = planFinalReplay
                         if completionMode == .verificationOnly {
                             commandEvidence = replay.map { [$0] } ?? []
                             requiredSupportingObligations = outcome?.requiredSupportingObligations
@@ -1281,7 +1330,12 @@ extension KistRunner {
                             commandEvidence = evidence
                             requiredSupportingObligations = nil
                             supportingCommandReceipts = nil
-                            planFinalVerificationReceipt = nil
+                            // Preserve the same typed post-mutation replay receipt already admitted
+                            // into command evidence. Accepted dashboard authority later requires this
+                            // exact mission/contract/workspace lineage; dropping it here made a real
+                            // PlanExecute build indistinguishable from a generic planned adapter.
+                            planFinalVerificationReceipt = replay != nil
+                                ? outcome?.finalVerificationReceipt : nil
                         }
                     } else {
                         // Generic adapters expose only an aggregate exit/check string, not one exact

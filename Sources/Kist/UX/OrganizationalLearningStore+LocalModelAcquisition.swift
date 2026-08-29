@@ -36,12 +36,8 @@ extension OrganizationalLearningStore {
                                                                   manifest: manifest,
                                                                   decision: decision,
                                                                   reportPath: relativePath)
-        let memoryRecords = recordLocalModelAcquisitionPreflightMemory(manifestPath: storedManifestPath,
-                                                                       manifest: manifest,
-                                                                       decision: decision,
-                                                                       reportPath: relativePath,
-                                                                       loadError: loadError)
-        let text = renderLocalModelAcquisitionPreflight(manifestPath: storedManifestPath,
+        var memoryRecords = 0
+        var text = renderLocalModelAcquisitionPreflight(manifestPath: storedManifestPath,
                                                         manifest: manifest,
                                                         decision: decision,
                                                         reportPath: relativePath,
@@ -55,7 +51,25 @@ extension OrganizationalLearningStore {
                                                     withIntermediateDirectories: true)
             try (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
             writeSucceeded = true
+
+            memoryRecords = recordLocalModelAcquisitionPreflightMemory(
+                manifestPath: storedManifestPath,
+                manifest: manifest,
+                decision: decision,
+                reportPath: relativePath,
+                loadError: loadError)
+            let finalizedText = renderLocalModelAcquisitionPreflight(
+                manifestPath: storedManifestPath,
+                manifest: manifest,
+                decision: decision,
+                reportPath: relativePath,
+                seededTasks: seededTasks,
+                memoryRecords: memoryRecords,
+                loadError: loadError)
+            try (finalizedText + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+            text = finalizedText
         } catch {
+            writeSucceeded = false
             writeError = String(describing: error)
         }
         return LocalModelAcquisitionPreflightReport(path: relativePath,
@@ -202,12 +216,8 @@ extension OrganizationalLearningStore {
                                                             artifactAttestation: artifactAttestation,
                                                             artifactAttestationPath: artifactAttestationPath,
                                                             reportPath: relativePath)
-        let memoryRecords = recordLocalModelAcquisitionRunMemory(manifestPath: storedManifestPath,
-                                                                 manifest: manifest,
-                                                                 stage: stage,
-                                                                 decision: decision,
-                                                                 reportPath: relativePath)
-        let text = renderLocalModelAcquisitionRun(manifestPath: storedManifestPath,
+        var memoryRecords = 0
+        var text = renderLocalModelAcquisitionRun(manifestPath: storedManifestPath,
                                                   stage: stage,
                                                   manifest: manifest,
                                                   decision: decision,
@@ -228,7 +238,31 @@ extension OrganizationalLearningStore {
                                                     withIntermediateDirectories: true)
             try (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
             writeSucceeded = true
+
+            memoryRecords = recordLocalModelAcquisitionRunMemory(manifestPath: storedManifestPath,
+                                                                 manifest: manifest,
+                                                                 stage: stage,
+                                                                 decision: decision,
+                                                                 reportPath: relativePath)
+            let finalizedText = renderLocalModelAcquisitionRun(
+                manifestPath: storedManifestPath,
+                stage: stage,
+                manifest: manifest,
+                decision: decision,
+                command: command,
+                outcome: outcome,
+                dependencyBlockers: dependencyBlockers,
+                artifactAttestation: artifactAttestation,
+                artifactAttestationPath: artifactAttestationPath,
+                reportPath: relativePath,
+                markerPath: markerPath,
+                seededTasks: seededTasks,
+                memoryRecords: memoryRecords,
+                loadError: loadError)
+            try (finalizedText + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+            text = finalizedText
         } catch {
+            writeSucceeded = false
             writeError = String(describing: error)
         }
         return LocalModelAcquisitionRunReport(path: relativePath,
@@ -651,13 +685,8 @@ extension OrganizationalLearningStore {
             impact: 4,
             tags: ["local-model", "acquisition-manifest", "download-gate", manifest?.providerHint ?? "unknown"]
         )
-        var records = loadJSONL(DiskMemoryRecord.self, path: knowledgeIndexPath)
-        if let idx = records.firstIndex(where: { $0.id == record.id }) {
-            records[idx] = record
-        } else {
-            records.append(record)
-        }
-        return saveJSONL(records, to: knowledgeIndexPath) ? 1 : 0
+        return upsertGenericMemory(
+            record, to: knowledgeIndexPath, decayRate: .fast) ? 1 : 0
     }
 
     func recordLocalModelAcquisitionRunMemory(manifestPath: String,
@@ -684,13 +713,8 @@ extension OrganizationalLearningStore {
             impact: 4,
             tags: ["local-model", "acquisition-run", stage?.rawValue ?? "unknown", manifest?.providerHint ?? "unknown"]
         )
-        var records = loadJSONL(DiskMemoryRecord.self, path: knowledgeIndexPath)
-        if let idx = records.firstIndex(where: { $0.id == record.id }) {
-            records[idx] = record
-        } else {
-            records.append(record)
-        }
-        return saveJSONL(records, to: knowledgeIndexPath) ? 1 : 0
+        return upsertGenericMemory(
+            record, to: knowledgeIndexPath, decayRate: .fast) ? 1 : 0
     }
 
 }

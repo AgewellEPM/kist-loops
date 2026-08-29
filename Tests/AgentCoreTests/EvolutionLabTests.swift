@@ -54,6 +54,50 @@ final class EvolutionLabTests: XCTestCase {
         XCTAssertEqual(blocked.score, 0)
     }
 
+    func testEveryEvolutionFitnessAndParentGateFileIsProtectedFromSelfModification() {
+        let protectedSpine = [
+            "Sources/AgentCore/ForgeSeal.swift",
+            "Sources/AgentCore/MythosCrypto.swift",
+            "Sources/AgentCore/AcceptedRunReceipt.swift",
+            "Sources/AgentCore/GitIsolation.swift",
+            "Sources/AgentCore/EvolutionLab.swift",
+            "Sources/AgentCore/EvolutionAutonomyReadiness.swift",
+            "Sources/AgentCore/EvolutionCapabilityFitness.swift",
+            "Sources/AgentCore/EvolutionRollbackAnchor.swift",
+            "Sources/AgentCore/HardProcessContainment.swift",
+            "Sources/AgentCore/EvolutionArchiveAuthority.swift",
+            "Sources/AgentCore/EvolutionArchiveStore.swift",
+            "Sources/AgentCore/EvolutionParentSelector.swift",
+            "Sources/AgentCore/EvolutionLineage.swift",
+            "Sources/AgentCore/EvolutionLineageWorkspace.swift",
+            "Sources/AgentCore/EvolutionRunProgress.swift",
+            "Sources/AgentCore/EvolutionStatusReport.swift",
+            "Sources/AgentCore/EvolutionAutopilot.swift",
+            "Sources/AgentCore/SelfEvolution/AdversarialPromoteGate.swift",
+            "Sources/AgentCore/SelfEvolution/ClosedEvolutionLoop.swift",
+            "Sources/AgentCore/SelfEvolution/EvolutionReview.swift",
+            "Sources/AgentCore/SelfEvolution/SelfAuthoredTool.swift",
+            "Sources/AgentCore/SelfEvolution/SelfAuthoredToolStore.swift",
+            "Sources/Kist/KistEvolutionCommand.swift",
+            "Sources/AgentCore/Fleet/CIIntegrityGuard.swift",
+            "Sources/AgentCore/Tools/RunCommandTool.swift",
+            "Package.swift",
+            "test.sh",
+            ".github/workflows/evolution.yml",
+        ]
+        let policy = EvolutionPolicy()
+        for file in protectedSpine {
+            XCTAssertEqual(policy.protectedFiles(in: [file]), [file], "missing self-protection for \(file)")
+            let record = EvolutionEvaluator.evaluate(
+                runID: "r", candidateID: "c-\(file.hashValue)", parentID: nil,
+                objective: "weaken my own fitness gate", branch: "b", worktreePath: "/wt",
+                baseSHA: "base", commitSHA: "head", changedFiles: [file],
+                benchmarks: [bench("swift test", 0)], policy: policy, createdAtEpoch: 1)
+            XCTAssertEqual(record.status, .blocked, "self-modification must block \(file)")
+            XCTAssertEqual(record.score, 0)
+        }
+    }
+
     // THE CONSCIENCE ON EVOLUTION: a candidate whose benchmarks PASS but that gamed its own verifier
     // (per CIIntegrityGuard) must be BLOCKED, not scored as a win — self-evolution can't reward test-gaming.
     func testEvaluatorBlocksTestGamingEvenWhenBenchmarksPass() {
@@ -144,8 +188,11 @@ final class EvolutionLabTests: XCTestCase {
         try store.append(record(id: "high", status: .passed, score: 130, epoch: 3))
 
         XCTAssertEqual(store.records().map(\.candidateID), ["low", "blocked", "high"])
-        XCTAssertEqual(store.topCandidates(limit: 2).map(\.candidateID), ["high", "low"])
-        XCTAssertTrue(store.context(limit: 1).contains("high"))
+        XCTAssertEqual(store.topCandidatesForTesting(limit: 2).map(\.candidateID), ["high", "low"])
+        XCTAssertTrue(store.topCandidates().isEmpty,
+                      "unwitnessed local benchmark scores must not become production fitness")
+        XCTAssertTrue(store.contextForTesting(limit: 1).contains("high"))
+        XCTAssertFalse(store.context(limit: 1).contains("high"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.archiveURL.path))
     }
 
@@ -179,11 +226,12 @@ final class EvolutionLabTests: XCTestCase {
     }
 
     private func bench(_ command: String, _ exitCode: Int32) -> EvolutionBenchmarkResult {
-        EvolutionBenchmarkResult(command: command, exitCode: exitCode, timedOut: false, output: "")
+        EvolutionTestAuthority.benchmark(
+            command: command, exitCode: exitCode, commitSHA: "head")
     }
 
     private func record(id: String, status: EvolutionCandidateStatus, score: Int, epoch: Double) -> EvolutionCandidateRecord {
-        EvolutionCandidateRecord(
+        EvolutionTestAuthority.authoritative(EvolutionCandidateRecord(
             runID: "run",
             candidateID: id,
             parentID: nil,
@@ -199,6 +247,6 @@ final class EvolutionLabTests: XCTestCase {
             benchmarks: [bench("swift test", 0)],
             summary: "summary",
             createdAtEpoch: epoch
-        )
+        ))
     }
 }

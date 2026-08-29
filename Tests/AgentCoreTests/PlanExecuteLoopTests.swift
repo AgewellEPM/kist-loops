@@ -112,17 +112,21 @@ final class PlanExecuteLoopTests: XCTestCase {
         XCTAssertTrue(feedback, "preflight must explain how to replace legacy raw command arguments")
     }
 
-    func testLintExhaustionExecutesLastValidPlanWithVisibleWarning() async {
-        // ADVISORY at exhaustion (review catch): a lint false positive must never brick a run.
-        // Every attempt trips the empty-intent lint; the plan is structurally valid — after the
-        // repair budget it executes anyway, with the findings surfaced on the planReady summary.
+    func testLintExhaustionFailsClosedWithoutExecutingLumpyPlan() async {
+        // Every attempt trips the empty-intent lint. Exhausting bounded decomposition must preserve
+        // the rejected plan for diagnosis but never execute it or mint accepted evidence.
         let lintOnly = #"{"steps":[{"id":"E1","intent":"  ","tool":"write_file","arguments":{"path":"ok.txt","content":"done"}}]}"#
         let sink = PXLRecordingSink()
         let out = await loop([lintOnly, lintOnly, lintOnly], sink: sink).run(goal: "write ok.txt")
-        XCTAssertTrue(out.success, "lint-only findings must degrade, not fail: \(out.message)")
-        XCTAssertEqual(try? String(contentsOfFile: root + "/ok.txt", encoding: .utf8), "done")
-        XCTAssertTrue(sink.planReadySummaries.contains { $0.contains("lumpy steps accepted") },
-                      "the degraded acceptance must be VISIBLE, not silent")
+        XCTAssertFalse(out.success)
+        XCTAssertNotNil(out.plan, "the rejected plan remains available as repair context")
+        XCTAssertNil(out.execution)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/ok.txt"))
+        XCTAssertTrue(out.message.contains("refusing to execute lumpy plan"), out.message)
+        XCTAssertTrue(sink.saw {
+            if case .failed(let reason) = $0 { return reason.contains("singular-step decomposition exhausted") }
+            return false
+        })
     }
 
     func testGoalNotMetWithReplansExhaustedEmitsFailed() async {
@@ -288,6 +292,9 @@ final class PlanExecuteLoopTests: XCTestCase {
             let loaded = try await store.load(runID: checkpoint)
             let state = try XCTUnwrap(loaded)
             XCTAssertEqual(state.missionInstanceID, mission)
+            XCTAssertEqual(
+                state.projectIdentity,
+                try AcceptedRunReceipt.computeProjectIdentity(projectRoot: root))
             XCTAssertEqual(state.verificationControl?.attemptsStarted, 1)
             XCTAssertEqual(state.verificationControl?.seenReplayStateKeys.count, 1)
         }
@@ -319,6 +326,45 @@ final class PlanExecuteLoopTests: XCTestCase {
         let state = try XCTUnwrap(loaded)
         XCTAssertEqual(state.verificationControl?.attemptsStarted, 1)
         XCTAssertEqual(state.verificationControl?.seenReplayStateKeys.count, 1)
+    }
+
+    func testCopiedMissionCheckpointCannotResumeInAnotherPhysicalProject() async throws {
+        try "valid\n".write(toFile: root + "/valid.ndjson", atomically: true, encoding: .utf8)
+        try "invalid\n".write(toFile: root + "/invalid.ndjson", atomically: true, encoding: .utf8)
+        let sourceStore = AtomicReasoningControlStore(
+            directory: URL(fileURLWithPath: root).appendingPathComponent(
+                ".kist/reasoning", isDirectory: true))
+        let first = await runMissionScopedVerificationAudit(root: root, store: sourceStore)
+        XCTAssertTrue(first.outcome.success, first.outcome.message)
+        let mission = try XCTUnwrap(PlanExecuteMissionID(
+            rawValue: try XCTUnwrap(first.outcome.missionInstanceID)))
+
+        let targetURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("pxl-copy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: targetURL) }
+        try FileManager.default.createDirectory(
+            at: targetURL.appendingPathComponent(".kist", isDirectory: true),
+            withIntermediateDirectories: true)
+        try "valid\n".write(
+            to: targetURL.appendingPathComponent("valid.ndjson"),
+            atomically: true, encoding: .utf8)
+        try "invalid\n".write(
+            to: targetURL.appendingPathComponent("invalid.ndjson"),
+            atomically: true, encoding: .utf8)
+        try FileManager.default.copyItem(
+            at: URL(fileURLWithPath: root).appendingPathComponent(
+                ".kist/reasoning", isDirectory: true),
+            to: targetURL.appendingPathComponent(".kist/reasoning", isDirectory: true))
+        let targetStore = AtomicReasoningControlStore(
+            directory: targetURL.appendingPathComponent(".kist/reasoning", isDirectory: true))
+        let resumed = await runMissionScopedVerificationAudit(
+            root: targetURL.path, store: targetStore, launchMode: .resume(mission))
+
+        XCTAssertFalse(resumed.outcome.success)
+        XCTAssertTrue(resumed.outcome.message.contains("different physical project"),
+                      resumed.outcome.message)
+        XCTAssertEqual(resumed.providerCalls, 0)
+        XCTAssertEqual(resumed.commandInvocations, 0)
     }
 
     func testWrongOrMalformedMissionTokenCannotResume() async throws {
@@ -1522,7 +1568,8 @@ final class PlanExecuteLoopTests: XCTestCase {
     func testMemoryContextInjectedIntoPlanner() async throws {
         try "Build: swift build".write(toFile: root + "/AGENTS.md", atomically: true, encoding: .utf8)
         let mem = ProjectMemory(root: root)
-        mem.recordEpisode(Episode(goal: "earlier task", success: false, summary: "it failed", at: Date(timeIntervalSince1970: 1)))
+        mem.recordEpisode(Episode(goal: "earlier task", success: false, summary: "it failed",
+                                  at: Date().addingTimeInterval(-1)))
         let capt = CapturingProvider(id: "capt", responses: [validPlan])
         let registry = ProviderRegistry(providers: [capt], keyStore: PXLNullKeys())
         let loop = PlanExecuteLoop(providers: registry, providerId: "capt", model: nil,

@@ -8,12 +8,22 @@ public enum EvolutionLineage {
 
     /// Render the ancestry forest + a best-passing-score-per-generation trajectory. Roots are candidates
     /// whose parent is absent from the archive (first-of-lineage). Children indent under their parent.
-    public static func render(records: [EvolutionCandidateRecord]) -> String {
+    public static func render(records: [EvolutionCandidateRecord],
+                              authoritativeRecords explicitAuthority: [EvolutionCandidateRecord]? = nil,
+                              authorityState: EvolutionArchiveAuthorityState? = nil) -> String {
+        if case .invalid(let reason) = authorityState, records.isEmpty {
+            return "evolution lineage · INVALID / NON-AUTHORITATIVE\ntrajectory and parent selection refused: \(reason)"
+        }
         guard !records.isEmpty else {
             return "No evolution lineage yet. Run  kist --evolve \"<objective>\"  to start a generation."
         }
+        let authoritative = explicitAuthority ?? records.filter(\.hasValidArchiveAuthority)
         var out: [String] = ["evolution lineage · \(records.count) candidate(s)", ""]
-        out.append(contentsOf: trajectoryLines(records))
+        out.append("authority · \(authoritative.count) trusted · \(records.count - authoritative.count) display-only/untrusted")
+        if case .invalid(let reason) = authorityState {
+            out.append("⚠ ARCHIVE INVALID — trajectory and parent selection refused: \(reason)")
+        }
+        out.append(contentsOf: trajectoryLines(authoritative))
         out.append("")
         out.append("ancestry:")
         out.append(contentsOf: forestLines(records))
@@ -24,7 +34,7 @@ public enum EvolutionLineage {
     /// so you can see the fitness curve rise (or plateau) across generations.
     static func trajectoryLines(_ records: [EvolutionCandidateRecord]) -> [String] {
         var bestByGen: [Int: Int] = [:]
-        for r in records where r.status == .passed {
+        for r in records where r.hasValidArchiveAuthority && r.status == .passed {
             let gen = generation(of: r.candidateID)
             bestByGen[gen] = max(bestByGen[gen] ?? Int.min, r.score)
         }

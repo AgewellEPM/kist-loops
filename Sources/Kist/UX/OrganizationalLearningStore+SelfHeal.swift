@@ -4,17 +4,18 @@ import AgentCore
 extension OrganizationalLearningStore {
     func runSelfHealMission(plan: Plan, trajectory: [ActionRecord],
                             objective: String = "") -> SelfHealMissionReport {
+        let instant = now()
         let cleanObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         let missionObjective = cleanObjective.isEmpty
             ? "Captain self-heal: convert observations into assigned research, build, review, benchmark, and Teach Captain gates."
             : cleanObjective
-        let boardMeeting = runBoardMeeting(plan: plan, trajectory: trajectory)
+        let boardMeeting = runBoardMeeting(plan: plan, trajectory: trajectory, at: instant)
         let currentPlan = PlanStore(projectRoot: projectRoot).load()
         let insights = DashboardResearchPlanner.build(for: currentPlan, projectRoot: projectRoot,
                                                        trajectory: trajectory, limit: 6)
         let weakness = selfHealWeakness(insights: insights,
-                                        debts: openKnowledgeDebt(limit: 6),
-                                        latest: latestCapsule())
+                                        debts: openKnowledgeDebt(limit: 6, at: instant),
+                                        latest: latestTemporallyEligibleCapsule(at: instant))
         let assignments = selfHealAssignments(weakness: weakness, objective: missionObjective)
         let createdSpecialists = createSelfHealSpecialists(assignments: assignments)
         let seededTasks = seedSelfHealTasks(weakness: weakness,
@@ -22,7 +23,7 @@ extension OrganizationalLearningStore {
                                             assignments: assignments,
                                             boardMeetingPath: boardMeeting.path)
 
-        let timestamp = Int(now().timeIntervalSince1970)
+        let timestamp = Int(instant.timeIntervalSince1970)
         let path = selfHealRoot + "/\(timestamp)-self-heal.md"
         let dispatchCommand = "/self-heal run"
         var text = renderSelfHealMission(objective: missionObjective,
@@ -71,7 +72,8 @@ extension OrganizationalLearningStore {
         let summary = Self.safe(rawSummary.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !summary.isEmpty else { return nil }
 
-        let timestamp = Int(now().timeIntervalSince1970)
+        let instant = OrganizationalMemoryTemporal.canonicalInstant(now())
+        let timestamp = Int(instant.timeIntervalSince1970)
         let path = selfHealRoot + "/specialists/"
             + "\(timestamp)-\(Self.slug(objective))-\(Self.slug(assignment.specialistName)).md"
         let relativePath = Self.projectRelative(path, root: projectRoot)
@@ -103,7 +105,7 @@ extension OrganizationalLearningStore {
             return nil
         }
 
-        let memoryRecorded = appendJSON(DiskMemoryRecord(
+        let memoryRecorded = appendGenericMemory(DiskMemoryRecord(
             id: "AA-self-heal-specialist-\(timestamp)-\(Self.slug(assignment.specialistName))",
             title: "Self-Heal Specialist: \(assignment.specialistName)",
             summary: "\(assignment.role): \(excerpt(summary, limit: 180))",
@@ -117,7 +119,7 @@ extension OrganizationalLearningStore {
             confidence: 76,
             impact: 5,
             tags: ["self-heal", "specialist-output", assignment.specialistName]
-        ), to: knowledgeIndexPath)
+        ), to: knowledgeIndexPath, decayRate: .medium, at: instant)
 
         let planStore = PlanStore(projectRoot: projectRoot)
         let plan = planStore.load()

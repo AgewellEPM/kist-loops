@@ -181,6 +181,9 @@ public actor AtomicReasoningControlStore: ReasoningControlStateStoring {
         guard next.missionInstanceID == current.missionInstanceID else {
             throw ReasoningControlError.nonMonotonicUpdate("mission instance identity changed")
         }
+        guard next.projectIdentity == current.projectIdentity else {
+            throw ReasoningControlError.nonMonotonicUpdate("project identity changed")
+        }
         try next.validateWorkspaceLifecycle()
         if let objective = current.canonicalFunctionalObjectiveFingerprint {
             guard next.canonicalFunctionalObjectiveFingerprint == objective else {

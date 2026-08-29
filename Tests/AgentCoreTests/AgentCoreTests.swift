@@ -221,6 +221,35 @@ final class AgentCoreTests: XCTestCase {
         }
     }
 
+    func testRegistryRequiresSubscriptionCLIAuthenticationNotJustInstallation() {
+        func fixture(binary: String) -> CLIChatProvider {
+            CLIChatProvider(
+                id: "codex-cli", name: "fixture", iconName: "cpu", keyAccount: "",
+                defaultModel: "fixture", availableModels: [AIModel(id: "fixture")],
+                binaryName: binary, argsForModel: { _ in [] }, parseOutput: { $0 })
+        }
+
+        let loggedIn = fixture(binary: "/usr/bin/true")
+        let loggedOut = fixture(binary: "/usr/bin/false")
+        let registry = ProviderRegistry(
+            providers: [loggedIn, loggedOut], keyStore: DictKeyStore(keys: [:]))
+
+        XCTAssertTrue(registry.hasKey(for: loggedIn))
+        XCTAssertFalse(registry.hasKey(for: loggedOut))
+    }
+
+    func testClaudeCLIAuthenticationStatusParsesLoggedInFieldFailClosed() {
+        XCTAssertTrue(CLIChatProvider.authenticationStatusIsUsable(
+            providerID: "claude-cli", exitCode: 0, timedOut: false,
+            stdout: #"{"loggedIn":true,"authMethod":"claude.ai"}"#))
+        XCTAssertFalse(CLIChatProvider.authenticationStatusIsUsable(
+            providerID: "claude-cli", exitCode: 0, timedOut: false,
+            stdout: #"{"loggedIn":false,"authMethod":"none"}"#))
+        XCTAssertFalse(CLIChatProvider.authenticationStatusIsUsable(
+            providerID: "claude-cli", exitCode: 0, timedOut: false,
+            stdout: "not json"))
+    }
+
     func testCodexCLIAdvertisesTheProbedSubscriptionModel() {
         let provider = CLIChatProvider.codexCLI()
 

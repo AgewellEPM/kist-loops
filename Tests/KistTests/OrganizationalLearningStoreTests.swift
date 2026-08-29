@@ -3,6 +3,27 @@ import AgentCore
 @testable import Kist
 
 final class OrganizationalLearningStoreTests: XCTestCase {
+    private final class ClockProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private let instant: Date
+        private var count = 0
+
+        init(_ instant: Date) { self.instant = instant }
+
+        func read() -> Date {
+            lock.lock()
+            defer { lock.unlock() }
+            count += 1
+            return instant
+        }
+
+        var reads: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+    }
+
     private func tempRoot() -> String {
         let root = NSTemporaryDirectory() + "kist_learning_\(UUID().uuidString)"
         try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
@@ -13,6 +34,83 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                                 withIntermediateDirectories: true)
         try text.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    private func jsonLine<T: Encodable>(_ value: T) throws -> String {
+        String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+    }
+
+    private func mappedBytes(at path: String) throws -> Data {
+        try Data(contentsOf: URL(fileURLWithPath: path), options: [.mappedIfSafe])
+    }
+
+    private func writeRepeatedJSONLine(_ line: String, count: Int, to path: String) throws {
+        try write("", to: path)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        let batchSize = 1_000
+        let batch = Data(String(repeating: line + "\n", count: batchSize).utf8)
+        for _ in 0..<(count / batchSize) {
+            try handle.write(contentsOf: batch)
+        }
+        let remainder = count % batchSize
+        if remainder > 0 {
+            try handle.write(contentsOf: Data(
+                String(repeating: line + "\n", count: remainder).utf8))
+        }
+    }
+
+    private func makeRule(id: String, lesson: String, at instant: Date,
+                          status: OrganizationalRuleRecord.Status = .active,
+                          confidence: Int = 96,
+                          updatedAt: Date? = nil,
+                          temporal: MemoryTemporalEnvelope? = nil) -> OrganizationalRuleRecord {
+        OrganizationalRuleRecord(
+            id: id,
+            lesson: lesson,
+            confidence: confidence,
+            reason: "Receipt-bound historical rule fixture.",
+            evidence: [],
+            sourceCapsuleID: nil,
+            status: status,
+            createdAt: instant.timeIntervalSince1970,
+            updatedAt: (updatedAt ?? instant).timeIntervalSince1970,
+            temporal: temporal)
+    }
+
+    private func makeCapsule(id: String, at instant: Date,
+                             temporal: MemoryTemporalEnvelope? = nil) -> LearningCapsule {
+        LearningCapsule(
+            id: id,
+            taskTitle: "Task \(id)",
+            status: .pass,
+            summary: "Summary \(id)",
+            learned: ["Lesson \(id)"],
+            surprises: [],
+            slowdowns: [],
+            assumptionsToChallenge: [],
+            futureEvolution: "Continue \(id)",
+            tokenCount: 1,
+            at: instant.timeIntervalSince1970,
+            temporal: temporal)
+    }
+
+    private func makeDebt(id: String, at instant: Date,
+                          temporal: MemoryTemporalEnvelope? = nil) -> KnowledgeDebtRecord {
+        KnowledgeDebtRecord(
+            id: id,
+            topic: "Topic \(id)",
+            reason: "Reason \(id)",
+            visit: "Primary documentation",
+            impact: 3,
+            priority: .medium,
+            estimatedLearning: "one hour",
+            expectedBenefit: ["better decisions"],
+            sourceCapsuleID: nil,
+            status: .open,
+            createdAt: instant.timeIntervalSince1970,
+            updatedAt: instant.timeIntervalSince1970,
+            temporal: temporal)
     }
 
     @discardableResult
@@ -654,15 +752,16 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(store.renderLatestReflection().contains("WHAT WE LEARNED"))
     }
 
-    func testKnowledgeDebtCanBeAddedAndClosed() {
+    func testKnowledgeDebtCanBeAddedAndClosed() throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
         let store = OrganizationalLearningStore(projectRoot: root)
 
-        let record = store.addKnowledgeDebt(topic: "Study Cursor background agents",
-                                            reason: "Task persistence",
-                                            impact: 5,
-                                            priority: .high)
+        let record = try XCTUnwrap(store.addKnowledgeDebt(
+            topic: "Study Cursor background agents",
+            reason: "Task persistence",
+            impact: 5,
+            priority: .high))
 
         XCTAssertTrue(store.renderKnowledgeDebt().contains(record.id))
         XCTAssertTrue(store.markKnowledgeDebtDone(record.id))
@@ -687,7 +786,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertFalse(capsule.taskTitle.contains("agent/orchestration"))
     }
 
-    func testBoardMeetingWritesReportAndSeedsResearchTasks() {
+    func testBoardMeetingWritesReportAndSeedsResearchTasks() throws {
         // The strategic-intelligence competitor watch-list is Kist's own roadmap → only seeded inside a
         // Kist project now; use a kist-named root so this test exercises it.
         let base = tempRoot()
@@ -700,12 +799,29 @@ final class OrganizationalLearningStoreTests: XCTestCase {
                                          detail: "assign models to workers and gate the swarm",
                                          kind: .action)])
         PlanStore(projectRoot: root).save(plan)
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_001)
         let store = OrganizationalLearningStore(projectRoot: root,
-                                                now: { Date(timeIntervalSince1970: 1_700_000_001) },
+                                                now: { fixedNow },
                                                 specialistRegistry: {
                                                     SpecialistRegistry(projectRoot: $0, userDir: nil,
                                                                        claudeUserDir: nil)
                                                 })
+        let eligibleAt = fixedNow.addingTimeInterval(-20)
+        let rawLatestAt = fixedNow.addingTimeInterval(-10)
+        let eligibleTemporal = try MemoryTemporalEnvelope(
+            createdAt: eligibleAt, decayRate: .medium)
+        let notYetTemporal = try MemoryTemporalEnvelope(
+            createdAt: rawLatestAt,
+            validFrom: fixedNow.addingTimeInterval(60),
+            decayRate: .medium)
+        XCTAssertTrue(store.appendJSON(
+            makeCapsule(id: "board-eligible", at: eligibleAt,
+                        temporal: eligibleTemporal),
+            to: store.capsulesPath))
+        XCTAssertTrue(store.appendJSON(
+            makeCapsule(id: "board-raw-latest-ineligible", at: rawLatestAt,
+                        temporal: notYetTemporal),
+            to: store.capsulesPath))
 
         let report = store.runBoardMeeting(plan: plan,
                                            trajectory: [ActionRecord(tool: "read_file",
@@ -732,6 +848,8 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(report.text.contains("Teach Captain"))
         XCTAssertTrue(report.text.contains("Permanent Organizational Rules"))
         XCTAssertTrue(report.text.contains("Industry Research Agenda"))
+        XCTAssertTrue(report.text.contains("Task board-eligible"))
+        XCTAssertFalse(report.text.contains("Task board-raw-latest-ineligible"))
         XCTAssertTrue(report.text.contains("Strategic intelligence records:"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/" + report.path))
         XCTAssertGreaterThan(report.seededResearchTasks, 0)
@@ -756,7 +874,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(store.renderCaptainMemoryArchitecture().contains("Project History [disk]"))
     }
 
-    func testSelfHealMissionSeedsAssignedAgentsAndGatedTasks() {
+    func testSelfHealMissionSeedsAssignedAgentsAndGatedTasks() throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
         let plan = Plan(title: "Kist Self Heal",
@@ -765,12 +883,29 @@ final class OrganizationalLearningStoreTests: XCTestCase {
                                          detail: "turn observations into assigned agents, evidence, review, benchmarks, and Teach Captain",
                                          kind: .action)])
         PlanStore(projectRoot: root).save(plan)
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_321)
         let store = OrganizationalLearningStore(projectRoot: root,
-                                                now: { Date(timeIntervalSince1970: 1_700_000_321) },
+                                                now: { fixedNow },
                                                 specialistRegistry: {
                                                     SpecialistRegistry(projectRoot: $0, userDir: nil,
                                                                        claudeUserDir: nil)
                                                 })
+        let eligibleAt = fixedNow.addingTimeInterval(-20)
+        let rawLatestAt = fixedNow.addingTimeInterval(-10)
+        let eligibleTemporal = try MemoryTemporalEnvelope(
+            createdAt: eligibleAt, decayRate: .medium)
+        let notYetTemporal = try MemoryTemporalEnvelope(
+            createdAt: rawLatestAt,
+            validFrom: fixedNow.addingTimeInterval(60),
+            decayRate: .medium)
+        XCTAssertTrue(store.appendJSON(
+            makeCapsule(id: "self-heal-eligible", at: eligibleAt,
+                        temporal: eligibleTemporal),
+            to: store.capsulesPath))
+        XCTAssertTrue(store.appendJSON(
+            makeCapsule(id: "self-heal-raw-latest-ineligible", at: rawLatestAt,
+                        temporal: notYetTemporal),
+            to: store.capsulesPath))
 
         let report = store.runSelfHealMission(plan: plan,
                                               trajectory: [ActionRecord(tool: "read_file",
@@ -784,6 +919,8 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(report.text.contains("self-heal-critic"))
         XCTAssertTrue(report.text.contains("self-heal-captain-gate"))
         XCTAssertTrue(report.text.contains("Acceptance Gate"))
+        XCTAssertTrue(report.text.contains("Task self-heal-eligible"))
+        XCTAssertFalse(report.text.contains("Task self-heal-raw-latest-ineligible"))
         XCTAssertTrue(report.agentAssignments.first { $0.specialistName == "self-heal-builder" }?.task.contains("VERIFY: <command/check> => PASS|FAIL") == true)
         XCTAssertTrue(report.agentAssignments.first { $0.specialistName == "self-heal-critic" }?.task.contains("VERIFY: <command/check> => PASS|FAIL") == true)
         XCTAssertTrue(report.agentAssignments.first { $0.specialistName == "self-heal-captain-gate" }?.task.contains("VERIFY: <command/check> => PASS|FAIL") == true)
@@ -878,8 +1015,9 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertEqual(ledger.taskIDs, artifact.updatedTaskIDs)
         XCTAssertEqual(ledger.taskEvidenceUpdated, artifact.taskEvidenceUpdated)
         XCTAssertTrue(ledger.memoryRecorded)
-        let retrieved = KistREPL.handleRetrieveCommand("self-heal critic critique captured",
-                                                       projectRoot: root)
+        let retrieved = KistREPL.handleRetrieveCommand(
+            "self-heal critic critique captured", projectRoot: root,
+            now: { Date(timeIntervalSince1970: 1_700_000_341) })
         XCTAssertTrue(retrieved.contains("Self-Heal Specialist") || retrieved.contains("Critique captured"),
                       retrieved)
         XCTAssertTrue(retrieved.contains("Evidence Ledger: self-heal-critic"), retrieved)
@@ -1739,6 +1877,65 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(InputCompleter.builtInCommands.contains("/model-scout"))
     }
 
+    func testLocalModelScoutReportWriteFailurePublishesNoGenericMemory() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_444)
+        let objective = "Swift write-failure model scout"
+        let store = OrganizationalLearningStore(projectRoot: root, now: { fixedNow })
+        store.ensureMemoryArchitecture()
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "scout-failure-sentinel", title: "Existing generic memory",
+                summary: "Must remain byte-identical.", body: nil, source: nil,
+                confidence: 80, impact: 4, tags: ["sentinel"]),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: fixedNow))
+        let before = try mappedBytes(at: store.knowledgeIndexPath)
+        let blockedReportPath = store.localModelsRoot
+            + "/\(Int(fixedNow.timeIntervalSince1970))-\(OrganizationalLearningStore.slug(objective)).md"
+        try FileManager.default.createDirectory(
+            atPath: blockedReportPath, withIntermediateDirectories: true)
+
+        let report = store.runLocalModelScout(objective: objective)
+
+        XCTAssertFalse(report.writeSucceeded)
+        XCTAssertNotNil(report.writeError)
+        XCTAssertEqual(report.memoryRecords, 0)
+        XCTAssertEqual(try mappedBytes(at: store.knowledgeIndexPath), before)
+        XCTAssertEqual(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath).map(\.id),
+            ["scout-failure-sentinel"])
+    }
+
+    func testLocalModelAcquisitionReportWriteFailurePublishesNoGenericMemory() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_445)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { fixedNow })
+        store.ensureMemoryArchitecture()
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "acquisition-failure-sentinel", title: "Existing generic memory",
+                summary: "Must remain byte-identical.", body: nil, source: nil,
+                confidence: 80, impact: 4, tags: ["sentinel"]),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: fixedNow))
+        let before = try mappedBytes(at: store.knowledgeIndexPath)
+        let blockedReportPath = store.localModelsRoot
+            + "/\(Int(fixedNow.timeIntervalSince1970))-acquire-missing-manifest-path.md"
+        try FileManager.default.createDirectory(
+            atPath: blockedReportPath, withIntermediateDirectories: true)
+
+        let report = store.runLocalModelAcquisitionPreflight(manifestPath: "")
+
+        XCTAssertFalse(report.writeSucceeded)
+        XCTAssertNotNil(report.writeError)
+        XCTAssertEqual(report.memoryRecords, 0)
+        XCTAssertEqual(try mappedBytes(at: store.knowledgeIndexPath), before)
+        XCTAssertEqual(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath).map(\.id),
+            ["acquisition-failure-sentinel"])
+    }
+
     func testSymbolicWorkflowCompileAndRunSeedsDeterministicGates() {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
@@ -1825,7 +2022,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(KistREPL.handleKnowledgeCommand("done \(id)", projectRoot: root).contains("closed"))
     }
 
-    func testTeachCommandPromotesPermanentOrganizationalRule() {
+    func testTeachCommandKeepsStringEvidenceAdvisory() {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
 
@@ -1835,11 +2032,14 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         let id = OrganizationalLearningStore.ruleID("Medical projects require DICOM research before planning")
 
         XCTAssertTrue(added.contains(id))
-        XCTAssertTrue(added.contains("organizational rule promoted"))
+        XCTAssertTrue(added.contains("organizational rule proposed"))
+        let store = OrganizationalLearningStore(projectRoot: root)
+        XCTAssertTrue(store.permanentRules().isEmpty)
         let listing = KistREPL.handleTeachCommand("", projectRoot: root)
-        XCTAssertTrue(listing.contains("Permanent Organizational Rules"))
+        XCTAssertTrue(listing.contains("Proposed Rules Awaiting Evidence"))
         XCTAssertTrue(listing.contains("confidence 97%"))
         XCTAssertTrue(listing.contains("regulated domain risk"))
+        XCTAssertTrue(listing.contains("exact receipt-bound rule verification"))
     }
 
     func testTeachCommandQuarantinesWeakRuleAsProposedKnowledgeDebt() {
@@ -1861,32 +2061,967 @@ final class OrganizationalLearningStoreTests: XCTestCase {
     func testRetrieveCommandRendersRankedMemoryAndDecisionCards() {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
-        let store = OrganizationalLearningStore(projectRoot: root)
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { fixedNow })
         _ = store.addKnowledgeDebt(topic: "Agent orchestration benchmarks",
                                    reason: "Need benchmark proof before model-routing changes",
                                    impact: 5,
                                    priority: .high)
-        _ = store.promoteOrganizationalRule(
+        let untrustedActive = makeRule(
+            id: "OR-untrusted-active",
             lesson: "Agent-orchestration work requires competitor/runtime comparison before implementation.",
-            confidence: 96,
-            reason: "Avoid building orchestration from internal assumptions only.",
-            evidence: ["tests: swift test passed", "benchmark: orchestration eval score 0.91 passed"])
+            at: fixedNow,
+            temporal: try? MemoryTemporalEnvelope(createdAt: fixedNow, decayRate: .verySlow))
+        XCTAssertTrue(store.appendJSON(untrustedActive, to: store.rulesPath))
 
         let text = KistREPL.handleRetrieveCommand("improve Captain agent orchestration benchmarks",
-                                                  projectRoot: root)
+                                                  projectRoot: root, now: { fixedNow })
 
         XCTAssertTrue(text.contains("CAPTAIN RETRIEVAL CONTEXT"))
         XCTAssertTrue(text.contains("context window policy"))
-        XCTAssertTrue(text.contains("Rule: Agent-orchestration work requires competitor/runtime comparison"))
+        XCTAssertTrue(text.contains("Advisory rule proposal (not operating policy)"))
+        XCTAssertTrue(text.contains("UNVERIFIED—DO NOT APPLY AS POLICY"))
         XCTAssertTrue(text.contains("Knowledge Debt: Agent orchestration benchmarks"))
         XCTAssertTrue(text.contains("DECISION CARDS"))
         XCTAssertTrue(text.contains("Benchmark Gate"))
-        XCTAssertTrue(text.contains("Applicable Organizational Rules"))
+        XCTAssertFalse(text.contains("Applicable Organizational Rules"))
+    }
+
+    func testLegacyOrganizationalMemoryProjectsTemporalMetadataWithoutRewriting() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(
+            projectRoot: root, now: { instant.addingTimeInterval(10 * 86_400) })
+        try write(#"{"id":"LC-legacy","taskTitle":"Legacy task","status":"PASS","summary":"legacy summary","learned":["one"],"surprises":[],"slowdowns":[],"assumptionsToChallenge":[],"futureEvolution":"","tokenCount":2,"at":1700000000}"# + "\n",
+                  to: store.capsulesPath)
+        let before = try Data(contentsOf: URL(fileURLWithPath: store.capsulesPath))
+
+        let capsule = try XCTUnwrap(store.latestCapsule())
+        XCTAssertNil(capsule.temporal)
+        let projected = try XCTUnwrap(capsule.temporalProjection)
+        XCTAssertEqual(projected.createdAt, instant)
+        XCTAssertEqual(projected.updatedAt, instant)
+        XCTAssertEqual(projected.decayRate, .medium)
+        XCTAssertNil(projected.lastConfirmedAt)
+        XCTAssertNil(projected.seasonalWindow)
+        _ = store.memoryCandidates(at: instant.addingTimeInterval(10 * 86_400))
+
+        let after = try Data(contentsOf: URL(fileURLWithPath: store.capsulesPath))
+        XCTAssertEqual(after, before, "legacy projection must never migrate or reinforce on read")
+    }
+
+    func testStoredTemporalClockAgreementKeepsRawAuditButRejectsContradictoryProjection() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let updated = base.addingTimeInterval(10)
+        let evaluationAt = base.addingTimeInterval(60)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { evaluationAt })
+
+        let capsuleEnvelope = try MemoryTemporalEnvelope(
+            createdAt: base, decayRate: .medium)
+        var capsuleWithin = makeCapsule(
+            id: "capsule-within", at: base, temporal: capsuleEnvelope)
+        capsuleWithin.at += 0.000_5
+        var capsuleAtBoundary = makeCapsule(
+            id: "capsule-at-boundary", at: base, temporal: capsuleEnvelope)
+        capsuleAtBoundary.at += OrganizationalMemoryTemporal.storedClockAgreementTolerance
+        var capsuleBeyond = makeCapsule(
+            id: "capsule-beyond", at: base, temporal: capsuleEnvelope)
+        capsuleBeyond.at += 0.002
+        XCTAssertNotNil(capsuleAtBoundary.temporalProjection,
+                        "the one-millisecond agreement boundary is inclusive")
+        try write(try [capsuleWithin, capsuleBeyond]
+            .map { try jsonLine($0) }.joined(separator: "\n") + "\n",
+            to: store.capsulesPath)
+
+        let capsuleAudit = store.capsules(limit: 10)
+        XCTAssertEqual(capsuleAudit.map(\.id), ["capsule-within", "capsule-beyond"])
+        XCTAssertNotNil(capsuleAudit[0].temporalProjection)
+        XCTAssertNil(capsuleAudit[1].temporalProjection)
+        XCTAssertEqual(store.latestCapsule()?.id, "capsule-beyond")
+        XCTAssertEqual(store.latestTemporallyEligibleCapsule(at: evaluationAt)?.id,
+                       "capsule-within")
+        XCTAssertNil(store.loadJSONLForMutation(
+            LearningCapsule.self, path: store.capsulesPath))
+
+        let debtEnvelope = try MemoryTemporalEnvelope(
+            createdAt: base, updatedAt: updated, decayRate: .slow)
+        var debtWithin = makeDebt(id: "debt-within", at: base, temporal: debtEnvelope)
+        debtWithin.createdAt += 0.000_5
+        debtWithin.updatedAt = updated.timeIntervalSince1970 + 0.000_5
+        var debtBeyond = makeDebt(id: "debt-beyond", at: base, temporal: debtEnvelope)
+        debtBeyond.updatedAt = updated.timeIntervalSince1970 + 0.002
+        try write(try [debtWithin, debtBeyond]
+            .map { try jsonLine($0) }.joined(separator: "\n") + "\n",
+            to: store.debtPath)
+
+        let debtAudit = store.loadJSONL(KnowledgeDebtRecord.self, path: store.debtPath)
+        XCTAssertEqual(debtAudit.map(\.id), ["debt-within", "debt-beyond"])
+        XCTAssertNotNil(debtAudit[0].temporalProjection)
+        XCTAssertNil(debtAudit[1].temporalProjection)
+        XCTAssertNil(store.loadJSONLForMutation(
+            KnowledgeDebtRecord.self, path: store.debtPath))
+
+        let ruleEnvelope = try MemoryTemporalEnvelope(
+            createdAt: base, updatedAt: updated, decayRate: .verySlow)
+        var ruleWithin = makeRule(
+            id: "rule-within", lesson: "within clock tolerance",
+            at: base, temporal: ruleEnvelope)
+        ruleWithin.updatedAt = updated.timeIntervalSince1970 + 0.000_5
+        var ruleBeyond = makeRule(
+            id: "rule-beyond", lesson: "beyond clock tolerance",
+            at: base, temporal: ruleEnvelope)
+        ruleBeyond.updatedAt = updated.timeIntervalSince1970 + 0.002
+        try write(try [ruleWithin, ruleBeyond]
+            .map { try jsonLine($0) }.joined(separator: "\n") + "\n",
+            to: store.rulesPath)
+
+        let ruleAudit = store.loadJSONL(OrganizationalRuleRecord.self, path: store.rulesPath)
+        XCTAssertEqual(ruleAudit.map(\.id), ["rule-within", "rule-beyond"])
+        XCTAssertNotNil(ruleAudit[0].temporalProjection)
+        XCTAssertNil(ruleAudit[1].temporalProjection)
+        XCTAssertNil(store.loadJSONLForMutation(
+            OrganizationalRuleRecord.self, path: store.rulesPath))
+    }
+
+    func testOrganizationalCreationUsesSharedDecayRatesExplicitSeasonAndOneClock() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let rawNow = Date(timeIntervalSince1970: 1_700_000_000.123_456)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { rawNow })
+        let season = try SeasonalMemoryWindow(
+            months: [1, 2], timeZoneIdentifier: "UTC",
+            inSeasonBoost: 1.4, offSeasonFactor: 0.2)
+        let capsule = store.recordTurn(
+            plan: Plan(title: "Temporal memory"), spans: [], trajectory: [],
+            outcomeSummary: "Captured a seasonal episode.", success: true,
+            seasonalWindow: season)
+        let debt = try XCTUnwrap(store.addKnowledgeDebt(
+            topic: "Winter release playbook", seasonalWindow: season))
+        let rule = try XCTUnwrap(store.promoteOrganizationalRule(
+            lesson: "Winter releases require explicit seasonal verification windows.",
+            confidence: 100,
+            evidence: ["tests passed", "artifact: /tmp/report"],
+            seasonalWindow: season))
+
+        XCTAssertEqual(capsule.temporal?.decayRate, .medium)
+        XCTAssertEqual(debt.temporal?.decayRate, .slow)
+        XCTAssertEqual(rule.temporal?.decayRate, .verySlow)
+        XCTAssertEqual(capsule.temporal?.seasonalWindow, season)
+        XCTAssertEqual(debt.temporal?.seasonalWindow, season)
+        XCTAssertEqual(rule.temporal?.seasonalWindow, season)
+        XCTAssertEqual(capsule.at, capsule.temporal?.createdAt.timeIntervalSince1970)
+        XCTAssertEqual(debt.createdAt, debt.temporal?.createdAt.timeIntervalSince1970)
+        XCTAssertEqual(rule.createdAt, rule.temporal?.createdAt.timeIntervalSince1970)
+        XCTAssertEqual(rule.status, .proposed)
+        XCTAssertNil(rule.temporal?.lastConfirmedAt)
+    }
+
+    func testKnowledgeDebtExactHalfLifeChangesCaptainRelevance() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { created })
+        let debt = try XCTUnwrap(store.addKnowledgeDebt(
+            topic: "Temporal orchestration benchmark", impact: 5, priority: .high))
+        let envelope = try XCTUnwrap(debt.temporalProjection)
+        let atCreation = envelope.evaluate(at: created)
+        let halfLife = created.addingTimeInterval(MemoryDecayRate.slow.halfLifeDays * 86_400)
+        let atHalfLife = envelope.evaluate(at: halfLife)
+
+        XCTAssertEqual(atCreation.salience, 0.8, accuracy: 0.000_000_1)
+        XCTAssertEqual(atHalfLife.salience, 0.4, accuracy: 0.000_000_1)
+        let fullCandidate = try XCTUnwrap(
+            store.memoryCandidates(at: created).first { $0.recordID == debt.id })
+        let halfCandidate = try XCTUnwrap(
+            store.memoryCandidates(at: halfLife).first { $0.recordID == debt.id })
+        XCTAssertEqual(halfCandidate.baseRelevance * 2, fullCandidate.baseRelevance)
+    }
+
+    func testSeasonalRuleProposalFallsOutAndReactivatesWithoutReadMutation() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_735_689_600) // 2025-01-01 UTC
+        let offSeason = Date(timeIntervalSince1970: 1_751_328_000) // 2025-07-01 UTC
+        let nextSeason = Date(timeIntervalSince1970: 1_768_435_200) // 2026-01-15 UTC
+        let season = try SeasonalMemoryWindow(
+            months: [1], timeZoneIdentifier: "UTC",
+            inSeasonBoost: 1.5, offSeasonFactor: 0.01)
+        let envelope = try MemoryTemporalEnvelope(
+            createdAt: created, seasonalWindow: season, decayRate: .verySlow)
+        let rule = makeRule(id: "OR-seasonal", lesson: "January release evidence review",
+                            at: created, temporal: envelope)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { offSeason })
+        XCTAssertTrue(store.appendJSON(rule, to: store.rulesPath))
+        let before = try Data(contentsOf: URL(fileURLWithPath: store.rulesPath))
+
+        XCTAssertFalse(store.memoryCandidates(at: offSeason).contains { $0.recordID == rule.id })
+        XCTAssertTrue(store.memoryCandidates(at: nextSeason).contains { $0.recordID == rule.id })
+        XCTAssertEqual(envelope.evaluate(at: offSeason).inSeason, false)
+        XCTAssertEqual(envelope.evaluate(at: nextSeason).inSeason, true)
+        XCTAssertGreaterThan(envelope.evaluate(at: nextSeason).salience,
+                             envelope.evaluate(at: offSeason).salience)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: store.rulesPath)), before)
+    }
+
+    func testSeasonalCapsulesFilterBeforeLimitAndOrderBySalienceEventAndOrdinal() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let target = Date(timeIntervalSince1970: 1_768_435_200) // 2026-01-15 UTC
+        let offSeason = Date(timeIntervalSince1970: 1_782_864_000) // 2026-07-01 UTC
+        let clock = ClockProbe(target)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { clock.read() })
+        let season = try SeasonalMemoryWindow(
+            months: [1], timeZoneIdentifier: "UTC",
+            inSeasonBoost: 1.5, offSeasonFactor: 0)
+
+        let highAt = target.addingTimeInterval(-600)
+        let tieOlderAt = target.addingTimeInterval(-500)
+        let tieNewerAt = target.addingTimeInterval(-400)
+        let sharedEvidenceAnchor = target.addingTimeInterval(-300)
+        let highTemporal = try MemoryTemporalEnvelope(
+            createdAt: highAt, lastConfirmedAt: sharedEvidenceAnchor,
+            seasonalWindow: season,
+            decayRate: .medium, baseSalience: 0.6)
+        let tieOlderTemporal = try MemoryTemporalEnvelope(
+            createdAt: tieOlderAt, lastConfirmedAt: sharedEvidenceAnchor,
+            seasonalWindow: season,
+            decayRate: .medium, baseSalience: 0.4)
+        let tieNewerTemporal = try MemoryTemporalEnvelope(
+            createdAt: tieNewerAt, lastConfirmedAt: sharedEvidenceAnchor,
+            seasonalWindow: season,
+            decayRate: .medium, baseSalience: 0.4)
+        let eligible = [
+            makeCapsule(id: "seasonal-high", at: highAt, temporal: highTemporal),
+            makeCapsule(id: "seasonal-tie-older", at: tieOlderAt,
+                        temporal: tieOlderTemporal),
+            makeCapsule(id: "seasonal-tie-first", at: tieNewerAt,
+                        temporal: tieNewerTemporal),
+            makeCapsule(id: "seasonal-tie-second", at: tieNewerAt,
+                        temporal: tieNewerTemporal),
+        ]
+        for capsule in eligible {
+            XCTAssertTrue(store.appendJSON(capsule, to: store.capsulesPath))
+        }
+
+        for index in 0..<80 {
+            let eventAt = target.addingTimeInterval(-100 + Double(index))
+            let notYet = try MemoryTemporalEnvelope(
+                createdAt: eventAt,
+                validFrom: target.addingTimeInterval(60),
+                seasonalWindow: season,
+                decayRate: .medium,
+                baseSalience: 0.99,
+                pinned: true)
+            XCTAssertTrue(store.appendJSON(
+                makeCapsule(id: "newer-ineligible-\(index)",
+                            at: eventAt, temporal: notYet),
+                to: store.capsulesPath))
+        }
+
+        let historyIDs = store.memoryCandidates(at: target)
+            .filter { $0.layerID == .projectHistory }
+            .map(\.recordID)
+        XCTAssertEqual(historyIDs, [
+            "seasonal-high",
+            "seasonal-tie-second",
+            "seasonal-tie-first",
+            "seasonal-tie-older",
+        ])
+        XCTAssertTrue(store.memoryCandidates(at: offSeason)
+            .filter { $0.layerID == .projectHistory }.isEmpty,
+            "an explicit zero off-season factor must filter the capsules")
+        XCTAssertEqual(store.capsules(limit: 200).count, 84,
+                       "raw audit retains every temporally ineligible row")
+        XCTAssertEqual(store.latestCapsule()?.id, "newer-ineligible-79")
+        XCTAssertEqual(store.latestTemporallyEligibleCapsule(at: target)?.id,
+                       "seasonal-tie-second")
+        XCTAssertEqual(store.latestTemporallyEligibleCapsule()?.id,
+                       "seasonal-tie-second")
+        XCTAssertEqual(clock.reads, 1, "operational latest captures the injected clock once")
+    }
+
+    func testLifecycleAndValidityExcludePinnedRuleProposalsBeforeRanking() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let created = now.addingTimeInterval(-1_000)
+        let futureCreated = now.addingTimeInterval(
+            MemoryTemporalEnvelope.maximumFutureEvidenceSkew + 1)
+        let eligible = try MemoryTemporalEnvelope(createdAt: created, decayRate: .verySlow,
+                                                  pinned: true)
+        let lifecycleAt = now.addingTimeInterval(-1)
+        let retired = try MemoryTemporalEnvelope(
+            createdAt: created, updatedAt: lifecycleAt, pinned: true, status: .retired,
+            retiredAt: lifecycleAt, retiredReason: "retired")
+        let expired = try MemoryTemporalEnvelope(
+            createdAt: created, validFrom: created,
+            validUntil: now, decayRate: .verySlow, pinned: true)
+        let future = try MemoryTemporalEnvelope(
+            createdAt: futureCreated,
+            decayRate: .verySlow, pinned: true)
+        let notYet = try MemoryTemporalEnvelope(
+            createdAt: created, validFrom: now.addingTimeInterval(1),
+            decayRate: .verySlow, pinned: true)
+        let superseded = try MemoryTemporalEnvelope(
+            createdAt: created, updatedAt: lifecycleAt, pinned: true, status: .superseded,
+            retiredAt: lifecycleAt, retiredReason: "superseded by replacement",
+            supersededBy: "replacement")
+        let rules = [
+            makeRule(id: "eligible", lesson: "eligible temporal advisory", at: created,
+                     temporal: eligible),
+            makeRule(id: "retired", lesson: "retired temporal advisory", at: created,
+                     updatedAt: lifecycleAt, temporal: retired),
+            makeRule(id: "expired", lesson: "expired temporal advisory", at: created,
+                     temporal: expired),
+            makeRule(id: "future", lesson: "future temporal advisory", at: futureCreated,
+                     temporal: future),
+            makeRule(id: "not-yet", lesson: "not yet temporal advisory", at: created,
+                     temporal: notYet),
+            makeRule(id: "superseded", lesson: "superseded temporal advisory", at: created,
+                     updatedAt: lifecycleAt, temporal: superseded),
+        ]
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        for rule in rules { XCTAssertTrue(store.appendJSON(rule, to: store.rulesPath)) }
+
+        let currentIDs = Set(store.proposedRules(limit: 20).map(\.id))
+        let candidateIDs = Set(store.memoryCandidates(at: now).map(\.recordID))
+        XCTAssertEqual(currentIDs, ["eligible"])
+        XCTAssertTrue(candidateIDs.contains("eligible"))
+        XCTAssertTrue(candidateIDs.isDisjoint(with: ["retired", "expired", "future", "not-yet", "superseded"]))
+        XCTAssertTrue(store.permanentRules().isEmpty,
+                      "source status alone must never create constitutional policy")
+    }
+
+    func testRuleAuditOrderingMalformedRowsAndLowSalienceFloor() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let recentEnvelope = try MemoryTemporalEnvelope(createdAt: now, decayRate: .verySlow)
+        let oldInstant = now.addingTimeInterval(-10 * 365 * 86_400)
+        let oldEnvelope = try MemoryTemporalEnvelope(createdAt: oldInstant, decayRate: .verySlow)
+        let first = makeRule(id: "z-first-physical", lesson: "first physical proposal",
+                             at: now, temporal: recentEnvelope)
+        let second = makeRule(id: "a-second-physical", lesson: "second physical proposal",
+                              at: now, temporal: recentEnvelope)
+        let faded = makeRule(id: "faded-audit", lesson: "low salience audit proposal",
+                             at: oldInstant, confidence: 80, temporal: oldEnvelope)
+        let invalidTemporal = #"{"id":"invalid-temporal","lesson":"invalid temporal row","confidence":96,"reason":"invalid","evidence":[],"status":"active","createdAt":1800000000,"updatedAt":1800000000,"temporal":{"created_at":1800000000,"base_salience":2}}"#
+        let text = try jsonLine(first) + "\n{malformed-json\n" + invalidTemporal
+            + "\n" + jsonLine(second)
+            + "\n" + jsonLine(faded) + "\n"
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        try write(text, to: store.rulesPath)
+
+        let listed = store.proposedRules(limit: 20)
+        XCTAssertEqual(Array(listed.prefix(2).map(\.id)), [first.id, second.id],
+                       "equal ties use physical JSONL ordinal, not lexical ID")
+        XCTAssertTrue(listed.contains { $0.id == faded.id },
+                      "audit/list view retains eligible low-salience history")
+        XCTAssertLessThan(try XCTUnwrap(faded.temporalProjection).evaluate(at: now).salience,
+                          MemoryTemporalEnvelope.confidenceFloor)
+        XCTAssertFalse(store.memoryCandidates(at: now).contains { $0.recordID == faded.id })
+        XCTAssertEqual(store.loadJSONL(OrganizationalRuleRecord.self, path: store.rulesPath).count, 3,
+                       "malformed and invalid-temporal lines must not hide adjacent safe rows")
+    }
+
+    func testReadsDoNotTouchReinforceOrRewriteOrganizationalMemory() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        _ = store.recordTurn(plan: Plan(title: "Read immutability"), spans: [], trajectory: [],
+                             outcomeSummary: "read memory", success: true)
+        _ = store.addKnowledgeDebt(topic: "Read-only temporal memory")
+        _ = store.promoteOrganizationalRule(
+            lesson: "Read operations must never reinforce organizational evidence.",
+            confidence: 100, evidence: ["tests passed", "report: exists"])
+        let paths = [store.capsulesPath, store.debtPath, store.rulesPath]
+        let before = try paths.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+
+        _ = store.capsules()
+        _ = store.openKnowledgeDebt()
+        _ = store.proposedRules()
+        _ = store.retrievalContext(
+            objective: "read temporal organizational memory",
+            strategy: CaptainStrategist.plan(objective: "read temporal organizational memory"))
+
+        let after = try paths.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+        XCTAssertEqual(after, before)
+        for envelope in [store.latestCapsule()?.temporal,
+                         store.openKnowledgeDebt().first?.temporal,
+                         store.proposedRules().first?.temporal].compactMap({ $0 }) {
+            XCTAssertEqual(envelope.accessCount, 0)
+            XCTAssertEqual(envelope.reinforcementCount, 0)
+            XCTAssertNil(envelope.lastConfirmedAt)
+        }
+    }
+
+    func testRetrievalSamplesInjectedClockExactlyOnce() {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let clock = ClockProbe(Date(timeIntervalSince1970: 1_800_000_000))
+        let store = OrganizationalLearningStore(projectRoot: root, now: { clock.read() })
+
+        _ = store.retrievalContext(
+            objective: "single clock retrieval",
+            strategy: CaptainStrategist.plan(objective: "single clock retrieval"))
+
+        XCTAssertEqual(clock.reads, 1)
+    }
+
+    func testRuleStringUpdatePreservesEveryEvidenceFieldAndRemainsAdvisory() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let now = created.addingTimeInterval(10_000)
+        let confirmed = created.addingTimeInterval(10)
+        let season = try SeasonalMemoryWindow(months: [1], timeZoneIdentifier: "UTC")
+        let envelope = try MemoryTemporalEnvelope(
+            createdAt: created,
+            updatedAt: created.addingTimeInterval(20),
+            accessedAt: created.addingTimeInterval(5),
+            validFrom: created.addingTimeInterval(-10),
+            validUntil: now.addingTimeInterval(10_000),
+            lastConfirmedAt: confirmed,
+            seasonalWindow: season,
+            accessCount: 2,
+            reinforcementCount: 3,
+            decayRate: .verySlow,
+            baseSalience: 0.7,
+            pinned: true,
+            supersedes: "older-rule")
+        let lesson = "Receipt-bound rules must preserve confirmation across advisory text updates."
+        var original = makeRule(id: OrganizationalLearningStore.ruleID(lesson), lesson: lesson,
+                                at: created, temporal: envelope)
+        original.updatedAt = envelope.updatedAt.timeIntervalSince1970
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        XCTAssertTrue(store.appendJSON(original, to: store.rulesPath))
+        try write("artifact", to: root + "/claimed-proof.txt")
+
+        let returned = try XCTUnwrap(store.promoteOrganizationalRule(
+            lesson: lesson,
+            confidence: 100,
+            evidence: ["tests: all passed", root + "/claimed-proof.txt"]))
+        let stored = try XCTUnwrap(store.loadJSONL(
+            OrganizationalRuleRecord.self, path: store.rulesPath).first)
+        let updated = try XCTUnwrap(stored.temporal)
+
+        XCTAssertEqual(returned.status, .proposed)
+        XCTAssertEqual(store.organizationalRulePromotionDecision(
+            lesson: lesson, confidence: 100,
+            evidence: ["tests: all passed", root + "/claimed-proof.txt"]).verifiedEvidenceCount, 0)
+        XCTAssertEqual(updated.createdAt, envelope.createdAt)
+        XCTAssertEqual(updated.accessedAt, envelope.accessedAt)
+        XCTAssertEqual(updated.validFrom, envelope.validFrom)
+        XCTAssertEqual(updated.validUntil, envelope.validUntil)
+        XCTAssertEqual(updated.lastConfirmedAt, envelope.lastConfirmedAt)
+        XCTAssertEqual(updated.seasonalWindow, envelope.seasonalWindow)
+        XCTAssertEqual(updated.accessCount, envelope.accessCount)
+        XCTAssertEqual(updated.reinforcementCount, envelope.reinforcementCount)
+        XCTAssertEqual(updated.decayRate, envelope.decayRate)
+        XCTAssertEqual(updated.baseSalience, envelope.baseSalience)
+        XCTAssertEqual(updated.pinned, envelope.pinned)
+        XCTAssertEqual(updated.status, envelope.status)
+        XCTAssertEqual(updated.supersedes, envelope.supersedes)
+        XCTAssertEqual(updated.updatedAt, OrganizationalMemoryTemporal.canonicalInstant(now))
+        XCTAssertTrue(store.permanentRules().isEmpty)
+        XCTAssertTrue(store.proposedRules().contains { $0.id == original.id })
+    }
+
+    func testLegacyGenericMemoryRemainsAuditOnlyAndReadDoesNotRewriteIt() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        let legacy = DiskMemoryRecord(
+            id: "legacy-generic", title: "Unknown-age conclusion",
+            summary: "Preserve this historical row for audit.", body: nil,
+            source: "legacy/import.json", confidence: 90, impact: 5,
+            tags: ["legacy"])
+        try write(try jsonLine(legacy) + "\n", to: store.knowledgeIndexPath)
+        let before = try mappedBytes(at: store.knowledgeIndexPath)
+
+        let audit = try XCTUnwrap(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath).first)
+        XCTAssertEqual(audit.id, legacy.id)
+        XCTAssertNil(audit.createdAt)
+        XCTAssertNil(audit.updatedAt)
+        XCTAssertNil(audit.temporalProjection)
+        XCTAssertFalse(store.memoryCandidates(at: now).contains {
+            $0.recordID == "legacy-generic"
+        })
+        XCTAssertEqual(try mappedBytes(at: store.knowledgeIndexPath), before,
+                       "operational recall must not invent clocks or migrate a legacy row")
+    }
+
+    func testMemoryArchitectureSurfacesGenericTemporalAdmissionDebt() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let instant = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { instant })
+        let legacy = DiskMemoryRecord(
+            id: "legacy-dashboard-row", title: "Unknown-age row",
+            summary: nil, body: nil, source: nil, confidence: nil, impact: nil, tags: nil)
+        try write(try jsonLine(legacy) + "\n", to: store.industryIntelligencePath)
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "clocked-dashboard-row", title: "Clocked row",
+                summary: nil, body: nil, source: nil, confidence: nil, impact: nil, tags: nil),
+            to: store.evolutionProposalsPath, decayRate: .medium, at: instant))
+
+        let readiness = store.genericMemoryTemporalReadiness()
+        XCTAssertEqual(readiness.operational, 1)
+        XCTAssertEqual(readiness.auditOnly, 1)
+        XCTAssertTrue(store.renderCaptainMemoryArchitecture().contains(
+            "Generic temporal admission: 1 clocked row(s); 1 legacy or invalid row(s) remain raw audit-only."))
+    }
+
+    func testGenericTemporalAdmissionRejectsPartialContradictoryAndPrivilegedRows() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { created })
+        let ordinary = try MemoryTemporalEnvelope(createdAt: created, decayRate: .medium)
+        let contradictory = try MemoryTemporalEnvelope(createdAt: created, decayRate: .medium)
+        let pinned = try MemoryTemporalEnvelope(
+            createdAt: created, decayRate: .medium, pinned: true)
+        let noDecay = try MemoryTemporalEnvelope(createdAt: created, decayRate: .none)
+        let confirmed = try MemoryTemporalEnvelope(
+            createdAt: created, lastConfirmedAt: created, decayRate: .medium)
+        let reinforced = try MemoryTemporalEnvelope(
+            createdAt: created, reinforcementCount: 1, decayRate: .medium)
+
+        let rows = [
+            DiskMemoryRecord(
+                id: "partial-clock", title: "partial", summary: nil, body: nil,
+                source: nil, confidence: 80, impact: 5, tags: nil,
+                createdAt: created.timeIntervalSince1970, updatedAt: nil, temporal: nil),
+            DiskMemoryRecord(
+                id: "contradictory-clock", title: "contradictory", summary: nil,
+                body: nil, source: nil, confidence: 80, impact: 5, tags: nil,
+                createdAt: created.timeIntervalSince1970 + 0.002,
+                updatedAt: created.timeIntervalSince1970, temporal: contradictory),
+            DiskMemoryRecord(
+                id: "pinned-generic", title: "pinned", summary: nil, body: nil,
+                source: nil, confidence: 80, impact: 5, tags: nil,
+                createdAt: created.timeIntervalSince1970,
+                updatedAt: created.timeIntervalSince1970, temporal: pinned),
+            DiskMemoryRecord(
+                id: "no-decay-generic", title: "none", summary: nil, body: nil,
+                source: nil, confidence: 80, impact: 5, tags: nil,
+                createdAt: created.timeIntervalSince1970,
+                updatedAt: created.timeIntervalSince1970, temporal: noDecay),
+            DiskMemoryRecord(
+                id: "confirmed-generic", title: "confirmed", summary: nil, body: nil,
+                source: nil, confidence: 80, impact: 5, tags: nil,
+                createdAt: created.timeIntervalSince1970,
+                updatedAt: created.timeIntervalSince1970, temporal: confirmed),
+            DiskMemoryRecord(
+                id: "reinforced-generic", title: "reinforced", summary: nil, body: nil,
+                source: nil, confidence: 80, impact: 5, tags: nil,
+                createdAt: created.timeIntervalSince1970,
+                updatedAt: created.timeIntervalSince1970, temporal: reinforced),
+        ]
+        XCTAssertNotNil(ordinary,
+                        "fixture proves an ordinary matching envelope remains constructible")
+        for (index, row) in rows.enumerated() {
+            XCTAssertFalse(store.appendJSON(
+                row, to: store.learningRoot + "/rejected-\(index).jsonl"),
+                "unsafe generic temporal metadata must be rejected at append")
+        }
+
+        try write(try rows.map { try jsonLine($0) }.joined(separator: "\n") + "\n",
+                  to: store.knowledgeIndexPath)
+        let before = try mappedBytes(at: store.knowledgeIndexPath)
+        XCTAssertEqual(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath).count, rows.count,
+            "raw audit remains fail-soft and exposes independently decodable rows")
+        XCTAssertNil(store.loadJSONLForMutation(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath))
+        let rejectedIDs = Set(rows.compactMap(\.id))
+        XCTAssertTrue(Set(store.memoryCandidates(at: created).map(\.recordID))
+            .isDisjoint(with: rejectedIDs))
+        XCTAssertEqual(try mappedBytes(at: store.knowledgeIndexPath), before)
+    }
+
+    func testGenericMemoryExactHalfLifeHalvesCaptainRelevance() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { created })
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "generic-half-life", title: "Temporal routing observation",
+                summary: "A bounded advisory observation.", body: nil, source: nil,
+                confidence: 80, impact: 5, tags: ["temporal"]),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: created))
+        let halfLife = created.addingTimeInterval(
+            MemoryDecayRate.medium.halfLifeDays * 86_400)
+
+        let full = try XCTUnwrap(store.memoryCandidates(at: created).first {
+            $0.recordID == "generic-half-life"
+        })
+        let half = try XCTUnwrap(store.memoryCandidates(at: halfLife).first {
+            $0.recordID == "generic-half-life"
+        })
+        XCTAssertEqual(full.baseRelevance, 32)
+        XCTAssertEqual(half.baseRelevance, 16)
+        XCTAssertEqual(half.baseRelevance * 2, full.baseRelevance)
+    }
+
+    func testSeasonalGenericMemoryDisappearsAndReactivatesWithoutReadMutation() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_735_689_600) // 2025-01-01 UTC
+        let offSeason = Date(timeIntervalSince1970: 1_751_328_000) // 2025-07-01 UTC
+        let nextSeason = Date(timeIntervalSince1970: 1_768_435_200) // 2026-01-15 UTC
+        let season = try SeasonalMemoryWindow(
+            months: [1], timeZoneIdentifier: "UTC",
+            inSeasonBoost: 1.5, offSeasonFactor: 0)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { offSeason })
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "generic-january", title: "January release advisory",
+                summary: "Run the January release checks.", body: nil, source: nil,
+                confidence: 100, impact: 5, tags: ["release"]),
+            to: store.knowledgeIndexPath, decayRate: .medium,
+            seasonalWindow: season, at: created))
+        let before = try mappedBytes(at: store.knowledgeIndexPath)
+
+        XCTAssertTrue(store.memoryCandidates(at: created).contains {
+            $0.recordID == "generic-january"
+        })
+        XCTAssertFalse(store.memoryCandidates(at: offSeason).contains {
+            $0.recordID == "generic-january"
+        })
+        XCTAssertTrue(store.memoryCandidates(at: nextSeason).contains {
+            $0.recordID == "generic-january"
+        })
+        XCTAssertEqual(try mappedBytes(at: store.knowledgeIndexPath), before,
+                       "seasonal recall is a projection and must never reinforce on read")
+    }
+
+    func testGenericStableIDUpsertPreservesEvidenceAnchorSeasonAndNoReinforcement() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_735_689_600)
+        let updatedAt = created.addingTimeInterval(3_600)
+        let season = try SeasonalMemoryWindow(
+            months: [1], timeZoneIdentifier: "UTC",
+            inSeasonBoost: 1.4, offSeasonFactor: 0.2)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { updatedAt })
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "stable-generic", title: "Original observation",
+                summary: "Original body", body: nil, source: nil,
+                confidence: 80, impact: 4, tags: ["original"]),
+            to: store.knowledgeIndexPath, decayRate: .medium,
+            seasonalWindow: season, at: created))
+        let original = try XCTUnwrap(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath).first)
+        let originalEnvelope = try XCTUnwrap(original.temporal)
+
+        XCTAssertTrue(store.upsertGenericMemory(
+            DiskMemoryRecord(
+                id: "stable-generic", title: "Updated observation",
+                summary: "Updated body", body: nil, source: nil,
+                confidence: 90, impact: 5, tags: ["updated"]),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: updatedAt))
+        let records = store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath)
+        XCTAssertEqual(records.count, 1)
+        let updated = try XCTUnwrap(records.first)
+        let envelope = try XCTUnwrap(updated.temporal)
+        XCTAssertEqual(updated.title, "Updated observation")
+        XCTAssertEqual(updated.createdAt, original.createdAt)
+        XCTAssertEqual(updated.updatedAt,
+                       OrganizationalMemoryTemporal.canonicalInstant(updatedAt)
+                        .timeIntervalSince1970)
+        XCTAssertEqual(envelope.createdAt, originalEnvelope.createdAt)
+        XCTAssertEqual(envelope.updatedAt,
+                       OrganizationalMemoryTemporal.canonicalInstant(updatedAt))
+        XCTAssertEqual(envelope.accessedAt, originalEnvelope.accessedAt)
+        XCTAssertEqual(envelope.lastConfirmedAt, originalEnvelope.lastConfirmedAt)
+        XCTAssertEqual(envelope.seasonalWindow, season)
+        XCTAssertEqual(envelope.decayRate, .medium)
+        XCTAssertEqual(envelope.accessCount, 0)
+        XCTAssertEqual(envelope.reinforcementCount, 0)
+    }
+
+    func testGenericDuplicateDedupeUsesNewestEligibleObservation() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let oldAt = now.addingTimeInterval(-1_000)
+        let newerAt = now.addingTimeInterval(-100)
+        let newestAt = now.addingTimeInterval(-10)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "duplicate-generic", title: "Old eligible", summary: nil,
+                body: nil, source: nil, confidence: 80, impact: 5, tags: nil),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: oldAt))
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "duplicate-generic", title: "New eligible", summary: nil,
+                body: nil, source: nil, confidence: 80, impact: 5, tags: nil),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: newerAt))
+        let notYet = try MemoryTemporalEnvelope(
+            createdAt: newestAt, validFrom: now.addingTimeInterval(60),
+            decayRate: .medium)
+        XCTAssertTrue(store.appendJSON(
+            DiskMemoryRecord(
+                id: "duplicate-generic", title: "Newest but not yet valid",
+                summary: nil, body: nil, source: nil, confidence: 100, impact: 5,
+                tags: nil, createdAt: newestAt.timeIntervalSince1970,
+                updatedAt: newestAt.timeIntervalSince1970, temporal: notYet),
+            to: store.knowledgeIndexPath))
+
+        XCTAssertEqual(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath).count, 3)
+        let candidates = store.memoryCandidates(at: now).filter {
+            $0.recordID == "duplicate-generic"
+        }
+        XCTAssertEqual(candidates.count, 1)
+        XCTAssertEqual(candidates.first?.title, "New eligible")
+    }
+
+    func testUnindexedResearchArchiveIsExcludedFromOperationalRecall() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        let artifactPath = store.researchArchiveRoot + "/unindexed-seasonal-study.md"
+        try write("# Unindexed study\nunique-unindexed-research-conclusion\n",
+                  to: artifactPath)
+        let before = try mappedBytes(at: artifactPath)
+
+        XCTAssertTrue(store.rawResearchArchiveAuditCandidates(limit: 10).contains {
+            $0.excerpt.contains("unique-unindexed-research-conclusion")
+        }, "the raw archive remains available to an explicit audit reader")
+        let operational = store.memoryCandidates(at: now)
+        XCTAssertFalse(operational.contains { $0.layerID == .researchArchive })
+        XCTAssertFalse(operational.contains {
+            $0.excerpt.contains("unique-unindexed-research-conclusion")
+        })
+        XCTAssertEqual(try mappedBytes(at: artifactPath), before)
+    }
+
+    func testRawResearchAuditRefusesSymlinkHardlinkAndOversizedArtifacts() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let store = OrganizationalLearningStore(projectRoot: root)
+        try FileManager.default.createDirectory(
+            atPath: store.researchArchiveRoot, withIntermediateDirectories: true)
+
+        let symlinkTarget = root + "/outside-symlink.md"
+        try write("symlink-secret-marker\n", to: symlinkTarget)
+        try FileManager.default.createSymbolicLink(
+            atPath: store.researchArchiveRoot + "/symlink.md",
+            withDestinationPath: symlinkTarget)
+
+        let hardlinkTarget = root + "/outside-hardlink.md"
+        try write("hardlink-secret-marker\n", to: hardlinkTarget)
+        try FileManager.default.linkItem(
+            atPath: hardlinkTarget,
+            toPath: store.researchArchiveRoot + "/hardlink.md")
+
+        try write(String(repeating: "z", count: 1_024 * 1_024 + 1),
+                  to: store.researchArchiveRoot + "/oversized.md")
+
+        let audit = store.rawResearchArchiveAuditCandidates(limit: 40)
+        XCTAssertFalse(audit.contains { $0.excerpt.contains("symlink-secret-marker") })
+        XCTAssertFalse(audit.contains { $0.excerpt.contains("hardlink-secret-marker") })
+        XCTAssertFalse(audit.contains { $0.title.contains("oversized") })
+    }
+
+    func testEvidenceLedgerRecallDecaysWithoutDeletingRawEvidence() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { created })
+        let evidence = LearningEvidenceRecord(
+            id: "evidence-decay", kind: .selfHealSpecialist,
+            objective: "verify temporal recall", specialistName: "evidence-probe",
+            role: "verification", preferredModel: "gpt",
+            artifactPath: ".kist/learning/self-heal/evidence-probe.md",
+            memoryRecorded: true, taskIDs: [32], taskEvidenceUpdated: 1,
+            createdAt: created.timeIntervalSince1970)
+        XCTAssertTrue(store.appendJSON(evidence, to: store.evidenceLedgerPath))
+        let before = try mappedBytes(at: store.evidenceLedgerPath)
+        let halfLife = created.addingTimeInterval(
+            MemoryDecayRate.slow.halfLifeDays * 86_400)
+        let faded = created.addingTimeInterval(
+            MemoryDecayRate.slow.halfLifeDays * 6 * 86_400)
+
+        let full = try XCTUnwrap(store.evidenceLedgerCandidates(
+            limit: 10, at: created).first { $0.recordID == evidence.id })
+        let half = try XCTUnwrap(store.evidenceLedgerCandidates(
+            limit: 10, at: halfLife).first { $0.recordID == evidence.id })
+        XCTAssertEqual(full.baseRelevance, 32)
+        XCTAssertEqual(half.baseRelevance, 16)
+        XCTAssertFalse(store.evidenceLedgerCandidates(limit: 10, at: faded).contains {
+            $0.recordID == evidence.id
+        })
+        XCTAssertEqual(store.evidenceLedger(limit: 10), [evidence],
+                       "recall decay must never delete the durable evidence ledger")
+        XCTAssertEqual(try mappedBytes(at: store.evidenceLedgerPath), before)
+    }
+
+    func testUnboundedDecodedValuesAreClampedBeforeCaptainArithmetic() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { now })
+        let debt = KnowledgeDebtRecord(
+            id: "unbounded-debt",
+            topic: String(repeating: "x", count: 10_000),
+            reason: "overflow regression",
+            visit: "docs",
+            impact: Int.max,
+            priority: .high,
+            estimatedLearning: "unknown",
+            expectedBenefit: Array(repeating: "benefit", count: 1_000),
+            sourceCapsuleID: nil,
+            status: .open,
+            createdAt: now.timeIntervalSince1970,
+            updatedAt: now.timeIntervalSince1970)
+        XCTAssertTrue(store.appendJSON(debt, to: store.debtPath))
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(id: "unbounded-generic", title: "generic overflow",
+                             summary: nil, body: nil, source: nil,
+                             confidence: Int.max, impact: Int.max, tags: nil),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: now))
+
+        let loaded = try XCTUnwrap(store.openKnowledgeDebt().first)
+        XCTAssertEqual(loaded.impact, 5)
+        XCTAssertEqual(loaded.topic.count, 2_048)
+        XCTAssertEqual(loaded.expectedBenefit.count, 64)
+        let candidates = store.memoryCandidates(at: now)
+        XCTAssertTrue(candidates.contains { $0.recordID == debt.id })
+        XCTAssertTrue(candidates.contains { $0.recordID == "unbounded-generic" })
+        XCTAssertTrue(candidates.allSatisfy { (0...100).contains($0.baseRelevance) })
+    }
+
+    func testRewriteRefusesMalformedLedgerAndPreservesExactBytes() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root)
+        let existing = makeDebt(id: "existing", at: instant)
+        let replacement = makeDebt(id: "replacement", at: instant)
+        try write(try jsonLine(existing) + "\n{malformed-json\n", to: store.debtPath)
+        let before = try mappedBytes(at: store.debtPath)
+
+        XCTAssertEqual(store.loadJSONL(
+            KnowledgeDebtRecord.self, path: store.debtPath).map(\.id), ["existing"],
+            "raw audit reads remain fail-soft around a malformed physical row")
+        XCTAssertFalse(store.upsert(replacement))
+        XCTAssertEqual(try mappedBytes(at: store.debtPath), before)
+    }
+
+    func testPublicMutationAPIsReportRefusalAndDoNotCreateFollowOnDebt() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let store = OrganizationalLearningStore(projectRoot: root)
+
+        try write("{malformed-rule\n", to: store.rulesPath)
+        let ruleBefore = try mappedBytes(at: store.rulesPath)
+        XCTAssertNil(store.promoteOrganizationalRule(
+            lesson: "A refused rule write must never be reported as taught.",
+            confidence: 100,
+            evidence: ["receipt:a", "receipt:b"]))
+        XCTAssertEqual(try mappedBytes(at: store.rulesPath), ruleBefore)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.debtPath),
+                       "a refused rule must not seed follow-on debt")
+
+        try write("{malformed-debt\n", to: store.debtPath)
+        let debtBefore = try mappedBytes(at: store.debtPath)
+        XCTAssertNil(store.addKnowledgeDebt(topic: "Refused persistence"))
+        XCTAssertEqual(try mappedBytes(at: store.debtPath), debtBefore)
+    }
+
+    func testRewriteRefusesOneHundredThousandAndOneRowsWithoutTruncation() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root)
+        let existing = makeDebt(id: "existing", at: instant)
+        let replacement = makeDebt(id: "replacement", at: instant)
+        try writeRepeatedJSONLine(
+            try jsonLine(existing),
+            count: OrganizationalLearningStore.maximumJSONLRows + 1,
+            to: store.debtPath)
+        let before = try mappedBytes(at: store.debtPath)
+
+        XCTAssertFalse(store.upsert(replacement))
+        XCTAssertEqual(try mappedBytes(at: store.debtPath), before)
+    }
+
+    func testRewriteRefusesOversizedLineAndFileWithoutTruncation() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = OrganizationalLearningStore(projectRoot: root)
+        let existing = makeDebt(id: "existing", at: instant)
+        var oversizedLine = makeDebt(id: "oversized-line", at: instant)
+        oversizedLine.reason = String(
+            repeating: "x", count: OrganizationalLearningStore.maximumJSONLLineBytes)
+        try write(try jsonLine(existing) + "\n" + jsonLine(oversizedLine) + "\n",
+                  to: store.debtPath)
+        let lineBefore = try mappedBytes(at: store.debtPath)
+
+        XCTAssertFalse(store.markKnowledgeDebtDone(existing.id))
+        XCTAssertEqual(try mappedBytes(at: store.debtPath), lineBefore)
+
+        try write(try jsonLine(existing) + "\n", to: store.debtPath)
+        do {
+            let handle = try FileHandle(
+                forWritingTo: URL(fileURLWithPath: store.debtPath))
+            defer { try? handle.close() }
+            try handle.truncate(atOffset: UInt64(
+                OrganizationalLearningStore.maximumJSONLFileBytes + 1))
+        }
+        let fileBefore = try mappedBytes(at: store.debtPath)
+        XCTAssertFalse(store.upsert(makeDebt(id: "replacement", at: instant)))
+        XCTAssertEqual(try mappedBytes(at: store.debtPath), fileBefore)
+    }
+
+    func testGiantCombiningGraphemeIsBoundedByUTF8BytesOnDecodeAndEncode() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        let raw = "e" + String(repeating: "\u{0301}", count: 100_000)
+        XCTAssertEqual(raw.count, 1, "the regression fixture is one extended grapheme")
+        var debt = makeDebt(id: "giant-grapheme", at: instant)
+        debt.topic = raw
+        let store = OrganizationalLearningStore(projectRoot: root)
+
+        let maliciousPath = store.learningRoot + "/giant-raw.jsonl"
+        try write(try jsonLine(debt) + "\n", to: maliciousPath)
+        let decoded = try XCTUnwrap(store.loadJSONL(
+            KnowledgeDebtRecord.self, path: maliciousPath).first)
+        XCTAssertLessThanOrEqual(decoded.topic.utf8.count, 2_048)
+        XCTAssertFalse(decoded.topic.contains("\u{FFFD}"))
+
+        let encodedPath = store.learningRoot + "/giant-encoded.jsonl"
+        XCTAssertTrue(store.appendJSON(debt, to: encodedPath))
+        let encoded = try mappedBytes(at: encodedPath)
+        XCTAssertLessThanOrEqual(encoded.count,
+                                 OrganizationalLearningStore.maximumJSONLLineBytes + 1)
+        let roundTrip = try XCTUnwrap(store.loadJSONL(
+            KnowledgeDebtRecord.self, path: encodedPath).first)
+        XCTAssertLessThanOrEqual(roundTrip.topic.utf8.count, 2_048)
+        XCTAssertFalse(roundTrip.topic.contains("\u{FFFD}"))
     }
 
     func testRetrievalIncludesCaptainLearningBenchmarkEvidence() {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_300)
         let samples = (0..<3).map { i in
             CaptainLearningSample(taskSignature: "fix Swift routing eval with tests",
                                   taskTags: ["coding", "reasoning", "verification"],
@@ -1905,12 +3040,13 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         CaptainLearningStore(projectRoot: root).record(samples)
 
         let text = KistREPL.handleRetrieveCommand("improve Swift routing eval benchmarks",
-                                                  projectRoot: root)
+                                                  projectRoot: root, now: { fixedNow })
 
-        XCTAssertTrue(text.contains("Benchmark Evidence: deepseek for coder"))
-        XCTAssertEqual(text.components(separatedBy: "Benchmark Evidence: deepseek for coder").count - 1, 1)
+        XCTAssertTrue(text.contains("Unsigned Scorecard Observations: deepseek for coder"))
+        XCTAssertEqual(text.components(
+            separatedBy: "Unsigned Scorecard Observations: deepseek for coder").count - 1, 1)
         XCTAssertTrue(text.contains("Source: .kist/captain-learning.jsonl"))
-        XCTAssertTrue(text.contains("Status: promoted"))
+        XCTAssertTrue(text.contains("Status: route-bias eligible"))
         XCTAssertTrue(text.contains("Success: 3/3"))
         XCTAssertTrue(text.contains("Benchmark Gate"))
     }
@@ -1918,6 +3054,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
     func testCaptainLearningReportShowsPromotionAndShadowEvidence() {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_300)
         let store = CaptainLearningStore(projectRoot: root)
         store.record((0..<3).map { i in
             CaptainLearningSample(taskSignature: "fix Swift routing eval with tests",
@@ -1947,16 +3084,17 @@ final class OrganizationalLearningStoreTests: XCTestCase {
                                            toolFailures: 0,
                                            atEpoch: 1_700_000_200))
 
-        let text = KistREPL.handleCaptainLearningCommand("", projectRoot: root)
+        let text = KistREPL.handleCaptainLearningCommand(
+            "", projectRoot: root, now: { fixedNow })
 
         XCTAssertTrue(text.contains("Captain Learning"))
-        XCTAssertTrue(text.contains("Promotion gate"))
-        XCTAssertTrue(text.contains("Promoted Evidence"))
+        XCTAssertTrue(text.contains("Unsigned route-bias eligibility gate"))
+        XCTAssertTrue(text.contains("Unsigned Route-Bias Profiles"))
         XCTAssertTrue(text.contains("deepseek / coder"))
-        XCTAssertTrue(text.contains("status=promoted"))
-        XCTAssertTrue(text.contains("Shadow Evidence"))
+        XCTAssertTrue(text.contains("status=route-bias-eligible"))
+        XCTAssertTrue(text.contains("Unsigned Shadow Profiles"))
         XCTAssertTrue(text.contains("gemini / worker"))
-        XCTAssertTrue(text.contains("status=shadow"))
+        XCTAssertTrue(text.contains("status=shadow-only"))
         XCTAssertTrue(text.contains("How Captain uses this"))
     }
 
@@ -1998,6 +3136,70 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(text.contains("Strategic Intelligence must compare Kist"))
     }
 
+    func testStrategicArchiveWriteFailurePublishesNoGenericMemory() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let fixedNow = Date(timeIntervalSince1970: 1_700_003_900)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { fixedNow })
+        store.ensureMemoryArchitecture()
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "industry-failure-sentinel", title: "Existing industry memory",
+                summary: "Must remain byte-identical.", body: nil, source: nil,
+                confidence: 80, impact: 4, tags: ["sentinel"]),
+            to: store.industryIntelligencePath, decayRate: .fast, at: fixedNow))
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "proposal-failure-sentinel", title: "Existing proposal memory",
+                summary: "Must remain byte-identical.", body: nil, source: nil,
+                confidence: 80, impact: 4, tags: ["sentinel"]),
+            to: store.evolutionProposalsPath, decayRate: .medium, at: fixedNow))
+        let industryBefore = try mappedBytes(at: store.industryIntelligencePath)
+        let proposalsBefore = try mappedBytes(at: store.evolutionProposalsPath)
+        try write("not a directory",
+                  to: store.researchArchiveRoot + "/strategic-intelligence")
+        let snapshot = StrategicIntelligenceSnapshot(
+            id: "SI-write-failure",
+            objective: "prove archive-first strategic memory",
+            generatedAt: fixedNow.timeIntervalSince1970,
+            sourceTargets: [StrategicIntelligenceTarget(
+                id: "strategic-target-must-not-publish",
+                title: "Unpublished strategic target",
+                category: .benchmark,
+                priority: .high,
+                sourceTarget: "https://example.invalid/strategic-source",
+                compareAgainst: ["current runtime"],
+                researchQuestion: "Does artifact persistence precede indexing?",
+                reason: "A failed archive cannot support an operational conclusion.",
+                likelyKistGap: "Indexing before persistence",
+                expectedImpact: 5,
+                benchmarkPlan: "Force archive persistence failure.",
+                proposedEvolution: "Publish memory only after the archive exists.")],
+            proposals: [StrategicEvolutionProposal(
+                id: "strategic-proposal-must-not-publish",
+                title: "Unpublished strategic proposal",
+                reason: "The archive write was forced to fail.",
+                expectedImpact: 5,
+                evidenceNeeded: ["persisted archive"],
+                benchmarkPlan: "Verify both JSONL shelves are unchanged.",
+                teachableRule: "Strategic memory requires a persisted archive.")],
+            assumptionsToChallenge: [],
+            questions: [])
+
+        XCTAssertFalse(store.writeStrategicArchive(snapshot))
+        XCTAssertEqual(store.recordStrategicIntelligence(snapshot), 0)
+        XCTAssertEqual(try mappedBytes(at: store.industryIntelligencePath), industryBefore)
+        XCTAssertEqual(try mappedBytes(at: store.evolutionProposalsPath), proposalsBefore)
+        XCTAssertFalse(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.industryIntelligencePath).contains {
+                $0.id == "strategic-target-must-not-publish"
+            })
+        XCTAssertFalse(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.evolutionProposalsPath).contains {
+                $0.id == "strategic-proposal-must-not-publish"
+            })
+    }
+
     func testDomainLearningPreflightWritesDossierSeedsGatesAndSpecialists() throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
@@ -2011,8 +3213,9 @@ final class OrganizationalLearningStoreTests: XCTestCase {
                                                                 title: "ACTION: build unfamiliar platform",
                                                                 detail: "medical imaging",
                                                                 kind: .action)]))
+        let fixedNow = Date(timeIntervalSince1970: 1_700_004_000)
         let store = OrganizationalLearningStore(projectRoot: root,
-                                                now: { Date(timeIntervalSince1970: 1_700_004_000) },
+                                                now: { fixedNow },
                                                 specialistRegistry: {
                                                     SpecialistRegistry(projectRoot: $0, userDir: nil,
                                                                        claudeUserDir: nil)
@@ -2055,8 +3258,9 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         XCTAssertTrue(seeded.tasks.contains { $0.owner == "local-model-scout" })
         XCTAssertTrue(seeded.tasks.contains { $0.owner == "symbolic-rule-compiler" })
 
-        let retrieve = KistREPL.handleRetrieveCommand("medical imaging DICOM domain learning",
-                                                      projectRoot: root)
+        let retrieve = KistREPL.handleRetrieveCommand(
+            "medical imaging DICOM domain learning", projectRoot: root,
+            now: { fixedNow })
         XCTAssertTrue(retrieve.contains("Domain Learning Preflight"), retrieve)
         XCTAssertTrue(retrieve.contains("Research Gate"))
 
@@ -2069,6 +3273,44 @@ final class OrganizationalLearningStoreTests: XCTestCase {
             $0.contains(#""id":"AA-domain-learning-"#)
         }
         XCTAssertEqual(domainRecordLines.count, 1)
+    }
+
+    func testDomainLearningReportWriteFailurePublishesNoGenericMemory() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let fixedNow = Date(timeIntervalSince1970: 1_700_004_050)
+        let store = OrganizationalLearningStore(
+            projectRoot: root, now: { fixedNow },
+            specialistRegistry: {
+                SpecialistRegistry(projectRoot: $0, userDir: nil, claudeUserDir: nil)
+            })
+        store.ensureMemoryArchitecture()
+        XCTAssertTrue(store.appendGenericMemory(
+            DiskMemoryRecord(
+                id: "domain-failure-sentinel", title: "Existing generic memory",
+                summary: "Must remain byte-identical.", body: nil, source: nil,
+                confidence: 80, impact: 4, tags: ["sentinel"]),
+            to: store.knowledgeIndexPath, decayRate: .medium, at: fixedNow))
+        let before = try mappedBytes(at: store.knowledgeIndexPath)
+        try write("not a directory",
+                  to: store.researchArchiveRoot + "/domain-learning")
+        let plan = Plan(
+            title: "Domain write-failure probe",
+            tasks: [PlanTask(
+                id: 1, title: "ACTION: learn an unfamiliar regulated domain",
+                detail: "prove report persistence precedes generic indexing", kind: .action)])
+
+        let report = store.runDomainLearningPreflight(
+            plan: plan, trajectory: [],
+            objective: "medical imaging report persistence failure")
+
+        XCTAssertFalse(report.writeSucceeded)
+        XCTAssertNotNil(report.writeError)
+        XCTAssertEqual(report.memoryRecords, 0)
+        XCTAssertEqual(try mappedBytes(at: store.knowledgeIndexPath), before)
+        XCTAssertEqual(store.loadJSONL(
+            DiskMemoryRecord.self, path: store.knowledgeIndexPath).map(\.id),
+            ["domain-failure-sentinel"])
     }
 
     func testDomainLearningSpecialistOutputIsArchivedIndexedAndAttachedToTasks() throws {

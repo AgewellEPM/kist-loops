@@ -1,5 +1,5 @@
 import XCTest
-import AgentCore
+@testable import AgentCore
 @testable import Kist
 
 private actor KistBuilderReviewProbe {
@@ -425,6 +425,29 @@ final class KistBuilderRunCompositionTests: XCTestCase {
         XCTAssertNil(selection)
     }
 
+    func testFreshContextSameModelSelectionRequiresExplicitExactCLIModelAndNeverChangesDefaultPolicy() {
+        let registry = sameModelCLIReviewerRegistry()
+        let producers: Set<String> = ["codex-cli:fixture-model"]
+        let policy = BuilderReviewPolicy.lowRiskFreshContextSameModel(
+            disposableRootIdentity: String(repeating: "a", count: 64))
+
+        XCTAssertNil(KistRunner.freshContextSameModelReviewerSelection(
+            preferred: ProviderBinding(providerId: "codex-cli"),
+            producingIdentities: producers, registry: registry, policy: policy),
+            "provider-only critic bindings must not resolve implicit same-model authority")
+        let exact = KistRunner.freshContextSameModelReviewerSelection(
+            preferred: ProviderBinding(providerId: "codex-cli", model: "fixture-model"),
+            producingIdentities: producers, registry: registry, policy: policy)
+        XCTAssertEqual(exact?.identity, "codex-cli:fixture-model")
+        XCTAssertEqual(exact?.binding.model, "fixture-model")
+        XCTAssertEqual(exact?.reviewGrade, .freshContextSameModel)
+
+        XCTAssertNil(KistRunner.independentReviewerSelection(
+            preferred: ProviderBinding(providerId: "codex-cli", model: "fixture-model"),
+            producingIdentities: producers, registry: registry),
+            "the default independent policy must keep requiring a distinct identity")
+    }
+
     func testVerificationOnlyClassificationRequiresVerificationLeadAndExplicitNoEditClause() {
         XCTAssertEqual(KistRunner.builderCompletionMode(
             for: "Verify the existing project without editing unless a deterministic check fails"),
@@ -487,6 +510,38 @@ final class KistBuilderRunCompositionTests: XCTestCase {
         XCTAssertNotNil(payload["verifiedAt"] as? String)
     }
 
+    func testSameModelMachineReceiptCannotBeMintedFromPublicUnsealedFinal() {
+        let identity = "codex-cli:fixture-model"
+        let votes = ["Correctness", "Security", "Worth", "Completeness"].enumerated().map {
+            BuilderReviewVoteReceipt(
+                lens: $0.element, accepted: true, reason: "approved", failed: false,
+                provider: "codex-cli", model: "fixture-model",
+                invocationID: "host-lens-\($0.offset)", freshConversation: true)
+        }
+        let copied = BuilderFinalReceipt(
+            contractID: "copied", route: .direct,
+            workers: [BuilderWorkerReceipt(
+                nodeID: "build", provider: "codex-cli", model: "fixture-model")],
+            verification: BuilderVerifierReceipt(
+                scope: .final, provider: "kist", model: "deterministic",
+                deterministic: true, passed: true,
+                checks: [.init(name: "verify", passed: true)]),
+            review: BuilderReviewReceipt(
+                provider: "codex-cli", model: "fixture-model", accepted: true,
+                checks: [.init(name: "fresh-context same-model review", passed: true)],
+                workerIdentities: [identity], reviewerIdentity: identity,
+                evidencePacketDigest: String(repeating: "a", count: 64), votes: votes,
+                reviewGrade: .freshContextSameModel, independent: false,
+                freshConversation: true, separateInvocation: true,
+                producerInvocationIDs: ["producer-cli-observation"],
+                reviewerInvocationIDs: (0..<4).map { "review-cli-observation-\($0)" },
+                reviewThreshold: 3),
+            accepted: true, completedAt: Date())
+
+        XCTAssertFalse(copied.hasValidBuilderFinalAuthority)
+        XCTAssertNil(KistRunner.builderSameModelReviewReceiptPayload(copied))
+    }
+
     func testTypedPlanCommandEvidencePreservesExpectedExitAndExcludesFreeFormTools() {
         let fingerprint = "objective-sha"
         let rows = [
@@ -541,5 +596,13 @@ final class KistBuilderRunCompositionTests: XCTestCase {
                 availableModels: [AIModel(id: model)], requiresAPIKey: false)
         }
         return ProviderRegistry(providers: providers)
+    }
+
+    private func sameModelCLIReviewerRegistry() -> ProviderRegistry {
+        ProviderRegistry(providers: [CLIChatProvider(
+            id: "codex-cli", name: "fixture", iconName: "cpu", keyAccount: "",
+            defaultModel: "fixture-model",
+            availableModels: [AIModel(id: "fixture-model")],
+            binaryName: "/usr/bin/true", argsForModel: { _ in [] }, parseOutput: { $0 })])
     }
 }

@@ -72,6 +72,47 @@ final class OllamaEmbeddingsTests: XCTestCase {
         XCTAssertEqual(OllamaEmbeddingClient.defaultBaseURL(), "http://box.local:9999")
     }
 
+    func testEmbeddingSpaceBindsCanonicalEndpointModelAndManifestDigest() async throws {
+        let digest = String(repeating: "a", count: 64)
+        let body = """
+        {"models":[{"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","digest":"\(digest)"}]}
+        """.data(using: .utf8)!
+        let localTransport = CapturingTransport(body: body)
+        let local = OllamaEmbeddingClient(
+            model: "nomic-embed-text", transport: localTransport,
+            baseURL: "HTTP://LOCALHOST:11434/")
+        let remote = OllamaEmbeddingClient(
+            model: "nomic-embed-text", transport: CapturingTransport(body: body),
+            baseURL: "http://other.local:11434")
+
+        let localID = try await local.embeddingSpaceID()
+        let remoteID = try await remote.embeddingSpaceID()
+        XCTAssertEqual(
+            localID,
+            "ollama:http://localhost:11434:nomic-embed-text:sha256:\(digest)")
+        XCTAssertNotEqual(localID, remoteID)
+        XCTAssertEqual(localTransport.lastRequest?.httpMethod, "GET")
+        XCTAssertEqual(localTransport.lastRequest?.url?.path, "/api/tags")
+    }
+
+    func testEmbeddingSpaceRefusesMissingOrMalformedManifestDigest() async {
+        let missing = #"{"models":[{"name":"other","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#.data(using: .utf8)!
+        let malformed = #"{"models":[{"name":"nomic-embed-text:latest","digest":"not-a-digest"}]}"#.data(using: .utf8)!
+        for body in [missing, malformed] {
+            let client = OllamaEmbeddingClient(transport: CapturingTransport(body: body))
+            do {
+                _ = try await client.embeddingSpaceID()
+                XCTFail("expected immutable model identity failure")
+            } catch let error as OllamaEmbeddingClient.EmbeddingError {
+                guard case .badResponse = error else {
+                    return XCTFail("expected badResponse, got \(error)")
+                }
+            } catch {
+                XCTFail("wrong error type: \(error)")
+            }
+        }
+    }
+
     func testConformsToEmbeddingProviding() {
         let client: EmbeddingProviding = OllamaEmbeddingClient(transport: CapturingTransport(body: Data()))
         XCTAssertNotNil(client)   // swappable anywhere GeminiEmbeddingClient is used

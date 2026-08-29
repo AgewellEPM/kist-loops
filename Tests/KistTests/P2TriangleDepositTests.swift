@@ -7,6 +7,18 @@ import XCTest
 ///  2. the deposit stays GATED ON THE SMOKE VERDICT (never on promotion alone) — the anti-laundering invariant.
 final class P2TriangleDepositTests: XCTestCase {
 
+    func testRecallAblationHealthKeepsFirstFailureForFailClosedMeasurement() {
+        let health = KistRunner.RecallAblationHealth()
+        XCTAssertNil(health.failure)
+        health.recordFailure("embedding unavailable")
+        health.recordFailure("later noise")
+        XCTAssertEqual(health.failure, "embedding unavailable")
+
+        let bounded = KistRunner.RecallAblationHealth()
+        bounded.recordFailure(String(repeating: "x", count: 1_000))
+        XCTAssertEqual(bounded.failure?.count, 512)
+    }
+
     func testPromotionLessonIsDeterministicAndNamesTheTool() {
         let a = KistRunner.promotionLesson(tool: "self__add", brief: "sum two integers", description: "Prints the arithmetic sum of two integers")
         let b = KistRunner.promotionLesson(tool: "self__add", brief: "sum two integers", description: "Prints the arithmetic sum of two integers")
@@ -14,6 +26,8 @@ final class P2TriangleDepositTests: XCTestCase {
         XCTAssertTrue(a.contains("self__add"), "the tool name must be IN the body — it's what the future model reads via recall")
         XCTAssertTrue(a.lowercased().contains("callable next session"), "must state the honest next-session-only contract")
         XCTAssertTrue(a.contains("sum two integers"), "the solved goal must be present so recall matches a similar task")
+        XCTAssertTrue(a.contains("configured executed review and grounded smoke check"))
+        XCTAssertFalse(a.lowercased().contains("adversary-proven"))
         XCTAssertFalse(a.contains(":"+"20"), "no smoke-output snippet / no volatile content that would break determinism")
     }
 

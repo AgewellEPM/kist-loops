@@ -36,11 +36,17 @@ public struct PromotionMindVote: Sendable, Codable, Equatable {
     /// Concrete route returned by ProviderRegistry after any same-provider model recovery.
     public let providerID: String?
     public let modelID: String?
+    /// Host-minted call provenance. A successful same-model review is admissible only when every
+    /// completed lens carries a unique invocation ID and was called with a fresh user-only conversation.
+    public let invocationID: String?
+    public let freshConversation: Bool?
 
     public init(name: String, shipWorthy: Bool, reason: String, failed: Bool = false,
-                providerID: String? = nil, modelID: String? = nil) {
+                providerID: String? = nil, modelID: String? = nil,
+                invocationID: String? = nil, freshConversation: Bool? = nil) {
         self.name = name; self.shipWorthy = shipWorthy; self.reason = reason; self.failed = failed
         self.providerID = providerID; self.modelID = modelID
+        self.invocationID = invocationID; self.freshConversation = freshConversation
     }
 }
 
@@ -83,15 +89,18 @@ public struct CouncilPromotionJudge: Sendable {
     private let providers: ProviderRegistry
     private let roles: RoleBindings
     private let recorder: TraceRecorder?
+    private let routePolicy: ProviderRoutePolicy
     private let lensDeadlineNanoseconds: UInt64
     private let lensDeadlineDescription: String
 
     public init(providers: ProviderRegistry, roles: RoleBindings, recorder: TraceRecorder? = nil,
-                lensDeadline: TimeInterval = 60) {
+                lensDeadline: TimeInterval = 60,
+                routePolicy: ProviderRoutePolicy = .sameProviderAdaptive) {
         let maximumSeconds = Double(UInt64.max) / 1_000_000_000
         let normalized = lensDeadline.isFinite && lensDeadline > 0
             ? min(lensDeadline, maximumSeconds) : 60
         self.providers = providers; self.roles = roles; self.recorder = recorder
+        self.routePolicy = routePolicy
         self.lensDeadlineNanoseconds = UInt64(normalized * 1_000_000_000)
         self.lensDeadlineDescription = String(format: "%.3f seconds", normalized)
     }
@@ -131,6 +140,7 @@ public struct CouncilPromotionJudge: Sendable {
     private func ask(_ lens: Lens, _ ctx: PromotionContext) async -> PromotionMindVote {
         let binding = roles.binding(for: lens.role)
         let prompt = Self.judgePrompt(lens: lens, ctx: ctx)
+        let invocationID = "builder-review-\(UUID().uuidString.lowercased())"
         let settings = ModelSettings(temperature: 0.0, maxTokens: 600,
                                      systemPrompt: Self.systemPrompt(lens: lens.name),
                                      disableThinking: true)
@@ -140,7 +150,8 @@ public struct CouncilPromotionJudge: Sendable {
             do {
                 let completion = try await providers.completeWithRoute(
                     providerId: binding.providerId, model: binding.model,
-                    messages: [ChatMessage(role: .user, content: prompt)], settings: settings)
+                    messages: [ChatMessage(role: .user, content: prompt)], settings: settings,
+                    routePolicy: routePolicy)
                 guard !Task.isCancelled else {
                     return .failure("completion cancelled")
                 }
@@ -159,19 +170,22 @@ public struct CouncilPromotionJudge: Sendable {
             let (ship, reason) = Self.parseVote(completion.text)
             return PromotionMindVote(
                 name: lens.name, shipWorthy: ship, reason: reason,
-                providerID: completion.providerId, modelID: completion.model)
+                providerID: completion.providerId, modelID: completion.model,
+                invocationID: invocationID, freshConversation: true)
         case .failure(let message):
             await record(role: "promote_\(lens.name.lowercased())", binding: binding, usage: .zero,
                          promptChars: prompt.count, completionChars: 0, started: started, status: .error)
             // FAIL-CLOSED: a broken mind is `failed` (neither SHIP nor veto), shrinking the SHIP pool.
             return PromotionMindVote(
-                name: lens.name, shipWorthy: false, reason: "FAILED: \(message)", failed: true)
+                name: lens.name, shipWorthy: false, reason: "FAILED: \(message)", failed: true,
+                invocationID: invocationID, freshConversation: true)
         case .deadline:
             await record(role: "promote_\(lens.name.lowercased())", binding: binding, usage: .zero,
                          promptChars: prompt.count, completionChars: 0, started: started, status: .error)
             return PromotionMindVote(
                 name: lens.name, shipWorthy: false,
-                reason: "review deadline exceeded after \(lensDeadlineDescription)", failed: true)
+                reason: "review deadline exceeded after \(lensDeadlineDescription)", failed: true,
+                invocationID: invocationID, freshConversation: true)
         }
     }
 
@@ -315,7 +329,9 @@ public struct CouncilPromotionJudge: Sendable {
         mutationPolicy: \(evidence.completionMode == .verificationOnly ? "digest equality and no workspace changes are REQUIRED" : "a governed digest change is REQUIRED")
         producerIdentities: \(evidence.producerIdentities.joined(separator: ", "))
         reviewerIdentityForThisInvocation: \(evidence.reviewerIdentity)
-        reviewerDistinctFromEveryProducer: true
+        reviewGrade: \(evidence.reviewGrade.rawValue)
+        independent: \(evidence.reviewGrade.claimsIndependence)
+        reviewerDistinctFromEveryProducer: \(evidence.reviewGrade.claimsIndependence)
         hadChanges: \(evidence.hadChanges)
         changedPaths: \(evidence.changedPaths.joined(separator: ", "))
 
@@ -341,7 +357,8 @@ public struct CouncilPromotionJudge: Sendable {
         \(checks)
 
         REVIEW PROTOCOL:
-        - This is the pre-verdict input. Your current call CREATES the independent final review receipt.
+        - This is the pre-verdict input. Your current call CREATES the \(evidence.reviewGrade.evidenceLabel) receipt.
+        - A fresh_context_same_model review is explicitly weaker evidence and never claims independence.
         - A final review receipt cannot exist yet and MUST NOT be demanded as input.
         - For verificationOnly, unchanged baseline/verified/review-entry digests and no diff are success proof, not missing mutation proof.
         - Planned free-form reviews and grounded_answer text are not authoritative; only typed host facts above are evidence.
