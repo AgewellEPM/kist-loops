@@ -353,6 +353,28 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(decoded.modelRouter.workflowIDs, ["content.release"])
         XCTAssertEqual(decoded.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(decoded.modelRouter.tool.parameters.map(\.name), ["workflow_id", "line"])
+        XCTAssertEqual(decoded.planningManifest.workflowIDs, ["content.release"])
+        XCTAssertEqual(decoded.planningManifest.workflows.map(\.entrypoint), ["plan"])
+        XCTAssertEqual(
+            decoded.planningManifest.toolIndex.map(\.reference),
+            ["content.plan", "artifact_verified", "repository.write"]
+        )
+        XCTAssertEqual(
+            decoded.planningManifest.approvalGates.map(\.instructionID),
+            ["approval"]
+        )
+        XCTAssertEqual(decoded.apiBasePaths, ["/automation"])
+        XCTAssertEqual(
+            decoded.metadataEndpoints.map(\.pathTemplate),
+            [
+                "/automation/runtime/catalog",
+                "/automation/runtime/export",
+                "/automation/runtime/openapi",
+                "/automation/runtime/planning",
+                "/automation/runtime/model-router",
+                "/automation/runtime/onyx-drivers",
+            ]
+        )
         XCTAssertFalse(encoded.contains("operator.luke"))
         XCTAssertFalse(encoded.contains("leaseID"))
         XCTAssertFalse(encoded.contains("lease_id"))
@@ -388,12 +410,31 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(export.modelRouter.tool.parameters.map(\.name), ["workflow_id", "line"])
         XCTAssertEqual(export.modelRouter.maximumCommandRounds, 4)
         XCTAssertEqual(export.onyxDrivers.map(\.workflowID), ["content.release", "content.review"])
+        XCTAssertEqual(export.planning.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.planning.workflows.map(\.workflowID), ["content.release", "content.review"])
+        XCTAssertEqual(export.planning.workflows.map(\.entrypoint), ["plan", "plan"])
+        XCTAssertEqual(export.planning.toolIndex.count, 6)
+        XCTAssertEqual(export.planning.decomposableUnits, [])
+        XCTAssertEqual(
+            export.planning.approvalGates.map { "\($0.workflowID):\($0.instructionID)" },
+            ["content.release:approval", "content.review:approval"]
+        )
 
         let info = try object(export.openAPI["info"])
         XCTAssertEqual(info["title"], .string("Automation"))
         XCTAssertEqual(info["version"], .string("2026.08"))
 
         let paths = try object(export.openAPI["paths"])
+        let runtimePlanningPath = try object(paths["/automation/runtime/planning"])
+        let runtimePlanning = try object(runtimePlanningPath["get"])
+        XCTAssertEqual(
+            runtimePlanning["operationId"],
+            .string(SMLWorkflowRuntimeMetadataResource.planning.operationID)
+        )
+        XCTAssertEqual(runtimePlanning["x-sml-runtime-resource"], .string("planning"))
+        XCTAssertEqual(runtimePlanning["x-sml-read-only"], .bool(true))
+        XCTAssertEqual(runtimePlanning["x-sml-authority"], .string("descriptor-only"))
+
         let releasePath = try object(paths["/automation/workflows/content.release"])
         let describe = try object(releasePath["get"])
         XCTAssertEqual(describe["operationId"], .string("describe_workflow_ContentRelease"))
@@ -413,6 +454,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
 
         let components = try object(export.openAPI["components"])
         let schemas = try object(components["schemas"])
+        let runtimeMetadataSchema = try object(schemas["SMLRuntimeMetadata"])
+        XCTAssertEqual(runtimeMetadataSchema["type"], .array([.string("object"), .string("array")]))
         let startSchema = try object(schemas["WorkflowStart_ContentRelease"])
         XCTAssertEqual(startSchema["additionalProperties"], .bool(false))
         XCTAssertEqual(
@@ -443,6 +486,22 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(routerTool["name"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
         let routerParameters = try array(routerTool["parameters"])
         XCTAssertEqual(routerParameters.count, 2)
+        let metadataEndpoints = try array(runtime["metadataEndpoints"])
+        XCTAssertEqual(metadataEndpoints.count, 6)
+        let metadataPlanningEndpoint = try object(metadataEndpoints[3])
+        XCTAssertEqual(metadataPlanningEndpoint["pathTemplate"], .string("/automation/runtime/planning"))
+        XCTAssertEqual(metadataPlanningEndpoint["resource"], .string("planning"))
+        XCTAssertEqual(
+            runtime["planningManifestSchemaVersion"],
+            .number(Decimal(SMLWorkflowRuntimePlanningManifest.currentSchemaVersion))
+        )
+        XCTAssertEqual(
+            try array(runtime["planningWorkflowIDs"]),
+            [.string("content.release"), .string("content.review")]
+        )
+        XCTAssertEqual(try array(runtime["planningToolIndex"]).count, 6)
+        XCTAssertEqual(try array(runtime["planningDecomposableUnits"]), [])
+        XCTAssertEqual(try array(runtime["planningApprovalGates"]).count, 2)
 
         let data = try JSONEncoder().encode(export)
         let decoded = try JSONDecoder().decode(SMLWorkflowRuntimeExport.self, from: data)
@@ -500,7 +559,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
 
         XCTAssertEqual(app.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(app.catalog.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(app.planningManifest.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(app.planningManifest.toolIndex.count, 6)
+        XCTAssertEqual(app.metadataEndpoints.count, 6)
         XCTAssertEqual(app.runtimeAPI.catalog.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(app.runtimeAPI.metadataEndpoints.map(\.resource), [
+            .catalog, .export, .openAPI, .planning, .modelRouter, .onyxDrivers,
+        ])
         XCTAssertEqual(try app.descriptor(workflowID: "content.review").workflowName, "Content review")
         XCTAssertEqual(try app.onyxDriver(workflowID: "content.release").plan.entrypoint, "plan")
 
@@ -527,6 +592,47 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(started.statusCode, 201)
         XCTAssertEqual(started.command.op, SMLRuntimeCommandOperation.workflowRun)
         XCTAssertEqual(started.result.task?.workflowID, "content.review")
+
+        let planningMetadata = try app.handleMetadata(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/planning")
+        )
+        XCTAssertEqual(planningMetadata.statusCode, 200)
+        XCTAssertEqual(planningMetadata.resource, .planning)
+        let planningBody = try object(planningMetadata.body)
+        XCTAssertEqual(
+            try array(planningBody["workflowIDs"]),
+            [.string("content.release"), .string("content.review")]
+        )
+        XCTAssertEqual(try array(planningBody["toolIndex"]).count, 6)
+
+        let routerMetadata = try app.handleMetadata(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/model-router")
+        )
+        let routerMetadataBody = try object(routerMetadata.body)
+        XCTAssertEqual(
+            try array(routerMetadataBody["workflowIDs"]),
+            [.string("content.release"), .string("content.review")]
+        )
+        let onyxMetadata = try app.handleMetadata(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/onyx-drivers")
+        )
+        XCTAssertEqual(onyxMetadata.resource, .onyxDrivers)
+        XCTAssertEqual(try array(onyxMetadata.body).count, 2)
+
+        XCTAssertThrowsError(
+            try app.handleMetadata(
+                SMLWorkflowAPIRequest(
+                    method: .post,
+                    path: "/automation/runtime/planning",
+                    body: ["ignored": .bool(true)]
+                )
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .metadataRequestMustBeReadOnly
+            )
+        }
 
         let providers = ProviderRegistry(providers: [], retryDelaysNanoseconds: [])
         let router = app.modelRouter(
@@ -812,6 +918,40 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(nested.planning?.unitKind, .nestedWorkflow)
         XCTAssertEqual(nested.planning?.canDecomposeFurther, true)
+
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            admitted: [admitted],
+            role: "ops-role",
+            actor: "operator.luke",
+            apiBasePath: "/automation"
+        )
+        let planning = registry.planningManifest
+
+        XCTAssertEqual(planning.workflowIDs, ["ops.invoice"])
+        XCTAssertEqual(planning.workflows.first?.workflowName, "Invoice operation")
+        XCTAssertEqual(planning.workflows.first?.entrypoint, "decide")
+        XCTAssertEqual(
+            planning.decomposableUnits.map { "\($0.instructionID):\($0.unitKind.rawValue)" },
+            ["nested:nested_workflow", "plugin:plugin_contract"]
+        )
+        let pluginIndex: SMLWorkflowRuntimePlanningToolIndexEntry = try XCTUnwrap(
+            planning.toolIndex.first { $0.instructionID == "plugin" }
+        )
+        XCTAssertEqual(pluginIndex.reference, "invoice_processor")
+        XCTAssertEqual(pluginIndex.unitKind, .pluginContract)
+        XCTAssertEqual(pluginIndex.statePreconditions, ["ready"])
+        XCTAssertEqual(pluginIndex.declaredOutputs, ["status"])
+        XCTAssertEqual(pluginIndex.verifier, "invoice_verified")
+        XCTAssertEqual(pluginIndex.sideEffectLevel, .reversibleInternal)
+        XCTAssertEqual(
+            planning.toolIndex.first { $0.instructionID == "nested" }?.unitKind,
+            .nestedWorkflow
+        )
+        XCTAssertEqual(planning.approvalGates, [])
+
+        let encoded = String(decoding: try JSONEncoder().encode(planning), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("operator.luke"))
+        XCTAssertFalse(encoded.contains("lease"))
     }
 
     func testInterfaceValidationRejectsUnknownDuplicateAndUnpublishedFields() throws {
