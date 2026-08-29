@@ -130,6 +130,17 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.onyxDrivers.first?.plan.entrypoint, "plan")
         XCTAssertEqual(package.runtime.planning.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(package.runtime.agentGuide.workflowGuides.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(package.runtime.hostGuide.workflowBindings.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(package.runtime.hostGuide.launchSteps.map(\.id), [
+            "decode_source_package",
+            "fresh_host_admission",
+            "launch_runtime_app",
+            "serve_descriptor_metadata",
+            "route_repl_and_api",
+            "attach_model_router",
+            "attach_onyx_and_planning",
+        ])
+        XCTAssertEqual(package.runtime.hostGuide.hostBindingCount, 7)
         XCTAssertTrue(
             package.runtime.agentGuide.systemPrompt.contains(
                 "Break work into small contextual workflow steps"
@@ -153,15 +164,20 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         let openAPIPaths = try object(package.runtime.openAPI["paths"])
         XCTAssertNotNil(openAPIPaths["/source/workflows/langgraph.review/tasks"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/agent-guide"])
+        XCTAssertNotNil(openAPIPaths["/source/runtime/host-guide"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/model-router"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/onyx-drivers"])
 
         let encoded = try JSONEncoder().encode(package)
         let encodedString = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(encodedString.contains("\"agentGuide\""))
+        XCTAssertTrue(encodedString.contains("\"hostGuide\""))
         XCTAssertFalse(encodedString.contains("operator.luke"))
         XCTAssertFalse(encodedString.contains("source-lease"))
         XCTAssertFalse(encodedString.contains("authenticatedActor"))
-        XCTAssertFalse(encodedString.contains("admissionCatalog"))
+        XCTAssertFalse(encodedString.contains("\"toolCapabilities\""))
+        XCTAssertFalse(encodedString.contains("\"modelPurposes\""))
+        XCTAssertFalse(encodedString.contains("\"modelOutputSchemas\""))
 
         let decoded = try JSONDecoder().decode(SMLWorkflowRuntimeSourcePackage.self, from: encoded)
         XCTAssertEqual(decoded, package)
@@ -333,6 +349,81 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
                     expected: "2.0.0",
                     actual: "1.0.0"
                 )
+            )
+        }
+    }
+
+    func testRuntimePackageFailsClosedWhenSerializedGuidesDisagreeWithCatalog() throws {
+        let workflow = try SMLWorkflowSourceImporter.langGraphWorkflow(from: langGraphReviewManifest())
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            sourceMounts: [
+                SMLWorkflowRuntimeSourceMount(
+                    document: .langGraphManifest(langGraphReviewManifest()),
+                    admissionCatalog: reviewCatalog(),
+                    role: "reviewer",
+                    actor: "operator.luke",
+                    apiBasePath: "/source"
+                ),
+            ]
+        )
+        let driftedRegistry = try SMLWorkflowRuntimeRegistry.compile(
+            sourceMounts: [
+                SMLWorkflowRuntimeSourceMount(
+                    document: .langGraphManifest(langGraphReviewManifest()),
+                    admissionCatalog: reviewCatalog(),
+                    role: "reviewer",
+                    actor: "operator.luke",
+                    apiBasePath: "/drifted"
+                ),
+            ]
+        )
+        let runtime = registry.export()
+
+        let wrongAgentGuideRuntime = SMLWorkflowRuntimeExport(
+            schemaVersion: runtime.schemaVersion,
+            catalog: runtime.catalog,
+            mountContract: runtime.mountContract,
+            openAPI: runtime.openAPI,
+            modelTools: runtime.modelTools,
+            modelRouter: runtime.modelRouter,
+            onyxDrivers: runtime.onyxDrivers,
+            planning: runtime.planning,
+            agentGuide: driftedRegistry.catalog.agentGuide,
+            hostGuide: runtime.hostGuide
+        )
+        XCTAssertThrowsError(
+            try SMLWorkflowRuntimeSourcePackage(
+                normalizedWorkflows: [workflow],
+                runtime: wrongAgentGuideRuntime
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeSourcePackageError,
+                .runtimeDerivedPayloadMismatch(field: "runtime.agentGuide")
+            )
+        }
+
+        let wrongHostGuideRuntime = SMLWorkflowRuntimeExport(
+            schemaVersion: runtime.schemaVersion,
+            catalog: runtime.catalog,
+            mountContract: runtime.mountContract,
+            openAPI: runtime.openAPI,
+            modelTools: runtime.modelTools,
+            modelRouter: runtime.modelRouter,
+            onyxDrivers: runtime.onyxDrivers,
+            planning: runtime.planning,
+            agentGuide: runtime.agentGuide,
+            hostGuide: driftedRegistry.catalog.hostGuide
+        )
+        XCTAssertThrowsError(
+            try SMLWorkflowRuntimeSourcePackage(
+                normalizedWorkflows: [workflow],
+                runtime: wrongHostGuideRuntime
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeSourcePackageError,
+                .runtimeDerivedPayloadMismatch(field: "runtime.hostGuide")
             )
         }
     }

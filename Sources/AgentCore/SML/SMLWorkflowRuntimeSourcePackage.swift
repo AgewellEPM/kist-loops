@@ -7,6 +7,7 @@ public enum SMLWorkflowRuntimeSourcePackageError: Error, Sendable, Equatable, Cu
     case invalidWorkflow(workflowID: String, report: SMLValidationReport)
     case runtimeWorkflowMismatch(workflowID: String, field: String, expected: String, actual: String)
     case runtimeExportMismatch(field: String, expected: [String], actual: [String])
+    case runtimeDerivedPayloadMismatch(field: String)
 
     public var description: String {
         switch self {
@@ -23,6 +24,8 @@ public enum SMLWorkflowRuntimeSourcePackageError: Error, Sendable, Equatable, Cu
             return "SML workflow runtime source package workflow \(workflowID) \(field) mismatch: expected \(expected), got \(actual)"
         case .runtimeExportMismatch(let field, let expected, let actual):
             return "SML workflow runtime source package \(field) mismatch: expected \(expected), got \(actual)"
+        case .runtimeDerivedPayloadMismatch(let field):
+            return "SML workflow runtime source package \(field) does not match the catalog-derived payload"
         }
     }
 }
@@ -165,6 +168,7 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
             equal: expectedWorkflowIDs,
             field: "runtime.planning.workflows"
         )
+        try Self.requireDerivedRuntimePayloadsMatch(runtime)
         try Self.requireRuntimeWorkflowFields(
             workflows: orderedWorkflows,
             runtime: runtime
@@ -350,6 +354,21 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 equals: workflow.entrypoint,
                 workflowID: workflow.id,
                 field: "runtime.planning.entrypoint"
+            )
+        }
+    }
+
+    private static func requireDerivedRuntimePayloadsMatch(
+        _ runtime: SMLWorkflowRuntimeExport
+    ) throws {
+        guard runtime.agentGuide == runtime.catalog.agentGuide else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.agentGuide"
+            )
+        }
+        guard runtime.hostGuide == runtime.catalog.hostGuide else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.hostGuide"
             )
         }
     }

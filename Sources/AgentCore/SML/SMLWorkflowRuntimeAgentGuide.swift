@@ -251,9 +251,3 @@ public extension SMLWorkflowRuntimeCatalog {
         SMLWorkflowRuntimeAgentGuide(catalog: self)
     }
 }
-
-public extension SMLWorkflowRuntimeExport {
-    var agentGuide: SMLWorkflowRuntimeAgentGuide {
-        catalog.agentGuide
-    }
-}

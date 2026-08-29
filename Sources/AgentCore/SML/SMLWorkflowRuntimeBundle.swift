@@ -486,6 +486,7 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
     case openAPI = "openapi"
     case planning
     case agentGuide = "agent-guide"
+    case hostGuide = "host-guide"
     case modelRouter = "model-router"
     case onyxDrivers = "onyx-drivers"
 
@@ -507,6 +508,8 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "Return the aggregate planner manifest for mounted SML workflows"
         case .agentGuide:
             return "Return the canonical model and agent operating guide for mounted SML workflows"
+        case .hostGuide:
+            return "Return the canonical host wiring guide for mounting SML workflow runtimes"
         case .modelRouter:
             return "Return the native model-router tool descriptor for mounted SML workflows"
         case .onyxDrivers:
@@ -1351,7 +1354,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -1361,6 +1364,8 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
     public let modelRouter: SMLWorkflowRuntimeModelRouterDescriptor
     public let onyxDrivers: [SMLOnyxDriverManifest]
     public let planning: SMLWorkflowRuntimePlanningManifest
+    public let agentGuide: SMLWorkflowRuntimeAgentGuide
+    public let hostGuide: SMLWorkflowRuntimeHostGuide
 
     public init(
         schemaVersion: Int = SMLWorkflowRuntimeExport.currentSchemaVersion,
@@ -1370,7 +1375,9 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         modelTools: [SMLWorkflowRuntimeModelToolExport],
         modelRouter: SMLWorkflowRuntimeModelRouterDescriptor,
         onyxDrivers: [SMLOnyxDriverManifest],
-        planning: SMLWorkflowRuntimePlanningManifest
+        planning: SMLWorkflowRuntimePlanningManifest,
+        agentGuide: SMLWorkflowRuntimeAgentGuide? = nil,
+        hostGuide: SMLWorkflowRuntimeHostGuide? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.catalog = catalog
@@ -1380,11 +1387,13 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         self.modelRouter = modelRouter
         self.onyxDrivers = onyxDrivers
         self.planning = planning
+        self.agentGuide = agentGuide ?? catalog.agentGuide
+        self.hostGuide = hostGuide ?? catalog.hostGuide
     }
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion, catalog, mountContract, openAPI, modelTools, modelRouter,
-             onyxDrivers, planning
+             onyxDrivers, planning, agentGuide, hostGuide
     }
 
     public init(from decoder: Decoder) throws {
@@ -1405,6 +1414,12 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         planning = try container.decodeIfPresent(
             SMLWorkflowRuntimePlanningManifest.self, forKey: .planning
         ) ?? catalog.planningManifest
+        agentGuide = try container.decodeIfPresent(
+            SMLWorkflowRuntimeAgentGuide.self, forKey: .agentGuide
+        ) ?? catalog.agentGuide
+        hostGuide = try container.decodeIfPresent(
+            SMLWorkflowRuntimeHostGuide.self, forKey: .hostGuide
+        ) ?? catalog.hostGuide
     }
 }
 
@@ -1456,7 +1471,9 @@ public extension SMLWorkflowRuntimeCatalog {
             modelTools: modelTools,
             modelRouter: modelRouter,
             onyxDrivers: onyxDrivers,
-            planning: planningManifest
+            planning: planningManifest,
+            agentGuide: agentGuide,
+            hostGuide: hostGuide
         )
     }
 }
@@ -2027,6 +2044,8 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.planningManifest)
         case .agentGuide:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.agentGuide)
+        case .hostGuide:
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostGuide)
         case .modelRouter:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.modelRouter)
         case .onyxDrivers:
@@ -2777,6 +2796,7 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
         }
 
         let agentGuide = catalog.agentGuide
+        let hostGuide = catalog.hostGuide
         return [
             "openapi": .string("3.1.0"),
             "info": .object([
@@ -2810,6 +2830,11 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                     Decimal(agentGuide.workflowGuides.count)
                 ),
                 "agentGuideModelRouterToolName": .string(agentGuide.modelRouterTool.name),
+                "hostGuideSchemaVersion": .number(Decimal(hostGuide.schemaVersion)),
+                "hostGuideWorkflowCount": .number(
+                    Decimal(hostGuide.workflowBindings.count)
+                ),
+                "hostGuideBindingCount": .number(Decimal(hostGuide.hostBindingCount)),
                 "planningManifestSchemaVersion": .number(
                     Decimal(catalog.planningManifest.schemaVersion)
                 ),
