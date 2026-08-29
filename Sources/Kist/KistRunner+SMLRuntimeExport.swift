@@ -487,6 +487,72 @@ extension KistRunner {
         }
     }
 
+    struct SMLRuntimeHostREPLTranscriptTurn: Sendable, Codable, Equatable {
+        let index: Int
+        let line: String
+        let output: String
+        let shouldExit: Bool
+        let command: SMLCommandEnvelope?
+        let result: SMLCommandResult?
+
+        init(
+            index: Int,
+            line: String,
+            output: String,
+            shouldExit: Bool,
+            command: SMLCommandEnvelope?,
+            result: SMLCommandResult?
+        ) {
+            self.index = index
+            self.line = line
+            self.output = output
+            self.shouldExit = shouldExit
+            self.command = command
+            self.result = result
+        }
+    }
+
+    struct SMLRuntimeHostREPLTranscript: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let workflowID: String
+        let availableWorkflowIDs: [String]
+        let scriptPath: String
+        let requestedLineCount: Int
+        let executedLineCount: Int
+        let stoppedAtExit: Bool
+        let turns: [SMLRuntimeHostREPLTranscriptTurn]
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostREPLTranscript.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            workflowID: String,
+            availableWorkflowIDs: [String],
+            scriptPath: String,
+            requestedLineCount: Int,
+            stoppedAtExit: Bool,
+            turns: [SMLRuntimeHostREPLTranscriptTurn],
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.workflowID = workflowID
+            self.availableWorkflowIDs = availableWorkflowIDs
+            self.scriptPath = scriptPath
+            self.requestedLineCount = requestedLineCount
+            self.executedLineCount = turns.count
+            self.stoppedAtExit = stoppedAtExit
+            self.turns = turns
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
     struct SMLRuntimeHostAPIExchange: Sendable, Codable, Equatable {
         static let currentSchemaVersion = 2
 
@@ -537,6 +603,112 @@ extension KistRunner {
             self.metadataResource = metadataResource
             self.command = command
             self.result = result
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostAPIRequestSpec: Sendable, Codable, Equatable {
+        let method: SMLWorkflowAPIMethod
+        let path: String
+        let body: SMLObject
+
+        init(
+            method: SMLWorkflowAPIMethod,
+            path: String,
+            body: SMLObject = [:]
+        ) {
+            self.method = method
+            self.path = path
+            self.body = body
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case method
+            case path
+            case body
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                method: try container.decode(SMLWorkflowAPIMethod.self, forKey: .method),
+                path: try container.decode(String.self, forKey: .path),
+                body: try container.decodeIfPresent(SMLObject.self, forKey: .body) ?? [:]
+            )
+        }
+    }
+
+    struct SMLRuntimeHostAPITranscriptExchange: Sendable, Codable, Equatable {
+        let index: Int
+        let method: SMLWorkflowAPIMethod
+        let path: String
+        let requestBody: SMLObject
+        let statusCode: Int
+        let kind: SMLWorkflowRuntimeAPIResponseKind
+        let responseBody: SMLValue
+        let route: SMLWorkflowRuntimeAPIMount?
+        let pathParameters: [String: String]
+        let metadataResource: SMLWorkflowRuntimeMetadataResource?
+        let command: SMLCommandEnvelope?
+        let result: SMLCommandResult?
+
+        init(
+            index: Int,
+            method: SMLWorkflowAPIMethod,
+            path: String,
+            requestBody: SMLObject,
+            statusCode: Int,
+            kind: SMLWorkflowRuntimeAPIResponseKind,
+            responseBody: SMLValue,
+            route: SMLWorkflowRuntimeAPIMount?,
+            pathParameters: [String: String],
+            metadataResource: SMLWorkflowRuntimeMetadataResource?,
+            command: SMLCommandEnvelope?,
+            result: SMLCommandResult?
+        ) {
+            self.index = index
+            self.method = method
+            self.path = path
+            self.requestBody = requestBody
+            self.statusCode = statusCode
+            self.kind = kind
+            self.responseBody = responseBody
+            self.route = route
+            self.pathParameters = pathParameters
+            self.metadataResource = metadataResource
+            self.command = command
+            self.result = result
+        }
+    }
+
+    struct SMLRuntimeHostAPITranscript: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let scriptPath: String
+        let requestedRequestCount: Int
+        let executedRequestCount: Int
+        let exchanges: [SMLRuntimeHostAPITranscriptExchange]
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostAPITranscript.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            scriptPath: String,
+            requestedRequestCount: Int,
+            exchanges: [SMLRuntimeHostAPITranscriptExchange],
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.scriptPath = scriptPath
+            self.requestedRequestCount = requestedRequestCount
+            self.executedRequestCount = exchanges.count
+            self.exchanges = exchanges
             self.launchDescriptor = launchDescriptor
         }
     }
@@ -606,7 +778,14 @@ extension KistRunner {
         case missingSourcePath
         case missingOutputDirectory
         case missingREPLLine
+        case missingREPLScriptPath
+        case emptyREPLScript(path: String)
+        case readREPLScriptFailed(path: String, reason: String)
         case missingAPIPath
+        case missingAPIScriptPath
+        case emptyAPIScript(path: String)
+        case invalidAPIScript(path: String, reason: String)
+        case readAPIScriptFailed(path: String, reason: String)
         case missingModelPrompt
         case invalidJSONObject(flag: String, reason: String)
         case invalidScaffold(path: String, reason: String)
@@ -623,13 +802,27 @@ extension KistRunner {
         var description: String {
             switch self {
             case .missingSourcePath:
-                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-openapi/--sml-runtime-model-router/--sml-runtime-onyx/--sml-runtime-planning/--sml-runtime-catalog/--sml-runtime-mount/--sml-runtime-agent-guide/--sml-runtime-host-guide/--sml-runtime-host-wiring/--sml-runtime-scaffold/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
+                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-openapi/--sml-runtime-model-router/--sml-runtime-onyx/--sml-runtime-planning/--sml-runtime-catalog/--sml-runtime-mount/--sml-runtime-agent-guide/--sml-runtime-host-guide/--sml-runtime-host-wiring/--sml-runtime-scaffold/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-repl-script/--sml-runtime-api/--sml-runtime-api-script/--sml-runtime-model requires <source.json>"
             case .missingOutputDirectory:
                 return "--sml-runtime-scaffold requires --sml-out <dir>"
             case .missingREPLLine:
                 return "--sml-runtime-repl requires --sml-line <line>"
+            case .missingREPLScriptPath:
+                return "--sml-runtime-repl-script requires --sml-script <path>"
+            case .emptyREPLScript(let path):
+                return "--sml-script contains no runnable REPL lines: \(path)"
+            case .readREPLScriptFailed(let path, let reason):
+                return "could not read SML runtime REPL script '\(path)': \(reason)"
             case .missingAPIPath:
                 return "--sml-runtime-api requires --sml-path <path>"
+            case .missingAPIScriptPath:
+                return "--sml-runtime-api-script requires --sml-api-script <path>"
+            case .emptyAPIScript(let path):
+                return "--sml-api-script contains no API requests: \(path)"
+            case .invalidAPIScript(let path, let reason):
+                return "invalid SML runtime API script '\(path)': \(reason)"
+            case .readAPIScriptFailed(let path, let reason):
+                return "could not read SML runtime API script '\(path)': \(reason)"
             case .missingModelPrompt:
                 return "--sml-runtime-model requires --sml-prompt <text> or a positional prompt"
             case .invalidJSONObject(let flag, let reason):
@@ -946,6 +1139,28 @@ extension KistRunner {
         }
     }
 
+    static func runSMLRuntimeREPLScript(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostREPLTranscript(
+                sourcePath: opts.smlRuntimeREPLScript,
+                projectRoot: opts.project,
+                workflowID: opts.smlRuntimeWorkflowID,
+                scriptPath: opts.smlRuntimeREPLScriptPath,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
     static func runSMLRuntimeAPI(_ opts: KistOptions) async -> Int32 {
         do {
             let json = try await renderSMLRuntimeHostAPIExchange(
@@ -954,6 +1169,27 @@ extension KistRunner {
                 method: opts.smlRuntimeAPIMethod,
                 path: opts.smlRuntimeAPIPath,
                 bodyJSON: opts.smlRuntimeAPIBody,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeAPIScript(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostAPITranscript(
+                sourcePath: opts.smlRuntimeAPIScript,
+                projectRoot: opts.project,
+                scriptPath: opts.smlRuntimeAPIScriptPath,
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
@@ -1331,6 +1567,35 @@ extension KistRunner {
         return String(decoding: try encoder.encode(command), as: UTF8.self)
     }
 
+    static func renderSMLRuntimeHostREPLTranscript(
+        sourcePath: String?,
+        projectRoot: String,
+        workflowID: String? = nil,
+        scriptPath: String?,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let transcript = try await makeSMLRuntimeHostREPLTranscript(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            workflowID: workflowID,
+            scriptPath: scriptPath,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(transcript), as: UTF8.self)
+    }
+
     static func renderSMLRuntimeHostAttachments(
         sourcePath: String?,
         projectRoot: String,
@@ -1387,6 +1652,33 @@ extension KistRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return String(decoding: try encoder.encode(exchange), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostAPITranscript(
+        sourcePath: String?,
+        projectRoot: String,
+        scriptPath: String?,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let transcript = try await makeSMLRuntimeHostAPITranscript(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            scriptPath: scriptPath,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(transcript), as: UTF8.self)
     }
 
     static func renderSMLRuntimeHostModelTurn(
@@ -1941,6 +2233,18 @@ extension KistRunner {
                     summary: "Attachment manifest for \(attachment.workflowID).",
                     payload: attachment
                 ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "api-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).json",
+                    outputDirectory: outputURL,
+                    summary: "Runnable generated API request script template for \(attachment.workflowID).",
+                    payload: smlRuntimeScaffoldAPIScript(for: attachment)
+                ))
+                files.append(try writeSMLRuntimeScaffoldTextFile(
+                    relativePath: "repl-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).repl",
+                    outputDirectory: outputURL,
+                    summary: "Runnable generated REPL script template for \(attachment.workflowID).",
+                    text: smlRuntimeScaffoldREPLScript(for: attachment)
+                ))
             }
             files.append(try writeSMLRuntimeScaffoldTextFile(
                 relativePath: "README.md",
@@ -2212,9 +2516,82 @@ extension KistRunner {
         4. Load `onyx-drivers.json` for skill trees, tool bindings, and plans.
         5. Use `planning.json`, `agent-guide.json`, and `host-guide.json` as the agent/host operating contract.
         6. Use `host-wiring.json` or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
+        7. Run `repl-scripts/*.repl` with `kist --sml-runtime-repl-script <this directory> --sml-script <script>` to produce a multi-turn workflow REPL transcript.
+        8. Run `api-scripts/*.json` with `kist --sml-runtime-api-script <this directory> --sml-api-script <script>` to produce a multi-request generated API transcript.
 
         Descriptor files do not carry actor identity, leases, credentials, provider registries, runtime handles, or completion authority. State changes still have to cross the generated host command gateway and replay/admission checks.
         """
+    }
+
+    private static func smlRuntimeScaffoldAPIScript(
+        for attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
+    ) -> [SMLRuntimeHostAPIRequestSpec] {
+        return [SMLWorkflowControlAction.describe, .start, .watch, .receipts].compactMap { action in
+            let matchingEndpoints = attachment.apiRoutes.filter {
+                $0.action == action
+            }.sorted {
+                if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            guard let endpoint = matchingEndpoints.first,
+                  let example = endpoint.examples.first else {
+                return nil
+            }
+            return SMLRuntimeHostAPIRequestSpec(
+                method: example.method,
+                path: example.path.replacingOccurrences(of: "TASK-ID", with: "TASK-SCAFFOLD"),
+                body: smlRuntimeReplaceTaskID(in: example.body)
+            )
+        }
+    }
+
+    private static func smlRuntimeScaffoldREPLScript(
+        for attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
+    ) -> String {
+        let examplesByVerb = Dictionary(
+            grouping: attachment.replExamples,
+            by: \.verb
+        ).mapValues { examples in
+            examples.sorted { $0.line < $1.line }.first?.line ?? ""
+        }
+        let startLine = examplesByVerb["start"]?
+            .replacingOccurrences(of: "TASK-ID", with: "TASK-SCAFFOLD")
+        let watchLine = examplesByVerb["watch"]?
+            .replacingOccurrences(of: "TASK-ID", with: "TASK-SCAFFOLD")
+        let runtimeLines = [startLine, watchLine].compactMap { $0 }
+        return ([
+            "# Generated SML workflow REPL script for \(attachment.workflowID)",
+            "# Run from the scaffold directory with:",
+            "# kist --sml-runtime-repl-script . --sml-script repl-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).repl --sml-workflow \(attachment.workflowID)",
+            "help",
+            "schema",
+            "api",
+            "model",
+            "onyx",
+            "planning",
+            "attachment",
+        ] + runtimeLines + [
+            "# Approval/refusal/rollback commands require the latest task_revision returned by watch.",
+            "exit",
+            "",
+        ]).joined(separator: "\n")
+    }
+
+    private static func smlRuntimeReplaceTaskID(in object: SMLObject) -> SMLObject {
+        object.mapValues(smlRuntimeReplaceTaskID(in:))
+    }
+
+    private static func smlRuntimeReplaceTaskID(in value: SMLValue) -> SMLValue {
+        switch value {
+        case .null, .bool, .number:
+            return value
+        case .string(let string):
+            return .string(string.replacingOccurrences(of: "TASK-ID", with: "TASK-SCAFFOLD"))
+        case .array(let array):
+            return .array(array.map(smlRuntimeReplaceTaskID(in:)))
+        case .object(let object):
+            return .object(smlRuntimeReplaceTaskID(in: object))
+        }
     }
 
     static func makeSMLRuntimeHostAPIExchange(
@@ -2268,6 +2645,65 @@ extension KistRunner {
                 metadataResource: response.metadataResource,
                 command: response.command,
                 result: response.result,
+                launchDescriptor: host.launch.launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostAPITranscript(
+        sourcePath: String?,
+        projectRoot: String,
+        scriptPath: String?,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostAPITranscript {
+        let script = try loadSMLRuntimeAPIScript(
+            scriptPath: scriptPath,
+            projectRoot: projectRoot
+        )
+        return try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            var exchanges: [SMLRuntimeHostAPITranscriptExchange] = []
+            for (offset, spec) in script.requests.enumerated() {
+                let request = SMLWorkflowAPIRequest(
+                    method: spec.method,
+                    path: spec.path,
+                    body: spec.body
+                )
+                let response = try await host.launch.app.handleRuntimeAPI(request)
+                exchanges.append(SMLRuntimeHostAPITranscriptExchange(
+                    index: offset + 1,
+                    method: spec.method,
+                    path: spec.path,
+                    requestBody: spec.body,
+                    statusCode: response.statusCode,
+                    kind: response.kind,
+                    responseBody: response.body,
+                    route: response.route,
+                    pathParameters: response.pathParameters,
+                    metadataResource: response.metadataResource,
+                    command: response.command,
+                    result: response.result
+                ))
+            }
+            return SMLRuntimeHostAPITranscript(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                scriptPath: script.path,
+                requestedRequestCount: script.requests.count,
+                exchanges: exchanges,
                 launchDescriptor: host.launch.launchDescriptor
             )
         }
@@ -2423,11 +2859,91 @@ extension KistRunner {
         }
     }
 
+    static func makeSMLRuntimeHostREPLTranscript(
+        sourcePath: String?,
+        projectRoot: String,
+        workflowID: String? = nil,
+        scriptPath: String?,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostREPLTranscript {
+        let script = try loadSMLRuntimeREPLScript(
+            scriptPath: scriptPath,
+            projectRoot: projectRoot
+        )
+        return try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let availableWorkflowIDs = host.runtimePackage.workflowIDs
+            let selectedWorkflowID = try selectSMLRuntimeREPLWorkflowID(
+                workflowID,
+                availableWorkflowIDs: availableWorkflowIDs
+            )
+            let session = try host.launch.app.replSession(workflowID: selectedWorkflowID)
+            var turns: [SMLRuntimeHostREPLTranscriptTurn] = []
+            var stoppedAtExit = false
+            for (offset, line) in script.lines.enumerated() {
+                let response = try await session.submit(line)
+                turns.append(SMLRuntimeHostREPLTranscriptTurn(
+                    index: offset + 1,
+                    line: line,
+                    output: response.output,
+                    shouldExit: response.shouldExit,
+                    command: response.command,
+                    result: response.result
+                ))
+                if response.shouldExit {
+                    stoppedAtExit = true
+                    break
+                }
+            }
+            return SMLRuntimeHostREPLTranscript(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                workflowID: selectedWorkflowID,
+                availableWorkflowIDs: availableWorkflowIDs,
+                scriptPath: script.path,
+                requestedLineCount: script.lines.count,
+                stoppedAtExit: stoppedAtExit,
+                turns: turns,
+                launchDescriptor: host.launch.launchDescriptor
+            )
+        }
+    }
+
     private struct SMLRuntimeHostLaunch {
         let sourcePath: String
         let sourceFormat: SMLRuntimeHostExportSourceFormat
         let runtimePackage: SMLWorkflowRuntimeSourcePackage
         let launch: SMLWorkflowRuntimeLaunch
+    }
+
+    private final class SMLRuntimeSequentialIDSource: @unchecked Sendable {
+        private let lock = NSLock()
+        private let prefix: String
+        private var nextValue = 0
+
+        init(prefix: String) {
+            self.prefix = prefix
+        }
+
+        func nextID() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            nextValue += 1
+            return "\(prefix)-\(nextValue)"
+        }
     }
 
     private static func withSMLRuntimeHostLaunch<T>(
@@ -2464,6 +2980,8 @@ extension KistRunner {
         let version = version ?? "1.0.0"
         let modelRounds = modelMaximumCommandRoundsOverride.map { min(max(1, $0), 8) }
         let admissionCatalog = derivedSMLAdmissionCatalog(for: loaded.workflows)
+        let commandIDSource = SMLRuntimeSequentialIDSource(prefix: "sml-runtime-export-command")
+        let taskIDSource = SMLRuntimeSequentialIDSource(prefix: "TASK-SML-RUNTIME-EXPORT")
         let registry: SMLWorkflowRuntimeRegistry
         if let package = loaded.package {
             registry = try SMLWorkflowRuntimeRegistry.compile(
@@ -2473,8 +2991,8 @@ extension KistRunner {
                 roleOverride: role,
                 apiBasePathOverride: apiBasePathOverride,
                 modelMaximumCommandRoundsOverride: modelRounds,
-                commandID: { "sml-runtime-export-command" },
-                taskID: { "TASK-SML-RUNTIME-EXPORT" }
+                commandID: { commandIDSource.nextID() },
+                taskID: { taskIDSource.nextID() }
             )
         } else {
             registry = try SMLWorkflowRuntimeRegistry.compile(
@@ -2484,8 +3002,8 @@ extension KistRunner {
                 actor: actor,
                 apiBasePath: apiBasePathOverride ?? "/sml",
                 modelMaximumCommandRounds: modelRounds ?? 4,
-                commandID: { "sml-runtime-export-command" },
-                taskID: { "TASK-SML-RUNTIME-EXPORT" }
+                commandID: { commandIDSource.nextID() },
+                taskID: { taskIDSource.nextID() }
             )
         }
 
@@ -2598,6 +3116,75 @@ extension KistRunner {
                 reason: String(describing: error)
             )
         }
+    }
+
+    private static func loadSMLRuntimeREPLScript(
+        scriptPath: String?,
+        projectRoot: String
+    ) throws -> (path: String, lines: [String]) {
+        guard let scriptPath,
+              !scriptPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SMLRuntimeHostExportError.missingREPLScriptPath
+        }
+        let scriptURL = smlRuntimeSourceURL(scriptPath, projectRoot: projectRoot)
+            .standardizedFileURL
+        let scriptText: String
+        do {
+            scriptText = try String(contentsOf: scriptURL, encoding: .utf8)
+        } catch {
+            throw SMLRuntimeHostExportError.readREPLScriptFailed(
+                path: scriptURL.path,
+                reason: String(describing: error)
+            )
+        }
+        let lines = scriptText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        guard !lines.isEmpty else {
+            throw SMLRuntimeHostExportError.emptyREPLScript(path: scriptURL.path)
+        }
+        return (scriptURL.path, lines)
+    }
+
+    private static func loadSMLRuntimeAPIScript(
+        scriptPath: String?,
+        projectRoot: String
+    ) throws -> (path: String, requests: [SMLRuntimeHostAPIRequestSpec]) {
+        guard let scriptPath,
+              !scriptPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SMLRuntimeHostExportError.missingAPIScriptPath
+        }
+        let scriptURL = smlRuntimeSourceURL(scriptPath, projectRoot: projectRoot)
+            .standardizedFileURL
+        let data: Data
+        do {
+            data = try Data(contentsOf: scriptURL)
+        } catch {
+            throw SMLRuntimeHostExportError.readAPIScriptFailed(
+                path: scriptURL.path,
+                reason: String(describing: error)
+            )
+        }
+        let requests: [SMLRuntimeHostAPIRequestSpec]
+        do {
+            requests = try JSONDecoder().decode([SMLRuntimeHostAPIRequestSpec].self, from: data)
+        } catch {
+            throw SMLRuntimeHostExportError.invalidAPIScript(
+                path: scriptURL.path,
+                reason: String(describing: error)
+            )
+        }
+        guard !requests.isEmpty else {
+            throw SMLRuntimeHostExportError.emptyAPIScript(path: scriptURL.path)
+        }
+        for request in requests where request.path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw SMLRuntimeHostExportError.invalidAPIScript(
+                path: scriptURL.path,
+                reason: "request path must be nonempty"
+            )
+        }
+        return (scriptURL.path, requests)
     }
 
     private struct LoadedSMLRuntimeSource {

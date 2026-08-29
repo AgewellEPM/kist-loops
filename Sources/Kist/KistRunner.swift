@@ -163,8 +163,14 @@ enum KistRunner {
         if opts.smlRuntimeAPI != nil {
             return await runSMLRuntimeAPI(opts)
         }
+        if opts.smlRuntimeAPIScript != nil {
+            return await runSMLRuntimeAPIScript(opts)
+        }
         if opts.smlRuntimeAttachments != nil {
             return await runSMLRuntimeAttachments(opts)
+        }
+        if opts.smlRuntimeREPLScript != nil {
+            return await runSMLRuntimeREPLScript(opts)
         }
         if opts.smlRuntimeREPL != nil {
             return await runSMLRuntimeREPL(opts)

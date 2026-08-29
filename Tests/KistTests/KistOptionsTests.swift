@@ -339,6 +339,37 @@ final class KistOptionsTests: XCTestCase {
         ])
         XCTAssertEqual(alias.smlRuntimeREPL, "graphs/review.langgraph.json")
         XCTAssertEqual(alias.smlRuntimeREPLLine, "help")
+
+        let script = KistOptions.parse([
+            "--sml-runtime-repl-script", "graphs/review.langgraph.json",
+            "--sml-workflow", "langgraph.review",
+            "--sml-script", "scripts/review.repl",
+            "--sml-role", "reviewer",
+            "--sml-actor", "operator.test",
+            "--sml-api-base", "/source",
+            "--sml-title", "Source Runtime",
+            "--sml-version", "2026.08",
+            "--sml-model-rounds", "3",
+        ])
+        XCTAssertEqual(script.smlRuntimeREPLScript, "graphs/review.langgraph.json")
+        XCTAssertEqual(script.smlRuntimeWorkflowID, "langgraph.review")
+        XCTAssertEqual(script.smlRuntimeREPLScriptPath, "scripts/review.repl")
+        XCTAssertEqual(script.smlRuntimeRole, "reviewer")
+        XCTAssertEqual(script.smlRuntimeActor, "operator.test")
+        XCTAssertEqual(script.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(script.smlRuntimeTitle, "Source Runtime")
+        XCTAssertEqual(script.smlRuntimeVersion, "2026.08")
+        XCTAssertEqual(script.smlRuntimeModelRounds, 3)
+        XCTAssertNil(script.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-repl-script <json>"))
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-script <path>"))
+
+        let scriptAlias = KistOptions.parse([
+            "--sml-repl-script", "graphs/review.langgraph.json",
+            "--sml-lines", "scripts/review.repl",
+        ])
+        XCTAssertEqual(scriptAlias.smlRuntimeREPLScript, "graphs/review.langgraph.json")
+        XCTAssertEqual(scriptAlias.smlRuntimeREPLScriptPath, "scripts/review.repl")
     }
 
     func testSMLRuntimeAPIFlags() {
@@ -374,6 +405,35 @@ final class KistOptionsTests: XCTestCase {
         ])
         XCTAssertEqual(defaultMethod.smlRuntimeAPI, "graphs/review.langgraph.json")
         XCTAssertEqual(defaultMethod.smlRuntimeAPIMethod, .get)
+
+        let script = KistOptions.parse([
+            "--sml-runtime-api-script", "graphs/review.langgraph.json",
+            "--sml-api-script", "scripts/review-api.json",
+            "--sml-role", "reviewer",
+            "--sml-actor", "operator.test",
+            "--sml-api-base", "/source",
+            "--sml-title", "Source Runtime",
+            "--sml-version", "2026.08",
+            "--sml-model-rounds", "3",
+        ])
+        XCTAssertEqual(script.smlRuntimeAPIScript, "graphs/review.langgraph.json")
+        XCTAssertEqual(script.smlRuntimeAPIScriptPath, "scripts/review-api.json")
+        XCTAssertEqual(script.smlRuntimeRole, "reviewer")
+        XCTAssertEqual(script.smlRuntimeActor, "operator.test")
+        XCTAssertEqual(script.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(script.smlRuntimeTitle, "Source Runtime")
+        XCTAssertEqual(script.smlRuntimeVersion, "2026.08")
+        XCTAssertEqual(script.smlRuntimeModelRounds, 3)
+        XCTAssertNil(script.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-api-script <json>"))
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-api-script <path>"))
+
+        let scriptAlias = KistOptions.parse([
+            "--sml-api-batch", "graphs/review.langgraph.json",
+            "--sml-requests", "scripts/review-api.json",
+        ])
+        XCTAssertEqual(scriptAlias.smlRuntimeAPIScript, "graphs/review.langgraph.json")
+        XCTAssertEqual(scriptAlias.smlRuntimeAPIScriptPath, "scripts/review-api.json")
     }
 
     func testSMLRuntimeModelFlags() {
@@ -606,9 +666,27 @@ final class KistOptionsTests: XCTestCase {
         let lineOnly = KistOptions.parse(["--sml-line", "help"])
         XCTAssertTrue(lineOnly.optionErrors.contains { $0.contains("--sml-line requires --sml-runtime-repl") })
 
+        let replScript = KistOptions.parse(["--sml-runtime-repl-script"])
+        XCTAssertTrue(replScript.optionErrors.contains {
+            $0.contains("--sml-runtime-repl-script requires <source.json>")
+        })
+        XCTAssertNil(replScript.smlRuntimeREPLScript)
+
+        let missingScript = KistOptions.parse([
+            "--sml-runtime-repl-script", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(missingScript.optionErrors.contains {
+            $0.contains("--sml-runtime-repl-script requires --sml-script <path>")
+        })
+
+        let scriptOnly = KistOptions.parse(["--sml-script", "scripts/review.repl"])
+        XCTAssertTrue(scriptOnly.optionErrors.contains {
+            $0.contains("--sml-script requires --sml-runtime-repl-script")
+        })
+
         let workflowOnly = KistOptions.parse(["--sml-workflow", "langgraph.review"])
         XCTAssertTrue(workflowOnly.optionErrors.contains {
-            $0.contains("--sml-workflow requires --sml-runtime-repl or --sml-runtime-attachments")
+            $0.contains("--sml-workflow requires --sml-runtime-repl, --sml-runtime-repl-script, or --sml-runtime-attachments")
         })
 
         let conflict = KistOptions.parse([
@@ -633,6 +711,16 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(openAPIConflict.optionErrors.contains {
             $0.contains("--sml-runtime-openapi conflicts with --sml-runtime-repl")
         })
+
+        let replScriptConflict = KistOptions.parse([
+            "--sml-runtime-repl", "graphs/review.langgraph.json",
+            "--sml-line", "help",
+            "--sml-runtime-repl-script", "graphs/review.langgraph.json",
+            "--sml-script", "scripts/review.repl",
+        ])
+        XCTAssertTrue(replScriptConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-repl conflicts with --sml-runtime-repl-script")
+        })
     }
 
     func testSMLRuntimeAPIFlagsRequireRunnableMode() {
@@ -640,8 +728,21 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(api.optionErrors.contains { $0.contains("--sml-runtime-api requires <source.json>") })
         XCTAssertNil(api.smlRuntimeAPI)
 
+        let apiScript = KistOptions.parse(["--sml-runtime-api-script"])
+        XCTAssertTrue(apiScript.optionErrors.contains {
+            $0.contains("--sml-runtime-api-script requires <source.json>")
+        })
+        XCTAssertNil(apiScript.smlRuntimeAPIScript)
+
         let missingPath = KistOptions.parse(["--sml-runtime-api", "graphs/review.langgraph.json"])
         XCTAssertTrue(missingPath.optionErrors.contains { $0.contains("--sml-runtime-api requires --sml-path") })
+
+        let missingScript = KistOptions.parse([
+            "--sml-runtime-api-script", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(missingScript.optionErrors.contains {
+            $0.contains("--sml-runtime-api-script requires --sml-api-script <path>")
+        })
 
         let badMethod = KistOptions.parse([
             "--sml-runtime-api", "graphs/review.langgraph.json",
@@ -658,6 +759,11 @@ final class KistOptionsTests: XCTestCase {
 
         let bodyOnly = KistOptions.parse(["--sml-body", #"{"hello":"world"}"#])
         XCTAssertTrue(bodyOnly.optionErrors.contains { $0.contains("--sml-body requires --sml-runtime-api") })
+
+        let apiScriptOnly = KistOptions.parse(["--sml-api-script", "scripts/review-api.json"])
+        XCTAssertTrue(apiScriptOnly.optionErrors.contains {
+            $0.contains("--sml-api-script requires --sml-runtime-api-script")
+        })
 
         let exportConflict = KistOptions.parse([
             "--sml-runtime-export", "graphs/review.langgraph.json",
@@ -689,6 +795,16 @@ final class KistOptionsTests: XCTestCase {
             "--sml-path", "/source/runtime/planning",
         ])
         XCTAssertTrue(replConflict.optionErrors.contains { $0.contains("--sml-runtime-repl conflicts with --sml-runtime-api") })
+
+        let apiScriptConflict = KistOptions.parse([
+            "--sml-runtime-api", "graphs/review.langgraph.json",
+            "--sml-path", "/source/runtime/planning",
+            "--sml-runtime-api-script", "graphs/review.langgraph.json",
+            "--sml-api-script", "scripts/review-api.json",
+        ])
+        XCTAssertTrue(apiScriptConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-api conflicts with --sml-runtime-api-script")
+        })
     }
 
     func testSMLRuntimeModelFlagsRequireRunnableMode() {

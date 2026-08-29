@@ -156,12 +156,16 @@ struct KistOptions {
     var smlRuntimeScaffold: String? // --sml-runtime-scaffold <source.json>: write all host-consumable runtime artifacts
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
+    var smlRuntimeREPLScript: String? // --sml-runtime-repl-script <source.json>: run a generated workflow REPL script offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/attachments
     var smlRuntimeREPLLine: String? // --sml-line <line>: generated workflow REPL line to run
+    var smlRuntimeREPLScriptPath: String? // --sml-script <path>: generated workflow REPL script file to run
     var smlRuntimeAPI: String?      // --sml-runtime-api <source.json>: run one generated runtime API request offline
+    var smlRuntimeAPIScript: String? // --sml-runtime-api-script <source.json>: run a generated runtime API request script offline
     var smlRuntimeAPIMethod: SMLWorkflowAPIMethod = .get // --sml-method <GET|POST>
     var smlRuntimeAPIPath: String?  // --sml-path <path>: generated runtime API path to invoke
     var smlRuntimeAPIBody: String?  // --sml-body <json>: generated runtime API request body
+    var smlRuntimeAPIScriptPath: String? // --sml-api-script <path>: generated runtime API request script file
     var smlRuntimeModel: String?    // --sml-runtime-model <source.json>: let a native-tool model drive mounted workflows
     var smlRuntimeModelPrompt: String? // --sml-prompt <text>: user prompt for --sml-runtime-model
     var smlRuntimeRole: String?     // --sml-role <role>: override mounted workflow role
@@ -257,8 +261,14 @@ struct KistOptions {
             case let flag where ["--sml-runtime-repl", "--sml-repl"].contains(flag):
                                             if let v = next() { o.smlRuntimeREPL = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-repl-script", "--sml-repl-script"].contains(flag):
+                                            if let v = next() { o.smlRuntimeREPLScript = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-api", "--sml-api"].contains(flag):
                                             if let v = next() { o.smlRuntimeAPI = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-api-script", "--sml-api-batch"].contains(flag):
+                                            if let v = next() { o.smlRuntimeAPIScript = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-model", "--sml-model-runtime"].contains(flag):
                                             if let v = next() { o.smlRuntimeModel = v }
@@ -269,6 +279,9 @@ struct KistOptions {
             case let flag where ["--sml-line", "--sml-repl-line"].contains(flag):
                                             if let v = next() { o.smlRuntimeREPLLine = v }
                                             else { o.optionErrors.append("\(flag) requires <line>") }
+            case let flag where ["--sml-script", "--sml-lines"].contains(flag):
+                                            if let v = next() { o.smlRuntimeREPLScriptPath = v }
+                                            else { o.optionErrors.append("\(flag) requires <path>") }
             case "--sml-method":
                                             sawSMLRuntimeAPIMethod = true
                                             if let v = next() {
@@ -285,6 +298,9 @@ struct KistOptions {
                                             else { o.optionErrors.append("--sml-path requires <path>") }
             case "--sml-body":              if let v = next() { o.smlRuntimeAPIBody = v }
                                             else { o.optionErrors.append("--sml-body requires <json>") }
+            case let flag where ["--sml-api-script", "--sml-requests"].contains(flag):
+                                            if let v = next() { o.smlRuntimeAPIScriptPath = v }
+                                            else { o.optionErrors.append("\(flag) requires <path>") }
             case let flag where ["--sml-prompt", "--sml-model-prompt"].contains(flag):
                                             if let v = next() { o.smlRuntimeModelPrompt = v }
                                             else { o.optionErrors.append("\(flag) requires <text>") }
@@ -530,7 +546,9 @@ struct KistOptions {
             ("--sml-runtime-scaffold", o.smlRuntimeScaffold != nil),
             ("--sml-runtime-attachments", o.smlRuntimeAttachments != nil),
             ("--sml-runtime-repl", o.smlRuntimeREPL != nil),
+            ("--sml-runtime-repl-script", o.smlRuntimeREPLScript != nil),
             ("--sml-runtime-api", o.smlRuntimeAPI != nil),
+            ("--sml-runtime-api-script", o.smlRuntimeAPIScript != nil),
             ("--sml-runtime-model", o.smlRuntimeModel != nil),
         ]
         let activeSMLRuntimeModes = smlRuntimeModes.filter { $0.active }
@@ -545,16 +563,22 @@ struct KistOptions {
             if o.smlRuntimeREPLLine?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                 o.optionErrors.append("--sml-runtime-repl requires --sml-line <line>")
             }
+        } else if o.smlRuntimeREPLLine != nil {
+            o.optionErrors.append("--sml-line requires --sml-runtime-repl <source.json>")
+        }
+        if o.smlRuntimeREPLScript != nil {
+            if o.smlRuntimeREPLScriptPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--sml-runtime-repl-script requires --sml-script <path>")
+            }
+        } else if o.smlRuntimeREPLScriptPath != nil {
+            o.optionErrors.append("--sml-script requires --sml-runtime-repl-script <source.json>")
         } else {
             if o.smlRuntimeWorkflowID != nil
                 && o.smlRuntimeAttachments == nil
                 && o.smlRuntimeOnyx == nil {
                 o.optionErrors.append(
-                    "--sml-workflow requires --sml-runtime-repl or --sml-runtime-attachments <source.json>; it can also filter --sml-runtime-onyx <source.json>"
+                    "--sml-workflow requires --sml-runtime-repl, --sml-runtime-repl-script, or --sml-runtime-attachments <source.json>; it can also filter --sml-runtime-onyx <source.json>"
                 )
-            }
-            if o.smlRuntimeREPLLine != nil {
-                o.optionErrors.append("--sml-line requires --sml-runtime-repl <source.json>")
             }
         }
         if o.smlRuntimeAPI != nil {
@@ -571,6 +595,13 @@ struct KistOptions {
             if o.smlRuntimeAPIBody != nil {
                 o.optionErrors.append("--sml-body requires --sml-runtime-api <source.json>")
             }
+        }
+        if o.smlRuntimeAPIScript != nil {
+            if o.smlRuntimeAPIScriptPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--sml-runtime-api-script requires --sml-api-script <path>")
+            }
+        } else if o.smlRuntimeAPIScriptPath != nil {
+            o.optionErrors.append("--sml-api-script requires --sml-runtime-api-script <source.json>")
         }
         if o.smlRuntimeScaffold != nil {
             if o.smlRuntimeOutputDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
@@ -838,15 +869,25 @@ struct KistOptions {
                                     Launch the same wrapped source offline and run one generated
                                     workflow REPL command, returning command/result JSON for host
                                     adapters and model drivers.
+          --sml-runtime-repl-script <json> --sml-script <path> [--sml-workflow <id>]
+                                    Launch the same wrapped source offline and run a multi-turn
+                                    generated workflow REPL script, returning a transcript whose
+                                    later commands can use the session's remembered task ID.
           --sml-runtime-api <json> --sml-path <path> [--sml-method <GET|POST>] [--sml-body <json>]
                                     Launch the same wrapped source offline and handle one generated
                                     runtime API request, returning route, command, result, and body JSON.
+          --sml-runtime-api-script <json> --sml-api-script <path>
+                                    Launch the same wrapped source offline and handle a JSON array of
+                                    generated runtime API requests, returning a transcript of exchanges.
           --sml-runtime-model <json> [--sml-prompt <text>] [--provider <id>] [--model <id>]
                                     Launch the wrapped source and let the selected native-tool model
                                     drive mounted workflows through propose_sml_runtime_command.
               --sml-role <role>         Override workflow role for the generated mount.
               --sml-api-base <path>     Override API base path for generated endpoints.
               --sml-out <dir>           Output directory for --sml-runtime-scaffold.
+              --sml-script <path>       Script file for --sml-runtime-repl-script; blank lines and
+                                        leading # comments are ignored.
+              --sml-api-script <path>   JSON request array for --sml-runtime-api-script.
               --sml-model-rounds <n>    Override model-router round ceiling (1...8).
           --bench                   Provider bake-off for the given task: success, latency, usage/cost,
                                     tool failures, and tests evidence where available.
