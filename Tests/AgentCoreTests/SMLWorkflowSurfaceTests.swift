@@ -54,6 +54,504 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertFalse(first.driverID.contains("+"))
     }
 
+    func testRuntimeBundlePackagesOneAdmittedWorkflowIntoAllGeneratedAdapters() async throws {
+        let admitted = try makeAdmitted()
+        let bundle = try SMLWorkflowRuntimeBundle.compile(
+            admitted: admitted,
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation",
+            commandID: { "bundle-command" },
+            taskID: { "TASK-BUNDLE" }
+        )
+
+        XCTAssertEqual(bundle.surface.workflowID, "content.release")
+        XCTAssertEqual(bundle.actor, "operator.luke")
+        XCTAssertEqual(bundle.descriptor.workflowID, "content.release")
+        XCTAssertEqual(bundle.descriptor.sourceKind, .langGraph)
+        XCTAssertEqual(bundle.descriptor.sourceReference, "graphs/content_release.py")
+        XCTAssertTrue(bundle.descriptor.graphSummary.contains("plan CALL_MODEL [content.plan] -> write"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("graph:"))
+        XCTAssertEqual(bundle.descriptor.api.basePath, "/automation")
+        XCTAssertEqual(
+            bundle.descriptor.api.endpoints.first { $0.action == .start }?.bodyKind,
+            .startTask
+        )
+        XCTAssertEqual(bundle.descriptor.model.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertTrue(bundle.descriptor.model.requiresNativeTools)
+        XCTAssertFalse(bundle.descriptor.model.allowedActions.contains(.approve))
+        XCTAssertEqual(bundle.descriptor.onyx.driverID, bundle.onyxDriver.driverID)
+
+        guard case .command(let replStart) = try bundle.replCompiler.compile(
+            #"start {"target":"bundle.md"}"#,
+            issuedAtEpoch: 3_000
+        ) else { return XCTFail("expected bundled REPL command") }
+        XCTAssertEqual(replStart.task, "TASK-BUNDLE")
+        XCTAssertEqual(replStart.arguments["workflow_id"], .string("content.release"))
+
+        let apiStart = try bundle.apiCompiler.compile(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/workflows/content.release/tasks",
+                body: [
+                    "task_id": .string("TASK-API"),
+                    "input": .object(["target": .string("api.md")]),
+                ]
+            ),
+            issuedAtEpoch: 3_001
+        )
+        XCTAssertEqual(apiStart.op, SMLRuntimeCommandOperation.workflowRun)
+        XCTAssertEqual(apiStart.role, "release-manager")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-bundle-\(UUID().uuidString)", isDirectory: true)
+        let store = SMLRuntimeStore(
+            fileURL: directory.appendingPathComponent("runtime.json"),
+            clock: { 3_000 }
+        )
+        let gateway = SMLCommandGateway(
+            runtime: SMLRuntime(store: store, clock: { 3_000 }),
+            replayGuard: store
+        )
+        let authority: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = { command in
+            SMLCommandAuthority(
+                authenticatedActor: "operator.luke",
+                leaseID: "bundle-lease",
+                roles: ["release-manager"],
+                tasks: [command.task],
+                operations: [command.op],
+                scope: [:]
+            )
+        }
+        let replSession = bundle.makeREPLSession(
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 3_000 }
+        )
+        let api = bundle.makeAPI(gateway: gateway, authorityResolver: authority, clock: { 3_000 })
+        let modelAdapter = bundle.makeModelAdapter(
+            binding: ProviderBinding(providerId: "onyx-test", model: "onyx-1"),
+            providers: ProviderRegistry(providers: [], retryDelaysNanoseconds: []),
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 3_000 }
+        )
+        _ = bundle.makeModelSession(
+            binding: ProviderBinding(providerId: "onyx-test", model: "onyx-1"),
+            providers: ProviderRegistry(providers: [], retryDelaysNanoseconds: []),
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 3_000 }
+        )
+
+        let help = try await replSession.submit("help")
+        XCTAssertTrue(help.output.contains("graph:"))
+        XCTAssertEqual(api.compiler.catalog.basePath, "/automation")
+        XCTAssertEqual(modelAdapter.surface.workflowID, "content.release")
+        XCTAssertEqual(modelAdapter.allowedActions, SMLWorkflowSurface.modelDefaultActions)
+    }
+
+    func testRuntimeBundleDescriptorRoundTripsWithoutActorOrAuthority() throws {
+        let bundle = try SMLWorkflowRuntimeBundle.compile(
+            admitted: try makeAdmitted(),
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation"
+        )
+
+        let data = try JSONEncoder().encode(bundle.descriptor)
+        let decoded = try JSONDecoder().decode(SMLWorkflowRuntimeDescriptor.self, from: data)
+        let encoded = String(decoding: data, as: UTF8.self)
+
+        XCTAssertEqual(decoded, bundle.descriptor)
+        XCTAssertFalse(encoded.contains("operator.luke"))
+        XCTAssertFalse(encoded.contains("leaseID"))
+        XCTAssertFalse(encoded.contains("lease_id"))
+        XCTAssertFalse(encoded.contains("model-lease"))
+        XCTAssertEqual(
+            decoded.onyx.skillTree.first { $0.id == "plan" }?.planning?.unitKind,
+            .modelReasoning
+        )
+        XCTAssertEqual(
+            decoded.api.endpoints.first { $0.action == .approve }?.bodyKind,
+            .expectedState
+        )
+    }
+
+    func testRuntimeRegistryMountsAdmittedWorkflowsAndRoutesGeneratedSurfaces() async throws {
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            admitted: [
+                makeAdmitted(),
+                makeAdmitted(
+                    id: "content.review",
+                    name: "Content review",
+                    sourceReference: "graphs/content_review.py"
+                ),
+            ],
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation",
+            commandID: { "registry-command" },
+            taskID: { "TASK-REGISTRY-GENERATED" }
+        )
+
+        XCTAssertEqual(registry.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(registry.catalog.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(registry.catalog.apiEndpoints.count, 14)
+        XCTAssertEqual(
+            try registry.descriptor(workflowID: "content.review").sourceReference,
+            "graphs/content_review.py"
+        )
+        XCTAssertEqual(
+            try registry.onyxDriver(workflowID: "content.review").plan.entrypoint,
+            "plan"
+        )
+
+        guard case .command(let replStart) = try registry.compileREPL(
+            #"start TASK-REVIEW {"target":"review.md"}"#,
+            workflowID: "content.review",
+            issuedAtEpoch: 4_000
+        ) else { return XCTFail("expected registry-routed REPL command") }
+        XCTAssertEqual(replStart.task, "TASK-REVIEW")
+        XCTAssertEqual(replStart.arguments["workflow_id"], .string("content.review"))
+
+        let apiDescribe = try registry.compileAPI(
+            SMLWorkflowAPIRequest(
+                method: .get,
+                path: "/automation/workflows/content.release"
+            ),
+            issuedAtEpoch: 4_001
+        )
+        XCTAssertEqual(apiDescribe.op, SMLRuntimeCommandOperation.workflowInspect)
+        XCTAssertEqual(apiDescribe.arguments["workflow_id"], .string("content.release"))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-registry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SMLRuntimeStore(
+            fileURL: directory.appendingPathComponent("runtime.json"),
+            clock: { 4_000 }
+        )
+        let runtime = SMLRuntime(store: store, clock: { 4_000 })
+        let gateway = SMLCommandGateway(runtime: runtime, replayGuard: store)
+        let installed = try await registry.installAll(into: runtime)
+        XCTAssertEqual(installed.map(\.id), ["content.release", "content.review"])
+
+        let authority: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = { command in
+            SMLCommandAuthority(
+                authenticatedActor: "operator.luke",
+                leaseID: "registry-lease",
+                roles: [command.role],
+                tasks: [command.task],
+                operations: [command.op],
+                scope: command.scope
+            )
+        }
+        let runtimeAPI = registry.makeAPI(
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 4_000 }
+        )
+        XCTAssertEqual(runtimeAPI.catalog.workflowIDs, ["content.release", "content.review"])
+
+        let started = try await runtimeAPI.handle(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/workflows/content.review/tasks",
+                body: [
+                    "task_id": .string("TASK-REGISTRY"),
+                    "input": .object(["target": .string("review.md")]),
+                ]
+            )
+        )
+        XCTAssertEqual(started.statusCode, 201)
+        XCTAssertEqual(started.command.arguments["workflow_id"], .string("content.review"))
+        XCTAssertEqual(started.result.task?.workflowID, "content.review")
+
+        let replSession = try registry.makeREPLSession(
+            workflowID: "content.release",
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 4_000 }
+        )
+        let help = try await replSession.submit("help")
+        XCTAssertTrue(help.output.contains("content.release"))
+
+        let modelAdapter = try registry.makeModelAdapter(
+            workflowID: "content.review",
+            binding: ProviderBinding(providerId: "onyx-test", model: "onyx-1"),
+            providers: ProviderRegistry(providers: [], retryDelaysNanoseconds: []),
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 4_000 }
+        )
+        XCTAssertEqual(modelAdapter.surface.workflowID, "content.review")
+        _ = try registry.makeModelSession(
+            workflowID: "content.release",
+            binding: ProviderBinding(providerId: "onyx-test", model: "onyx-1"),
+            providers: ProviderRegistry(providers: [], retryDelaysNanoseconds: []),
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 4_000 }
+        )
+
+        XCTAssertThrowsError(
+            try registry.descriptor(workflowID: "missing.workflow")
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .unknownWorkflow("missing.workflow")
+            )
+        }
+        XCTAssertThrowsError(
+            try registry.compileAPI(
+                SMLWorkflowAPIRequest(
+                    method: .get,
+                    path: "/automation/workflows/content.review/%2e%2e"
+                ),
+                issuedAtEpoch: 4_002
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .invalidAPIPath("/automation/workflows/content.review/%2e%2e")
+            )
+        }
+    }
+
+    func testRuntimeRegistryRejectsEmptyAndDuplicateWorkflowMounts() throws {
+        XCTAssertThrowsError(try SMLWorkflowRuntimeRegistry(bundles: [])) {
+            XCTAssertEqual($0 as? SMLWorkflowRuntimeRegistryError, .emptyRegistry)
+        }
+        XCTAssertThrowsError(try SMLWorkflowRuntimeRegistry.compile(
+            admitted: [makeAdmitted(), makeAdmitted(version: "1.0.1")],
+            role: "release-manager",
+            actor: "operator.luke"
+        )) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .duplicateWorkflowID("content.release")
+            )
+        }
+    }
+
+    func testRuntimeRegistryCatalogRoundTripsWithoutActorsOrLeases() throws {
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            admitted: [makeAdmitted()],
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation"
+        )
+
+        let data = try JSONEncoder().encode(registry.catalog)
+        let decoded = try JSONDecoder().decode(SMLWorkflowRuntimeCatalog.self, from: data)
+        let encoded = String(decoding: data, as: UTF8.self)
+
+        XCTAssertEqual(decoded, registry.catalog)
+        XCTAssertEqual(decoded.workflowIDs, ["content.release"])
+        XCTAssertEqual(decoded.onyxDrivers.map(\.workflowID), ["content.release"])
+        XCTAssertEqual(decoded.modelRouter.workflowIDs, ["content.release"])
+        XCTAssertEqual(decoded.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(decoded.modelRouter.tool.parameters.map(\.name), ["workflow_id", "line"])
+        XCTAssertFalse(encoded.contains("operator.luke"))
+        XCTAssertFalse(encoded.contains("leaseID"))
+        XCTAssertFalse(encoded.contains("lease_id"))
+    }
+
+    func testRuntimeExportContainsOpenAPIModelToolsAndOnyxDriversWithoutAuthority() throws {
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            admitted: [
+                makeAdmitted(),
+                makeAdmitted(
+                    id: "content.review",
+                    name: "Content review",
+                    sourceReference: "graphs/content_review.py"
+                ),
+            ],
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation"
+        )
+
+        let export = registry.export(title: "Automation", version: "2026.08")
+
+        XCTAssertEqual(export.schemaVersion, SMLWorkflowRuntimeExport.currentSchemaVersion)
+        XCTAssertEqual(export.catalog.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.modelTools.map(\.workflowID), ["content.release", "content.review"])
+        XCTAssertEqual(export.modelTools.map(\.tool.name), [
+            SMLWorkflowModelAdapter.toolName,
+            SMLWorkflowModelAdapter.toolName,
+        ])
+        XCTAssertTrue(export.modelRouter.requiresNativeTools)
+        XCTAssertEqual(export.modelRouter.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(export.modelRouter.tool.parameters.map(\.name), ["workflow_id", "line"])
+        XCTAssertEqual(export.modelRouter.maximumCommandRounds, 4)
+        XCTAssertEqual(export.onyxDrivers.map(\.workflowID), ["content.release", "content.review"])
+
+        let info = try object(export.openAPI["info"])
+        XCTAssertEqual(info["title"], .string("Automation"))
+        XCTAssertEqual(info["version"], .string("2026.08"))
+
+        let paths = try object(export.openAPI["paths"])
+        let releasePath = try object(paths["/automation/workflows/content.release"])
+        let describe = try object(releasePath["get"])
+        XCTAssertEqual(describe["operationId"], .string("describe_workflow_ContentRelease"))
+        XCTAssertEqual(describe["x-sml-workflow-id"], .string("content.release"))
+        XCTAssertEqual(describe["x-sml-model-tool"], .string(SMLWorkflowModelAdapter.toolName))
+        XCTAssertEqual(
+            describe["x-sml-model-router-tool"],
+            .string(SMLWorkflowRuntimeModelAdapter.toolName)
+        )
+        XCTAssertNotNil(describe["x-sml-onyx-driver-id"])
+
+        let startPath = try object(paths["/automation/workflows/content.release/tasks"])
+        let start = try object(startPath["post"])
+        XCTAssertEqual(start["operationId"], .string("start_workflow_task_ContentRelease"))
+        let requestBody = try object(start["requestBody"])
+        XCTAssertEqual(requestBody["required"], .bool(true))
+
+        let components = try object(export.openAPI["components"])
+        let schemas = try object(components["schemas"])
+        let startSchema = try object(schemas["WorkflowStart_ContentRelease"])
+        XCTAssertEqual(startSchema["additionalProperties"], .bool(false))
+        XCTAssertEqual(
+            try array(startSchema["required"]),
+            [.string("task_id"), .string("input")]
+        )
+        let inputSchema = try object(schemas["WorkflowInput_ContentRelease"])
+        let inputProperties = try object(inputSchema["properties"])
+        let target = try object(inputProperties["target"])
+        XCTAssertEqual(target["type"], .array([.string("string")]))
+        XCTAssertEqual(target["description"], .string("Source document"))
+
+        let runtime = try object(export.openAPI["x-sml-runtime"])
+        XCTAssertEqual(
+            try array(runtime["workflowIDs"]),
+            [.string("content.release"), .string("content.review")]
+        )
+        XCTAssertEqual(
+            try array(runtime["modelToolNames"]),
+            [.string(SMLWorkflowModelAdapter.toolName), .string(SMLWorkflowModelAdapter.toolName)]
+        )
+        XCTAssertEqual(
+            runtime["modelRouterToolName"],
+            .string(SMLWorkflowRuntimeModelAdapter.toolName)
+        )
+        XCTAssertEqual(runtime["modelRouterMaximumCommandRounds"], .number(4))
+        let routerTool = try object(runtime["modelRouterTool"])
+        XCTAssertEqual(routerTool["name"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
+        let routerParameters = try array(routerTool["parameters"])
+        XCTAssertEqual(routerParameters.count, 2)
+
+        let data = try JSONEncoder().encode(export)
+        let decoded = try JSONDecoder().decode(SMLWorkflowRuntimeExport.self, from: data)
+        let encoded = String(decoding: data, as: UTF8.self)
+
+        XCTAssertEqual(decoded, export)
+        XCTAssertFalse(encoded.contains("operator.luke"))
+        XCTAssertFalse(encoded.contains("leaseID"))
+        XCTAssertFalse(encoded.contains("lease_id"))
+    }
+
+    func testRuntimeAppBindsCatalogAPIREPLModelRouterAndOnyxFacade() async throws {
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            admitted: [
+                makeAdmitted(),
+                makeAdmitted(
+                    id: "content.review",
+                    name: "Content review",
+                    sourceReference: "graphs/content_review.py"
+                ),
+            ],
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation",
+            commandID: { "app-command" },
+            taskID: { "TASK-APP-GENERATED" }
+        )
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-app-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SMLRuntimeStore(
+            fileURL: directory.appendingPathComponent("runtime.json"),
+            clock: { 5_000 }
+        )
+        let runtime = SMLRuntime(store: store, clock: { 5_000 })
+        let gateway = SMLCommandGateway(runtime: runtime, replayGuard: store)
+        _ = try await registry.installAll(into: runtime)
+
+        let authority: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = { command in
+            SMLCommandAuthority(
+                authenticatedActor: "operator.luke",
+                leaseID: "app-lease",
+                roles: [command.role],
+                tasks: [command.task],
+                operations: [command.op],
+                scope: command.scope
+            )
+        }
+        let app = registry.makeApp(
+            gateway: gateway,
+            authorityResolver: authority,
+            clock: { 5_000 }
+        )
+
+        XCTAssertEqual(app.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(app.catalog.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(app.runtimeAPI.catalog.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(try app.descriptor(workflowID: "content.review").workflowName, "Content review")
+        XCTAssertEqual(try app.onyxDriver(workflowID: "content.release").plan.entrypoint, "plan")
+
+        let export = app.export(title: "Runtime App", version: "2026.08")
+        XCTAssertEqual(export.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        let encodedExport = String(decoding: try JSONEncoder().encode(export), as: UTF8.self)
+        XCTAssertFalse(encodedExport.contains("operator.luke"))
+        XCTAssertFalse(encodedExport.contains("app-lease"))
+
+        let repl = try app.replSession(workflowID: "content.release")
+        let help = try await repl.submit("help")
+        XCTAssertTrue(help.output.contains("content.release"))
+
+        let started = try await app.handleAPI(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/workflows/content.review/tasks",
+                body: [
+                    "task_id": .string("TASK-APP"),
+                    "input": .object(["target": .string("app-review.md")]),
+                ]
+            )
+        )
+        XCTAssertEqual(started.statusCode, 201)
+        XCTAssertEqual(started.command.op, SMLRuntimeCommandOperation.workflowRun)
+        XCTAssertEqual(started.result.task?.workflowID, "content.review")
+
+        let providers = ProviderRegistry(providers: [], retryDelaysNanoseconds: [])
+        let router = app.modelRouter(
+            binding: ProviderBinding(providerId: "onyx-test", model: "onyx-1"),
+            providers: providers
+        )
+        XCTAssertEqual(router.modelCommandTool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertTrue(router.modelCommandTool.description.contains("content.release"))
+        XCTAssertTrue(router.modelCommandTool.description.contains("content.review"))
+
+        let routerSession = app.modelRouterSession(
+            binding: ProviderBinding(providerId: "onyx-test", model: "onyx-1"),
+            providers: providers
+        )
+        let routerTaskIDs = await routerSession.taskIDs()
+        XCTAssertEqual(routerTaskIDs, [:])
+
+        let model = try app.modelAdapter(
+            workflowID: "content.release",
+            binding: ProviderBinding(providerId: "onyx-test", model: "onyx-1"),
+            providers: providers
+        )
+        XCTAssertEqual(model.surface.workflowID, "content.release")
+    }
+
     func testWorkflowScopedREPLBindsWorkflowInputsAndExpectedState() throws {
         let surface = try makeSurface()
         let repl = SMLWorkflowREPLCompiler(
@@ -360,11 +858,24 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
     }
 
     private func makeSurface(version: String = "1.0.0") throws -> SMLWorkflowSurface {
-        let candidate = try SMLWorkflowValidator.requireValidForImport(
-            workflow(version: version)
-        )
-        let admitted = try SMLWorkflowAdmission.admitForExecution(
-            candidate,
+        try SMLWorkflowSurface.compile(admitted: makeAdmitted(version: version), role: "release-manager")
+    }
+
+    private func makeAdmitted(
+        id: String = "content.release",
+        version: String = "1.0.0",
+        name: String = "Content release",
+        sourceReference: String = "graphs/content_release.py"
+    ) throws -> SMLAdmittedWorkflow {
+        try SMLWorkflowAdmission.admitForExecution(
+            SMLWorkflowValidator.requireValidForImport(
+                workflow(
+                    id: id,
+                    version: version,
+                    name: name,
+                    sourceReference: sourceReference
+                )
+            ),
             catalog: SMLExecutionAdmissionCatalog(
                 toolCapabilities: ["repository.write"],
                 modelPurposes: ["content.plan"],
@@ -373,15 +884,19 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 approvalAuthorities: ["release_approver"]
             )
         )
-        return try SMLWorkflowSurface.compile(admitted: admitted, role: "release-manager")
     }
 
-    private func workflow(version: String = "1.0.0") -> SMLWorkflow {
+    private func workflow(
+        id: String = "content.release",
+        version: String = "1.0.0",
+        name: String = "Content release",
+        sourceReference: String = "graphs/content_release.py"
+    ) -> SMLWorkflow {
         SMLWorkflow(
-            id: "content.release",
+            id: id,
             version: version,
-            name: "Content release",
-            source: .init(kind: .langGraph, reference: "graphs/content_release.py"),
+            name: name,
+            source: .init(kind: .langGraph, reference: sourceReference),
             trigger: .init(kind: .manual),
             stateSchema: [
                 .init(name: "target", type: .string, description: "Source document"),
@@ -404,5 +919,29 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                       reason: "release_failed", owner: "release_approver"),
             ]
         )
+    }
+
+    private func object(
+        _ value: SMLValue?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> SMLObject {
+        guard case .object(let object)? = value else {
+            XCTFail("expected SML object", file: file, line: line)
+            return [:]
+        }
+        return object
+    }
+
+    private func array(
+        _ value: SMLValue?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> [SMLValue] {
+        guard case .array(let array)? = value else {
+            XCTFail("expected SML array", file: file, line: line)
+            return []
+        }
+        return array
     }
 }

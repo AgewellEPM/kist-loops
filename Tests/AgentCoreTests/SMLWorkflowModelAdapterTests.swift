@@ -199,10 +199,98 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertTrue(snapshot.tasks.isEmpty)
     }
 
+    func testRuntimeModelRouterLetsOneModelSelectMountedWorkflow() async throws {
+        let provider = ScriptedWorkflowProvider([
+            .textAndCall(
+                "Routing the review workflow through the registry.",
+                name: SMLWorkflowRuntimeModelAdapter.toolName,
+                arguments: #"{"workflow_id":"model.review","line":"start TASK-REVIEW {\"value\":\"hello\"}"}"#
+            ),
+        ])
+        let fixture = try await makeRuntimeFixture(provider: provider)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let budget = ProviderRequestBudget(limit: 1)
+        let turn = try await fixture.session.submit(
+            "start the review workflow",
+            requestBudget: budget
+        )
+
+        XCTAssertEqual(turn.steps.count, 1)
+        XCTAssertEqual(turn.steps.first?.disposition, .commandExecuted)
+        XCTAssertEqual(turn.steps.first?.command?.op, SMLRuntimeCommandOperation.workflowRun)
+        XCTAssertEqual(turn.steps.first?.command?.task, "TASK-REVIEW")
+        XCTAssertEqual(
+            turn.steps.first?.command?.arguments["workflow_id"],
+            .string("model.review")
+        )
+        XCTAssertEqual(turn.steps.first?.result?.task?.workflowID, "model.review")
+        XCTAssertEqual(turn.taskIDsByWorkflowID["model.review"], "TASK-REVIEW")
+        let consumed = await budget.consumedCount()
+        XCTAssertEqual(consumed, 1)
+
+        let capture = provider.capture()
+        XCTAssertEqual(capture.toolNames, [SMLWorkflowRuntimeModelAdapter.toolName])
+        XCTAssertEqual(capture.toolChoice, .any)
+        XCTAssertFalse(capture.geminiBuiltins)
+        XCTAssertTrue(capture.systemPrompt.contains("mounted workflow_id"))
+        XCTAssertTrue(capture.systemPrompt.contains("model.workflow@1.0.0"))
+        XCTAssertTrue(capture.systemPrompt.contains("model.review@1.0.0"))
+        XCTAssertTrue(capture.systemPrompt.contains("Allowed grammar:"))
+        XCTAssertTrue(capture.systemPrompt.contains("start [TASK_ID] [JSON_INPUT_OBJECT]"))
+    }
+
+    func testRuntimeModelRouterFailsClosedOnUnknownWorkflowAndLocalCommands() async throws {
+        let cases: [(ScriptedWorkflowProvider.Step, (Error) -> Bool)] = [
+            (
+                .call(
+                    name: SMLWorkflowRuntimeModelAdapter.toolName,
+                    arguments: #"{"workflow_id":"missing.workflow","line":"start TASK-MISSING {\"value\":\"x\"}"}"#
+                ),
+                { error in
+                    error as? SMLWorkflowRuntimeRegistryError == .unknownWorkflow("missing.workflow")
+                }
+            ),
+            (
+                .call(
+                    name: SMLWorkflowRuntimeModelAdapter.toolName,
+                    arguments: #"{"workflow_id":"model.workflow","line":"schema"}"#
+                ),
+                { error in
+                    error as? SMLWorkflowModelError == .nonCommandProposal
+                }
+            ),
+        ]
+
+        for (index, testCase) in cases.enumerated() {
+            let fixture = try await makeRuntimeFixture(
+                provider: ScriptedWorkflowProvider([testCase.0])
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.directory) }
+            do {
+                _ = try await fixture.session.submit(
+                    "case \(index)",
+                    requestBudget: ProviderRequestBudget(limit: 1)
+                )
+                XCTFail("runtime model router case \(index) should fail closed")
+            } catch {
+                XCTAssertTrue(testCase.1(error), "unexpected error for case \(index): \(error)")
+            }
+            let snapshot = try await fixture.store.load()
+            XCTAssertTrue(snapshot.tasks.isEmpty, "case \(index) must not partially execute")
+        }
+    }
+
     private struct Fixture {
         let directory: URL
         let store: SMLRuntimeStore
         let adapter: SMLWorkflowModelAdapter
+    }
+
+    private struct RuntimeFixture {
+        let directory: URL
+        let store: SMLRuntimeStore
+        let session: SMLWorkflowRuntimeModelSession
     }
 
     private func makeFixture(provider: any ChatProvider) async throws -> Fixture {
@@ -251,12 +339,69 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         return Fixture(directory: directory, store: store, adapter: adapter)
     }
 
-    private func capabilityWorkflow() -> SMLWorkflow {
+    private func makeRuntimeFixture(provider: any ChatProvider) async throws -> RuntimeFixture {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-runtime-model-\(UUID().uuidString)", isDirectory: true)
+        let store = SMLRuntimeStore(
+            fileURL: directory.appendingPathComponent("runtime.json"),
+            clock: { 1_000 }
+        )
+        let runtime = SMLRuntime(store: store, clock: { 1_000 })
+        let workflows = [
+            capabilityWorkflow(),
+            capabilityWorkflow(
+                id: "model.review",
+                name: "Review workflow",
+                sourceReference: "review"
+            ),
+        ]
+        let admitted = try workflows.map {
+            try SMLWorkflowAdmission.admitForExecution(
+                SMLWorkflowValidator.requireValidForImport($0),
+                catalog: SMLExecutionAdmissionCatalog(toolCapabilities: ["tool.execute"])
+            )
+        }
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            admitted: admitted,
+            role: "model-role",
+            actor: "model.onyx",
+            apiBasePath: "/model"
+        )
+        _ = try await registry.installAll(into: runtime)
+        let providerRegistry = ProviderRegistry(
+            providers: [provider],
+            retryDelaysNanoseconds: []
+        )
+        let gateway = SMLCommandGateway(runtime: runtime, replayGuard: store)
+        let session = registry.makeModelRouterSession(
+            binding: ProviderBinding(providerId: provider.id, model: provider.defaultModel),
+            providers: providerRegistry,
+            gateway: gateway,
+            authorityResolver: { command in
+                SMLCommandAuthority(
+                    authenticatedActor: "model.onyx",
+                    leaseID: "runtime-model-lease",
+                    roles: ["model-role"],
+                    tasks: [command.task],
+                    operations: [command.op],
+                    scope: [:]
+                )
+            },
+            clock: { 1_000 }
+        )
+        return RuntimeFixture(directory: directory, store: store, session: session)
+    }
+
+    private func capabilityWorkflow(
+        id: String = "model.workflow",
+        name: String = "Model workflow",
+        sourceReference: String = "test"
+    ) -> SMLWorkflow {
         SMLWorkflow(
-            id: "model.workflow",
+            id: id,
             version: "1.0.0",
-            name: "Model workflow",
-            source: .init(kind: .langGraph, reference: "test"),
+            name: name,
+            source: .init(kind: .langGraph, reference: sourceReference),
             trigger: .init(kind: .manual),
             stateSchema: [
                 .init(name: "value", type: .string),
