@@ -165,7 +165,7 @@ public struct SMLOnyxPlan: Sendable, Codable, Equatable {
 /// credentials, authority tokens, closures, or execution handles: all commands still return through
 /// the generated SML surface and host admission gateway.
 public struct SMLOnyxDriverManifest: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let driverID: String
@@ -180,6 +180,7 @@ public struct SMLOnyxDriverManifest: Sendable, Codable, Equatable {
     public let skillTree: [SMLOnyxSkillNode]
     public let tools: [SMLOnyxToolBinding]
     public let plan: SMLOnyxPlan
+    public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
 
     public init(
         schemaVersion: Int = SMLOnyxDriverManifest.currentSchemaVersion,
@@ -194,7 +195,8 @@ public struct SMLOnyxDriverManifest: Sendable, Codable, Equatable {
         api: SMLWorkflowAPICatalog,
         skillTree: [SMLOnyxSkillNode],
         tools: [SMLOnyxToolBinding],
-        plan: SMLOnyxPlan
+        plan: SMLOnyxPlan,
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = []
     ) {
         self.schemaVersion = schemaVersion
         self.driverID = driverID
@@ -209,6 +211,101 @@ public struct SMLOnyxDriverManifest: Sendable, Codable, Equatable {
         self.skillTree = skillTree
         self.tools = tools
         self.plan = plan
+        self.commandBindings = Self.sortedCommandBindings(commandBindings)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case driverID
+        case providerFamily
+        case workflowID
+        case workflowVersion
+        case role
+        case replGrammar
+        case modelToolName
+        case modelActions
+        case api
+        case skillTree
+        case tools
+        case plan
+        case commandBindings
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try container.decode(Int.self, forKey: .schemaVersion),
+            driverID: try container.decode(String.self, forKey: .driverID),
+            providerFamily: try container.decode(String.self, forKey: .providerFamily),
+            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
+            role: try container.decode(String.self, forKey: .role),
+            replGrammar: try container.decode(String.self, forKey: .replGrammar),
+            modelToolName: try container.decode(String.self, forKey: .modelToolName),
+            modelActions: try container.decode(
+                [SMLWorkflowControlAction].self,
+                forKey: .modelActions
+            ),
+            api: try container.decode(SMLWorkflowAPICatalog.self, forKey: .api),
+            skillTree: try container.decode([SMLOnyxSkillNode].self, forKey: .skillTree),
+            tools: try container.decode([SMLOnyxToolBinding].self, forKey: .tools),
+            plan: try container.decode(SMLOnyxPlan.self, forKey: .plan),
+            commandBindings: try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningCommandBinding].self,
+                forKey: .commandBindings
+            ) ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(driverID, forKey: .driverID)
+        try container.encode(providerFamily, forKey: .providerFamily)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(role, forKey: .role)
+        try container.encode(replGrammar, forKey: .replGrammar)
+        try container.encode(modelToolName, forKey: .modelToolName)
+        try container.encode(modelActions, forKey: .modelActions)
+        try container.encode(api, forKey: .api)
+        try container.encode(skillTree, forKey: .skillTree)
+        try container.encode(tools, forKey: .tools)
+        try container.encode(plan, forKey: .plan)
+        try container.encode(commandBindings, forKey: .commandBindings)
+    }
+
+    public func withCommandBindings(
+        _ commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) -> SMLOnyxDriverManifest {
+        SMLOnyxDriverManifest(
+            schemaVersion: SMLOnyxDriverManifest.currentSchemaVersion,
+            driverID: driverID,
+            providerFamily: providerFamily,
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            role: role,
+            replGrammar: replGrammar,
+            modelToolName: modelToolName,
+            modelActions: modelActions,
+            api: api,
+            skillTree: skillTree,
+            tools: tools,
+            plan: plan,
+            commandBindings: commandBindings
+        )
+    }
+
+    private static func sortedCommandBindings(
+        _ bindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
+        bindings.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
+        }
     }
 }
 
@@ -240,6 +337,8 @@ public enum SMLOnyxDriverCompiler {
         let tools = workflow.instructions.compactMap(toolBinding).sorted {
             $0.instructionID < $1.instructionID
         }
+        let api = SMLWorkflowAPICatalog(surface: surface, basePath: apiBasePath)
+        let modelToolName = "propose_sml_command"
         let planNodes = workflow.instructions.map { instruction in
             SMLOnyxPlanNode(
                 id: instruction.id,
@@ -254,18 +353,28 @@ public enum SMLOnyxDriverCompiler {
             )
         }
         let actions = modelActions.sorted { $0.rawValue < $1.rawValue }
+        let commandBindings = SMLWorkflowRuntimePlanningManifest.commandBindings(
+            workflowID: workflow.id,
+            workflowVersion: workflow.version,
+            replCommands: surface.replCommandDescriptors(),
+            replExamples: surface.replExamples(),
+            apiEndpoints: api.endpoints,
+            modelAllowedActions: actions,
+            modelToolName: modelToolName
+        )
         return SMLOnyxDriverManifest(
             driverID: driverID(for: surface),
             workflowID: workflow.id,
             workflowVersion: workflow.version,
             role: surface.role,
             replGrammar: surface.grammar(allowedActions: modelActions),
-            modelToolName: "propose_sml_command",
+            modelToolName: modelToolName,
             modelActions: actions,
-            api: SMLWorkflowAPICatalog(surface: surface, basePath: apiBasePath),
+            api: api,
             skillTree: skillTree,
             tools: tools,
-            plan: SMLOnyxPlan(entrypoint: workflow.entrypoint, nodes: planNodes)
+            plan: SMLOnyxPlan(entrypoint: workflow.entrypoint, nodes: planNodes),
+            commandBindings: commandBindings
         )
     }
 

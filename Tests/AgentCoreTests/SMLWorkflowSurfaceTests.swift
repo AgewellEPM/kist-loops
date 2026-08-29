@@ -87,6 +87,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(onyx.skillTree.first { $0.id == "verify" }?.planning?.unitKind, .externalCapability)
         XCTAssertEqual(onyx.skillTree.first { $0.id == "receipt" }?.planning?.declaredOutputs, ["artifact", "task"])
         XCTAssertFalse(onyx.modelActions.contains(.approve))
+        XCTAssertEqual(onyx.commandBindings.count, 7)
+        let onyxStartBinding = try XCTUnwrap(onyx.commandBindings.first {
+            $0.action == .start
+        })
+        XCTAssertEqual(onyxStartBinding.replLineTemplate, "start [TASK_ID] [JSON_INPUT_OBJECT]")
+        XCTAssertEqual(onyxStartBinding.apiPathTemplate, "/v1/workflows/content.release/tasks")
+        XCTAssertTrue(onyxStartBinding.modelEligible)
     }
 
     func testOnyxDriverIDHashesExactSemVerRevisionIntoBoundedIdentifier() throws {
@@ -263,6 +270,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             "workflow_id": .string("content.release"),
             "line": .string(#"start TASK-ID {"target":"target"}"#),
         ])
+        XCTAssertEqual(bundle.onyxDriver.commandBindings, planningManifest.commandBindings)
+        XCTAssertEqual(bundle.descriptor.onyx.commandBindings, planningManifest.commandBindings)
         let approveBinding = try XCTUnwrap(planningManifest.commandBindings.first {
             $0.action == .approve
         })
@@ -299,6 +308,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             "content.plan", "artifact_verified", "repository.write",
         ])
         XCTAssertEqual(attachmentDescriptor.plan.entrypoint, "plan")
+        XCTAssertEqual(attachmentDescriptor.commandBindings, planningManifest.commandBindings)
         let manifestInfo = try await replSession.submit("manifest")
         XCTAssertNil(manifestInfo.command)
         XCTAssertEqual(manifestInfo.output, attachmentInfo.output)
@@ -1416,6 +1426,15 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 && $0.line == #"start TASK-ID {"target":"target"}"#
         })
         XCTAssertEqual(export.onyxDrivers.map(\.workflowID), ["content.release", "content.review"])
+        XCTAssertEqual(export.catalog.onyxDrivers, export.onyxDrivers)
+        let releaseOnyxDriver = try XCTUnwrap(export.onyxDrivers.first {
+            $0.workflowID == "content.release"
+        })
+        XCTAssertEqual(releaseOnyxDriver.commandBindings.count, 7)
+        XCTAssertEqual(
+            releaseOnyxDriver.commandBindings,
+            export.planning.commandBindings.filter { $0.workflowID == "content.release" }
+        )
         XCTAssertEqual(export.planning.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(export.planning.workflows.map(\.workflowID), ["content.release", "content.review"])
         XCTAssertEqual(export.planning.workflows.map(\.entrypoint), ["plan", "plan"])
@@ -1548,6 +1567,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(runtimePlanning["x-sml-runtime-resource"], .string("planning"))
         XCTAssertEqual(runtimePlanning["x-sml-read-only"], .bool(true))
         XCTAssertEqual(runtimePlanning["x-sml-authority"], .string("descriptor-only"))
+        XCTAssertNil(runtimePlanning["x-sml-command-binding"])
         let runtimeAgentGuidePath = try object(paths["/automation/runtime/agent-guide"])
         let runtimeAgentGuide = try object(runtimeAgentGuidePath["get"])
         XCTAssertEqual(
@@ -1618,6 +1638,40 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let startPath = try object(paths["/automation/workflows/content.release/tasks"])
         let start = try object(startPath["post"])
         XCTAssertEqual(start["operationId"], .string("start_workflow_task_ContentRelease"))
+        let startCommandBinding = try object(start["x-sml-command-binding"])
+        XCTAssertEqual(startCommandBinding["workflowID"], .string("content.release"))
+        XCTAssertEqual(startCommandBinding["workflowVersion"], .string("1.0.0"))
+        XCTAssertEqual(startCommandBinding["action"], .string("start"))
+        XCTAssertEqual(
+            startCommandBinding["replLineTemplate"],
+            .string("start [TASK_ID] [JSON_INPUT_OBJECT]")
+        )
+        XCTAssertEqual(
+            startCommandBinding["apiPathTemplate"],
+            .string("/automation/workflows/content.release/tasks")
+        )
+        XCTAssertEqual(
+            startCommandBinding["apiOperationID"],
+            .string("start_workflow_task_ContentRelease")
+        )
+        XCTAssertEqual(startCommandBinding["apiBodyKind"], .string("start_task"))
+        XCTAssertEqual(startCommandBinding["modelEligible"], .bool(true))
+        XCTAssertEqual(
+            startCommandBinding["modelRouterToolName"],
+            .string(SMLWorkflowRuntimeModelAdapter.toolName)
+        )
+        let startCommandREPLFields = try array(startCommandBinding["replJSONFields"])
+        XCTAssertEqual(try object(startCommandREPLFields.first)["name"], .string("target"))
+        XCTAssertEqual(try object(startCommandREPLFields.first)["type"], .string("string"))
+        let startCommandAPIFields = try array(startCommandBinding["apiBodyFields"])
+        XCTAssertEqual(try object(startCommandAPIFields.first)["name"], .string("target"))
+        XCTAssertEqual(try object(startCommandAPIFields.first)["nullable"], .bool(false))
+        let startModelArguments = try object(startCommandBinding["modelRouterArgumentsTemplate"])
+        XCTAssertEqual(startModelArguments["workflow_id"], .string("content.release"))
+        XCTAssertEqual(
+            startModelArguments["line"],
+            .string("start [TASK_ID] [JSON_INPUT_OBJECT]")
+        )
         let openAPIExamples = try array(start["x-sml-request-examples"])
         let openAPIStartExample = try object(openAPIExamples.first)
         XCTAssertEqual(openAPIStartExample["method"], .string("POST"))
@@ -1891,8 +1945,33 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         var legacyOpenAPIPaths = try XCTUnwrap(legacyOpenAPI["paths"] as? [String: Any])
         legacyOpenAPIPaths.removeValue(forKey: "/automation/runtime/attachments")
         legacyOpenAPIPaths.removeValue(forKey: "/automation/runtime/attachments/{workflow_id}")
+        var legacyStartPath = try XCTUnwrap(
+            legacyOpenAPIPaths["/automation/workflows/content.release/tasks"] as? [String: Any]
+        )
+        var legacyStartPost = try XCTUnwrap(legacyStartPath["post"] as? [String: Any])
+        legacyStartPost.removeValue(forKey: "x-sml-command-binding")
+        legacyStartPath["post"] = legacyStartPost
+        legacyOpenAPIPaths["/automation/workflows/content.release/tasks"] = legacyStartPath
         legacyOpenAPI["paths"] = legacyOpenAPIPaths
         nestedLegacyObject["openAPI"] = legacyOpenAPI
+        var legacyOnyxDrivers = try XCTUnwrap(nestedLegacyObject["onyxDrivers"] as? [[String: Any]])
+        for index in legacyOnyxDrivers.indices {
+            legacyOnyxDrivers[index]["schemaVersion"] = 1
+            legacyOnyxDrivers[index].removeValue(forKey: "commandBindings")
+        }
+        nestedLegacyObject["onyxDrivers"] = legacyOnyxDrivers
+        var legacyCatalog = try XCTUnwrap(nestedLegacyObject["catalog"] as? [String: Any])
+        var legacyCatalogWorkflows = try XCTUnwrap(legacyCatalog["workflows"] as? [[String: Any]])
+        for workflowIndex in legacyCatalogWorkflows.indices {
+            var legacyOnyx = try XCTUnwrap(
+                legacyCatalogWorkflows[workflowIndex]["onyx"] as? [String: Any]
+            )
+            legacyOnyx["schemaVersion"] = 1
+            legacyOnyx.removeValue(forKey: "commandBindings")
+            legacyCatalogWorkflows[workflowIndex]["onyx"] = legacyOnyx
+        }
+        legacyCatalog["workflows"] = legacyCatalogWorkflows
+        nestedLegacyObject["catalog"] = legacyCatalog
         var legacyModelRouter = try XCTUnwrap(nestedLegacyObject["modelRouter"] as? [String: Any])
         legacyModelRouter.removeValue(forKey: "examples")
         nestedLegacyObject["modelRouter"] = legacyModelRouter
@@ -1979,6 +2058,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let nestedDecodedPaths = try object(nestedDecoded.openAPI["paths"])
         XCTAssertNotNil(nestedDecodedPaths["/automation/runtime/attachments"])
         XCTAssertNotNil(nestedDecodedPaths["/automation/runtime/attachments/{workflow_id}"])
+        let nestedDecodedStartPath = try object(
+            nestedDecodedPaths["/automation/workflows/content.release/tasks"]
+        )
+        let nestedDecodedStartPost = try object(nestedDecodedStartPath["post"])
+        XCTAssertNotNil(nestedDecodedStartPost["x-sml-command-binding"])
         let nestedDecodedInfo = try object(nestedDecoded.openAPI["info"])
         XCTAssertEqual(nestedDecodedInfo["title"], .string("Automation"))
         XCTAssertEqual(nestedDecodedInfo["version"], .string("2026.08"))
@@ -1996,6 +2080,12 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         } ?? false)
         XCTAssertEqual(nestedDecoded.hostWiring.workflows.first?.commandBindings.count, 7)
         XCTAssertEqual(nestedDecoded.hostWiring.attachmentManifests.first?.commandBindings.count, 7)
+        XCTAssertEqual(nestedDecoded.onyxDrivers, nestedDecoded.catalog.onyxDrivers)
+        XCTAssertEqual(
+            nestedDecoded.onyxDrivers.first?.schemaVersion,
+            SMLOnyxDriverManifest.currentSchemaVersion
+        )
+        XCTAssertEqual(nestedDecoded.onyxDrivers.first?.commandBindings.count, 7)
     }
 
     func testHostWiringDerivesAttachmentManifestWhenLegacyWorkflowOmitsIt() throws {

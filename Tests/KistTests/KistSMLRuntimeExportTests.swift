@@ -103,6 +103,12 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             export.runtimePackage.runtime.onyxDrivers.map(\.driverID),
             export.runtimePackage.runtime.mountContract.onyxDriverIDs
         )
+        let runtimeOnyxDriver = try XCTUnwrap(export.runtimePackage.runtime.onyxDrivers.first)
+        XCTAssertEqual(runtimeOnyxDriver.commandBindings.count, 7)
+        XCTAssertEqual(
+            runtimeOnyxDriver.commandBindings.first { $0.action == .start }?.apiPathTemplate,
+            "/source/workflows/langgraph.review/tasks"
+        )
         XCTAssertEqual(export.runtimePackage.runtime.planning.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(export.runtimePackage.runtime.planning.commandBindings.count, 7)
         let startBinding = try XCTUnwrap(export.runtimePackage.runtime.planning.commandBindings.first {
@@ -177,6 +183,40 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertNotNil(paths["/source/runtime/host-wiring"])
         XCTAssertNotNil(paths["/source/runtime/attachments"])
         XCTAssertNotNil(paths["/source/runtime/attachments/{workflow_id}"])
+        let openAPIStartPath = try object(paths["/source/workflows/langgraph.review/tasks"])
+        let openAPIStartOperation = try object(openAPIStartPath["post"])
+        let openAPIOperationBinding = try object(openAPIStartOperation["x-sml-command-binding"])
+        XCTAssertEqual(openAPIOperationBinding["workflowID"], .string("langgraph.review"))
+        XCTAssertEqual(openAPIOperationBinding["action"], .string("start"))
+        XCTAssertEqual(
+            openAPIOperationBinding["replLineTemplate"],
+            .string("start [TASK_ID] [JSON_INPUT_OBJECT]")
+        )
+        XCTAssertEqual(
+            openAPIOperationBinding["apiPathTemplate"],
+            .string("/source/workflows/langgraph.review/tasks")
+        )
+        XCTAssertEqual(
+            openAPIOperationBinding["apiOperationID"],
+            .string("start_workflow_task_LanggraphReview")
+        )
+        XCTAssertEqual(openAPIOperationBinding["modelEligible"], .bool(true))
+        XCTAssertEqual(
+            openAPIOperationBinding["modelRouterToolName"],
+            .string(SMLWorkflowRuntimeModelAdapter.toolName)
+        )
+        let openAPIOperationREPLFields = try array(openAPIOperationBinding["replJSONFields"])
+        XCTAssertEqual(try object(openAPIOperationREPLFields.first)["name"], .string("topic"))
+        let openAPIOperationAPIFields = try array(openAPIOperationBinding["apiBodyFields"])
+        XCTAssertEqual(try object(openAPIOperationAPIFields.first)["name"], .string("topic"))
+        let openAPIOperationModelArguments = try object(
+            openAPIOperationBinding["modelRouterArgumentsTemplate"]
+        )
+        XCTAssertEqual(openAPIOperationModelArguments["workflow_id"], .string("langgraph.review"))
+        XCTAssertEqual(
+            openAPIOperationModelArguments["line"],
+            .string("start [TASK_ID] [JSON_INPUT_OBJECT]")
+        )
         let openAPIRuntime = try object(export.runtimePackage.runtime.openAPI["x-sml-runtime"])
         XCTAssertEqual(openAPIRuntime["mountREPLCommandBindingCount"], .number(7))
         XCTAssertEqual(openAPIRuntime["mountWorkflowCommandBindingCount"], .number(7))
@@ -865,6 +905,11 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "review.plan", "repository.write",
         ])
         XCTAssertEqual(attachment.plan.entrypoint, "plan")
+        XCTAssertEqual(attachment.commandBindings.count, 7)
+        XCTAssertEqual(
+            attachment.commandBindings.first { $0.action == .start }?.apiPathTemplate,
+            "/source/workflows/langgraph.review/tasks"
+        )
         XCTAssertEqual(repl.launchDescriptor.hostWiring.attachmentManifests.first?.workflowID, "langgraph.review")
 
         XCTAssertFalse(json.contains("operator.test"))

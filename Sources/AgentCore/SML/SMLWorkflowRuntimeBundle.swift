@@ -322,7 +322,7 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             basePath: apiBasePath,
             commandID: commandID
         )
-        let onyxDriver = SMLOnyxDriverCompiler.compile(
+        let baseOnyxDriver = SMLOnyxDriverCompiler.compile(
             surface: surface,
             modelActions: modelActions,
             apiBasePath: apiBasePath
@@ -330,10 +330,23 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
         let modelTool = SMLWorkflowModelToolDescriptor(
             surface.modelCommandTool(allowedActions: modelActions)
         )
+        let replAllowedActions = replActions ?? Set(SMLWorkflowControlAction.allCases)
+        let replCommands = surface.replCommandDescriptors(allowedActions: replAllowedActions)
+        let replExamples = surface.replExamples(allowedActions: replAllowedActions)
+        let commandBindings = SMLWorkflowRuntimePlanningManifest.commandBindings(
+            workflowID: surface.workflowID,
+            workflowVersion: surface.workflowVersion,
+            replCommands: replCommands,
+            replExamples: replExamples,
+            apiEndpoints: apiCompiler.catalog.endpoints,
+            modelAllowedActions: modelActions.stableOrder,
+            modelToolName: modelTool.name
+        )
+        let onyxDriver = baseOnyxDriver.withCommandBindings(commandBindings)
         let replCompiler = SMLWorkflowREPLCompiler(
             surface: surface,
             actor: actor,
-            allowedActions: replActions,
+            allowedActions: replAllowedActions,
             apiCatalog: apiCompiler.catalog,
             modelTool: modelTool,
             modelRouterToolName: SMLWorkflowRuntimeModelAdapter.toolName,
@@ -358,8 +371,8 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
                 allowedActions: replCompiler.allowedActions.stableOrder,
                 grammar: surface.grammar(allowedActions: replCompiler.allowedActions),
                 helpText: replCompiler.helpText,
-                commands: surface.replCommandDescriptors(allowedActions: replCompiler.allowedActions),
-                examples: surface.replExamples(allowedActions: replCompiler.allowedActions)
+                commands: replCommands,
+                examples: replExamples
             ),
             api: apiCompiler.catalog,
             model: SMLWorkflowModelDescriptor(
@@ -560,7 +573,14 @@ public struct SMLWorkflowRuntimeCatalog: Sendable, Codable, Equatable {
     }
 
     public var onyxDrivers: [SMLOnyxDriverManifest] {
-        workflows.map(\.onyx)
+        workflows.map { descriptor in
+            let commandBindings = SMLWorkflowRuntimePlanningManifest.commandBindings(for: descriptor)
+            guard descriptor.onyx.schemaVersion < SMLOnyxDriverManifest.currentSchemaVersion
+                    || descriptor.onyx.commandBindings != commandBindings else {
+                return descriptor.onyx
+            }
+            return descriptor.onyx.withCommandBindings(commandBindings)
+        }
     }
 
     public var apiBasePaths: [String] {
@@ -1877,17 +1897,23 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
     }
 
     public static func commandBindings(
-        for descriptor: SMLWorkflowRuntimeDescriptor
+        workflowID: String,
+        workflowVersion: String,
+        replCommands: [SMLWorkflowREPLCommandDescriptor],
+        replExamples: [SMLWorkflowREPLExample],
+        apiEndpoints: [SMLWorkflowAPIEndpoint],
+        modelAllowedActions: [SMLWorkflowControlAction],
+        modelToolName: String
     ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
         let endpointsByAction = Dictionary(
-            uniqueKeysWithValues: descriptor.api.endpoints.map { ($0.action, $0) }
+            uniqueKeysWithValues: apiEndpoints.map { ($0.action, $0) }
         )
         let examplesByVerb = Dictionary(
-            grouping: descriptor.repl.examples,
+            grouping: replExamples,
             by: \.verb
         ).mapValues { examples in examples.sorted { $0.line < $1.line } }
-        let modelAllowedActions = Set(descriptor.model.allowedActions)
-        return descriptor.repl.commands.compactMap { command in
+        let modelAllowedActions = Set(modelAllowedActions)
+        return replCommands.compactMap { command in
             guard command.kind == .runtime,
                   let action = command.action,
                   let endpoint = endpointsByAction[action] else {
@@ -1899,15 +1925,15 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
             let exampleModelArguments: SMLObject?
             if modelEligible, let line = replExample?.line {
                 exampleModelArguments = [
-                    "workflow_id": .string(descriptor.workflowID),
+                    "workflow_id": .string(workflowID),
                     "line": .string(line),
                 ]
             } else {
                 exampleModelArguments = nil
             }
             return SMLWorkflowRuntimePlanningCommandBinding(
-                workflowID: descriptor.workflowID,
-                workflowVersion: descriptor.workflowVersion,
+                workflowID: workflowID,
+                workflowVersion: workflowVersion,
                 action: action,
                 replVerb: command.verb,
                 replAliases: command.aliases,
@@ -1918,7 +1944,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
                 apiPathTemplate: endpoint.pathTemplate,
                 apiOperationID: runtimeOperationID(
                     endpoint,
-                    workflowID: descriptor.workflowID
+                    workflowID: workflowID
                 ),
                 apiBodyKind: endpoint.bodyKind,
                 apiBodyFields: endpoint.bodyFields,
@@ -1926,10 +1952,10 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
                 requiresTask: command.requiresTask,
                 changesTaskState: command.changesTaskState,
                 modelEligible: modelEligible,
-                modelToolName: descriptor.model.tool.name,
+                modelToolName: modelToolName,
                 modelRouterToolName: SMLWorkflowRuntimeModelAdapter.toolName,
                 modelRouterArgumentsTemplate: [
-                    "workflow_id": .string(descriptor.workflowID),
+                    "workflow_id": .string(workflowID),
                     "line": .string(command.usage),
                 ],
                 exampleReplLine: replExample?.line,
@@ -1937,7 +1963,27 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
                 exampleAPIBody: apiExample?.body,
                 exampleModelRouterArguments: exampleModelArguments
             )
+        }.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
         }
+    }
+
+    public static func commandBindings(
+        for descriptor: SMLWorkflowRuntimeDescriptor
+    ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
+        commandBindings(
+            workflowID: descriptor.workflowID,
+            workflowVersion: descriptor.workflowVersion,
+            replCommands: descriptor.repl.commands,
+            replExamples: descriptor.repl.examples,
+            apiEndpoints: descriptor.api.endpoints,
+            modelAllowedActions: descriptor.model.allowedActions,
+            modelToolName: descriptor.model.tool.name
+        )
     }
 
     private static func toolIndex(
@@ -2040,7 +2086,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 16
+    public static let currentSchemaVersion = 17
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -2109,7 +2155,13 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         modelRouter = decodedSchemaVersion < SMLWorkflowRuntimeExport.currentSchemaVersion
             ? catalog.modelRouter
             : decodedModelRouter ?? catalog.modelRouter
-        onyxDrivers = try container.decode([SMLOnyxDriverManifest].self, forKey: .onyxDrivers)
+        let decodedOnyxDrivers = try container.decode(
+            [SMLOnyxDriverManifest].self,
+            forKey: .onyxDrivers
+        )
+        onyxDrivers = decodedSchemaVersion < SMLWorkflowRuntimeExport.currentSchemaVersion
+            ? catalog.onyxDrivers
+            : decodedOnyxDrivers
         let decodedPlanning = try container.decodeIfPresent(
             SMLWorkflowRuntimePlanningManifest.self, forKey: .planning
         )
@@ -4207,12 +4259,24 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
         }
 
         for workflow in catalog.workflows {
+            let commandBindingsByAction = Dictionary(
+                uniqueKeysWithValues: catalog.planningManifest.commandBindings
+                    .filter {
+                        $0.workflowID == workflow.workflowID
+                            && $0.workflowVersion == workflow.workflowVersion
+                    }
+                    .map { ($0.action, $0) }
+            )
             schemas[inputSchemaName(workflow)] = .object(inputSchema(workflow))
             schemas[startBodySchemaName(workflow)] = .object(startBodySchema(workflow))
             for endpoint in workflow.api.endpoints {
                 var methods = pathObject(paths[endpoint.pathTemplate])
                 methods[endpoint.method.rawValue.lowercased()] = .object(
-                    operation(endpoint, workflow: workflow)
+                    operation(
+                        endpoint,
+                        workflow: workflow,
+                        commandBinding: commandBindingsByAction[endpoint.action]
+                    )
                 )
                 paths[endpoint.pathTemplate] = .object(methods)
             }
@@ -4357,7 +4421,8 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
 
     private static func operation(
         _ endpoint: SMLWorkflowAPIEndpoint,
-        workflow: SMLWorkflowRuntimeDescriptor
+        workflow: SMLWorkflowRuntimeDescriptor,
+        commandBinding: SMLWorkflowRuntimePlanningCommandBinding?
     ) -> SMLObject {
         let statusCode = endpoint.action == .start ? "201" : "200"
         var object: SMLObject = [
@@ -4383,6 +4448,10 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "x-sml-onyx-driver-id": .string(workflow.onyx.driverID),
             "x-sml-request-examples": .array(endpoint.examples.map(apiExample)),
         ]
+
+        if let commandBinding {
+            object["x-sml-command-binding"] = planningCommandBinding(commandBinding)
+        }
 
         if endpoint.pathTemplate.contains("{task_id}") {
             object["parameters"] = .array([

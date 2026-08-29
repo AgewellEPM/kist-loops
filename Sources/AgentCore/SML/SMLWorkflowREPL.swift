@@ -25,7 +25,7 @@ public enum SMLWorkflowREPLCompilation: Sendable, Equatable {
 }
 
 public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let workflowID: String
@@ -48,6 +48,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
     public let skillTree: [SMLOnyxSkillNode]
     public let toolBindings: [SMLOnyxToolBinding]
     public let plan: SMLOnyxPlan
+    public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
 
     public init(
         schemaVersion: Int = SMLWorkflowREPLAttachmentDescriptor.currentSchemaVersion,
@@ -70,7 +71,8 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         onyxDriverID: String,
         skillTree: [SMLOnyxSkillNode],
         toolBindings: [SMLOnyxToolBinding],
-        plan: SMLOnyxPlan
+        plan: SMLOnyxPlan,
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = []
     ) {
         self.schemaVersion = schemaVersion
         self.workflowID = workflowID
@@ -104,6 +106,116 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
             return $0.reference < $1.reference
         }
         self.plan = plan
+        self.commandBindings = Self.sortedCommandBindings(commandBindings)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case workflowID
+        case workflowVersion
+        case workflowName
+        case role
+        case sourceKind
+        case sourceReference
+        case sourceDigest
+        case apiBasePath
+        case runtimeAttachmentsPath
+        case runtimeWorkflowAttachmentPath
+        case replGrammar
+        case replCommands
+        case replExamples
+        case apiCatalog
+        case modelTool
+        case modelRouterToolName
+        case onyxDriverID
+        case skillTree
+        case toolBindings
+        case plan
+        case commandBindings
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try container.decode(Int.self, forKey: .schemaVersion),
+            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
+            workflowName: try container.decode(String.self, forKey: .workflowName),
+            role: try container.decode(String.self, forKey: .role),
+            sourceKind: try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind),
+            sourceReference: try container.decode(String.self, forKey: .sourceReference),
+            sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
+            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            runtimeAttachmentsPath: try container.decode(
+                String.self,
+                forKey: .runtimeAttachmentsPath
+            ),
+            runtimeWorkflowAttachmentPath: try container.decode(
+                String.self,
+                forKey: .runtimeWorkflowAttachmentPath
+            ),
+            replGrammar: try container.decode(String.self, forKey: .replGrammar),
+            replCommands: try container.decode(
+                [SMLWorkflowREPLCommandDescriptor].self,
+                forKey: .replCommands
+            ),
+            replExamples: try container.decode(
+                [SMLWorkflowREPLExample].self,
+                forKey: .replExamples
+            ),
+            apiCatalog: try container.decode(SMLWorkflowAPICatalog.self, forKey: .apiCatalog),
+            modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
+            modelRouterToolName: try container.decodeIfPresent(
+                String.self,
+                forKey: .modelRouterToolName
+            ),
+            onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
+            skillTree: try container.decode([SMLOnyxSkillNode].self, forKey: .skillTree),
+            toolBindings: try container.decode([SMLOnyxToolBinding].self, forKey: .toolBindings),
+            plan: try container.decode(SMLOnyxPlan.self, forKey: .plan),
+            commandBindings: try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningCommandBinding].self,
+                forKey: .commandBindings
+            ) ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(workflowName, forKey: .workflowName)
+        try container.encode(role, forKey: .role)
+        try container.encode(sourceKind, forKey: .sourceKind)
+        try container.encode(sourceReference, forKey: .sourceReference)
+        try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
+        try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(runtimeAttachmentsPath, forKey: .runtimeAttachmentsPath)
+        try container.encode(runtimeWorkflowAttachmentPath, forKey: .runtimeWorkflowAttachmentPath)
+        try container.encode(replGrammar, forKey: .replGrammar)
+        try container.encode(replCommands, forKey: .replCommands)
+        try container.encode(replExamples, forKey: .replExamples)
+        try container.encode(apiCatalog, forKey: .apiCatalog)
+        try container.encode(modelTool, forKey: .modelTool)
+        try container.encodeIfPresent(modelRouterToolName, forKey: .modelRouterToolName)
+        try container.encode(onyxDriverID, forKey: .onyxDriverID)
+        try container.encode(skillTree, forKey: .skillTree)
+        try container.encode(toolBindings, forKey: .toolBindings)
+        try container.encode(plan, forKey: .plan)
+        try container.encode(commandBindings, forKey: .commandBindings)
+    }
+
+    private static func sortedCommandBindings(
+        _ bindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) -> [SMLWorkflowRuntimePlanningCommandBinding] {
+        bindings.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
+        }
     }
 }
 
@@ -247,7 +359,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             onyxDriverID: onyxDriver.driverID,
             skillTree: onyxDriver.skillTree,
             toolBindings: onyxDriver.tools,
-            plan: onyxDriver.plan
+            plan: onyxDriver.plan,
+            commandBindings: onyxDriver.commandBindings
         )
     }
 
