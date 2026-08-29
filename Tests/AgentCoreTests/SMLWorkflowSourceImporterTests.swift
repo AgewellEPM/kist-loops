@@ -145,12 +145,22 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.onyxDrivers.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.onyxDrivers.first?.plan.entrypoint, "plan")
         XCTAssertEqual(package.runtime.planning.workflowIDs, ["langgraph.review"])
+        let sourceReplMount = try XCTUnwrap(package.runtime.mountContract.replMounts.first)
+        XCTAssertEqual(sourceReplMount.commands.first { $0.verb == "start" }?.jsonBodyKind, .workflowInput)
+        XCTAssertEqual(sourceReplMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        XCTAssertTrue(sourceReplMount.examples.contains {
+            $0.line == #"start TASK-ID {"topic":"topic"}"#
+        })
         XCTAssertEqual(package.runtime.agentGuide.workflowGuides.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.hostGuide.workflowBindings.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.hostWiring.apiBasePaths, ["/source"])
         let workflowWiring = try XCTUnwrap(package.runtime.hostWiring.workflows.first)
         XCTAssertEqual(workflowWiring.apiRoutes.count, 7)
+        XCTAssertEqual(workflowWiring.replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        XCTAssertTrue(workflowWiring.replMount.examples.contains {
+            $0.line == #"start TASK-ID {"topic":"topic"}"#
+        })
         XCTAssertEqual(workflowWiring.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(
             Set(workflowWiring.hostBindings.map(\.channel)),
@@ -174,6 +184,14 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
                 "Break work into small contextual workflow steps"
             )
         )
+        let agentWorkflow = try XCTUnwrap(package.runtime.agentGuide.workflowGuides.first)
+        XCTAssertEqual(agentWorkflow.replCommands.first { $0.verb == "start" }?.jsonBodyKind, .workflowInput)
+        XCTAssertEqual(agentWorkflow.replCommands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        XCTAssertTrue(agentWorkflow.replExamples.contains {
+            $0.line == #"start TASK-ID {"topic":"topic"}"#
+        })
+        XCTAssertTrue(package.runtime.agentGuide.systemPrompt.contains("Structured REPL commands:"))
+        XCTAssertTrue(package.runtime.agentGuide.systemPrompt.contains("json:workflow_input fields:topic"))
         XCTAssertEqual(
             package.runtime.agentGuide.modelRouterTool.name,
             SMLWorkflowRuntimeModelAdapter.toolName

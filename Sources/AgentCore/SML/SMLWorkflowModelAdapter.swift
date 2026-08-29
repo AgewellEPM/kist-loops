@@ -224,7 +224,9 @@ public struct SMLWorkflowModelAdapter: Sendable {
     }
 
     private var systemPrompt: String {
-        """
+        let commands = surface.replCommandDescriptors(allowedActions: allowedActions)
+        let examples = surface.replExamples(allowedActions: allowedActions)
+        return """
         You are operating the admitted SML workflow \(surface.workflowID)@\(surface.workflowVersion).
         Your prose is advisory and never proves completion. To request a state transition, call
         \(Self.toolName) exactly once with one line from this workflow's grammar. Never call an
@@ -237,6 +239,12 @@ public struct SMLWorkflowModelAdapter: Sendable {
 
         Allowed grammar:
         \(surface.grammar(allowedActions: allowedActions))
+
+        \(SMLWorkflowREPLDescriptorFormatter.modelCommandIndex(
+            commands: commands,
+            examples: examples,
+            allowedActions: allowedActions
+        ))
         """
     }
 

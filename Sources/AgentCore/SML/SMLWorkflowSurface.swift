@@ -278,11 +278,19 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
     public func modelCommandTool(
         allowedActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions
     ) -> ToolSpec {
-        ToolSpec(
+        let commands = replCommandDescriptors(allowedActions: allowedActions)
+        let examples = replExamples(allowedActions: allowedActions)
+        return ToolSpec(
             name: "propose_sml_command",
             description: "Propose exactly one command for \(workflowID)@\(workflowVersion). "
                 + "The host validates authority and may refuse it. Allowed grammar:\n"
-                + grammar(allowedActions: allowedActions),
+                + grammar(allowedActions: allowedActions)
+                + "\n\n"
+                + SMLWorkflowREPLDescriptorFormatter.modelCommandIndex(
+                    commands: commands,
+                    examples: examples,
+                    allowedActions: allowedActions
+                ),
             parameters: [
                 ToolParameter(
                     name: "line",

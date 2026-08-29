@@ -45,8 +45,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let modelTool = surface.modelCommandTool()
         XCTAssertEqual(modelTool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(modelTool.parameters.map(\.name), ["line"])
+        XCTAssertTrue(modelTool.description.contains("Structured REPL commands:"))
+        XCTAssertTrue(modelTool.description.contains("json:workflow_input fields:target"))
+        XCTAssertTrue(modelTool.description.contains(#"start TASK-ID {"target":"target"}"#))
         XCTAssertFalse(modelTool.description.contains("approve TASK_ID"))
         XCTAssertFalse(modelTool.description.contains("rollback TASK_ID"))
+        XCTAssertFalse(modelTool.description.contains("json:expected_state fields:task_revision"))
+        XCTAssertFalse(modelTool.description.contains("help [local]"))
 
         let api = SMLWorkflowAPICatalog(surface: surface)
         XCTAssertEqual(api.endpoints.count, 7)
@@ -716,9 +721,27 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(mount.replMounts.map(\.modelRouterToolName), [
             SMLWorkflowRuntimeModelAdapter.toolName,
         ])
+        let replMount = try XCTUnwrap(mount.replMounts.first)
+        XCTAssertEqual(
+            replMount.commands.first { $0.verb == "start" }?.jsonBodyKind,
+            .workflowInput
+        )
+        XCTAssertEqual(
+            replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name),
+            ["target"]
+        )
+        XCTAssertTrue(replMount.examples.contains {
+            $0.line == #"start TASK-ID {"target":"target"}"#
+        })
         XCTAssertEqual(mount.apiRoutes.count, 17)
         XCTAssertEqual(mount.workflowMounts.map(\.workflowID), ["content.release"])
         XCTAssertEqual(mount.workflowMounts.first?.apiRoutes.count, 7)
+        XCTAssertEqual(
+            mount.workflowMounts.first?.repl.commands.first {
+                $0.verb == "start"
+            }?.jsonFields.map(\.name),
+            ["target"]
+        )
         XCTAssertEqual(mount.workflowMounts.first?.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(
             mount.workflowMounts.first?.modelRouterToolName,
@@ -751,6 +774,22 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertFalse(encoded.contains("operator.luke"))
         XCTAssertFalse(encoded.contains("leaseID"))
         XCTAssertFalse(encoded.contains("lease_id"))
+
+        var legacyMountObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(replMount)) as? [String: Any]
+        )
+        legacyMountObject.removeValue(forKey: "commands")
+        legacyMountObject.removeValue(forKey: "examples")
+        let legacyMountData = try JSONSerialization.data(
+            withJSONObject: legacyMountObject,
+            options: [.sortedKeys]
+        )
+        let legacyMount = try JSONDecoder().decode(
+            SMLWorkflowRuntimeREPLMount.self,
+            from: legacyMountData
+        )
+        XCTAssertEqual(legacyMount.commands, [])
+        XCTAssertEqual(legacyMount.examples, [])
     }
 
     func testRuntimeAgentGuideExportsModelREPLAPIOnyxAndPlanningInstructions() throws {
@@ -784,6 +823,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(guide.systemPrompt.contains("content.release@1.0.0"))
         XCTAssertTrue(guide.systemPrompt.contains("Allowed REPL grammar:"))
         XCTAssertTrue(guide.systemPrompt.contains("start [TASK_ID] [JSON_INPUT_OBJECT]"))
+        XCTAssertTrue(guide.systemPrompt.contains("Structured REPL commands:"))
+        XCTAssertTrue(guide.systemPrompt.contains("json:workflow_input fields:target"))
+        XCTAssertTrue(guide.systemPrompt.contains("REPL examples:"))
+        XCTAssertTrue(guide.systemPrompt.contains(#"start TASK-ID {"target":"target"}"#))
         XCTAssertTrue(guide.systemPrompt.contains("API routes:"))
         XCTAssertTrue(guide.systemPrompt.contains("Onyx driver"))
         XCTAssertTrue(guide.systemPrompt.contains("Planning units:"))
@@ -795,6 +838,21 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(release.apiRoutes.count, 7)
         XCTAssertEqual(release.modelTool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(release.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(
+            release.replCommands.first { $0.verb == "start" }?.jsonBodyKind,
+            .workflowInput
+        )
+        XCTAssertEqual(
+            release.replCommands.first { $0.verb == "start" }?.jsonFields.map(\.name),
+            ["target"]
+        )
+        XCTAssertEqual(
+            release.replCommands.first { $0.verb == "approve" }?.jsonBodyKind,
+            .expectedState
+        )
+        XCTAssertTrue(release.replExamples.contains {
+            $0.line == #"start TASK-ID {"target":"target"}"#
+        })
         XCTAssertEqual(release.planningToolIndex.map(\.reference), [
             "content.plan", "artifact_verified", "repository.write",
         ])
@@ -806,6 +864,27 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertFalse(encoded.contains("operator.luke"))
         XCTAssertFalse(encoded.contains("leaseID"))
         XCTAssertFalse(encoded.contains("lease_id"))
+        XCTAssertTrue(encoded.contains("\"replCommands\""))
+        XCTAssertTrue(encoded.contains("\"replExamples\""))
+
+        let encodedData = try JSONEncoder().encode(guide)
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encodedData) as? [String: Any]
+        )
+        legacyObject["schemaVersion"] = 1
+        var legacyWorkflowGuides = try XCTUnwrap(
+            legacyObject["workflowGuides"] as? [[String: Any]]
+        )
+        for index in legacyWorkflowGuides.indices {
+            legacyWorkflowGuides[index].removeValue(forKey: "replCommands")
+            legacyWorkflowGuides[index].removeValue(forKey: "replExamples")
+        }
+        legacyObject["workflowGuides"] = legacyWorkflowGuides
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject, options: [.sortedKeys])
+        let legacyGuide = try JSONDecoder().decode(SMLWorkflowRuntimeAgentGuide.self, from: legacyData)
+        XCTAssertEqual(legacyGuide.schemaVersion, 1)
+        XCTAssertEqual(legacyGuide.workflowGuides.map(\.replCommands), [[], []])
+        XCTAssertEqual(legacyGuide.workflowGuides.map(\.replExamples), [[], []])
     }
 
     func testRuntimeHostGuideExportsLaunchBindingsWithoutAuthority() throws {
@@ -867,6 +946,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(release.apiBasePath, "/automation")
         XCTAssertEqual(release.replMount.workflowID, "content.release")
+        XCTAssertEqual(
+            release.replMount.commands.first { $0.verb == "start" }?.jsonBodyKind,
+            .workflowInput
+        )
+        XCTAssertTrue(release.replMount.examples.contains {
+            $0.line == #"start TASK-ID {"target":"target"}"#
+        })
         XCTAssertEqual(release.apiRoutes.count, 7)
         XCTAssertEqual(release.modelTool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(release.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
@@ -932,6 +1018,16 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             SMLWorkflowRuntimeModelAdapter.toolName,
             SMLWorkflowRuntimeModelAdapter.toolName,
         ])
+        let releaseReplMount = try XCTUnwrap(
+            export.mountContract.replMounts.first { $0.workflowID == "content.release" }
+        )
+        XCTAssertEqual(
+            releaseReplMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name),
+            ["target"]
+        )
+        XCTAssertTrue(releaseReplMount.examples.contains {
+            $0.line == #"start TASK-ID {"target":"target"}"#
+        })
         XCTAssertEqual(export.mountContract.apiRoutes.count, 24)
         XCTAssertEqual(export.mountContract.workflowMounts.map(\.workflowID), [
             "content.release", "content.review",

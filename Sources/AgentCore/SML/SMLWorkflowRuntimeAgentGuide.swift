@@ -7,7 +7,7 @@ import Foundation
 /// model router, and Onyx exports. It carries no actor, lease, credentials, runtime handle, replay
 /// state, or host authority; mutations still have to cross the runtime command gateway.
 public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let systemPrompt: String
@@ -98,6 +98,8 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
     public let entrypoint: String
     public let apiBasePath: String
     public let replGrammar: String
+    public let replCommands: [SMLWorkflowREPLCommandDescriptor]
+    public let replExamples: [SMLWorkflowREPLExample]
     public let schemaSummary: String
     public let graphSummary: String
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
@@ -119,6 +121,8 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         entrypoint: String,
         apiBasePath: String,
         replGrammar: String,
+        replCommands: [SMLWorkflowREPLCommandDescriptor] = [],
+        replExamples: [SMLWorkflowREPLExample] = [],
         schemaSummary: String,
         graphSummary: String,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
@@ -139,6 +143,14 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         self.entrypoint = entrypoint
         self.apiBasePath = apiBasePath
         self.replGrammar = replGrammar
+        self.replCommands = replCommands.sorted {
+            if $0.kind.rawValue != $1.kind.rawValue { return $0.kind.rawValue < $1.kind.rawValue }
+            return $0.verb < $1.verb
+        }
+        self.replExamples = replExamples.sorted {
+            if $0.verb != $1.verb { return $0.verb < $1.verb }
+            return $0.line < $1.line
+        }
         self.schemaSummary = schemaSummary
         self.graphSummary = graphSummary
         self.apiRoutes = apiRoutes.sorted {
@@ -181,6 +193,8 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             entrypoint: descriptor.onyx.plan.entrypoint,
             apiBasePath: descriptor.api.basePath,
             replGrammar: descriptor.repl.grammar,
+            replCommands: descriptor.repl.commands,
+            replExamples: descriptor.repl.examples,
             schemaSummary: descriptor.schemaSummary,
             graphSummary: descriptor.graphSummary,
             apiRoutes: mount?.apiRoutes ?? [],
@@ -231,6 +245,11 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         Allowed REPL grammar:
         \(replGrammar)
 
+        \(SMLWorkflowREPLDescriptorFormatter.commandIndex(
+            commands: replCommands,
+            examples: replExamples
+        ))
+
         API routes:
         \(routes)
 
@@ -243,6 +262,97 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         Approval gates:
         \(approvals)
         """
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case workflowName
+        case role
+        case sourceKind
+        case sourceReference
+        case sourceDigest
+        case entrypoint
+        case apiBasePath
+        case replGrammar
+        case replCommands
+        case replExamples
+        case schemaSummary
+        case graphSummary
+        case apiRoutes
+        case modelTool
+        case modelRouterToolName
+        case onyxDriverID
+        case planningToolIndex
+        case decomposableUnits
+        case approvalGates
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
+            workflowName: try container.decode(String.self, forKey: .workflowName),
+            role: try container.decode(String.self, forKey: .role),
+            sourceKind: try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind),
+            sourceReference: try container.decode(String.self, forKey: .sourceReference),
+            sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
+            entrypoint: try container.decode(String.self, forKey: .entrypoint),
+            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            replGrammar: try container.decode(String.self, forKey: .replGrammar),
+            replCommands: try container.decodeIfPresent(
+                [SMLWorkflowREPLCommandDescriptor].self,
+                forKey: .replCommands
+            ) ?? [],
+            replExamples: try container.decodeIfPresent(
+                [SMLWorkflowREPLExample].self,
+                forKey: .replExamples
+            ) ?? [],
+            schemaSummary: try container.decode(String.self, forKey: .schemaSummary),
+            graphSummary: try container.decode(String.self, forKey: .graphSummary),
+            apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
+            modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
+            modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
+            onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
+            planningToolIndex: try container.decode(
+                [SMLWorkflowRuntimePlanningToolIndexEntry].self,
+                forKey: .planningToolIndex
+            ),
+            decomposableUnits: try container.decode(
+                [SMLWorkflowRuntimePlanningDecompositionUnit].self,
+                forKey: .decomposableUnits
+            ),
+            approvalGates: try container.decode(
+                [SMLWorkflowRuntimePlanningApprovalGate].self,
+                forKey: .approvalGates
+            )
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(workflowName, forKey: .workflowName)
+        try container.encode(role, forKey: .role)
+        try container.encode(sourceKind, forKey: .sourceKind)
+        try container.encode(sourceReference, forKey: .sourceReference)
+        try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
+        try container.encode(entrypoint, forKey: .entrypoint)
+        try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(replGrammar, forKey: .replGrammar)
+        try container.encode(replCommands, forKey: .replCommands)
+        try container.encode(replExamples, forKey: .replExamples)
+        try container.encode(schemaSummary, forKey: .schemaSummary)
+        try container.encode(graphSummary, forKey: .graphSummary)
+        try container.encode(apiRoutes, forKey: .apiRoutes)
+        try container.encode(modelTool, forKey: .modelTool)
+        try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
+        try container.encode(onyxDriverID, forKey: .onyxDriverID)
+        try container.encode(planningToolIndex, forKey: .planningToolIndex)
+        try container.encode(decomposableUnits, forKey: .decomposableUnits)
+        try container.encode(approvalGates, forKey: .approvalGates)
     }
 }
 

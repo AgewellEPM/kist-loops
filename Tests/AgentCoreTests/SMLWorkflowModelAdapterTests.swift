@@ -51,9 +51,24 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertEqual(capture.toolNames, [SMLWorkflowModelAdapter.toolName])
         XCTAssertEqual(capture.toolChoice, .any)
         XCTAssertFalse(capture.geminiBuiltins)
+        let toolDescription = try XCTUnwrap(capture.toolDescriptions.first)
+        XCTAssertTrue(toolDescription.contains("Structured REPL commands:"))
+        XCTAssertTrue(toolDescription.contains("json:workflow_input fields:value"))
+        XCTAssertTrue(toolDescription.contains("REPL examples:"))
+        XCTAssertTrue(toolDescription.contains(#"start TASK-ID {"value":"value"}"#))
+        XCTAssertFalse(toolDescription.contains("approve TASK_ID"))
+        XCTAssertFalse(toolDescription.contains("json:expected_state fields:task_revision"))
+        XCTAssertFalse(toolDescription.contains("help [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("prose is advisory"))
         XCTAssertTrue(capture.systemPrompt.contains("Workflow graph:"))
         XCTAssertTrue(capture.systemPrompt.contains("work CALL_TOOL [tool.execute] -> receipt"))
+        XCTAssertTrue(capture.systemPrompt.contains("Structured REPL commands:"))
+        XCTAssertTrue(capture.systemPrompt.contains("json:workflow_input fields:value"))
+        XCTAssertTrue(capture.systemPrompt.contains("REPL examples:"))
+        XCTAssertTrue(capture.systemPrompt.contains(#"start TASK-ID {"value":"value"}"#))
+        XCTAssertFalse(capture.systemPrompt.contains("approve TASK_ID"))
+        XCTAssertFalse(capture.systemPrompt.contains("json:expected_state fields:task_revision"))
+        XCTAssertFalse(capture.systemPrompt.contains("help [local]"))
     }
 
     func testMultipleWrongAndMalformedCallsAreAtomicNoOps() async throws {
@@ -233,11 +248,27 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertEqual(capture.toolNames, [SMLWorkflowRuntimeModelAdapter.toolName])
         XCTAssertEqual(capture.toolChoice, .any)
         XCTAssertFalse(capture.geminiBuiltins)
+        let toolDescription = try XCTUnwrap(capture.toolDescriptions.first)
+        XCTAssertTrue(toolDescription.contains("model.workflow@1.0.0"))
+        XCTAssertTrue(toolDescription.contains("model.review@1.0.0"))
+        XCTAssertTrue(toolDescription.contains("Structured REPL commands:"))
+        XCTAssertTrue(toolDescription.contains("json:workflow_input fields:value"))
+        XCTAssertTrue(toolDescription.contains(#"start TASK-ID {"value":"value"}"#))
+        XCTAssertFalse(toolDescription.contains("approve TASK_ID"))
+        XCTAssertFalse(toolDescription.contains("json:expected_state fields:task_revision"))
+        XCTAssertFalse(toolDescription.contains("help [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("mounted workflow_id"))
         XCTAssertTrue(capture.systemPrompt.contains("model.workflow@1.0.0"))
         XCTAssertTrue(capture.systemPrompt.contains("model.review@1.0.0"))
         XCTAssertTrue(capture.systemPrompt.contains("Allowed REPL grammar:"))
         XCTAssertTrue(capture.systemPrompt.contains("start [TASK_ID] [JSON_INPUT_OBJECT]"))
+        XCTAssertTrue(capture.systemPrompt.contains("Structured REPL commands:"))
+        XCTAssertTrue(capture.systemPrompt.contains("json:workflow_input fields:value"))
+        XCTAssertTrue(capture.systemPrompt.contains("REPL examples:"))
+        XCTAssertTrue(capture.systemPrompt.contains(#"start TASK-ID {"value":"value"}"#))
+        XCTAssertFalse(capture.systemPrompt.contains("approve TASK_ID"))
+        XCTAssertFalse(capture.systemPrompt.contains("json:expected_state fields:task_revision"))
+        XCTAssertFalse(capture.systemPrompt.contains("help [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("API routes:"))
         XCTAssertTrue(
             capture.systemPrompt.contains(
@@ -273,6 +304,15 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
                 ),
                 { error in
                     error as? SMLWorkflowModelError == .nonCommandProposal
+                }
+            ),
+            (
+                .call(
+                    name: SMLWorkflowRuntimeModelAdapter.toolName,
+                    arguments: #"{"workflow_id":"model.workflow","line":"approve TASK-FORGED {\"task_revision\":0}"}"#
+                ),
+                { error in
+                    error as? SMLWorkflowREPLCompileError == .actionDenied("approve")
                 }
             ),
         ]
@@ -445,6 +485,7 @@ private final class ScriptedWorkflowProvider: ChatProvider, @unchecked Sendable 
 
     struct Capture {
         let toolNames: [String]
+        let toolDescriptions: [String]
         let toolChoice: ToolChoice
         let geminiBuiltins: Bool
         let systemPrompt: String
@@ -461,7 +502,13 @@ private final class ScriptedWorkflowProvider: ChatProvider, @unchecked Sendable 
 
     private let lock = NSLock()
     private var steps: [Step]
-    private var lastCapture = Capture(toolNames: [], toolChoice: .auto, geminiBuiltins: true, systemPrompt: "")
+    private var lastCapture = Capture(
+        toolNames: [],
+        toolDescriptions: [],
+        toolChoice: .auto,
+        geminiBuiltins: true,
+        systemPrompt: ""
+    )
 
     init(_ steps: [Step]) { self.steps = steps }
 
@@ -527,6 +574,7 @@ private final class ScriptedWorkflowProvider: ChatProvider, @unchecked Sendable 
         let step = steps.isEmpty ? .answer("done") : steps.removeFirst()
         lastCapture = Capture(
             toolNames: tools.map(\.name),
+            toolDescriptions: tools.map(\.description),
             toolChoice: settings.toolChoice,
             geminiBuiltins: settings.geminiBuiltins,
             systemPrompt: settings.systemPrompt

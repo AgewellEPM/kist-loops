@@ -67,6 +67,12 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(export.runtimePackage.runtime.mountContract.apiBasePaths, ["/source"])
         XCTAssertEqual(export.runtimePackage.runtime.mountContract.replMounts.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(export.runtimePackage.runtime.mountContract.replMounts.map(\.role), ["reviewer"])
+        let runtimeReplMount = try XCTUnwrap(export.runtimePackage.runtime.mountContract.replMounts.first)
+        XCTAssertEqual(runtimeReplMount.commands.first { $0.verb == "start" }?.jsonBodyKind, .workflowInput)
+        XCTAssertEqual(runtimeReplMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        XCTAssertTrue(runtimeReplMount.examples.contains {
+            $0.line == #"start TASK-ID {"topic":"topic"}"#
+        })
         XCTAssertEqual(export.runtimePackage.runtime.mountContract.workflowMounts.map(\.apiRoutes.count), [7])
         XCTAssertEqual(export.runtimePackage.runtime.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(export.runtimePackage.runtime.modelRouter.maximumCommandRounds, 3)
@@ -100,6 +106,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(export.launchDescriptor.planningWorkflowIDs, ["langgraph.review"])
         let launched = try XCTUnwrap(export.launchDescriptor.workflows.first)
         XCTAssertEqual(launched.replMount.workflowID, "langgraph.review")
+        XCTAssertEqual(launched.replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
         XCTAssertEqual(launched.apiRoutes.count, 7)
         XCTAssertEqual(launched.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(launched.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
@@ -135,6 +142,9 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(wiring.role, "reviewer")
         XCTAssertEqual(wiring.apiBasePath, "/source")
         XCTAssertEqual(wiring.replMount.workflowID, "langgraph.review")
+        XCTAssertTrue(wiring.replMount.examples.contains {
+            $0.line == #"start TASK-ID {"topic":"topic"}"#
+        })
         XCTAssertEqual(wiring.apiRoutes.count, 7)
         XCTAssertEqual(wiring.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(wiring.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
