@@ -143,6 +143,7 @@ struct KistOptions {
     var modelRunStage: String?      // --model-run <stage> <manifest.json>: execute verified manifest stage
     var modelRunManifest: String?
     var smlRuntimeExport: String?   // --sml-runtime-export <source.json>: offline source/package -> REPL/API/model/Onyx/planning JSON
+    var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl
     var smlRuntimeREPLLine: String? // --sml-line <line>: generated workflow REPL line to run
@@ -205,6 +206,9 @@ struct KistOptions {
             case "--sml-runtime-export":
                                             if let v = next() { o.smlRuntimeExport = v }
                                             else { o.optionErrors.append("--sml-runtime-export requires <source.json>") }
+            case let flag where ["--sml-runtime-attachments", "--sml-attachments"].contains(flag):
+                                            if let v = next() { o.smlRuntimeAttachments = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-repl", "--sml-repl"].contains(flag):
                                             if let v = next() { o.smlRuntimeREPL = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
@@ -466,11 +470,23 @@ struct KistOptions {
         if o.smlRuntimeExport != nil && o.smlRuntimeREPL != nil {
             o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-repl")
         }
+        if o.smlRuntimeExport != nil && o.smlRuntimeAttachments != nil {
+            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-attachments")
+        }
         if o.smlRuntimeExport != nil && o.smlRuntimeAPI != nil {
             o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-api")
         }
         if o.smlRuntimeExport != nil && o.smlRuntimeModel != nil {
             o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-model")
+        }
+        if o.smlRuntimeAttachments != nil && o.smlRuntimeREPL != nil {
+            o.optionErrors.append("--sml-runtime-attachments conflicts with --sml-runtime-repl")
+        }
+        if o.smlRuntimeAttachments != nil && o.smlRuntimeAPI != nil {
+            o.optionErrors.append("--sml-runtime-attachments conflicts with --sml-runtime-api")
+        }
+        if o.smlRuntimeAttachments != nil && o.smlRuntimeModel != nil {
+            o.optionErrors.append("--sml-runtime-attachments conflicts with --sml-runtime-model")
         }
         if o.smlRuntimeREPL != nil && o.smlRuntimeAPI != nil {
             o.optionErrors.append("--sml-runtime-repl conflicts with --sml-runtime-api")
@@ -723,6 +739,9 @@ struct KistOptions {
                                     runtime source package into a host JSON payload containing the
                                     generated custom REPL mount, API/OpenAPI routes, native model-router
                                     tool, Onyx driver manifests, planning graph, and launch descriptor.
+          --sml-runtime-attachments <json>
+                                    Emit the per-workflow attachment manifests for generated REPL,
+                                    API, model-router, Onyx driver, and planning adapters.
           --sml-runtime-repl <json> --sml-line <line> [--sml-workflow <id>]
                                     Launch the same wrapped source offline and run one generated
                                     workflow REPL command, returning command/result JSON for host

@@ -142,6 +142,13 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.mountContract.workflowMounts.map(\.apiRoutes.count), [7])
         XCTAssertEqual(package.runtime.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(package.runtime.modelRouter.workflowIDs, ["langgraph.review"])
+        XCTAssertTrue(package.runtime.modelRouter.examples.contains {
+            $0.workflowID == "langgraph.review"
+                && $0.arguments == [
+                    "workflow_id": .string("langgraph.review"),
+                    "line": .string(#"start TASK-ID {"topic":"topic"}"#),
+                ]
+        })
         XCTAssertEqual(package.runtime.onyxDrivers.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.onyxDrivers.first?.plan.entrypoint, "plan")
         XCTAssertEqual(package.runtime.planning.workflowIDs, ["langgraph.review"])
@@ -176,6 +183,38 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
                 .onyxDriver, .planningWorkflow,
             ])
         )
+        XCTAssertTrue(workflowWiring.hostBindings.contains {
+            $0.channel == .customAPI
+                && $0.apiExamples.contains {
+                    $0.path == "/source/workflows/langgraph.review/tasks"
+                        && $0.body["input"] == .object(["topic": .string("topic")])
+                }
+        })
+        XCTAssertTrue(workflowWiring.hostBindings.contains {
+            $0.channel == .modelRouter
+                && $0.modelToolExamples.contains {
+                    $0.arguments == [
+                        "workflow_id": .string("langgraph.review"),
+                        "line": .string(#"start TASK-ID {"topic":"topic"}"#),
+                    ]
+                }
+        })
+        XCTAssertEqual(workflowWiring.attachment.workflowID, "langgraph.review")
+        XCTAssertEqual(workflowWiring.attachment.apiBasePath, "/source")
+        XCTAssertEqual(workflowWiring.attachment.plannerEntrypoint, "plan")
+        XCTAssertTrue(workflowWiring.attachment.replExamples.contains {
+            $0.line == #"start TASK-ID {"topic":"topic"}"#
+        })
+        XCTAssertTrue(workflowWiring.attachment.apiExamples.contains {
+            $0.path == "/source/workflows/langgraph.review/tasks"
+                && $0.body["input"] == .object(["topic": .string("topic")])
+        })
+        XCTAssertTrue(workflowWiring.attachment.modelRouterExamples.contains {
+            $0.arguments == [
+                "workflow_id": .string("langgraph.review"),
+                "line": .string(#"start TASK-ID {"topic":"topic"}"#),
+            ]
+        })
         XCTAssertEqual(package.runtime.hostGuide.launchSteps.map(\.id), [
             "decode_source_package",
             "fresh_host_admission",
@@ -219,6 +258,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertNotNil(openAPIPaths["/source/runtime/agent-guide"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/host-guide"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/host-wiring"])
+        XCTAssertNotNil(openAPIPaths["/source/runtime/attachments"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/model-router"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/onyx-drivers"])
         let sourceStartPath = try object(openAPIPaths["/source/workflows/langgraph.review/tasks"])

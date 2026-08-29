@@ -9,7 +9,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostExport: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 4
+        static let currentSchemaVersion = 8
 
         let schemaVersion: Int
         let sourcePath: String
@@ -31,6 +31,39 @@ extension KistRunner {
             self.sourceFormat = sourceFormat
             self.runtimePackage = runtimePackage
             self.hostWiring = hostWiring
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostAttachments: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let attachmentEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let attachments: [SMLWorkflowRuntimeWorkflowAttachmentManifest]
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostAttachments.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            attachmentEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            attachments: [SMLWorkflowRuntimeWorkflowAttachmentManifest],
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.attachmentEndpoint = attachmentEndpoint
+            self.attachments = attachments.sorted {
+                if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+                return $0.workflowVersion < $1.workflowVersion
+            }
             self.launchDescriptor = launchDescriptor
         }
     }
@@ -207,7 +240,7 @@ extension KistRunner {
         var description: String {
             switch self {
             case .missingSourcePath:
-                return "--sml-runtime-export/--sml-runtime-repl/--sml-runtime-api requires <source.json>"
+                return "--sml-runtime-export/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
             case .missingREPLLine:
                 return "--sml-runtime-repl requires --sml-line <line>"
             case .missingAPIPath:
@@ -237,6 +270,26 @@ extension KistRunner {
         do {
             let json = try await renderSMLRuntimeHostExport(
                 sourcePath: opts.smlRuntimeExport,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeAttachments(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostAttachments(
+                sourcePath: opts.smlRuntimeAttachments,
                 projectRoot: opts.project,
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
@@ -379,6 +432,31 @@ extension KistRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return String(decoding: try encoder.encode(command), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostAttachments(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let attachments = try await makeSMLRuntimeHostAttachments(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(attachments), as: UTF8.self)
     }
 
     static func renderSMLRuntimeHostAPIExchange(
@@ -525,6 +603,40 @@ extension KistRunner {
                 metadataResource: response.metadataResource,
                 command: response.command,
                 result: response.result,
+                launchDescriptor: host.launch.launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostAttachments(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostAttachments {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let hostWiring = host.runtimePackage.runtime.hostWiring
+            return SMLRuntimeHostAttachments(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: hostWiring.apiBasePaths,
+                attachmentEndpoint: hostWiring.metadataEndpoints.first {
+                    $0.resource == .attachments
+                },
+                attachments: hostWiring.attachmentManifests,
                 launchDescriptor: host.launch.launchDescriptor
             )
         }

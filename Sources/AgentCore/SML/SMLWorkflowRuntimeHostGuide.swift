@@ -10,6 +10,47 @@ public enum SMLWorkflowRuntimeHostBindingChannel: String, Sendable, Codable, Equ
     case agentGuide = "agent_guide"
 }
 
+public struct SMLWorkflowRuntimeModelToolCallExample: Sendable, Codable, Equatable {
+    public let toolName: String
+    public let workflowID: String?
+    public let line: String
+    public let arguments: SMLObject
+    public let summary: String
+
+    public init(
+        toolName: String,
+        workflowID: String? = nil,
+        line: String,
+        summary: String
+    ) {
+        var arguments: SMLObject = ["line": .string(line)]
+        if let workflowID {
+            arguments["workflow_id"] = .string(workflowID)
+        }
+        self.init(
+            toolName: toolName,
+            workflowID: workflowID,
+            line: line,
+            arguments: arguments,
+            summary: summary
+        )
+    }
+
+    public init(
+        toolName: String,
+        workflowID: String?,
+        line: String,
+        arguments: SMLObject,
+        summary: String
+    ) {
+        self.toolName = toolName
+        self.workflowID = workflowID
+        self.line = line
+        self.arguments = arguments
+        self.summary = summary
+    }
+}
+
 public struct SMLWorkflowRuntimeHostBinding: Sendable, Codable, Equatable {
     public let channel: SMLWorkflowRuntimeHostBindingChannel
     public let reference: String
@@ -20,6 +61,9 @@ public struct SMLWorkflowRuntimeHostBinding: Sendable, Codable, Equatable {
     public let toolName: String?
     public let driverID: String?
     public let planningWorkflowID: String?
+    public let replExamples: [SMLWorkflowREPLExample]
+    public let apiExamples: [SMLWorkflowAPIRequestExample]
+    public let modelToolExamples: [SMLWorkflowRuntimeModelToolCallExample]
 
     public init(
         channel: SMLWorkflowRuntimeHostBindingChannel,
@@ -30,7 +74,10 @@ public struct SMLWorkflowRuntimeHostBinding: Sendable, Codable, Equatable {
         pathTemplates: [String] = [],
         toolName: String? = nil,
         driverID: String? = nil,
-        planningWorkflowID: String? = nil
+        planningWorkflowID: String? = nil,
+        replExamples: [SMLWorkflowREPLExample] = [],
+        apiExamples: [SMLWorkflowAPIRequestExample] = [],
+        modelToolExamples: [SMLWorkflowRuntimeModelToolCallExample] = []
     ) {
         self.channel = channel
         self.reference = reference
@@ -41,6 +88,92 @@ public struct SMLWorkflowRuntimeHostBinding: Sendable, Codable, Equatable {
         self.toolName = toolName
         self.driverID = driverID
         self.planningWorkflowID = planningWorkflowID
+        self.replExamples = replExamples.sorted {
+            if $0.verb != $1.verb { return $0.verb < $1.verb }
+            return $0.line < $1.line
+        }
+        self.apiExamples = apiExamples.sorted {
+            if $0.path != $1.path { return $0.path < $1.path }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.summary < $1.summary
+        }
+        self.modelToolExamples = modelToolExamples.sorted {
+            if ($0.workflowID ?? "") != ($1.workflowID ?? "") {
+                return ($0.workflowID ?? "") < ($1.workflowID ?? "")
+            }
+            if $0.line != $1.line { return $0.line < $1.line }
+            if $0.toolName != $1.toolName { return $0.toolName < $1.toolName }
+            return $0.summary < $1.summary
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case channel
+        case reference
+        case authority
+        case readOnly
+        case summary
+        case pathTemplates
+        case toolName
+        case driverID
+        case planningWorkflowID
+        case replExamples
+        case apiExamples
+        case modelToolExamples
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            channel: try container.decode(SMLWorkflowRuntimeHostBindingChannel.self, forKey: .channel),
+            reference: try container.decode(String.self, forKey: .reference),
+            authority: try container.decode(
+                SMLWorkflowRuntimeRouteAuthority.self,
+                forKey: .authority
+            ),
+            readOnly: try container.decode(Bool.self, forKey: .readOnly),
+            summary: try container.decode(String.self, forKey: .summary),
+            pathTemplates: try container.decodeIfPresent(
+                [String].self,
+                forKey: .pathTemplates
+            ) ?? [],
+            toolName: try container.decodeIfPresent(String.self, forKey: .toolName),
+            driverID: try container.decodeIfPresent(String.self, forKey: .driverID),
+            planningWorkflowID: try container.decodeIfPresent(
+                String.self,
+                forKey: .planningWorkflowID
+            ),
+            replExamples: try container.decodeIfPresent(
+                [SMLWorkflowREPLExample].self,
+                forKey: .replExamples
+            ) ?? [],
+            apiExamples: try container.decodeIfPresent(
+                [SMLWorkflowAPIRequestExample].self,
+                forKey: .apiExamples
+            ) ?? [],
+            modelToolExamples: try container.decodeIfPresent(
+                [SMLWorkflowRuntimeModelToolCallExample].self,
+                forKey: .modelToolExamples
+            ) ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(channel, forKey: .channel)
+        try container.encode(reference, forKey: .reference)
+        try container.encode(authority, forKey: .authority)
+        try container.encode(readOnly, forKey: .readOnly)
+        try container.encode(summary, forKey: .summary)
+        try container.encode(pathTemplates, forKey: .pathTemplates)
+        try container.encodeIfPresent(toolName, forKey: .toolName)
+        try container.encodeIfPresent(driverID, forKey: .driverID)
+        try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
+        try container.encode(replExamples, forKey: .replExamples)
+        try container.encode(apiExamples, forKey: .apiExamples)
+        try container.encode(modelToolExamples, forKey: .modelToolExamples)
     }
 }
 
@@ -179,9 +312,11 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             approvalGates: approvalGates,
             hostBindings: Self.hostBindings(
                 workflowID: descriptor.workflowID,
+                replMount: replMount,
                 apiRoutes: apiRoutes,
                 modelToolName: descriptor.model.tool.name,
                 modelRouterToolName: modelRouterToolName,
+                modelAllowedActions: descriptor.model.allowedActions,
                 onyxDriverID: onyxDriverID,
                 planningWorkflowID: planningWorkflowID,
                 metadataEndpoints: metadataEndpoints
@@ -191,9 +326,11 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 
     private static func hostBindings(
         workflowID: String,
+        replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
         modelRouterToolName: String,
+        modelAllowedActions: [SMLWorkflowControlAction],
         onyxDriverID: String,
         planningWorkflowID: String?,
         metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
@@ -202,13 +339,39 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             grouping: metadataEndpoints,
             by: \.resource
         ).mapValues { endpoints in endpoints.map(\.pathTemplate).sorted() }
+        let metadataExamplesByResource = Dictionary(
+            grouping: metadataEndpoints,
+            by: \.resource
+        ).mapValues { endpoints in
+            endpoints.map {
+                SMLWorkflowAPIRequestExample(
+                    method: $0.method,
+                    path: $0.pathTemplate,
+                    summary: $0.summary
+                )
+            }
+        }
+        let workflowAPIExamples = apiRoutes.flatMap(\.examples)
+        let modelToolExamples = Self.modelExamples(
+            toolName: modelToolName,
+            workflowID: nil,
+            replMount: replMount,
+            allowedActions: modelAllowedActions
+        )
+        let modelRouterExamples = Self.modelExamples(
+            toolName: modelRouterToolName,
+            workflowID: workflowID,
+            replMount: replMount,
+            allowedActions: modelAllowedActions
+        )
         return [
             SMLWorkflowRuntimeHostBinding(
                 channel: .customREPL,
                 reference: #"SMLWorkflowRuntimeApp.replSession(workflowID:)"#,
                 authority: .hostCommandGateway,
                 readOnly: false,
-                summary: "Bind this workflow's generated REPL grammar to a host terminal loop."
+                summary: "Bind this workflow's generated REPL grammar to a host terminal loop.",
+                replExamples: replMount.examples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .customAPI,
@@ -216,7 +379,8 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .hostCommandGateway,
                 readOnly: false,
                 summary: "Route generated HTTP/API endpoints through the shared runtime dispatcher.",
-                pathTemplates: apiRoutes.map(\.pathTemplate)
+                pathTemplates: apiRoutes.map(\.pathTemplate),
+                apiExamples: workflowAPIExamples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .modelTool,
@@ -224,7 +388,8 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .hostCommandGateway,
                 readOnly: false,
                 summary: "Expose this workflow-local command proposal tool only behind host admission.",
-                toolName: modelToolName
+                toolName: modelToolName,
+                modelToolExamples: modelToolExamples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .modelRouter,
@@ -232,7 +397,8 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .hostCommandGateway,
                 readOnly: false,
                 summary: "Expose one model-facing router that selects workflow_id plus one REPL line.",
-                toolName: modelRouterToolName
+                toolName: modelRouterToolName,
+                modelToolExamples: modelRouterExamples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .onyxDriver,
@@ -241,7 +407,8 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 readOnly: true,
                 summary: "Load the provider-neutral Onyx driver descriptor; side effects still cross the gateway.",
                 pathTemplates: metadataPathsByResource[.onyxDrivers] ?? [],
-                driverID: onyxDriverID
+                driverID: onyxDriverID,
+                apiExamples: metadataExamplesByResource[.onyxDrivers] ?? []
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .planningWorkflow,
@@ -250,7 +417,8 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 readOnly: true,
                 summary: "Load the planning graph, tool index, decomposition units, and approval gates.",
                 pathTemplates: metadataPathsByResource[.planning] ?? [],
-                planningWorkflowID: planningWorkflowID
+                planningWorkflowID: planningWorkflowID,
+                apiExamples: metadataExamplesByResource[.planning] ?? []
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .agentGuide,
@@ -258,9 +426,35 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .descriptorOnly,
                 readOnly: true,
                 summary: "Give the model/operator the canonical operating guide before routing commands.",
-                pathTemplates: metadataPathsByResource[.agentGuide] ?? []
+                pathTemplates: metadataPathsByResource[.agentGuide] ?? [],
+                apiExamples: metadataExamplesByResource[.agentGuide] ?? []
             ),
         ]
+    }
+
+    private static func modelExamples(
+        toolName: String,
+        workflowID: String?,
+        replMount: SMLWorkflowRuntimeREPLMount,
+        allowedActions: [SMLWorkflowControlAction]
+    ) -> [SMLWorkflowRuntimeModelToolCallExample] {
+        let allowed = Set(allowedActions)
+        let verbs = Set(replMount.commands.compactMap { command -> String? in
+            guard command.kind == .runtime,
+                  let action = command.action,
+                  allowed.contains(action) else { return nil }
+            return command.verb
+        })
+        return replMount.examples
+            .filter { verbs.contains($0.verb) }
+            .map {
+                SMLWorkflowRuntimeModelToolCallExample(
+                    toolName: toolName,
+                    workflowID: workflowID,
+                    line: $0.line,
+                    summary: $0.summary
+                )
+            }
     }
 }
 
@@ -271,7 +465,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 5
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]

@@ -620,19 +620,63 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
     public let workflowIDs: [String]
     public let maximumAdvisoryBytes: Int
     public let maximumCommandRounds: Int
+    public let examples: [SMLWorkflowRuntimeModelToolCallExample]
 
     public init(
         requiresNativeTools: Bool = true,
         tool: SMLWorkflowModelToolDescriptor,
         workflowIDs: [String],
         maximumAdvisoryBytes: Int,
-        maximumCommandRounds: Int
+        maximumCommandRounds: Int,
+        examples: [SMLWorkflowRuntimeModelToolCallExample] = []
     ) {
         self.requiresNativeTools = requiresNativeTools
         self.tool = tool
         self.workflowIDs = workflowIDs.sorted()
         self.maximumAdvisoryBytes = max(0, maximumAdvisoryBytes)
         self.maximumCommandRounds = min(max(1, maximumCommandRounds), 8)
+        self.examples = examples.sorted {
+            if ($0.workflowID ?? "") != ($1.workflowID ?? "") {
+                return ($0.workflowID ?? "") < ($1.workflowID ?? "")
+            }
+            if $0.line != $1.line { return $0.line < $1.line }
+            if $0.toolName != $1.toolName { return $0.toolName < $1.toolName }
+            return $0.summary < $1.summary
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case requiresNativeTools
+        case tool
+        case workflowIDs
+        case maximumAdvisoryBytes
+        case maximumCommandRounds
+        case examples
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            requiresNativeTools: try container.decode(Bool.self, forKey: .requiresNativeTools),
+            tool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .tool),
+            workflowIDs: try container.decode([String].self, forKey: .workflowIDs),
+            maximumAdvisoryBytes: try container.decode(Int.self, forKey: .maximumAdvisoryBytes),
+            maximumCommandRounds: try container.decode(Int.self, forKey: .maximumCommandRounds),
+            examples: try container.decodeIfPresent(
+                [SMLWorkflowRuntimeModelToolCallExample].self,
+                forKey: .examples
+            ) ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(requiresNativeTools, forKey: .requiresNativeTools)
+        try container.encode(tool, forKey: .tool)
+        try container.encode(workflowIDs, forKey: .workflowIDs)
+        try container.encode(maximumAdvisoryBytes, forKey: .maximumAdvisoryBytes)
+        try container.encode(maximumCommandRounds, forKey: .maximumCommandRounds)
+        try container.encode(examples, forKey: .examples)
     }
 }
 
@@ -645,6 +689,7 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
     case agentGuide = "agent-guide"
     case hostGuide = "host-guide"
     case hostWiring = "host-wiring"
+    case attachments
     case modelRouter = "model-router"
     case onyxDrivers = "onyx-drivers"
 
@@ -670,6 +715,8 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "Return the canonical host wiring guide for mounting SML workflow runtimes"
         case .hostWiring:
             return "Return the compact host adapter wiring map for mounted SML workflow runtimes"
+        case .attachments:
+            return "Return per-workflow attachment manifests for REPL/API/model/Onyx/planning adapters"
         case .modelRouter:
             return "Return the native model-router tool descriptor for mounted SML workflows"
         case .onyxDrivers:
@@ -1063,7 +1110,7 @@ public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
 /// to expose and which handler to call, but it carries no actor identity, authority lease,
 /// credential, runtime handle, provider registry, or executable closure.
 public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 6
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -1667,7 +1714,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 10
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -1714,31 +1761,71 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        let decodedSchemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        schemaVersion = decodedSchemaVersion
         catalog = try container.decode(SMLWorkflowRuntimeCatalog.self, forKey: .catalog)
-        mountContract = try container.decodeIfPresent(
+        let decodedMountContract = try container.decodeIfPresent(
             SMLWorkflowRuntimeMountContract.self, forKey: .mountContract
-        ) ?? catalog.mountContract
-        openAPI = try container.decode(SMLObject.self, forKey: .openAPI)
+        )
+        mountContract = decodedMountContract.flatMap {
+            $0.schemaVersion < SMLWorkflowRuntimeMountContract.currentSchemaVersion ? nil : $0
+        } ?? catalog.mountContract
+        let decodedOpenAPI = try container.decode(SMLObject.self, forKey: .openAPI)
+        openAPI = decodedSchemaVersion < SMLWorkflowRuntimeExport.currentSchemaVersion
+            ? Self.regeneratedOpenAPI(from: decodedOpenAPI, catalog: catalog)
+            : decodedOpenAPI
         modelTools = try container.decode(
             [SMLWorkflowRuntimeModelToolExport].self, forKey: .modelTools
         )
-        modelRouter = try container.decodeIfPresent(
+        let decodedModelRouter = try container.decodeIfPresent(
             SMLWorkflowRuntimeModelRouterDescriptor.self, forKey: .modelRouter
-        ) ?? catalog.modelRouter
+        )
+        modelRouter = decodedSchemaVersion < SMLWorkflowRuntimeExport.currentSchemaVersion
+            ? catalog.modelRouter
+            : decodedModelRouter ?? catalog.modelRouter
         onyxDrivers = try container.decode([SMLOnyxDriverManifest].self, forKey: .onyxDrivers)
         planning = try container.decodeIfPresent(
             SMLWorkflowRuntimePlanningManifest.self, forKey: .planning
         ) ?? catalog.planningManifest
-        agentGuide = try container.decodeIfPresent(
+        let decodedAgentGuide = try container.decodeIfPresent(
             SMLWorkflowRuntimeAgentGuide.self, forKey: .agentGuide
-        ) ?? catalog.agentGuide
-        hostGuide = try container.decodeIfPresent(
+        )
+        agentGuide = decodedAgentGuide.flatMap {
+            $0.schemaVersion < SMLWorkflowRuntimeAgentGuide.currentSchemaVersion ? nil : $0
+        } ?? catalog.agentGuide
+        let decodedHostGuide = try container.decodeIfPresent(
             SMLWorkflowRuntimeHostGuide.self, forKey: .hostGuide
-        ) ?? catalog.hostGuide
-        hostWiring = try container.decodeIfPresent(
+        )
+        hostGuide = decodedHostGuide.flatMap {
+            $0.schemaVersion < SMLWorkflowRuntimeHostGuide.currentSchemaVersion ? nil : $0
+        } ?? catalog.hostGuide
+        let decodedHostWiring = try container.decodeIfPresent(
             SMLWorkflowRuntimeHostWiring.self, forKey: .hostWiring
-        ) ?? catalog.hostWiring
+        )
+        hostWiring = decodedHostWiring.flatMap {
+            $0.schemaVersion < SMLWorkflowRuntimeHostWiring.currentSchemaVersion ? nil : $0
+        } ?? catalog.hostWiring
+    }
+
+    private static func regeneratedOpenAPI(
+        from decodedOpenAPI: SMLObject,
+        catalog: SMLWorkflowRuntimeCatalog
+    ) -> SMLObject {
+        let info = object(decodedOpenAPI["info"])
+        return catalog.openAPIDocument(
+            title: string(info["title"]) ?? "SML Workflow Runtime API",
+            version: string(info["version"]) ?? "1.0.0"
+        )
+    }
+
+    private static func object(_ value: SMLValue?) -> SMLObject {
+        guard case .object(let object) = value else { return [:] }
+        return object
+    }
+
+    private static func string(_ value: SMLValue?) -> String? {
+        guard case .string(let string) = value else { return nil }
+        return string
     }
 }
 
@@ -1756,8 +1843,31 @@ public extension SMLWorkflowRuntimeCatalog {
             maximumAdvisoryBytes: SMLWorkflowModelAdapter.maximumAdvisoryBytes,
             maximumCommandRounds: workflows
                 .map(\.model.maximumCommandRounds)
-                .max() ?? 1
+                .max() ?? 1,
+            examples: modelRouterExamples
         )
+    }
+
+    private var modelRouterExamples: [SMLWorkflowRuntimeModelToolCallExample] {
+        workflows.flatMap { descriptor in
+            let allowedActions = Set(descriptor.model.allowedActions)
+            let modelVerbs = Set(descriptor.repl.commands.compactMap { command -> String? in
+                guard command.kind == .runtime,
+                      let action = command.action,
+                      allowedActions.contains(action) else { return nil }
+                return command.verb
+            })
+            return descriptor.repl.examples
+                .filter { modelVerbs.contains($0.verb) }
+                .map {
+                    SMLWorkflowRuntimeModelToolCallExample(
+                        toolName: SMLWorkflowRuntimeModelAdapter.toolName,
+                        workflowID: descriptor.workflowID,
+                        line: $0.line,
+                        summary: $0.summary
+                    )
+                }
+        }
     }
 
     var planningManifest: SMLWorkflowRuntimePlanningManifest {
@@ -2376,6 +2486,8 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostGuide)
         case .hostWiring:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostWiring)
+        case .attachments:
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostWiring.attachmentManifests)
         case .modelRouter:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.modelRouter)
         case .onyxDrivers:
@@ -2569,7 +2681,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 8
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -3662,6 +3774,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "modelToolNames": .array(catalog.modelTools.map { .string($0.tool.name) }),
                 "modelRouterToolName": .string(catalog.modelRouter.tool.name),
                 "modelRouterTool": .object(modelTool(catalog.modelRouter.tool)),
+                "modelRouterExamples": .array(
+                    catalog.modelRouter.examples.map(modelToolCallExample)
+                ),
                 "modelRouterMaximumCommandRounds": .number(
                     Decimal(catalog.modelRouter.maximumCommandRounds)
                 ),
@@ -3681,6 +3796,12 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "hostWiringSchemaVersion": .number(Decimal(hostWiring.schemaVersion)),
                 "hostWiringWorkflowCount": .number(Decimal(hostWiring.workflows.count)),
                 "hostWiringBindingCount": .number(Decimal(hostWiring.hostBindingCount)),
+                "attachmentManifestCount": .number(
+                    Decimal(hostWiring.attachmentManifests.count)
+                ),
+                "attachmentWorkflowIDs": .array(
+                    hostWiring.attachmentManifests.map { .string($0.workflowID) }
+                ),
                 "planningManifestSchemaVersion": .number(
                     Decimal(catalog.planningManifest.schemaVersion)
                 ),
@@ -3904,6 +4025,21 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 ])
             }),
         ]
+    }
+
+    private static func modelToolCallExample(
+        _ example: SMLWorkflowRuntimeModelToolCallExample
+    ) -> SMLValue {
+        var object: SMLObject = [
+            "toolName": .string(example.toolName),
+            "line": .string(example.line),
+            "arguments": .object(example.arguments),
+            "summary": .string(example.summary),
+        ]
+        if let workflowID = example.workflowID {
+            object["workflowID"] = .string(workflowID)
+        }
+        return .object(object)
     }
 
     private static func metadataEndpoint(
