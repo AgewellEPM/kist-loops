@@ -142,6 +142,13 @@ struct KistOptions {
     var modelAcquire: String?       // --model-acquire <manifest.json>: verify acquisition manifest
     var modelRunStage: String?      // --model-run <stage> <manifest.json>: execute verified manifest stage
     var modelRunManifest: String?
+    var smlRuntimeExport: String?   // --sml-runtime-export <source.json>: offline source/package -> REPL/API/model/Onyx/planning JSON
+    var smlRuntimeRole: String?     // --sml-role <role>: override mounted workflow role
+    var smlRuntimeActor: String?    // --sml-actor <actor>: synthetic host actor for offline install proof
+    var smlRuntimeAPIBasePath: String? // --sml-api-base <path>: override generated API base path
+    var smlRuntimeTitle: String?    // --sml-title <title>: OpenAPI/runtime export title
+    var smlRuntimeVersion: String?  // --sml-version <version>: OpenAPI/runtime export version
+    var smlRuntimeModelRounds: Int? // --sml-model-rounds <1...8>: model-router command-round ceiling
     var optionErrors: [String] = []
     var resumeId: String?           // --resume <id>
     var resumeLast = false          // --resume-last
@@ -184,6 +191,25 @@ struct KistOptions {
                                                 }
                                             } else {
                                                 o.optionErrors.append("\(flag) requires <stage> <manifest.json>")
+                                            }
+            case "--sml-runtime-export":
+                                            if let v = next() { o.smlRuntimeExport = v }
+                                            else { o.optionErrors.append("--sml-runtime-export requires <source.json>") }
+            case "--sml-role":              if let v = next() { o.smlRuntimeRole = v }
+                                            else { o.optionErrors.append("--sml-role requires <role>") }
+            case "--sml-actor":             if let v = next() { o.smlRuntimeActor = v }
+                                            else { o.optionErrors.append("--sml-actor requires <actor>") }
+            case "--sml-api-base":          if let v = next() { o.smlRuntimeAPIBasePath = v }
+                                            else { o.optionErrors.append("--sml-api-base requires <path>") }
+            case "--sml-title":             if let v = next() { o.smlRuntimeTitle = v }
+                                            else { o.optionErrors.append("--sml-title requires <title>") }
+            case "--sml-version":           if let v = next() { o.smlRuntimeVersion = v }
+                                            else { o.optionErrors.append("--sml-version requires <version>") }
+            case "--sml-model-rounds":
+                                            if let v = next(), let n = Int(v), (1...8).contains(n) {
+                                                o.smlRuntimeModelRounds = n
+                                            } else {
+                                                o.optionErrors.append("--sml-model-rounds requires an integer from 1 through 8")
                                             }
             case "--list":                  o.listRuns = true
             case "--resume":
@@ -595,6 +621,14 @@ struct KistOptions {
                                     Execute only the stage authorized by a verified acquisition
                                     manifest. Download requires a prior passing dry-run marker;
                                     inspect/onboard/benchmark require the prior stage markers.
+          --sml-runtime-export <json>
+                                    Offline-wrap a LangGraph manifest, SML workflow JSON, or SML
+                                    runtime source package into a host JSON payload containing the
+                                    generated custom REPL mount, API/OpenAPI routes, native model-router
+                                    tool, Onyx driver manifests, planning graph, and launch descriptor.
+              --sml-role <role>         Override workflow role for the generated mount.
+              --sml-api-base <path>     Override API base path for generated endpoints.
+              --sml-model-rounds <n>    Override model-router round ceiling (1...8).
           --bench                   Provider bake-off for the given task: success, latency, usage/cost,
                                     tool failures, and tests evidence where available.
           --eval                    Agent regression check for the given task: output/trajectory assertions

@@ -127,6 +127,9 @@ enum KistRunner {
         if opts.stickyBarSelfTest {
             return await runStickyBarSelfTest()
         }
+        if opts.smlRuntimeExport != nil {
+            return await runSMLRuntimeExport(opts)
+        }
 
         let config = KistConfig.load()
         var registry = makeRegistry(config: config)

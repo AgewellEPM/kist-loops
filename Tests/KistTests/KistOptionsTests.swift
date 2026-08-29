@@ -92,6 +92,44 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertNil(runNoManifest.modelRunManifest)
     }
 
+    func testSMLRuntimeExportFlags() {
+        let o = KistOptions.parse([
+            "--sml-runtime-export", "graphs/review.langgraph.json",
+            "--sml-role", "reviewer",
+            "--sml-actor", "operator.test",
+            "--sml-api-base", "/source",
+            "--sml-title", "Source Runtime",
+            "--sml-version", "2026.08",
+            "--sml-model-rounds", "3",
+        ])
+        XCTAssertEqual(o.smlRuntimeExport, "graphs/review.langgraph.json")
+        XCTAssertEqual(o.smlRuntimeRole, "reviewer")
+        XCTAssertEqual(o.smlRuntimeActor, "operator.test")
+        XCTAssertEqual(o.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(o.smlRuntimeTitle, "Source Runtime")
+        XCTAssertEqual(o.smlRuntimeVersion, "2026.08")
+        XCTAssertEqual(o.smlRuntimeModelRounds, 3)
+        XCTAssertNil(o.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-export <json>"))
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-api-base <path>"))
+    }
+
+    func testSMLRuntimeExportFlagsRequireOperands() {
+        let export = KistOptions.parse(["--sml-runtime-export"])
+        XCTAssertTrue(export.optionErrors.contains { $0.contains("--sml-runtime-export requires") })
+        XCTAssertNil(export.smlRuntimeExport)
+
+        let role = KistOptions.parse(["--sml-role"])
+        XCTAssertTrue(role.optionErrors.contains { $0.contains("--sml-role requires") })
+
+        let apiBase = KistOptions.parse(["--sml-api-base"])
+        XCTAssertTrue(apiBase.optionErrors.contains { $0.contains("--sml-api-base requires") })
+
+        let rounds = KistOptions.parse(["--sml-model-rounds", "9"])
+        XCTAssertTrue(rounds.optionErrors.contains { $0.contains("--sml-model-rounds requires") })
+        XCTAssertNil(rounds.smlRuntimeModelRounds)
+    }
+
     func testShortFlags() {
         let o = KistOptions.parse(["-p", "openai", "-m", "gpt-4o", "-C", "/tmp/proj"])
         XCTAssertEqual(o.providerId, "openai")
