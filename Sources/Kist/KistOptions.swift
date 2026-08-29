@@ -168,6 +168,8 @@ struct KistOptions {
     var smlRuntimeAPIScriptPath: String? // --sml-api-script <path>: generated runtime API request script file
     var smlRuntimeModel: String?    // --sml-runtime-model <source.json>: let a native-tool model drive mounted workflows
     var smlRuntimeModelPrompt: String? // --sml-prompt <text>: user prompt for --sml-runtime-model
+    var smlRuntimeModelScript: String? // --sml-runtime-model-script <source.json>: run a generated model prompt script
+    var smlRuntimeModelScriptPath: String? // --sml-model-script <path>: prompt script file for --sml-runtime-model-script
     var smlRuntimeRole: String?     // --sml-role <role>: override mounted workflow role
     var smlRuntimeActor: String?    // --sml-actor <actor>: synthetic host actor for offline install proof
     var smlRuntimeAPIBasePath: String? // --sml-api-base <path>: override generated API base path
@@ -273,6 +275,9 @@ struct KistOptions {
             case let flag where ["--sml-runtime-model", "--sml-model-runtime"].contains(flag):
                                             if let v = next() { o.smlRuntimeModel = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-model-script", "--sml-model-batch"].contains(flag):
+                                            if let v = next() { o.smlRuntimeModelScript = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
             case "--sml-workflow":
                                             if let v = next() { o.smlRuntimeWorkflowID = v }
                                             else { o.optionErrors.append("--sml-workflow requires <workflow-id>") }
@@ -304,6 +309,9 @@ struct KistOptions {
             case let flag where ["--sml-prompt", "--sml-model-prompt"].contains(flag):
                                             if let v = next() { o.smlRuntimeModelPrompt = v }
                                             else { o.optionErrors.append("\(flag) requires <text>") }
+            case let flag where ["--sml-model-script", "--sml-prompts"].contains(flag):
+                                            if let v = next() { o.smlRuntimeModelScriptPath = v }
+                                            else { o.optionErrors.append("\(flag) requires <path>") }
             case "--sml-role":              if let v = next() { o.smlRuntimeRole = v }
                                             else { o.optionErrors.append("--sml-role requires <role>") }
             case "--sml-actor":             if let v = next() { o.smlRuntimeActor = v }
@@ -550,6 +558,7 @@ struct KistOptions {
             ("--sml-runtime-api", o.smlRuntimeAPI != nil),
             ("--sml-runtime-api-script", o.smlRuntimeAPIScript != nil),
             ("--sml-runtime-model", o.smlRuntimeModel != nil),
+            ("--sml-runtime-model-script", o.smlRuntimeModelScript != nil),
         ]
         let activeSMLRuntimeModes = smlRuntimeModes.filter { $0.active }
         for firstIndex in activeSMLRuntimeModes.indices {
@@ -617,6 +626,13 @@ struct KistOptions {
             }
         } else if o.smlRuntimeModelPrompt != nil {
             o.optionErrors.append("--sml-prompt requires --sml-runtime-model <source.json>")
+        }
+        if o.smlRuntimeModelScript != nil {
+            if o.smlRuntimeModelScriptPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--sml-runtime-model-script requires --sml-model-script <path>")
+            }
+        } else if o.smlRuntimeModelScriptPath != nil {
+            o.optionErrors.append("--sml-model-script requires --sml-runtime-model-script <source.json>")
         }
         // Autopilot is an UMBRELLA: it implies no-prompt (yolo) + shell + a FORCED OS sandbox.
         // Forced last so it can never be silently un-set by flag order or a future --no-sandbox.
@@ -882,12 +898,17 @@ struct KistOptions {
           --sml-runtime-model <json> [--sml-prompt <text>] [--provider <id>] [--model <id>]
                                     Launch the wrapped source and let the selected native-tool model
                                     drive mounted workflows through propose_sml_runtime_command.
+          --sml-runtime-model-script <json> --sml-model-script <path> [--provider <id>] [--model <id>]
+                                    Launch the wrapped source and run a multi-turn prompt script
+                                    through one generated model-router session.
               --sml-role <role>         Override workflow role for the generated mount.
               --sml-api-base <path>     Override API base path for generated endpoints.
               --sml-out <dir>           Output directory for --sml-runtime-scaffold.
               --sml-script <path>       Script file for --sml-runtime-repl-script; blank lines and
                                         leading # comments are ignored.
               --sml-api-script <path>   JSON request array for --sml-runtime-api-script.
+              --sml-model-script <path> Line-oriented prompt script for --sml-runtime-model-script;
+                                        blank lines and leading # comments are ignored.
               --sml-model-rounds <n>    Override model-router round ceiling (1...8).
           --bench                   Provider bake-off for the given task: success, latency, usage/cost,
                                     tool failures, and tests evidence where available.

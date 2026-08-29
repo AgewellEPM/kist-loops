@@ -466,6 +466,35 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertEqual(positionalPrompt.smlRuntimeModel, "graphs/review.langgraph.json")
         XCTAssertNil(positionalPrompt.smlRuntimeModelPrompt)
         XCTAssertEqual(positionalPrompt.goal, "start the review workflow")
+
+        let script = KistOptions.parse([
+            "--sml-runtime-model-script", "graphs/review.langgraph.json",
+            "--sml-model-script", "scripts/review.prompts",
+            "--sml-role", "reviewer",
+            "--sml-actor", "operator.test",
+            "--sml-api-base", "/source",
+            "--sml-title", "Source Runtime",
+            "--sml-version", "2026.08",
+            "--sml-model-rounds", "3",
+        ])
+        XCTAssertEqual(script.smlRuntimeModelScript, "graphs/review.langgraph.json")
+        XCTAssertEqual(script.smlRuntimeModelScriptPath, "scripts/review.prompts")
+        XCTAssertEqual(script.smlRuntimeRole, "reviewer")
+        XCTAssertEqual(script.smlRuntimeActor, "operator.test")
+        XCTAssertEqual(script.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(script.smlRuntimeTitle, "Source Runtime")
+        XCTAssertEqual(script.smlRuntimeVersion, "2026.08")
+        XCTAssertEqual(script.smlRuntimeModelRounds, 3)
+        XCTAssertNil(script.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-model-script <json>"))
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-model-script <path>"))
+
+        let scriptAlias = KistOptions.parse([
+            "--sml-model-batch", "graphs/review.langgraph.json",
+            "--sml-prompts", "scripts/review.prompts",
+        ])
+        XCTAssertEqual(scriptAlias.smlRuntimeModelScript, "graphs/review.langgraph.json")
+        XCTAssertEqual(scriptAlias.smlRuntimeModelScriptPath, "scripts/review.prompts")
     }
 
     func testSMLRuntimeExportFlagsRequireOperands() {
@@ -865,6 +894,34 @@ final class KistOptionsTests: XCTestCase {
             "--sml-prompt", "start it",
         ])
         XCTAssertTrue(apiConflict.optionErrors.contains { $0.contains("--sml-runtime-api conflicts with --sml-runtime-model") })
+
+        let modelScript = KistOptions.parse(["--sml-runtime-model-script"])
+        XCTAssertTrue(modelScript.optionErrors.contains {
+            $0.contains("--sml-runtime-model-script requires <source.json>")
+        })
+        XCTAssertNil(modelScript.smlRuntimeModelScript)
+
+        let missingScript = KistOptions.parse([
+            "--sml-runtime-model-script", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(missingScript.optionErrors.contains {
+            $0.contains("--sml-runtime-model-script requires --sml-model-script <path>")
+        })
+
+        let scriptOnly = KistOptions.parse(["--sml-model-script", "scripts/review.prompts"])
+        XCTAssertTrue(scriptOnly.optionErrors.contains {
+            $0.contains("--sml-model-script requires --sml-runtime-model-script")
+        })
+
+        let modelScriptConflict = KistOptions.parse([
+            "--sml-runtime-model", "graphs/review.langgraph.json",
+            "--sml-prompt", "start it",
+            "--sml-runtime-model-script", "graphs/review.langgraph.json",
+            "--sml-model-script", "scripts/review.prompts",
+        ])
+        XCTAssertTrue(modelScriptConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-model conflicts with --sml-runtime-model-script")
+        })
     }
 
     func testShortFlags() {

@@ -23,6 +23,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let apiScriptDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAPIScript != nil"))
         let exportDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeExport != nil"))
         let modelDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeModel != nil"))
+        let modelScriptDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeModelScript != nil"))
         let configLoad = try XCTUnwrap(source.range(of: "let config = KistConfig.load()"))
         let buildTools = try XCTUnwrap(source.range(of: "let extraTools = Self.buildExtraTools"))
 
@@ -116,10 +117,20 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             configLoad.lowerBound,
             "SML runtime model mode intentionally resolves a real provider/model before execution"
         )
+        XCTAssertGreaterThan(
+            modelScriptDispatch.lowerBound,
+            configLoad.lowerBound,
+            "SML runtime model-script mode intentionally resolves a real provider/model before execution"
+        )
         XCTAssertLessThan(
             modelDispatch.lowerBound,
             buildTools.lowerBound,
             "SML runtime model mode must use the generated model-router tool, not the normal agent tool registry"
+        )
+        XCTAssertLessThan(
+            modelScriptDispatch.lowerBound,
+            buildTools.lowerBound,
+            "SML runtime model-script mode must use the generated model-router tool, not the normal agent tool registry"
         )
     }
 
@@ -849,6 +860,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "host-guide.json",
             "host-wiring.json",
             "launch.json",
+            "model-scripts/langgraph.review.prompts",
             "model-router.json",
             "model-tools.json",
             "mount.json",
@@ -989,8 +1001,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let readme = try String(contentsOf: outputURL.appendingPathComponent("README.md"))
         XCTAssertTrue(readme.contains("Host wiring order"))
         XCTAssertTrue(readme.contains("api-scripts/*.json"))
+        XCTAssertTrue(readme.contains("model-scripts/*.prompts"))
         XCTAssertTrue(readme.contains("repl-scripts/*.repl"))
         XCTAssertTrue(readme.contains("--sml-runtime-api-script"))
+        XCTAssertTrue(readme.contains("--sml-runtime-model-script"))
         XCTAssertTrue(readme.contains("--sml-runtime-repl-script"))
         XCTAssertTrue(readme.contains("State changes still have to cross the generated host command gateway"))
         let apiScript = try JSONDecoder().decode(
@@ -1013,6 +1027,12 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(scaffoldScript.contains("kist --sml-runtime-repl-script ."))
         XCTAssertTrue(scaffoldScript.contains("start TASK-SCAFFOLD"))
         XCTAssertTrue(scaffoldScript.contains("watch TASK-SCAFFOLD"))
+        let modelPromptScript = try String(
+            contentsOf: outputURL.appendingPathComponent("model-scripts/langgraph.review.prompts")
+        )
+        XCTAssertTrue(modelPromptScript.contains("kist --sml-runtime-model-script ."))
+        XCTAssertTrue(modelPromptScript.contains("Start langgraph.review as task TASK-SCAFFOLD"))
+        XCTAssertTrue(modelPromptScript.contains("Watch the current langgraph.review task"))
 
         let replFromDirectoryJSON = try await KistRunner.renderSMLRuntimeHostREPLCommand(
             sourcePath: "runtime-scaffold",
@@ -1097,6 +1117,65 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(apiTranscriptFromDirectory.launchDescriptor.workflowIDs, ["langgraph.review"])
         XCTAssertFalse(apiTranscriptFromDirectoryJSON.contains("sml-runtime-export-lease"))
         XCTAssertFalse(apiTranscriptFromDirectoryJSON.contains("authenticatedActor"))
+
+        let scaffoldModelProvider = ScriptedSMLRuntimeProvider([
+            .textAndCall(
+                "Starting from scaffold prompt.",
+                name: SMLWorkflowRuntimeModelAdapter.toolName,
+                arguments: #"{"workflow_id":"langgraph.review","line":"start TASK-SCAFFOLD {\"topic\":\"runtime\"}"}"#
+            ),
+            .textAndCall(
+                "Watching from scaffold prompt.",
+                name: SMLWorkflowRuntimeModelAdapter.toolName,
+                arguments: #"{"workflow_id":"langgraph.review","line":"watch"}"#
+            ),
+            .textAndCall(
+                "Listing scaffold receipts.",
+                name: SMLWorkflowRuntimeModelAdapter.toolName,
+                arguments: #"{"workflow_id":"langgraph.review","line":"receipts"}"#
+            ),
+            .text("Receipt review complete."),
+        ])
+        let scaffoldModelRegistry = ProviderRegistry(
+            providers: [scaffoldModelProvider],
+            retryDelaysNanoseconds: []
+        )
+        let modelTranscriptFromDirectoryJSON = try await KistRunner.renderSMLRuntimeHostModelTranscript(
+            sourcePath: "runtime-scaffold",
+            projectRoot: directory.path,
+            scriptPath: "runtime-scaffold/model-scripts/langgraph.review.prompts",
+            binding: ProviderBinding(
+                providerId: scaffoldModelProvider.id,
+                model: scaffoldModelProvider.defaultModel
+            ),
+            providers: scaffoldModelRegistry,
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let modelTranscriptFromDirectory = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostModelTranscript.self,
+            from: Data(modelTranscriptFromDirectoryJSON.utf8)
+        )
+        XCTAssertEqual(modelTranscriptFromDirectory.sourcePath, indexURL.path)
+        XCTAssertEqual(modelTranscriptFromDirectory.sourceFormat, .runtimeScaffold)
+        XCTAssertEqual(modelTranscriptFromDirectory.promptCount, 3)
+        XCTAssertEqual(modelTranscriptFromDirectory.providerRequestLimit, 9)
+        XCTAssertEqual(modelTranscriptFromDirectory.providerRequestsConsumed, 4)
+        XCTAssertEqual(modelTranscriptFromDirectory.turns.map(\.providerRequestsConsumed), [1, 1, 2])
+        XCTAssertEqual(modelTranscriptFromDirectory.turns[0].steps.first?.command?.task, "TASK-SCAFFOLD")
+        XCTAssertEqual(modelTranscriptFromDirectory.turns[1].steps.first?.command?.task, "TASK-SCAFFOLD")
+        XCTAssertEqual(modelTranscriptFromDirectory.turns[2].steps.first?.command?.task, "TASK-SCAFFOLD")
+        XCTAssertEqual(modelTranscriptFromDirectory.turns[1].steps.first?.command?.op, SMLRuntimeCommandOperation.taskWatch)
+        XCTAssertEqual(modelTranscriptFromDirectory.turns[2].steps.first?.command?.op, SMLRuntimeCommandOperation.receiptsList)
+        XCTAssertEqual(modelTranscriptFromDirectory.turns[2].steps.last?.disposition, .advisoryOnly)
+        XCTAssertEqual(modelTranscriptFromDirectory.taskIDsByWorkflowID["langgraph.review"], "TASK-SCAFFOLD")
+        XCTAssertEqual(modelTranscriptFromDirectory.launchDescriptor.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertFalse(modelTranscriptFromDirectoryJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(modelTranscriptFromDirectoryJSON.contains("authenticatedActor"))
 
         let apiFromIndexJSON = try await KistRunner.renderSMLRuntimeHostAPIExchange(
             sourcePath: "runtime-scaffold/scaffold.json",
@@ -1907,6 +1986,94 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertFalse(json.contains("authenticatedActor"))
     }
 
+    func testLangGraphManifestModelScriptRunsSessionfulPromptTranscript() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifestURL = directory.appendingPathComponent("review.langgraph.json")
+        try langGraphReviewManifest().write(to: manifestURL)
+        let scriptURL = directory.appendingPathComponent("review.prompts")
+        try """
+        # generated model-router prompts
+        Start the review workflow as TASK-MODEL-SCRIPT.
+
+        Watch the current review task.
+        """.write(to: scriptURL, atomically: true, encoding: .utf8)
+        let provider = ScriptedSMLRuntimeProvider([
+            .textAndCall(
+                "Starting the wrapped workflow.",
+                name: SMLWorkflowRuntimeModelAdapter.toolName,
+                arguments: #"{"workflow_id":"langgraph.review","line":"start TASK-MODEL-SCRIPT {\"topic\":\"runtime\"}"}"#
+            ),
+            .textAndCall(
+                "Watching the remembered task.",
+                name: SMLWorkflowRuntimeModelAdapter.toolName,
+                arguments: #"{"workflow_id":"langgraph.review","line":"watch"}"#
+            ),
+        ])
+        let registry = ProviderRegistry(
+            providers: [provider],
+            retryDelaysNanoseconds: []
+        )
+
+        let json = try await KistRunner.renderSMLRuntimeHostModelTranscript(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            scriptPath: "review.prompts",
+            binding: ProviderBinding(providerId: provider.id, model: provider.defaultModel),
+            providers: registry,
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let transcript = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostModelTranscript.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(transcript.schemaVersion, KistRunner.SMLRuntimeHostModelTranscript.currentSchemaVersion)
+        XCTAssertEqual(transcript.sourcePath, manifestURL.path)
+        XCTAssertEqual(transcript.sourceFormat, .langGraphManifest)
+        XCTAssertEqual(transcript.scriptPath, scriptURL.path)
+        XCTAssertEqual(transcript.providerBinding, ProviderBinding(providerId: "sml-scripted", model: "scripted-1"))
+        XCTAssertEqual(transcript.maximumCommandRounds, 3)
+        XCTAssertEqual(transcript.promptCount, 2)
+        XCTAssertEqual(transcript.providerRequestLimit, 6)
+        XCTAssertEqual(transcript.providerRequestsConsumed, 2)
+        XCTAssertEqual(transcript.turns.map(\.index), [1, 2])
+        XCTAssertEqual(transcript.turns.map(\.providerRequestsBefore), [0, 1])
+        XCTAssertEqual(transcript.turns.map(\.providerRequestsAfter), [1, 2])
+        XCTAssertEqual(transcript.turns.map(\.providerRequestsConsumed), [1, 1])
+        XCTAssertEqual(transcript.turns.map(\.prompt), [
+            "Start the review workflow as TASK-MODEL-SCRIPT.",
+            "Watch the current review task.",
+        ])
+
+        let start = transcript.turns[0]
+        XCTAssertEqual(start.advisoryText, "Starting the wrapped workflow.")
+        XCTAssertEqual(start.steps.count, 1)
+        XCTAssertEqual(start.steps.first?.command?.op, SMLRuntimeCommandOperation.workflowRun)
+        XCTAssertEqual(start.steps.first?.command?.task, "TASK-MODEL-SCRIPT")
+        XCTAssertEqual(start.steps.first?.result?.task?.taskID, "TASK-MODEL-SCRIPT")
+        XCTAssertEqual(start.taskIDsByWorkflowID["langgraph.review"], "TASK-MODEL-SCRIPT")
+
+        let watch = transcript.turns[1]
+        XCTAssertEqual(watch.advisoryText, "Watching the remembered task.")
+        XCTAssertEqual(watch.steps.count, 1)
+        XCTAssertEqual(watch.steps.first?.command?.op, SMLRuntimeCommandOperation.taskWatch)
+        XCTAssertEqual(watch.steps.first?.command?.task, "TASK-MODEL-SCRIPT")
+        XCTAssertEqual(watch.steps.first?.result?.task?.taskID, "TASK-MODEL-SCRIPT")
+        XCTAssertEqual(watch.taskIDsByWorkflowID["langgraph.review"], "TASK-MODEL-SCRIPT")
+        XCTAssertEqual(transcript.taskIDsByWorkflowID["langgraph.review"], "TASK-MODEL-SCRIPT")
+        XCTAssertEqual(transcript.launchDescriptor.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(transcript.launchDescriptor.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+
+        XCTAssertFalse(json.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(json.contains("authenticatedActor"))
+    }
+
     func testLangGraphManifestREPLRunsGeneratedWorkflowCommandThroughLaunch() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2338,6 +2505,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
 private final class ScriptedSMLRuntimeProvider: ChatProvider, @unchecked Sendable {
     enum Step {
         case textAndCall(String, name: String, arguments: String)
+        case text(String)
     }
 
     struct Capture {
@@ -2397,6 +2565,10 @@ private final class ScriptedSMLRuntimeProvider: ChatProvider, @unchecked Sendabl
                     name: name,
                     argumentsJSON: arguments
                 ))
+                continuation.yield(.finish(reason: "stop"))
+                continuation.finish()
+            case .text(let text):
+                continuation.yield(.delta(text))
                 continuation.yield(.finish(reason: "stop"))
                 continuation.finish()
             }

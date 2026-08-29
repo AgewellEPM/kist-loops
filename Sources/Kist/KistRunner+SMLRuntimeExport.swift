@@ -774,6 +774,81 @@ extension KistRunner {
         }
     }
 
+    struct SMLRuntimeHostModelTranscriptTurn: Sendable, Codable, Equatable {
+        let index: Int
+        let prompt: String
+        let providerRequestsBefore: Int
+        let providerRequestsAfter: Int
+        let providerRequestsConsumed: Int
+        let advisoryText: String
+        let steps: [SMLRuntimeHostModelStep]
+        let taskIDsByWorkflowID: [String: String]
+
+        init(
+            index: Int,
+            prompt: String,
+            providerRequestsBefore: Int,
+            providerRequestsAfter: Int,
+            advisoryText: String,
+            steps: [SMLRuntimeHostModelStep],
+            taskIDsByWorkflowID: [String: String]
+        ) {
+            self.index = index
+            self.prompt = prompt
+            self.providerRequestsBefore = providerRequestsBefore
+            self.providerRequestsAfter = providerRequestsAfter
+            self.providerRequestsConsumed = providerRequestsAfter - providerRequestsBefore
+            self.advisoryText = advisoryText
+            self.steps = steps
+            self.taskIDsByWorkflowID = taskIDsByWorkflowID
+        }
+    }
+
+    struct SMLRuntimeHostModelTranscript: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let scriptPath: String
+        let providerBinding: ProviderBinding
+        let maximumCommandRounds: Int
+        let promptCount: Int
+        let providerRequestLimit: Int
+        let providerRequestsConsumed: Int
+        let turns: [SMLRuntimeHostModelTranscriptTurn]
+        let taskIDsByWorkflowID: [String: String]
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostModelTranscript.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            scriptPath: String,
+            providerBinding: ProviderBinding,
+            maximumCommandRounds: Int,
+            promptCount: Int,
+            providerRequestLimit: Int,
+            providerRequestsConsumed: Int,
+            turns: [SMLRuntimeHostModelTranscriptTurn],
+            taskIDsByWorkflowID: [String: String],
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.scriptPath = scriptPath
+            self.providerBinding = providerBinding
+            self.maximumCommandRounds = maximumCommandRounds
+            self.promptCount = promptCount
+            self.providerRequestLimit = providerRequestLimit
+            self.providerRequestsConsumed = providerRequestsConsumed
+            self.turns = turns
+            self.taskIDsByWorkflowID = taskIDsByWorkflowID
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
     enum SMLRuntimeHostExportError: Error, CustomStringConvertible {
         case missingSourcePath
         case missingOutputDirectory
@@ -787,6 +862,9 @@ extension KistRunner {
         case invalidAPIScript(path: String, reason: String)
         case readAPIScriptFailed(path: String, reason: String)
         case missingModelPrompt
+        case missingModelScriptPath
+        case emptyModelScript(path: String)
+        case readModelScriptFailed(path: String, reason: String)
         case invalidJSONObject(flag: String, reason: String)
         case invalidScaffold(path: String, reason: String)
         case readFailed(path: String, reason: String)
@@ -802,7 +880,7 @@ extension KistRunner {
         var description: String {
             switch self {
             case .missingSourcePath:
-                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-openapi/--sml-runtime-model-router/--sml-runtime-onyx/--sml-runtime-planning/--sml-runtime-catalog/--sml-runtime-mount/--sml-runtime-agent-guide/--sml-runtime-host-guide/--sml-runtime-host-wiring/--sml-runtime-scaffold/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-repl-script/--sml-runtime-api/--sml-runtime-api-script/--sml-runtime-model requires <source.json>"
+                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-openapi/--sml-runtime-model-router/--sml-runtime-onyx/--sml-runtime-planning/--sml-runtime-catalog/--sml-runtime-mount/--sml-runtime-agent-guide/--sml-runtime-host-guide/--sml-runtime-host-wiring/--sml-runtime-scaffold/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-repl-script/--sml-runtime-api/--sml-runtime-api-script/--sml-runtime-model/--sml-runtime-model-script requires <source.json>"
             case .missingOutputDirectory:
                 return "--sml-runtime-scaffold requires --sml-out <dir>"
             case .missingREPLLine:
@@ -825,6 +903,12 @@ extension KistRunner {
                 return "could not read SML runtime API script '\(path)': \(reason)"
             case .missingModelPrompt:
                 return "--sml-runtime-model requires --sml-prompt <text> or a positional prompt"
+            case .missingModelScriptPath:
+                return "--sml-runtime-model-script requires --sml-model-script <path>"
+            case .emptyModelScript(let path):
+                return "--sml-model-script contains no runnable prompts: \(path)"
+            case .readModelScriptFailed(let path, let reason):
+                return "could not read SML runtime model script '\(path)': \(reason)"
             case .invalidJSONObject(let flag, let reason):
                 return "\(flag) must be a valid SML JSON object: \(reason)"
             case .invalidScaffold(let path, let reason):
@@ -1217,6 +1301,35 @@ extension KistRunner {
                 sourcePath: opts.smlRuntimeModel,
                 projectRoot: projectRoot,
                 prompt: opts.smlRuntimeModelPrompt ?? opts.goal,
+                binding: ProviderBinding(providerId: providerId, model: model),
+                providers: registry,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeModelScript(
+        _ opts: KistOptions,
+        registry: ProviderRegistry,
+        providerId: String,
+        model: String?,
+        projectRoot: String
+    ) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostModelTranscript(
+                sourcePath: opts.smlRuntimeModelScript,
+                projectRoot: projectRoot,
+                scriptPath: opts.smlRuntimeModelScriptPath,
                 binding: ProviderBinding(providerId: providerId, model: model),
                 providers: registry,
                 roleOverride: opts.smlRuntimeRole,
@@ -1710,6 +1823,37 @@ extension KistRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return String(decoding: try encoder.encode(turn), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostModelTranscript(
+        sourcePath: String?,
+        projectRoot: String,
+        scriptPath: String?,
+        binding: ProviderBinding,
+        providers: ProviderRegistry,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let transcript = try await makeSMLRuntimeHostModelTranscript(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            scriptPath: scriptPath,
+            binding: binding,
+            providers: providers,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(transcript), as: UTF8.self)
     }
 
     static func makeSMLRuntimeHostExport(
@@ -2245,6 +2389,12 @@ extension KistRunner {
                     summary: "Runnable generated REPL script template for \(attachment.workflowID).",
                     text: smlRuntimeScaffoldREPLScript(for: attachment)
                 ))
+                files.append(try writeSMLRuntimeScaffoldTextFile(
+                    relativePath: "model-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).prompts",
+                    outputDirectory: outputURL,
+                    summary: "Runnable generated model-router prompt script template for \(attachment.workflowID).",
+                    text: smlRuntimeScaffoldModelScript(for: attachment)
+                ))
             }
             files.append(try writeSMLRuntimeScaffoldTextFile(
                 relativePath: "README.md",
@@ -2518,6 +2668,7 @@ extension KistRunner {
         6. Use `host-wiring.json` or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
         7. Run `repl-scripts/*.repl` with `kist --sml-runtime-repl-script <this directory> --sml-script <script>` to produce a multi-turn workflow REPL transcript.
         8. Run `api-scripts/*.json` with `kist --sml-runtime-api-script <this directory> --sml-api-script <script>` to produce a multi-request generated API transcript.
+        9. Run `model-scripts/*.prompts` with `kist --sml-runtime-model-script <this directory> --sml-model-script <script>` plus a native-tool provider/model to produce a multi-turn model-router transcript.
 
         Descriptor files do not carry actor identity, leases, credentials, provider registries, runtime handles, or completion authority. State changes still have to cross the generated host command gateway and replay/admission checks.
         """
@@ -2573,6 +2724,20 @@ extension KistRunner {
         ] + runtimeLines + [
             "# Approval/refusal/rollback commands require the latest task_revision returned by watch.",
             "exit",
+            "",
+        ]).joined(separator: "\n")
+    }
+
+    private static func smlRuntimeScaffoldModelScript(
+        for attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
+    ) -> String {
+        ([
+            "# Generated SML workflow model-router prompt script for \(attachment.workflowID)",
+            "# Run from the scaffold directory with a native-tool provider/model:",
+            "# kist --sml-runtime-model-script . --sml-model-script model-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).prompts --provider <provider> --model <model>",
+            "Start \(attachment.workflowID) as task TASK-SCAFFOLD with the declared sample input.",
+            "Watch the current \(attachment.workflowID) task and summarize the waiting instruction.",
+            "List receipts for \(attachment.workflowID); treat only accepted or sealed receipts as proof.",
             "",
         ]).joined(separator: "\n")
     }
@@ -2806,6 +2971,78 @@ extension KistRunner {
                 advisoryText: turn.advisoryText,
                 steps: turn.steps.map(SMLRuntimeHostModelStep.init),
                 taskIDsByWorkflowID: turn.taskIDsByWorkflowID,
+                launchDescriptor: host.launch.launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostModelTranscript(
+        sourcePath: String?,
+        projectRoot: String,
+        scriptPath: String?,
+        binding: ProviderBinding,
+        providers: ProviderRegistry,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostModelTranscript {
+        let script = try loadSMLRuntimeModelScript(
+            scriptPath: scriptPath,
+            projectRoot: projectRoot
+        )
+        let maximumCommandRounds = modelMaximumCommandRoundsOverride.map {
+            min(max(1, $0), 8)
+        } ?? 4
+        let providerRequestLimit = maximumCommandRounds * script.prompts.count
+        let requestBudget = ProviderRequestBudget(limit: providerRequestLimit)
+        return try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: maximumCommandRounds
+        ) { host in
+            let session = host.launch.app.modelRouterSession(
+                binding: binding,
+                providers: providers,
+                maximumCommandRounds: maximumCommandRounds
+            )
+            var turns: [SMLRuntimeHostModelTranscriptTurn] = []
+            for (offset, prompt) in script.prompts.enumerated() {
+                let before = await requestBudget.consumedCount()
+                let turn = try await session.submit(
+                    prompt,
+                    requestBudget: requestBudget
+                )
+                let after = await requestBudget.consumedCount()
+                turns.append(SMLRuntimeHostModelTranscriptTurn(
+                    index: offset + 1,
+                    prompt: prompt,
+                    providerRequestsBefore: before,
+                    providerRequestsAfter: after,
+                    advisoryText: turn.advisoryText,
+                    steps: turn.steps.map(SMLRuntimeHostModelStep.init),
+                    taskIDsByWorkflowID: turn.taskIDsByWorkflowID
+                ))
+            }
+            let consumed = await requestBudget.consumedCount()
+            return SMLRuntimeHostModelTranscript(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                scriptPath: script.path,
+                providerBinding: binding,
+                maximumCommandRounds: maximumCommandRounds,
+                promptCount: script.prompts.count,
+                providerRequestLimit: providerRequestLimit,
+                providerRequestsConsumed: consumed,
+                turns: turns,
+                taskIDsByWorkflowID: await session.taskIDs(),
                 launchDescriptor: host.launch.launchDescriptor
             )
         }
@@ -3185,6 +3422,35 @@ extension KistRunner {
             )
         }
         return (scriptURL.path, requests)
+    }
+
+    private static func loadSMLRuntimeModelScript(
+        scriptPath: String?,
+        projectRoot: String
+    ) throws -> (path: String, prompts: [String]) {
+        guard let scriptPath,
+              !scriptPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SMLRuntimeHostExportError.missingModelScriptPath
+        }
+        let scriptURL = smlRuntimeSourceURL(scriptPath, projectRoot: projectRoot)
+            .standardizedFileURL
+        let scriptText: String
+        do {
+            scriptText = try String(contentsOf: scriptURL, encoding: .utf8)
+        } catch {
+            throw SMLRuntimeHostExportError.readModelScriptFailed(
+                path: scriptURL.path,
+                reason: String(describing: error)
+            )
+        }
+        let prompts = scriptText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        guard !prompts.isEmpty else {
+            throw SMLRuntimeHostExportError.emptyModelScript(path: scriptURL.path)
+        }
+        return (scriptURL.path, prompts)
     }
 
     private struct LoadedSMLRuntimeSource {

@@ -346,6 +346,15 @@ enum KistRunner {
                 projectRoot: root
             )
         }
+        if opts.smlRuntimeModelScript != nil {
+            return await runSMLRuntimeModelScript(
+                opts,
+                registry: registry,
+                providerId: providerId,
+                model: model,
+                projectRoot: root
+            )
+        }
         let auditRunID = "cli-" + UUID().uuidString.lowercased()
         let auditLog = AuditLog.forRun(root: root, runID: auditRunID)
         let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
