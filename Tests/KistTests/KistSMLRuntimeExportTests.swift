@@ -152,6 +152,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let hostGuideWorkflow = try XCTUnwrap(
             export.runtimePackage.runtime.hostGuide.workflowBindings.first
         )
+        XCTAssertEqual(hostGuideWorkflow.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(hostGuideWorkflow.model?.maximumCommandRounds, 3)
         XCTAssertEqual(hostGuideWorkflow.skillIndex.count, 3)
         XCTAssertEqual(
             hostGuideWorkflow.skillIndex.first { $0.instructionID == "plan" }?.reference,
@@ -169,6 +171,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let agentGuideWorkflow = try XCTUnwrap(
             export.runtimePackage.runtime.agentGuide.workflowGuides.first
         )
+        XCTAssertEqual(agentGuideWorkflow.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(agentGuideWorkflow.model?.maximumCommandRounds, 3)
         XCTAssertEqual(agentGuideWorkflow.skillIndex.count, 3)
         XCTAssertEqual(
             agentGuideWorkflow.skillIndex.first { $0.instructionID == "plan" }?.reference,
@@ -246,10 +250,14 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(openAPIRuntime["mountWorkflowCommandBindingCount"], .number(7))
         XCTAssertEqual(openAPIRuntime["attachmentCommandBindingCount"], .number(7))
         XCTAssertEqual(openAPIRuntime["agentGuideCommandBindingCount"], .number(7))
+        XCTAssertEqual(openAPIRuntime["agentGuideModelDescriptorCount"], .number(1))
         XCTAssertEqual(openAPIRuntime["agentGuideSkillIndexCount"], .number(3))
         XCTAssertEqual(openAPIRuntime["hostGuideCommandBindingCount"], .number(7))
+        XCTAssertEqual(openAPIRuntime["hostGuideModelDescriptorCount"], .number(1))
         XCTAssertEqual(openAPIRuntime["hostGuideSkillIndexCount"], .number(3))
+        XCTAssertEqual(openAPIRuntime["hostWiringModelDescriptorCount"], .number(1))
         XCTAssertEqual(openAPIRuntime["hostWiringSkillIndexCount"], .number(3))
+        XCTAssertEqual(openAPIRuntime["attachmentModelDescriptorCount"], .number(1))
         XCTAssertEqual(openAPIRuntime["attachmentSkillIndexCount"], .number(3))
         XCTAssertEqual(openAPIRuntime["planningSkillIndexCount"], .number(3))
         let openAPIPlanningSkillIndex = try array(openAPIRuntime["planningSkillIndex"])
@@ -295,6 +303,14 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(launched.replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
         XCTAssertEqual(launched.replMount.commandBindings.count, 7)
         XCTAssertEqual(launched.commandBindings, launched.replMount.commandBindings)
+        XCTAssertEqual(launched.skillIndex.count, 3)
+        XCTAssertEqual(launched.skillIndex.first { $0.instructionID == "plan" }?.reference, "review.plan")
+        let launchedAttachment = try XCTUnwrap(launched.attachment)
+        XCTAssertEqual(launchedAttachment, export.hostWiring.attachmentManifests.first)
+        XCTAssertEqual(launchedAttachment.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(launchedAttachment.model?.maximumCommandRounds, 3)
+        XCTAssertEqual(launchedAttachment.skillIndex, launched.skillIndex)
+        XCTAssertEqual(launchedAttachment.commandBindings, launched.commandBindings)
         XCTAssertEqual(launched.apiRoutes.count, 7)
         XCTAssertEqual(
             launched.apiRoutes.first { $0.action == .start }?.examples.first?.body["input"],
@@ -346,6 +362,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             .object(["topic": .string("topic")])
         )
         XCTAssertEqual(wiring.modelToolName, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(wiring.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(wiring.model?.maximumCommandRounds, 3)
         XCTAssertEqual(wiring.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(wiring.onyxDriverID, export.runtimePackage.runtime.onyxDrivers.first?.driverID)
         XCTAssertEqual(wiring.planningWorkflowID, "langgraph.review")
@@ -405,6 +423,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(wiring.attachment.apiBasePath, "/source")
         XCTAssertEqual(wiring.attachment.plannerEntrypoint, "plan")
         XCTAssertEqual(wiring.attachment.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(wiring.attachment.model, wiring.model)
         XCTAssertEqual(wiring.attachment.skillTree.map(\.id), ["plan", "write", "receipt"])
         XCTAssertEqual(wiring.attachment.skillIndex, wiring.skillIndex)
         XCTAssertEqual(wiring.attachment.toolBindings.map(\.reference), [
@@ -465,6 +484,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(attachment.workflowName, "LangGraph review")
         XCTAssertEqual(attachment.apiBasePath, "/source")
         XCTAssertEqual(attachment.plannerEntrypoint, "plan")
+        XCTAssertEqual(attachment.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(attachment.model?.maximumCommandRounds, 3)
         XCTAssertEqual(attachment.channels, [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
             .onyxDriver, .planningWorkflow,
@@ -623,6 +644,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             XCTAssertEqual(workflows.count, 1)
             let workflow = try object(workflows.first)
             XCTAssertEqual(try array(workflow["skillIndex"]).count, 3)
+            XCTAssertEqual(
+                try object(try object(workflow["model"])["tool"])["name"],
+                .string(SMLWorkflowModelAdapter.toolName)
+            )
             XCTAssertEqual(try array(workflow["commandBindings"]).count, 7)
         } else {
             XCTFail("expected host-wiring workflows array")
@@ -660,6 +685,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(attachment["workflowID"], .string("langgraph.review"))
         XCTAssertEqual(attachment["apiBasePath"], .string("/source"))
         XCTAssertEqual(attachment["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
+        XCTAssertEqual(
+            try object(try object(attachment["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
         XCTAssertEqual(try array(attachment["skillIndex"]).count, 3)
         XCTAssertEqual(try array(attachment["commandBindings"]).count, 7)
         XCTAssertFalse(attachmentsJSON.contains("sml-runtime-export-lease"))
@@ -692,6 +721,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertNil(workflowAttachmentAPI.result)
         let workflowAttachment = try object(workflowAttachmentAPI.responseBody)
         XCTAssertEqual(workflowAttachment["workflowID"], .string("langgraph.review"))
+        XCTAssertEqual(
+            try object(try object(workflowAttachment["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
         XCTAssertEqual(try array(workflowAttachment["skillTree"]).count, 3)
         XCTAssertEqual(try array(workflowAttachment["skillIndex"]).count, 3)
         XCTAssertEqual(try array(workflowAttachment["toolBindings"]).count, 2)

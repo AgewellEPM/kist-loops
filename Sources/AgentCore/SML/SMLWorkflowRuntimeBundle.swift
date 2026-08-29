@@ -2200,7 +2200,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 18
+    public static let currentSchemaVersion = 20
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -3129,6 +3129,8 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
     public let planningWorkflowID: String?
     public let hostBindingChannels: [SMLWorkflowRuntimeHostBindingChannel]
     public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
+    public let attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest?
 
     public init(
         workflowID: String,
@@ -3146,7 +3148,9 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
         onyxDriverID: String,
         planningWorkflowID: String?,
         hostBindingChannels: [SMLWorkflowRuntimeHostBindingChannel],
-        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = []
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding] = [],
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry] = [],
+        attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest? = nil
     ) {
         self.workflowID = workflowID
         self.workflowVersion = workflowVersion
@@ -3172,6 +3176,8 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
             $0.rawValue < $1.rawValue
         }
         self.commandBindings = Self.sortedCommandBindings(commandBindings)
+        self.skillIndex = Self.sortedSkillIndex(skillIndex)
+        self.attachment = attachment
     }
 
     public init(
@@ -3196,7 +3202,37 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
             onyxDriverID: mount.onyxDriverID,
             planningWorkflowID: mount.planningWorkflowID,
             hostBindingChannels: hostBinding?.hostBindings.map(\.channel) ?? [],
-            commandBindings: mount.commandBindings
+            commandBindings: mount.commandBindings,
+            skillIndex: hostBinding?.skillIndex ?? [],
+            attachment: hostBinding.map { guide in
+                SMLWorkflowRuntimeWorkflowAttachmentManifest(
+                    workflowID: mount.workflowID,
+                    workflowVersion: mount.workflowVersion,
+                    workflowName: mount.workflowName,
+                    role: mount.role,
+                    sourceKind: descriptor.sourceKind,
+                    sourceReference: descriptor.sourceReference,
+                    sourceDigest: descriptor.sourceDigest,
+                    apiBasePath: mount.apiBasePath,
+                    replMount: mount.repl,
+                    apiRoutes: mount.apiRoutes,
+                    modelToolName: mount.modelToolName,
+                    model: descriptor.model,
+                    modelRouterToolName: mount.modelRouterToolName,
+                    onyxDriverID: mount.onyxDriverID,
+                    planningWorkflowID: mount.planningWorkflowID,
+                    plannerEntrypoint: guide.plannerEntrypoint,
+                    skillTree: descriptor.onyx.skillTree,
+                    skillIndex: guide.skillIndex,
+                    toolBindings: descriptor.onyx.tools,
+                    plan: descriptor.onyx.plan,
+                    toolReferences: guide.toolReferences,
+                    decomposableUnits: guide.decomposableUnits,
+                    approvalGates: guide.approvalGates,
+                    commandBindings: mount.commandBindings,
+                    hostBindings: guide.hostBindings
+                )
+            }
         )
     }
 
@@ -3217,6 +3253,8 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
         case planningWorkflowID
         case hostBindingChannels
         case commandBindings
+        case skillIndex
+        case attachment
     }
 
     public init(from decoder: Decoder) throws {
@@ -3247,7 +3285,15 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
             commandBindings: try container.decodeIfPresent(
                 [SMLWorkflowRuntimePlanningCommandBinding].self,
                 forKey: .commandBindings
-            ) ?? replMount.commandBindings
+            ) ?? replMount.commandBindings,
+            skillIndex: try container.decodeIfPresent(
+                [SMLWorkflowRuntimePlanningSkillIndexEntry].self,
+                forKey: .skillIndex
+            ) ?? [],
+            attachment: try container.decodeIfPresent(
+                SMLWorkflowRuntimeWorkflowAttachmentManifest.self,
+                forKey: .attachment
+            )
         )
     }
 
@@ -3269,6 +3315,8 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
         try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
         try container.encode(hostBindingChannels, forKey: .hostBindingChannels)
         try container.encode(commandBindings, forKey: .commandBindings)
+        try container.encode(skillIndex, forKey: .skillIndex)
+        try container.encodeIfPresent(attachment, forKey: .attachment)
     }
 
     private static func sortedCommandBindings(
@@ -3282,6 +3330,18 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
             return $0.replVerb < $1.replVerb
         }
     }
+
+    private static func sortedSkillIndex(
+        _ skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
+    ) -> [SMLWorkflowRuntimePlanningSkillIndexEntry] {
+        skillIndex.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.operation.rawValue < $1.operation.rawValue
+        }
+    }
 }
 
 /// Serializable receipt-shaped summary of what a host actually mounted.
@@ -3292,7 +3352,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 12
+    public static let currentSchemaVersion = 13
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -4471,6 +4531,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "agentGuideCommandBindingCount": .number(Decimal(
                     agentGuide.workflowGuides.reduce(0) { $0 + $1.commandBindings.count }
                 )),
+                "agentGuideModelDescriptorCount": .number(Decimal(
+                    agentGuide.workflowGuides.reduce(0) { $0 + ($1.model == nil ? 0 : 1) }
+                )),
                 "agentGuideSkillIndexCount": .number(Decimal(
                     agentGuide.workflowGuides.reduce(0) { $0 + $1.skillIndex.count }
                 )),
@@ -4482,12 +4545,18 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "hostGuideCommandBindingCount": .number(Decimal(
                     hostGuide.workflowBindings.reduce(0) { $0 + $1.commandBindings.count }
                 )),
+                "hostGuideModelDescriptorCount": .number(Decimal(
+                    hostGuide.workflowBindings.reduce(0) { $0 + ($1.model == nil ? 0 : 1) }
+                )),
                 "hostGuideSkillIndexCount": .number(Decimal(
                     hostGuide.workflowBindings.reduce(0) { $0 + $1.skillIndex.count }
                 )),
                 "hostWiringSchemaVersion": .number(Decimal(hostWiring.schemaVersion)),
                 "hostWiringWorkflowCount": .number(Decimal(hostWiring.workflows.count)),
                 "hostWiringBindingCount": .number(Decimal(hostWiring.hostBindingCount)),
+                "hostWiringModelDescriptorCount": .number(Decimal(
+                    hostWiring.workflows.reduce(0) { $0 + ($1.model == nil ? 0 : 1) }
+                )),
                 "hostWiringSkillIndexCount": .number(Decimal(
                     hostWiring.workflows.reduce(0) { $0 + $1.skillIndex.count }
                 )),
@@ -4497,6 +4566,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "attachmentWorkflowIDs": .array(
                     hostWiring.attachmentManifests.map { .string($0.workflowID) }
                 ),
+                "attachmentModelDescriptorCount": .number(Decimal(
+                    hostWiring.attachmentManifests.reduce(0) { $0 + ($1.model == nil ? 0 : 1) }
+                )),
                 "attachmentSkillTreeNodeCount": .number(Decimal(
                     hostWiring.attachmentManifests.reduce(0) { $0 + $1.skillTree.count }
                 )),

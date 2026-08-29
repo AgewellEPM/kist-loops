@@ -22,6 +22,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let apiExamples: [SMLWorkflowAPIRequestExample]
     public let modelToolName: String
+    public let model: SMLWorkflowModelDescriptor?
     public let modelRouterToolName: String
     public let modelToolExamples: [SMLWorkflowRuntimeModelToolCallExample]
     public let modelRouterExamples: [SMLWorkflowRuntimeModelToolCallExample]
@@ -49,6 +50,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
+        model: SMLWorkflowModelDescriptor? = nil,
         modelRouterToolName: String,
         onyxDriverID: String,
         planningWorkflowID: String?,
@@ -92,6 +94,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             return $0.summary < $1.summary
         }
         self.modelToolName = modelToolName
+        self.model = model
         self.modelRouterToolName = modelRouterToolName
         modelToolExamples = Self.modelExamples(for: .modelTool, in: hostBindings)
         modelRouterExamples = Self.modelExamples(for: .modelRouter, in: hostBindings)
@@ -134,6 +137,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         case apiRoutes
         case apiExamples
         case modelToolName
+        case model
         case modelRouterToolName
         case modelToolExamples
         case modelRouterExamples
@@ -180,6 +184,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             return $0.summary < $1.summary
         }
         modelToolName = try container.decode(String.self, forKey: .modelToolName)
+        model = try container.decodeIfPresent(SMLWorkflowModelDescriptor.self, forKey: .model)
         modelRouterToolName = try container.decode(String.self, forKey: .modelRouterToolName)
         modelToolExamples = try container.decode(
             [SMLWorkflowRuntimeModelToolCallExample].self,
@@ -272,6 +277,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let modelToolName: String
+    public let model: SMLWorkflowModelDescriptor?
     public let modelRouterToolName: String
     public let onyxDriverID: String
     public let planningWorkflowID: String?
@@ -296,6 +302,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
+        model: SMLWorkflowModelDescriptor? = nil,
         modelRouterToolName: String,
         onyxDriverID: String,
         planningWorkflowID: String?,
@@ -346,6 +353,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         self.replMount = replMount
         self.apiRoutes = sortedAPIRoutes
         self.modelToolName = modelToolName
+        self.model = model
         self.modelRouterToolName = modelRouterToolName
         self.onyxDriverID = onyxDriverID
         self.planningWorkflowID = planningWorkflowID
@@ -368,6 +376,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             replMount: replMount,
             apiRoutes: sortedAPIRoutes,
             modelToolName: modelToolName,
+            model: model,
             modelRouterToolName: modelRouterToolName,
             onyxDriverID: onyxDriverID,
             planningWorkflowID: planningWorkflowID,
@@ -401,6 +410,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             replMount: mount.repl,
             apiRoutes: mount.apiRoutes,
             modelToolName: mount.modelToolName,
+            model: descriptor.model,
             modelRouterToolName: mount.modelRouterToolName,
             onyxDriverID: mount.onyxDriverID,
             planningWorkflowID: mount.planningWorkflowID,
@@ -429,6 +439,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         case replMount
         case apiRoutes
         case modelToolName
+        case model
         case modelRouterToolName
         case onyxDriverID
         case planningWorkflowID
@@ -455,6 +466,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         let replMount = try container.decode(SMLWorkflowRuntimeREPLMount.self, forKey: .replMount)
         let apiRoutes = try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes)
         let modelToolName = try container.decode(String.self, forKey: .modelToolName)
+        let model = try container.decodeIfPresent(SMLWorkflowModelDescriptor.self, forKey: .model)
         let modelRouterToolName = try container.decode(String.self, forKey: .modelRouterToolName)
         let onyxDriverID = try container.decode(String.self, forKey: .onyxDriverID)
         let planningWorkflowID = try container.decodeIfPresent(
@@ -498,6 +510,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             replMount: replMount,
             apiRoutes: apiRoutes,
             modelToolName: modelToolName,
+            model: model,
             modelRouterToolName: modelRouterToolName,
             onyxDriverID: onyxDriverID,
             planningWorkflowID: planningWorkflowID,
@@ -528,6 +541,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         try container.encode(replMount, forKey: .replMount)
         try container.encode(apiRoutes, forKey: .apiRoutes)
         try container.encode(modelToolName, forKey: .modelToolName)
+        try container.encodeIfPresent(model, forKey: .model)
         try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
         try container.encode(onyxDriverID, forKey: .onyxDriverID)
         try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
@@ -567,7 +581,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 11
+    public static let currentSchemaVersion = 12
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

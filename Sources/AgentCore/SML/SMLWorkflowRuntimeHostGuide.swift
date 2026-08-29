@@ -208,6 +208,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let modelTool: SMLWorkflowModelToolDescriptor
+    public let model: SMLWorkflowModelDescriptor?
     public let modelRouterToolName: String
     public let onyxDriverID: String
     public let planningWorkflowID: String?
@@ -231,6 +232,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelTool: SMLWorkflowModelToolDescriptor,
+        model: SMLWorkflowModelDescriptor? = nil,
         modelRouterToolName: String,
         onyxDriverID: String,
         planningWorkflowID: String?,
@@ -259,6 +261,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             return $0.operationID < $1.operationID
         }
         self.modelTool = modelTool
+        self.model = model
         self.modelRouterToolName = modelRouterToolName
         self.onyxDriverID = onyxDriverID
         self.planningWorkflowID = planningWorkflowID
@@ -317,6 +320,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             replMount: replMount,
             apiRoutes: apiRoutes,
             modelTool: descriptor.model.tool,
+            model: descriptor.model,
             modelRouterToolName: modelRouterToolName,
             onyxDriverID: onyxDriverID,
             planningWorkflowID: planningWorkflowID,
@@ -352,6 +356,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         case replMount
         case apiRoutes
         case modelTool
+        case model
         case modelRouterToolName
         case onyxDriverID
         case planningWorkflowID
@@ -378,6 +383,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             replMount: try container.decode(SMLWorkflowRuntimeREPLMount.self, forKey: .replMount),
             apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
             modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
+            model: try container.decodeIfPresent(SMLWorkflowModelDescriptor.self, forKey: .model),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
             onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
             planningWorkflowID: try container.decodeIfPresent(
@@ -422,6 +428,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         try container.encode(replMount, forKey: .replMount)
         try container.encode(apiRoutes, forKey: .apiRoutes)
         try container.encode(modelTool, forKey: .modelTool)
+        try container.encodeIfPresent(model, forKey: .model)
         try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
         try container.encode(onyxDriverID, forKey: .onyxDriverID)
         try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
@@ -587,7 +594,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 9
+    public static let currentSchemaVersion = 10
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]

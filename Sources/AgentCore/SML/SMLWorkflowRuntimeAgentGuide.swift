@@ -7,7 +7,7 @@ import Foundation
 /// model router, and Onyx exports. It carries no actor, lease, credentials, runtime handle, replay
 /// state, or host authority; mutations still have to cross the runtime command gateway.
 public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 8
 
     public let schemaVersion: Int
     public let systemPrompt: String
@@ -108,6 +108,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
     public let graphSummary: String
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let modelTool: SMLWorkflowModelToolDescriptor
+    public let model: SMLWorkflowModelDescriptor?
     public let modelRouterToolName: String
     public let onyxDriverID: String
     public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
@@ -133,6 +134,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         graphSummary: String,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelTool: SMLWorkflowModelToolDescriptor,
+        model: SMLWorkflowModelDescriptor? = nil,
         modelRouterToolName: String,
         onyxDriverID: String,
         skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry] = [],
@@ -169,6 +171,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             return $0.operationID < $1.operationID
         }
         self.modelTool = modelTool
+        self.model = model
         self.modelRouterToolName = modelRouterToolName
         self.onyxDriverID = onyxDriverID
         self.skillIndex = skillIndex.sorted {
@@ -216,6 +219,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             graphSummary: descriptor.graphSummary,
             apiRoutes: mount?.apiRoutes ?? [],
             modelTool: descriptor.model.tool,
+            model: descriptor.model,
             modelRouterToolName: mount?.modelRouterToolName ?? SMLWorkflowRuntimeModelAdapter.toolName,
             onyxDriverID: descriptor.onyx.driverID,
             skillIndex: skillIndex,
@@ -342,6 +346,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         case graphSummary
         case apiRoutes
         case modelTool
+        case model
         case modelRouterToolName
         case onyxDriverID
         case skillIndex
@@ -376,6 +381,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             graphSummary: try container.decode(String.self, forKey: .graphSummary),
             apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
             modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
+            model: try container.decodeIfPresent(SMLWorkflowModelDescriptor.self, forKey: .model),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
             onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
             skillIndex: try container.decodeIfPresent(
@@ -419,6 +425,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         try container.encode(graphSummary, forKey: .graphSummary)
         try container.encode(apiRoutes, forKey: .apiRoutes)
         try container.encode(modelTool, forKey: .modelTool)
+        try container.encodeIfPresent(model, forKey: .model)
         try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
         try container.encode(onyxDriverID, forKey: .onyxDriverID)
         try container.encode(skillIndex, forKey: .skillIndex)

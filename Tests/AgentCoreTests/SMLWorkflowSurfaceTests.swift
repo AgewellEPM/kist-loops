@@ -777,6 +777,24 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         ])
         XCTAssertEqual(reviewLaunch.commandBindings, reviewLaunch.replMount.commandBindings)
         XCTAssertEqual(reviewLaunch.commandBindings.count, 7)
+        XCTAssertEqual(reviewLaunch.skillIndex.count, 7)
+        XCTAssertEqual(
+            reviewLaunch.skillIndex.first { $0.instructionID == "plan" }?.reference,
+            "content.plan"
+        )
+        let reviewLaunchAttachment = try XCTUnwrap(reviewLaunch.attachment)
+        XCTAssertEqual(
+            reviewLaunchAttachment,
+            launchDescriptor.hostWiring.attachmentManifests.first {
+                $0.workflowID == "content.review"
+            }
+        )
+        XCTAssertEqual(reviewLaunchAttachment.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(reviewLaunchAttachment.model?.maximumCommandRounds, 4)
+        XCTAssertEqual(reviewLaunchAttachment.skillIndex, reviewLaunch.skillIndex)
+        XCTAssertEqual(reviewLaunchAttachment.commandBindings, reviewLaunch.commandBindings)
+        XCTAssertEqual(reviewLaunchAttachment.plan?.entrypoint, "plan")
+        XCTAssertEqual(reviewLaunchAttachment.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
 
         var legacyLaunchWorkflowObject = try XCTUnwrap(
             JSONSerialization.jsonObject(
@@ -784,6 +802,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             ) as? [String: Any]
         )
         legacyLaunchWorkflowObject.removeValue(forKey: "commandBindings")
+        legacyLaunchWorkflowObject.removeValue(forKey: "skillIndex")
+        legacyLaunchWorkflowObject.removeValue(forKey: "attachment")
         let legacyLaunchWorkflowData = try JSONSerialization.data(
             withJSONObject: legacyLaunchWorkflowObject,
             options: [.sortedKeys]
@@ -793,6 +813,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             from: legacyLaunchWorkflowData
         )
         XCTAssertEqual(legacyLaunchWorkflow.commandBindings, reviewLaunch.replMount.commandBindings)
+        XCTAssertEqual(legacyLaunchWorkflow.skillIndex, [])
+        XCTAssertNil(legacyLaunchWorkflow.attachment)
 
         let encodedLaunchDescriptor = String(
             decoding: try JSONEncoder().encode(launchDescriptor),
@@ -1047,6 +1069,12 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(release.apiBasePath, "/automation")
         XCTAssertEqual(release.apiRoutes.count, 7)
         XCTAssertEqual(release.modelTool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(release.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(release.model?.maximumCommandRounds, 4)
+        XCTAssertEqual(
+            Set(release.model?.allowedActions ?? []),
+            SMLWorkflowSurface.modelDefaultActions
+        )
         XCTAssertEqual(release.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(
             release.replCommands.first { $0.verb == "start" }?.jsonBodyKind,
@@ -1111,6 +1139,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             legacyWorkflowGuides[index].removeValue(forKey: "replCommands")
             legacyWorkflowGuides[index].removeValue(forKey: "replExamples")
             legacyWorkflowGuides[index].removeValue(forKey: "skillIndex")
+            legacyWorkflowGuides[index].removeValue(forKey: "model")
             legacyWorkflowGuides[index].removeValue(forKey: "commandBindings")
         }
         legacyObject["workflowGuides"] = legacyWorkflowGuides
@@ -1120,6 +1149,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(legacyGuide.workflowGuides.map(\.replCommands), [[], []])
         XCTAssertEqual(legacyGuide.workflowGuides.map(\.replExamples), [[], []])
         XCTAssertEqual(legacyGuide.workflowGuides.map(\.skillIndex), [[], []])
+        XCTAssertTrue(legacyGuide.workflowGuides.allSatisfy { $0.model == nil })
         XCTAssertEqual(legacyGuide.workflowGuides.map(\.commandBindings), [[], []])
     }
 
@@ -1192,6 +1222,12 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         })
         XCTAssertEqual(release.apiRoutes.count, 7)
         XCTAssertEqual(release.modelTool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(release.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(release.model?.maximumCommandRounds, 4)
+        XCTAssertEqual(
+            Set(release.model?.allowedActions ?? []),
+            SMLWorkflowSurface.modelDefaultActions
+        )
         XCTAssertEqual(release.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(release.planningWorkflowID, "content.release")
         XCTAssertEqual(release.plannerEntrypoint, "plan")
@@ -1294,6 +1330,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 legacyWorkflowBindings[workflowIndex]["hostBindings"] as? [[String: Any]]
             )
             legacyWorkflowBindings[workflowIndex].removeValue(forKey: "skillIndex")
+            legacyWorkflowBindings[workflowIndex].removeValue(forKey: "model")
             legacyWorkflowBindings[workflowIndex].removeValue(forKey: "commandBindings")
             for bindingIndex in hostBindings.indices {
                 hostBindings[bindingIndex].removeValue(forKey: "replExamples")
@@ -1308,6 +1345,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(legacyGuide.schemaVersion, 3)
         XCTAssertTrue(legacyGuide.workflowBindings.allSatisfy { workflow in
             workflow.skillIndex.isEmpty
+                && workflow.model == nil
                 && workflow.commandBindings.isEmpty
                 && workflow.hostBindings.allSatisfy {
                 $0.replExamples.isEmpty
@@ -1515,6 +1553,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             SMLWorkflowRuntimeModelAdapter.toolName,
             SMLWorkflowRuntimeModelAdapter.toolName,
         ])
+        XCTAssertEqual(
+            export.hostWiring.workflows.compactMap { $0.model?.tool.name },
+            [SMLWorkflowModelAdapter.toolName, SMLWorkflowModelAdapter.toolName]
+        )
         XCTAssertTrue(export.hostWiring.workflows.allSatisfy {
             Set($0.hostBindings.map(\.channel)) == [
                 .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
@@ -1545,6 +1587,12 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 }
         })
         XCTAssertEqual(releaseWiring.commandBindings.count, 7)
+        XCTAssertEqual(releaseWiring.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(releaseWiring.model?.maximumCommandRounds, 4)
+        XCTAssertEqual(
+            Set(releaseWiring.model?.allowedActions ?? []),
+            SMLWorkflowSurface.modelDefaultActions
+        )
         XCTAssertEqual(releaseWiring.skillIndex.count, 7)
         XCTAssertEqual(
             releaseWiring.skillIndex.first { $0.instructionID == "plan" }?.reference,
@@ -1589,6 +1637,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 ]
         })
         XCTAssertEqual(releaseAttachment.commandBindings, releaseWiring.commandBindings)
+        XCTAssertEqual(releaseAttachment.model, releaseWiring.model)
         XCTAssertEqual(releaseAttachment.skillIndex, releaseWiring.skillIndex)
         XCTAssertEqual(releaseAttachment.onyxDriverID, releaseWiring.onyxDriverID)
         XCTAssertEqual(releaseAttachment.planningWorkflowID, "content.release")
@@ -1877,6 +1926,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             .string(SMLWorkflowRuntimeModelAdapter.toolName)
         )
         XCTAssertEqual(runtime["agentGuideCommandBindingCount"], .number(14))
+        XCTAssertEqual(runtime["agentGuideModelDescriptorCount"], .number(2))
         XCTAssertEqual(runtime["agentGuideSkillIndexCount"], .number(14))
         XCTAssertEqual(
             runtime["hostGuideSchemaVersion"],
@@ -1885,6 +1935,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(runtime["hostGuideWorkflowCount"], .number(2))
         XCTAssertEqual(runtime["hostGuideBindingCount"], .number(14))
         XCTAssertEqual(runtime["hostGuideCommandBindingCount"], .number(14))
+        XCTAssertEqual(runtime["hostGuideModelDescriptorCount"], .number(2))
         XCTAssertEqual(runtime["hostGuideSkillIndexCount"], .number(14))
         XCTAssertEqual(
             runtime["hostWiringSchemaVersion"],
@@ -1892,12 +1943,14 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(runtime["hostWiringWorkflowCount"], .number(2))
         XCTAssertEqual(runtime["hostWiringBindingCount"], .number(14))
+        XCTAssertEqual(runtime["hostWiringModelDescriptorCount"], .number(2))
         XCTAssertEqual(runtime["hostWiringSkillIndexCount"], .number(14))
         XCTAssertEqual(runtime["attachmentManifestCount"], .number(2))
         XCTAssertEqual(
             try array(runtime["attachmentWorkflowIDs"]),
             [.string("content.release"), .string("content.review")]
         )
+        XCTAssertEqual(runtime["attachmentModelDescriptorCount"], .number(2))
         XCTAssertEqual(runtime["attachmentSkillTreeNodeCount"], .number(14))
         XCTAssertEqual(runtime["attachmentSkillIndexCount"], .number(14))
         XCTAssertEqual(runtime["attachmentToolBindingCount"], .number(6))
@@ -2175,6 +2228,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         var workflows = try XCTUnwrap(legacyObject["workflows"] as? [[String: Any]])
         for workflowIndex in workflows.indices {
             workflows[workflowIndex].removeValue(forKey: "plannerEntrypoint")
+            workflows[workflowIndex].removeValue(forKey: "model")
             workflows[workflowIndex].removeValue(forKey: "attachment")
         }
         legacyObject["workflows"] = workflows
@@ -2187,6 +2241,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertNil(workflow.plannerEntrypoint)
         XCTAssertEqual(workflow.attachment.workflowID, "content.release")
         XCTAssertNil(workflow.attachment.plannerEntrypoint)
+        XCTAssertNil(workflow.model)
+        XCTAssertNil(workflow.attachment.model)
         XCTAssertEqual(
             workflow.attachment.channels,
             [
@@ -2216,6 +2272,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(currentWorkflow.attachment.plan?.entrypoint, "plan")
         XCTAssertEqual(currentWorkflow.attachment.plan?.nodes.count, 7)
+        XCTAssertEqual(currentWorkflow.model?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(currentWorkflow.attachment.model, currentWorkflow.model)
         XCTAssertEqual(currentWorkflow.attachment.skillIndex, currentWorkflow.skillIndex)
         XCTAssertEqual(currentWorkflow.attachment.commandBindings.count, 7)
 
@@ -2232,6 +2290,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             )
             attachment.removeValue(forKey: "skillTree")
             attachment.removeValue(forKey: "skillIndex")
+            attachment.removeValue(forKey: "model")
             attachment.removeValue(forKey: "toolBindings")
             attachment.removeValue(forKey: "plan")
             nestedWorkflows[workflowIndex]["attachment"] = attachment
@@ -2249,6 +2308,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(legacyNestedDecoded.schemaVersion, 7)
         XCTAssertEqual(legacyNestedWorkflow.attachment.skillTree, [])
         XCTAssertEqual(legacyNestedWorkflow.attachment.skillIndex, [])
+        XCTAssertNil(legacyNestedWorkflow.attachment.model)
         XCTAssertEqual(legacyNestedWorkflow.attachment.toolBindings, [])
         XCTAssertNil(legacyNestedWorkflow.attachment.plan)
     }
@@ -2558,6 +2618,18 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             try string(guideBody["systemPrompt"]).contains("Break work into small contextual workflow steps")
         )
         XCTAssertEqual(try array(guideBody["workflowGuides"]).count, 2)
+        let agentGuideWorkflows = try array(guideBody["workflowGuides"])
+        let releaseAgentGuide = try object(agentGuideWorkflows.first {
+            if case .object(let object) = $0 {
+                return object["workflowID"] == .string("content.release")
+            }
+            return false
+        })
+        XCTAssertEqual(
+            try object(try object(releaseAgentGuide["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
+        XCTAssertEqual(try object(releaseAgentGuide["model"])["maximumCommandRounds"], .number(4))
 
         let hostGuideMetadata = try app.handleMetadata(
             SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/host-guide")
@@ -2581,6 +2653,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             }
             return false
         })
+        XCTAssertEqual(
+            try object(try object(releaseHostGuide["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
+        XCTAssertEqual(try object(releaseHostGuide["model"])["maximumCommandRounds"], .number(4))
         XCTAssertEqual(try array(releaseHostGuide["commandBindings"]).count, 7)
         XCTAssertEqual(try array(hostGuideBody["launchSteps"]).count, 7)
 
@@ -2609,6 +2686,14 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(releaseWiring["apiBasePath"], .string("/automation"))
         XCTAssertEqual(try array(releaseWiring["apiRoutes"]).count, 7)
         XCTAssertEqual(releaseWiring["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
+        XCTAssertEqual(
+            try object(try object(releaseWiring["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
+        XCTAssertEqual(
+            try object(releaseWiring["model"])["maximumCommandRounds"],
+            .number(4)
+        )
         XCTAssertNotNil(releaseWiring["onyxDriverID"])
         XCTAssertEqual(releaseWiring["planningWorkflowID"], .string("content.release"))
         let releaseWiringCommandBindings = try array(releaseWiring["commandBindings"])
@@ -2626,6 +2711,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let releaseAttachment = try object(releaseWiring["attachment"])
         XCTAssertEqual(releaseAttachment["workflowID"], .string("content.release"))
         XCTAssertEqual(releaseAttachment["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
+        XCTAssertEqual(
+            try object(try object(releaseAttachment["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
         XCTAssertEqual(try array(releaseAttachment["commandBindings"]).count, 7)
         XCTAssertTrue(try array(releaseAttachment["modelRouterExamples"]).contains {
             guard case .object(let example) = $0 else { return false }
@@ -2714,6 +2803,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         })
         XCTAssertEqual(releaseAttachmentBody["apiBasePath"], .string("/automation"))
         XCTAssertEqual(releaseAttachmentBody["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
+        XCTAssertEqual(
+            try object(try object(releaseAttachmentBody["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
         XCTAssertEqual(try array(releaseAttachmentBody["commandBindings"]).count, 7)
         XCTAssertTrue(try array(releaseAttachmentBody["modelRouterExamples"]).contains {
             guard case .object(let example) = $0 else { return false }
@@ -2735,6 +2828,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(workflowAttachmentMetadata.resource, .workflowAttachment)
         let workflowAttachmentBody = try object(workflowAttachmentMetadata.body)
         XCTAssertEqual(workflowAttachmentBody["workflowID"], .string("content.release"))
+        XCTAssertEqual(
+            try object(try object(workflowAttachmentBody["model"])["tool"])["name"],
+            .string(SMLWorkflowModelAdapter.toolName)
+        )
         XCTAssertEqual(try array(workflowAttachmentBody["skillTree"]).count, 7)
         XCTAssertEqual(try array(workflowAttachmentBody["toolBindings"]).count, 3)
         XCTAssertEqual(try array(workflowAttachmentBody["commandBindings"]).count, 7)
