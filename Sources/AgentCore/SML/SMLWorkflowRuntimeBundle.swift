@@ -331,6 +331,52 @@ public struct SMLWorkflowRuntimeMount: Sendable {
     }
 }
 
+public struct SMLWorkflowRuntimeCandidateMount: Sendable {
+    public let workflow: SMLWorkflow
+    public let admissionCatalog: SMLExecutionAdmissionCatalog
+    public let role: String
+    public let actor: String
+    public let replActions: Set<SMLWorkflowControlAction>?
+    public let modelActions: Set<SMLWorkflowControlAction>
+    public let apiBasePath: String
+    public let modelMaximumCommandRounds: Int
+
+    public init(
+        workflow: SMLWorkflow,
+        admissionCatalog: SMLExecutionAdmissionCatalog,
+        role: String,
+        actor: String,
+        replActions: Set<SMLWorkflowControlAction>? = nil,
+        modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
+        apiBasePath: String = "/v1",
+        modelMaximumCommandRounds: Int = 4
+    ) {
+        self.workflow = workflow
+        self.admissionCatalog = admissionCatalog
+        self.role = role
+        self.actor = actor
+        self.replActions = replActions
+        self.modelActions = modelActions
+        self.apiBasePath = apiBasePath
+        self.modelMaximumCommandRounds = modelMaximumCommandRounds
+    }
+
+    public func admit() throws -> SMLWorkflowRuntimeMount {
+        SMLWorkflowRuntimeMount(
+            admitted: try SMLWorkflowAdmission.admitForExecution(
+                SMLWorkflowValidator.requireValidForImport(workflow),
+                catalog: admissionCatalog
+            ),
+            role: role,
+            actor: actor,
+            replActions: replActions,
+            modelActions: modelActions,
+            apiBasePath: apiBasePath,
+            modelMaximumCommandRounds: modelMaximumCommandRounds
+        )
+    }
+}
+
 public struct SMLWorkflowRuntimeCatalog: Sendable, Codable, Equatable {
     public static let currentSchemaVersion = 1
 
@@ -435,6 +481,7 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
 
 public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equatable, CaseIterable {
     case catalog
+    case mount
     case export
     case openAPI = "openapi"
     case planning
@@ -449,6 +496,8 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
         switch self {
         case .catalog:
             return "List the mounted SML workflow runtime catalog"
+        case .mount:
+            return "Return the host mount contract for this SML workflow runtime"
         case .export:
             return "Return the complete authority-neutral SML workflow runtime export"
         case .openAPI:
@@ -488,6 +537,542 @@ public struct SMLWorkflowRuntimeMetadataEndpoint: Sendable, Codable, Equatable {
 public enum SMLWorkflowRuntimeAPIRoute: Sendable, Equatable {
     case metadata(SMLWorkflowRuntimeMetadataResource)
     case workflow(workflowID: String)
+}
+
+public enum SMLWorkflowRuntimeRouteHandlerKind: String, Sendable, Codable, Equatable {
+    case metadata
+    case workflow
+}
+
+public enum SMLWorkflowRuntimeRouteAuthority: String, Sendable, Codable, Equatable {
+    case descriptorOnly = "descriptor_only"
+    case hostCommandGateway = "host_command_gateway"
+}
+
+public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
+    public let workflowID: String
+    public let workflowVersion: String
+    public let workflowName: String
+    public let role: String
+    public let apiBasePath: String
+    public let grammar: String
+    public let helpText: String
+    public let modelToolName: String
+    public let modelRouterToolName: String
+    public let onyxDriverID: String
+
+    public init(
+        workflowID: String,
+        workflowVersion: String,
+        workflowName: String,
+        role: String,
+        apiBasePath: String,
+        grammar: String,
+        helpText: String,
+        modelToolName: String,
+        modelRouterToolName: String,
+        onyxDriverID: String
+    ) {
+        self.workflowID = workflowID
+        self.workflowVersion = workflowVersion
+        self.workflowName = workflowName
+        self.role = role
+        self.apiBasePath = apiBasePath
+        self.grammar = grammar
+        self.helpText = helpText
+        self.modelToolName = modelToolName
+        self.modelRouterToolName = modelRouterToolName
+        self.onyxDriverID = onyxDriverID
+    }
+
+    public init(_ descriptor: SMLWorkflowRuntimeDescriptor) {
+        self.init(
+            workflowID: descriptor.workflowID,
+            workflowVersion: descriptor.workflowVersion,
+            workflowName: descriptor.workflowName,
+            role: descriptor.role,
+            apiBasePath: descriptor.api.basePath,
+            grammar: descriptor.repl.grammar,
+            helpText: descriptor.repl.helpText,
+            modelToolName: descriptor.model.tool.name,
+            modelRouterToolName: SMLWorkflowRuntimeModelAdapter.toolName,
+            onyxDriverID: descriptor.onyx.driverID
+        )
+    }
+}
+
+public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
+    public let method: SMLWorkflowAPIMethod
+    public let pathTemplate: String
+    public let operationID: String
+    public let handlerKind: SMLWorkflowRuntimeRouteHandlerKind
+    public let authority: SMLWorkflowRuntimeRouteAuthority
+    public let readOnly: Bool
+    public let workflowID: String?
+    public let action: SMLWorkflowControlAction?
+    public let metadataResource: SMLWorkflowRuntimeMetadataResource?
+    public let bodyKind: SMLWorkflowAPIRequestBodyKind
+    public let bodyFields: [SMLWorkflowFieldDescriptor]
+
+    public init(
+        method: SMLWorkflowAPIMethod,
+        pathTemplate: String,
+        operationID: String,
+        handlerKind: SMLWorkflowRuntimeRouteHandlerKind,
+        authority: SMLWorkflowRuntimeRouteAuthority,
+        readOnly: Bool,
+        workflowID: String? = nil,
+        action: SMLWorkflowControlAction? = nil,
+        metadataResource: SMLWorkflowRuntimeMetadataResource? = nil,
+        bodyKind: SMLWorkflowAPIRequestBodyKind = .none,
+        bodyFields: [SMLWorkflowFieldDescriptor] = []
+    ) {
+        self.method = method
+        self.pathTemplate = pathTemplate
+        self.operationID = operationID
+        self.handlerKind = handlerKind
+        self.authority = authority
+        self.readOnly = readOnly
+        self.workflowID = workflowID
+        self.action = action
+        self.metadataResource = metadataResource
+        self.bodyKind = bodyKind
+        self.bodyFields = bodyFields
+    }
+}
+
+public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
+    public let workflowID: String
+    public let workflowVersion: String
+    public let workflowName: String
+    public let role: String
+    public let apiBasePath: String
+    public let repl: SMLWorkflowRuntimeREPLMount
+    public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
+    public let modelToolName: String
+    public let modelRouterToolName: String
+    public let onyxDriverID: String
+    public let planningWorkflowID: String?
+
+    public init(
+        workflowID: String,
+        workflowVersion: String,
+        workflowName: String,
+        role: String,
+        apiBasePath: String,
+        repl: SMLWorkflowRuntimeREPLMount,
+        apiRoutes: [SMLWorkflowRuntimeAPIMount],
+        modelToolName: String,
+        modelRouterToolName: String,
+        onyxDriverID: String,
+        planningWorkflowID: String?
+    ) {
+        self.workflowID = workflowID
+        self.workflowVersion = workflowVersion
+        self.workflowName = workflowName
+        self.role = role
+        self.apiBasePath = apiBasePath
+        self.repl = repl
+        self.apiRoutes = apiRoutes.sorted {
+            if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.operationID < $1.operationID
+        }
+        self.modelToolName = modelToolName
+        self.modelRouterToolName = modelRouterToolName
+        self.onyxDriverID = onyxDriverID
+        self.planningWorkflowID = planningWorkflowID
+    }
+
+    public init(
+        repl: SMLWorkflowRuntimeREPLMount,
+        apiRoutes: [SMLWorkflowRuntimeAPIMount],
+        planningWorkflowID: String?
+    ) {
+        self.init(
+            workflowID: repl.workflowID,
+            workflowVersion: repl.workflowVersion,
+            workflowName: repl.workflowName,
+            role: repl.role,
+            apiBasePath: repl.apiBasePath,
+            repl: repl,
+            apiRoutes: apiRoutes,
+            modelToolName: repl.modelToolName,
+            modelRouterToolName: repl.modelRouterToolName,
+            onyxDriverID: repl.onyxDriverID,
+            planningWorkflowID: planningWorkflowID
+        )
+    }
+}
+
+public enum SMLWorkflowRuntimeMountContractError: Error, Sendable, Equatable, CustomStringConvertible {
+    case invalidAPIPath(String)
+    case routeNotFound(method: String, path: String)
+    case ambiguousAPIRoute(method: String, path: String)
+    case metadataRequestMustBeReadOnly
+    case workflowNotMounted(String)
+    case invalidWorkflowMount(String)
+
+    public var description: String {
+        switch self {
+        case .invalidAPIPath(let path):
+            return "invalid workflow runtime mount API path: \(path)"
+        case .routeNotFound(let method, let path):
+            return "workflow runtime mount route not found: \(method) \(path)"
+        case .ambiguousAPIRoute(let method, let path):
+            return "workflow runtime mount route is ambiguous: \(method) \(path)"
+        case .metadataRequestMustBeReadOnly:
+            return "workflow runtime mount metadata endpoints accept only read-only GET requests without body, scope, or expected state"
+        case .workflowNotMounted(let workflowID):
+            return "workflow runtime mount has no workflow: \(workflowID)"
+        case .invalidWorkflowMount(let workflowID):
+            return "workflow runtime mount is internally inconsistent for workflow: \(workflowID)"
+        }
+    }
+}
+
+public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
+    public let route: SMLWorkflowRuntimeAPIMount
+    public let pathParameters: [String: String]
+
+    public init(
+        route: SMLWorkflowRuntimeAPIMount,
+        pathParameters: [String: String] = [:]
+    ) {
+        self.route = route
+        self.pathParameters = pathParameters
+    }
+}
+
+/// Compact host contract for mounting a workflow runtime as a custom REPL/API surface.
+///
+/// This is intentionally only routing and adapter metadata. It tells a host which paths and REPLs
+/// to expose and which handler to call, but it carries no actor identity, authority lease,
+/// credential, runtime handle, provider registry, or executable closure.
+public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
+    public static let currentSchemaVersion = 2
+
+    public let schemaVersion: Int
+    public let workflowIDs: [String]
+    public let apiBasePaths: [String]
+    public let replMounts: [SMLWorkflowRuntimeREPLMount]
+    public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
+    public let workflowMounts: [SMLWorkflowRuntimeWorkflowMount]
+    public let modelRouter: SMLWorkflowRuntimeModelRouterDescriptor
+    public let onyxDriverIDs: [String]
+    public let planningWorkflowIDs: [String]
+
+    public init(
+        schemaVersion: Int = SMLWorkflowRuntimeMountContract.currentSchemaVersion,
+        workflowIDs: [String],
+        apiBasePaths: [String],
+        replMounts: [SMLWorkflowRuntimeREPLMount],
+        apiRoutes: [SMLWorkflowRuntimeAPIMount],
+        workflowMounts: [SMLWorkflowRuntimeWorkflowMount]? = nil,
+        modelRouter: SMLWorkflowRuntimeModelRouterDescriptor,
+        onyxDriverIDs: [String],
+        planningWorkflowIDs: [String]
+    ) {
+        let orderedReplMounts = replMounts.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.workflowVersion < $1.workflowVersion
+        }
+        let orderedAPIRoutes = apiRoutes.sorted {
+            if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.operationID < $1.operationID
+        }
+        let orderedPlanningWorkflowIDs = planningWorkflowIDs.sorted()
+        self.schemaVersion = schemaVersion
+        self.workflowIDs = workflowIDs.sorted()
+        self.apiBasePaths = apiBasePaths.sorted()
+        self.replMounts = orderedReplMounts
+        self.apiRoutes = orderedAPIRoutes
+        self.workflowMounts = (
+            workflowMounts ?? Self.workflowMountRows(
+                replMounts: orderedReplMounts,
+                apiRoutes: orderedAPIRoutes,
+                planningWorkflowIDs: Set(orderedPlanningWorkflowIDs)
+            )
+        ).sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.workflowVersion < $1.workflowVersion
+        }
+        self.modelRouter = modelRouter
+        self.onyxDriverIDs = onyxDriverIDs.sorted()
+        self.planningWorkflowIDs = orderedPlanningWorkflowIDs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, workflowIDs, apiBasePaths, replMounts, apiRoutes, workflowMounts,
+             modelRouter, onyxDriverIDs, planningWorkflowIDs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        let workflowIDs = try container.decode([String].self, forKey: .workflowIDs)
+        let apiBasePaths = try container.decode([String].self, forKey: .apiBasePaths)
+        let replMounts = try container.decode([SMLWorkflowRuntimeREPLMount].self, forKey: .replMounts)
+        let apiRoutes = try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes)
+        let workflowMounts = try container.decodeIfPresent(
+            [SMLWorkflowRuntimeWorkflowMount].self,
+            forKey: .workflowMounts
+        )
+        let modelRouter = try container.decode(
+            SMLWorkflowRuntimeModelRouterDescriptor.self,
+            forKey: .modelRouter
+        )
+        let onyxDriverIDs = try container.decode([String].self, forKey: .onyxDriverIDs)
+        let planningWorkflowIDs = try container.decode(
+            [String].self,
+            forKey: .planningWorkflowIDs
+        )
+        self.init(
+            schemaVersion: schemaVersion,
+            workflowIDs: workflowIDs,
+            apiBasePaths: apiBasePaths,
+            replMounts: replMounts,
+            apiRoutes: apiRoutes,
+            workflowMounts: workflowMounts,
+            modelRouter: modelRouter,
+            onyxDriverIDs: onyxDriverIDs,
+            planningWorkflowIDs: planningWorkflowIDs
+        )
+    }
+
+    public func resolveAPI(
+        _ request: SMLWorkflowAPIRequest
+    ) throws -> SMLWorkflowRuntimeResolvedAPIRoute {
+        let pathSegments = try Self.pathSegments(request.path)
+        let pathMatches = apiRoutes.compactMap { route -> SMLWorkflowRuntimeResolvedAPIRoute? in
+            guard let parameters = Self.match(route: route, pathSegments: pathSegments) else {
+                return nil
+            }
+            return SMLWorkflowRuntimeResolvedAPIRoute(
+                route: route,
+                pathParameters: parameters
+            )
+        }
+        let metadataPathMatches = pathMatches.filter { $0.route.handlerKind == .metadata }
+        if !metadataPathMatches.isEmpty {
+            if metadataPathMatches.count > 1 {
+                throw SMLWorkflowRuntimeMountContractError.ambiguousAPIRoute(
+                    method: request.method.rawValue,
+                    path: request.path
+                )
+            }
+            guard let route = metadataPathMatches.first?.route,
+                  request.method == route.method,
+                  request.body.isEmpty,
+                  request.scope.isEmpty,
+                  request.expectedState.isEmpty else {
+                throw SMLWorkflowRuntimeMountContractError.metadataRequestMustBeReadOnly
+            }
+        }
+        return try Self.resolveAPI(
+            method: request.method,
+            path: request.path,
+            pathSegments: pathSegments,
+            routes: apiRoutes
+        )
+    }
+
+    public func resolveAPI(
+        method: SMLWorkflowAPIMethod,
+        path: String
+    ) throws -> SMLWorkflowRuntimeResolvedAPIRoute {
+        try Self.resolveAPI(
+            method: method,
+            path: path,
+            pathSegments: Self.pathSegments(path),
+            routes: apiRoutes
+        )
+    }
+
+    public func resolveWorkflow(
+        workflowID: String
+    ) throws -> SMLWorkflowRuntimeWorkflowMount {
+        let matches = workflowMounts.filter { $0.workflowID == workflowID }
+        if matches.count == 1 {
+            let mount = matches[0]
+            let planningLinkIsValid = mount.planningWorkflowID.map {
+                planningWorkflowIDs.contains($0)
+            } ?? true
+            guard workflowIDs.contains(mount.workflowID),
+                  modelRouter.workflowIDs.contains(mount.workflowID),
+                  replMounts.contains(mount.repl),
+                  onyxDriverIDs.contains(mount.onyxDriverID),
+                  planningLinkIsValid,
+                  !mount.apiRoutes.isEmpty,
+                  mount.apiRoutes.allSatisfy({
+                      $0.handlerKind == .workflow && $0.workflowID == mount.workflowID
+                  }) else {
+                throw SMLWorkflowRuntimeMountContractError.invalidWorkflowMount(workflowID)
+            }
+            return mount
+        }
+        if matches.count > 1 || workflowIDs.contains(workflowID) {
+            throw SMLWorkflowRuntimeMountContractError.invalidWorkflowMount(workflowID)
+        }
+        throw SMLWorkflowRuntimeMountContractError.workflowNotMounted(workflowID)
+    }
+
+    public init(catalog: SMLWorkflowRuntimeCatalog) {
+        self.init(
+            workflowIDs: catalog.workflowIDs,
+            apiBasePaths: catalog.apiBasePaths,
+            replMounts: catalog.workflows.map(SMLWorkflowRuntimeREPLMount.init),
+            apiRoutes: Self.apiRoutes(for: catalog),
+            modelRouter: catalog.modelRouter,
+            onyxDriverIDs: catalog.onyxDrivers.map(\.driverID),
+            planningWorkflowIDs: catalog.planningManifest.workflowIDs
+        )
+    }
+
+    private static func apiRoutes(
+        for catalog: SMLWorkflowRuntimeCatalog
+    ) -> [SMLWorkflowRuntimeAPIMount] {
+        let metadataRoutes = catalog.metadataEndpoints.map { endpoint in
+            SMLWorkflowRuntimeAPIMount(
+                method: endpoint.method,
+                pathTemplate: endpoint.pathTemplate,
+                operationID: endpoint.operationID,
+                handlerKind: .metadata,
+                authority: .descriptorOnly,
+                readOnly: true,
+                metadataResource: endpoint.resource
+            )
+        }
+        let workflowRoutes = catalog.workflows.flatMap { workflow in
+            workflow.api.endpoints.map { endpoint in
+                let readOnly = !(workflow.commands.first {
+                    $0.action == endpoint.action
+                }?.changesTaskState ?? true)
+                return SMLWorkflowRuntimeAPIMount(
+                    method: endpoint.method,
+                    pathTemplate: endpoint.pathTemplate,
+                    operationID: operationID(endpoint, workflow: workflow),
+                    handlerKind: .workflow,
+                    authority: .hostCommandGateway,
+                    readOnly: readOnly,
+                    workflowID: workflow.workflowID,
+                    action: endpoint.action,
+                    bodyKind: endpoint.bodyKind,
+                    bodyFields: endpoint.bodyFields
+                )
+            }
+        }
+        return metadataRoutes + workflowRoutes
+    }
+
+    private static func workflowMountRows(
+        replMounts: [SMLWorkflowRuntimeREPLMount],
+        apiRoutes: [SMLWorkflowRuntimeAPIMount],
+        planningWorkflowIDs: Set<String>
+    ) -> [SMLWorkflowRuntimeWorkflowMount] {
+        replMounts.map { repl in
+            SMLWorkflowRuntimeWorkflowMount(
+                repl: repl,
+                apiRoutes: apiRoutes.filter {
+                    $0.handlerKind == .workflow && $0.workflowID == repl.workflowID
+                },
+                planningWorkflowID: planningWorkflowIDs.contains(repl.workflowID)
+                    ? repl.workflowID
+                    : nil
+            )
+        }
+    }
+
+    private static func resolveAPI(
+        method: SMLWorkflowAPIMethod,
+        path: String,
+        pathSegments: [String],
+        routes: [SMLWorkflowRuntimeAPIMount]
+    ) throws -> SMLWorkflowRuntimeResolvedAPIRoute {
+        let matches = routes.compactMap { route -> SMLWorkflowRuntimeResolvedAPIRoute? in
+            guard route.method == method,
+                  let parameters = match(route: route, pathSegments: pathSegments) else {
+                return nil
+            }
+            return SMLWorkflowRuntimeResolvedAPIRoute(
+                route: route,
+                pathParameters: parameters
+            )
+        }
+        if matches.count == 1 { return matches[0] }
+        if matches.count > 1 {
+            throw SMLWorkflowRuntimeMountContractError.ambiguousAPIRoute(
+                method: method.rawValue,
+                path: path
+            )
+        }
+        throw SMLWorkflowRuntimeMountContractError.routeNotFound(
+            method: method.rawValue,
+            path: path
+        )
+    }
+
+    private static func match(
+        route: SMLWorkflowRuntimeAPIMount,
+        pathSegments: [String]
+    ) -> [String: String]? {
+        guard let templateSegments = try? Self.pathSegments(route.pathTemplate),
+              templateSegments.count == pathSegments.count else {
+            return nil
+        }
+        var parameters: [String: String] = [:]
+        for (template, actual) in zip(templateSegments, pathSegments) {
+            if let name = placeholderName(template) {
+                guard parameters[name] == nil else { return nil }
+                parameters[name] = actual
+                continue
+            }
+            guard template == actual else { return nil }
+        }
+        return parameters
+    }
+
+    private static func placeholderName(_ segment: String) -> String? {
+        guard segment.hasPrefix("{"), segment.hasSuffix("}") else { return nil }
+        let name = String(segment.dropFirst().dropLast())
+        return name.isEmpty ? nil : name
+    }
+
+    private static func pathSegments(_ path: String) throws -> [String] {
+        guard path.hasPrefix("/"),
+              !path.contains("?"),
+              !path.contains("#"),
+              !path.contains("//"),
+              !path.contains("%"),
+              !path.split(separator: "/").contains("..") else {
+            throw SMLWorkflowRuntimeMountContractError.invalidAPIPath(path)
+        }
+        return path.split(separator: "/").map(String.init)
+    }
+
+    private static func operationID(
+        _ endpoint: SMLWorkflowAPIEndpoint,
+        workflow: SMLWorkflowRuntimeDescriptor
+    ) -> String {
+        "\(endpoint.operationID)_\(componentSuffix(workflow.workflowID))"
+    }
+
+    private static func componentSuffix(_ workflowID: String) -> String {
+        workflowID
+            .split(separator: ".")
+            .map { segment in
+                segment
+                    .split(separator: "-")
+                    .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+                    .joined()
+            }
+            .joined()
+    }
 }
 
 public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
@@ -763,10 +1348,11 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
+    public let mountContract: SMLWorkflowRuntimeMountContract
     public let openAPI: SMLObject
     public let modelTools: [SMLWorkflowRuntimeModelToolExport]
     public let modelRouter: SMLWorkflowRuntimeModelRouterDescriptor
@@ -776,6 +1362,7 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
     public init(
         schemaVersion: Int = SMLWorkflowRuntimeExport.currentSchemaVersion,
         catalog: SMLWorkflowRuntimeCatalog,
+        mountContract: SMLWorkflowRuntimeMountContract,
         openAPI: SMLObject,
         modelTools: [SMLWorkflowRuntimeModelToolExport],
         modelRouter: SMLWorkflowRuntimeModelRouterDescriptor,
@@ -784,6 +1371,7 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
     ) {
         self.schemaVersion = schemaVersion
         self.catalog = catalog
+        self.mountContract = mountContract
         self.openAPI = openAPI
         self.modelTools = modelTools
         self.modelRouter = modelRouter
@@ -792,13 +1380,17 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, catalog, openAPI, modelTools, modelRouter, onyxDrivers, planning
+        case schemaVersion, catalog, mountContract, openAPI, modelTools, modelRouter,
+             onyxDrivers, planning
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
         catalog = try container.decode(SMLWorkflowRuntimeCatalog.self, forKey: .catalog)
+        mountContract = try container.decodeIfPresent(
+            SMLWorkflowRuntimeMountContract.self, forKey: .mountContract
+        ) ?? catalog.mountContract
         openAPI = try container.decode(SMLObject.self, forKey: .openAPI)
         modelTools = try container.decode(
             [SMLWorkflowRuntimeModelToolExport].self, forKey: .modelTools
@@ -835,6 +1427,10 @@ public extension SMLWorkflowRuntimeCatalog {
         SMLWorkflowRuntimePlanningManifest(descriptors: workflows)
     }
 
+    var mountContract: SMLWorkflowRuntimeMountContract {
+        SMLWorkflowRuntimeMountContract(catalog: self)
+    }
+
     func openAPIDocument(
         title: String = "SML Workflow Runtime API",
         version: String = "1.0.0"
@@ -852,6 +1448,7 @@ public extension SMLWorkflowRuntimeCatalog {
     ) -> SMLWorkflowRuntimeExport {
         SMLWorkflowRuntimeExport(
             catalog: self,
+            mountContract: mountContract,
             openAPI: openAPIDocument(title: title, version: version),
             modelTools: modelTools,
             modelRouter: modelRouter,
@@ -870,6 +1467,7 @@ public enum SMLWorkflowRuntimeRegistryError: Error, Sendable, Equatable, CustomS
     case routeNotFound(method: String, path: String)
     case ambiguousAPIRoute(method: String, path: String)
     case metadataRequestMustBeReadOnly
+    case invalidWorkflowMount(String)
 
     public var description: String {
         switch self {
@@ -889,6 +1487,8 @@ public enum SMLWorkflowRuntimeRegistryError: Error, Sendable, Equatable, CustomS
             return "workflow runtime API route is ambiguous: \(method) \(path)"
         case .metadataRequestMustBeReadOnly:
             return "workflow runtime metadata endpoints accept only read-only GET requests without body, scope, or expected state"
+        case .invalidWorkflowMount(let workflowID):
+            return "workflow runtime mount is internally inconsistent for workflow: \(workflowID)"
         }
     }
 }
@@ -946,6 +1546,48 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
     }
 
     public static func compile(
+        candidateMounts: [SMLWorkflowRuntimeCandidateMount],
+        commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() }
+    ) throws -> SMLWorkflowRuntimeRegistry {
+        try compile(
+            mounts: candidateMounts.map { try $0.admit() },
+            commandID: commandID,
+            taskID: taskID
+        )
+    }
+
+    public static func compile(
+        workflows: [SMLWorkflow],
+        admissionCatalog: SMLExecutionAdmissionCatalog,
+        role: String,
+        actor: String,
+        replActions: Set<SMLWorkflowControlAction>? = nil,
+        modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
+        apiBasePath: String = "/v1",
+        modelMaximumCommandRounds: Int = 4,
+        commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() }
+    ) throws -> SMLWorkflowRuntimeRegistry {
+        try compile(
+            candidateMounts: workflows.map {
+                SMLWorkflowRuntimeCandidateMount(
+                    workflow: $0,
+                    admissionCatalog: admissionCatalog,
+                    role: role,
+                    actor: actor,
+                    replActions: replActions,
+                    modelActions: modelActions,
+                    apiBasePath: apiBasePath,
+                    modelMaximumCommandRounds: modelMaximumCommandRounds
+                )
+            },
+            commandID: commandID,
+            taskID: taskID
+        )
+    }
+
+    public static func compile(
         admitted workflows: [SMLAdmittedWorkflow],
         role: String,
         actor: String,
@@ -981,8 +1623,32 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
         catalog.planningManifest
     }
 
+    public var mountContract: SMLWorkflowRuntimeMountContract {
+        catalog.mountContract
+    }
+
     public var metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint] {
         catalog.metadataEndpoints
+    }
+
+    public func resolveMount(
+        for request: SMLWorkflowAPIRequest
+    ) throws -> SMLWorkflowRuntimeResolvedAPIRoute {
+        do {
+            return try mountContract.resolveAPI(request)
+        } catch let error as SMLWorkflowRuntimeMountContractError {
+            throw Self.registryError(from: error)
+        }
+    }
+
+    public func resolveWorkflowMount(
+        workflowID: String
+    ) throws -> SMLWorkflowRuntimeWorkflowMount {
+        do {
+            return try mountContract.resolveWorkflow(workflowID: workflowID)
+        } catch let error as SMLWorkflowRuntimeMountContractError {
+            throw Self.registryError(from: error)
+        }
     }
 
     public func installAll(into runtime: SMLRuntime) async throws -> [SMLWorkflowProjection] {
@@ -1040,70 +1706,54 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
         _ request: SMLWorkflowAPIRequest,
         issuedAtEpoch: Double
     ) throws -> SMLCommandEnvelope {
-        let bundle = try routeBundle(for: request)
+        let resolved = try resolveMount(for: request)
+        guard resolved.route.handlerKind == .workflow,
+              let workflowID = resolved.route.workflowID else {
+            throw SMLWorkflowRuntimeRegistryError.routeNotFound(
+                method: request.method.rawValue,
+                path: request.path
+            )
+        }
+        let bundle = try bundle(workflowID: workflowID)
         return try bundle.apiCompiler.compile(request, issuedAtEpoch: issuedAtEpoch)
     }
 
     public func route(
         for request: SMLWorkflowAPIRequest
     ) throws -> SMLWorkflowRuntimeAPIRoute {
-        let metadataMatches = try metadataResources(matchingPath: request.path)
-        if let resource = metadataMatches.first {
-            if metadataMatches.count > 1 {
-                throw SMLWorkflowRuntimeRegistryError.ambiguousAPIRoute(
+        let resolved = try resolveMount(for: request)
+        switch resolved.route.handlerKind {
+        case .metadata:
+            guard let resource = resolved.route.metadataResource else {
+                throw SMLWorkflowRuntimeRegistryError.routeNotFound(
                     method: request.method.rawValue,
                     path: request.path
                 )
             }
-            guard request.method == .get,
-                  request.body.isEmpty,
-                  request.scope.isEmpty,
-                  request.expectedState.isEmpty else {
-                throw SMLWorkflowRuntimeRegistryError.metadataRequestMustBeReadOnly
-            }
             return .metadata(resource)
+        case .workflow:
+            guard let workflowID = resolved.route.workflowID else {
+                throw SMLWorkflowRuntimeRegistryError.routeNotFound(
+                    method: request.method.rawValue,
+                    path: request.path
+                )
+            }
+            return .workflow(workflowID: workflowID)
         }
-
-        let bundle = try routeBundle(for: request)
-        return .workflow(workflowID: bundle.surface.workflowID)
     }
 
     public func metadataResource(
         for request: SMLWorkflowAPIRequest
     ) throws -> SMLWorkflowRuntimeMetadataResource {
-        let matches = try metadataResources(matchingPath: request.path)
-        if let match = matches.first, matches.count == 1 {
-            guard request.method == .get,
-                  request.body.isEmpty,
-                  request.scope.isEmpty,
-                  request.expectedState.isEmpty else {
-                throw SMLWorkflowRuntimeRegistryError.metadataRequestMustBeReadOnly
-            }
-            return match
-        }
-        if matches.count > 1 {
-            throw SMLWorkflowRuntimeRegistryError.ambiguousAPIRoute(
+        let resolved = try resolveMount(for: request)
+        guard resolved.route.handlerKind == .metadata,
+              let resource = resolved.route.metadataResource else {
+            throw SMLWorkflowRuntimeRegistryError.routeNotFound(
                 method: request.method.rawValue,
                 path: request.path
             )
         }
-        throw SMLWorkflowRuntimeRegistryError.routeNotFound(
-            method: request.method.rawValue,
-            path: request.path
-        )
-    }
-
-    private func metadataResources(
-        matchingPath path: String
-    ) throws -> [SMLWorkflowRuntimeMetadataResource] {
-        let segments = try pathSegments(path)
-        return catalog.apiBasePaths.compactMap { basePath -> SMLWorkflowRuntimeMetadataResource? in
-            let baseSegments = basePath.split(separator: "/").map(String.init)
-            guard segments.starts(with: baseSegments) else { return nil }
-            let tail = Array(segments.dropFirst(baseSegments.count))
-            guard tail.count == 2, tail[0] == "runtime" else { return nil }
-            return SMLWorkflowRuntimeMetadataResource(rawValue: tail[1])
-        }
+        return resource
     }
 
     public func makeREPLSession(
@@ -1226,43 +1876,23 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
         )
     }
 
-    private func routeBundle(
-        for request: SMLWorkflowAPIRequest
-    ) throws -> SMLWorkflowRuntimeBundle {
-        let segments = try pathSegments(request.path)
-        let matches = bundles.filter { bundle in
-            let baseSegments = bundle.descriptor.api.basePath
-                .split(separator: "/")
-                .map(String.init)
-            guard segments.starts(with: baseSegments) else { return false }
-            let tail = Array(segments.dropFirst(baseSegments.count))
-            return tail.count >= 2
-                && tail[0] == "workflows"
-                && tail[1] == bundle.surface.workflowID
+    private static func registryError(
+        from error: SMLWorkflowRuntimeMountContractError
+    ) -> SMLWorkflowRuntimeRegistryError {
+        switch error {
+        case .invalidAPIPath(let path):
+            return .invalidAPIPath(path)
+        case .routeNotFound(let method, let path):
+            return .routeNotFound(method: method, path: path)
+        case .ambiguousAPIRoute(let method, let path):
+            return .ambiguousAPIRoute(method: method, path: path)
+        case .metadataRequestMustBeReadOnly:
+            return .metadataRequestMustBeReadOnly
+        case .workflowNotMounted(let workflowID):
+            return .unknownWorkflow(workflowID)
+        case .invalidWorkflowMount(let workflowID):
+            return .invalidWorkflowMount(workflowID)
         }
-        if matches.count == 1 { return matches[0] }
-        if matches.count > 1 {
-            throw SMLWorkflowRuntimeRegistryError.ambiguousAPIRoute(
-                method: request.method.rawValue,
-                path: request.path
-            )
-        }
-        throw SMLWorkflowRuntimeRegistryError.routeNotFound(
-            method: request.method.rawValue,
-            path: request.path
-        )
-    }
-
-    private func pathSegments(_ path: String) throws -> [String] {
-        guard path.hasPrefix("/"),
-              !path.contains("?"),
-              !path.contains("#"),
-              !path.contains("//"),
-              !path.contains("%"),
-              !path.split(separator: "/").contains("..") else {
-            throw SMLWorkflowRuntimeRegistryError.invalidAPIPath(path)
-        }
-        return path.split(separator: "/").map(String.init)
     }
 }
 
@@ -1292,8 +1922,24 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
         registry.catalog
     }
 
+    public var mountContract: SMLWorkflowRuntimeMountContract {
+        registry.mountContract
+    }
+
     public var metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint] {
         registry.metadataEndpoints
+    }
+
+    public func resolveMount(
+        for request: SMLWorkflowAPIRequest
+    ) throws -> SMLWorkflowRuntimeResolvedAPIRoute {
+        try registry.resolveMount(for: request)
+    }
+
+    public func resolveWorkflowMount(
+        workflowID: String
+    ) throws -> SMLWorkflowRuntimeWorkflowMount {
+        try registry.resolveWorkflowMount(workflowID: workflowID)
     }
 
     public func openAPIDocument(
@@ -1324,18 +1970,31 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
     public func handleRuntime(
         _ request: SMLWorkflowAPIRequest
     ) async throws -> SMLWorkflowRuntimeAPIResponse {
-        switch try registry.route(for: request) {
-        case .metadata(let resource):
+        let resolved = try registry.resolveMount(for: request)
+        switch resolved.route.handlerKind {
+        case .metadata:
+            guard let resource = resolved.route.metadataResource else {
+                throw SMLWorkflowRuntimeRegistryError.routeNotFound(
+                    method: request.method.rawValue,
+                    path: request.path
+                )
+            }
             let metadata = try SMLWorkflowRuntimeMetadataResponse(
                 resource: resource,
                 path: request.path,
                 body: metadataPayload(for: resource)
             )
-            return SMLWorkflowRuntimeAPIResponse(metadata: metadata)
+            return SMLWorkflowRuntimeAPIResponse(
+                metadata: metadata,
+                route: resolved.route,
+                pathParameters: resolved.pathParameters
+            )
         case .workflow:
             return try SMLWorkflowRuntimeAPIResponse(
                 workflow: try await handle(request),
-                path: request.path
+                path: request.path,
+                route: resolved.route,
+                pathParameters: resolved.pathParameters
             )
         }
     }
@@ -1355,6 +2014,8 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
         switch resource {
         case .catalog:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog)
+        case .mount:
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.mountContract)
         case .export:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.export())
         case .openAPI:
@@ -1398,6 +2059,8 @@ public struct SMLWorkflowRuntimeAPIResponse: Sendable, Equatable {
     public let kind: SMLWorkflowRuntimeAPIResponseKind
     public let path: String
     public let body: SMLValue
+    public let route: SMLWorkflowRuntimeAPIMount?
+    public let pathParameters: [String: String]
     public let metadataResource: SMLWorkflowRuntimeMetadataResource?
     public let command: SMLCommandEnvelope?
     public let result: SMLCommandResult?
@@ -1407,6 +2070,8 @@ public struct SMLWorkflowRuntimeAPIResponse: Sendable, Equatable {
         kind: SMLWorkflowRuntimeAPIResponseKind,
         path: String,
         body: SMLValue,
+        route: SMLWorkflowRuntimeAPIMount? = nil,
+        pathParameters: [String: String] = [:],
         metadataResource: SMLWorkflowRuntimeMetadataResource? = nil,
         command: SMLCommandEnvelope? = nil,
         result: SMLCommandResult? = nil
@@ -1415,33 +2080,72 @@ public struct SMLWorkflowRuntimeAPIResponse: Sendable, Equatable {
         self.kind = kind
         self.path = path
         self.body = body
+        self.route = route
+        self.pathParameters = pathParameters
         self.metadataResource = metadataResource
         self.command = command
         self.result = result
     }
 
-    public init(metadata response: SMLWorkflowRuntimeMetadataResponse) {
+    public init(
+        metadata response: SMLWorkflowRuntimeMetadataResponse,
+        route: SMLWorkflowRuntimeAPIMount? = nil,
+        pathParameters: [String: String] = [:]
+    ) {
         self.init(
             statusCode: response.statusCode,
             kind: .metadata,
             path: response.path,
             body: response.body,
+            route: route,
+            pathParameters: pathParameters,
             metadataResource: response.resource
         )
     }
 
     public init(
         workflow response: SMLWorkflowAPIResponse,
-        path: String
+        path: String,
+        route: SMLWorkflowRuntimeAPIMount? = nil,
+        pathParameters: [String: String] = [:]
     ) throws {
         self.init(
             statusCode: response.statusCode,
             kind: .workflow,
             path: path,
             body: try SMLWorkflowRuntimePayloadCodec.encode(response.result),
+            route: route,
+            pathParameters: pathParameters,
             command: response.command,
             result: response.result
         )
+    }
+}
+
+public struct SMLWorkflowRuntimeLaunch: Sendable {
+    public let registry: SMLWorkflowRuntimeRegistry
+    public let app: SMLWorkflowRuntimeApp
+    public let installedWorkflows: [SMLWorkflowProjection]
+
+    public init(
+        registry: SMLWorkflowRuntimeRegistry,
+        app: SMLWorkflowRuntimeApp,
+        installedWorkflows: [SMLWorkflowProjection]
+    ) {
+        self.registry = registry
+        self.app = app
+        self.installedWorkflows = installedWorkflows
+    }
+
+    public var mountContract: SMLWorkflowRuntimeMountContract {
+        registry.mountContract
+    }
+
+    public func export(
+        title: String = "SML Workflow Runtime API",
+        version: String = "1.0.0"
+    ) -> SMLWorkflowRuntimeExport {
+        registry.export(title: title, version: version)
     }
 }
 
@@ -1641,6 +2345,9 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
 
         Mounted workflow catalog:
         \(workflowCatalogPrompt)
+
+        Mounted host surfaces:
+        \(runtimeSurfacePrompt)
         """
     }
 
@@ -1653,6 +2360,39 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
             \(workflow.graphSummary)
             Allowed grammar:
             \(workflow.repl.grammar)
+            """
+        }.joined(separator: "\n\n")
+    }
+
+    private var runtimeSurfacePrompt: String {
+        let planningUnitsByWorkflowID = Dictionary(
+            uniqueKeysWithValues: registry.planningManifest.workflows.map { workflow in
+                (
+                    workflow.workflowID,
+                    workflow.skillTree.compactMap { node in
+                        node.planning.map { "\(node.id):\($0.unitKind.rawValue)" }
+                    }.joined(separator: ", ")
+                )
+            }
+        )
+        let unitsByWorkflowID = Dictionary(
+            grouping: registry.planningManifest.decomposableUnits,
+            by: \.workflowID
+        )
+        return registry.mountContract.workflowMounts.map { mount in
+            let routes = mount.apiRoutes.map { route in
+                "\(route.method.rawValue) \(route.pathTemplate) -> \(route.operationID)"
+            }.joined(separator: "; ")
+            let decomposable = (unitsByWorkflowID[mount.workflowID] ?? []).map { unit in
+                "\(unit.instructionID):\(unit.unitKind.rawValue)"
+            }.joined(separator: ", ")
+            return """
+            \(mount.workflowID) mount
+            API routes: \(routes)
+            Model bridge: \(mount.modelToolName) via \(mount.modelRouterToolName)
+            Onyx driver: \(mount.onyxDriverID), planning: \(mount.planningWorkflowID ?? "none")
+            Planning units: \(planningUnitsByWorkflowID[mount.workflowID] ?? "none")
+            Decomposable units: \(decomposable.isEmpty ? "none" : decomposable)
             """
         }.joined(separator: "\n\n")
     }
@@ -1801,6 +2541,91 @@ public struct SMLWorkflowRuntimeApp: Sendable {
         self.clock = clock
     }
 
+    public static func launch(
+        mounts: [SMLWorkflowRuntimeMount],
+        runtime: SMLRuntime,
+        replayGuard: any SMLCommandReplayGuard,
+        authorityResolver: @escaping AuthorityResolver,
+        commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() },
+        clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
+    ) async throws -> SMLWorkflowRuntimeLaunch {
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            mounts: mounts,
+            commandID: commandID,
+            taskID: taskID
+        )
+        let installed = try await registry.installAll(into: runtime)
+        let app = registry.makeApp(
+            gateway: SMLCommandGateway(runtime: runtime, replayGuard: replayGuard),
+            authorityResolver: authorityResolver,
+            clock: clock
+        )
+        return SMLWorkflowRuntimeLaunch(
+            registry: registry,
+            app: app,
+            installedWorkflows: installed
+        )
+    }
+
+    public static func launch(
+        candidateMounts: [SMLWorkflowRuntimeCandidateMount],
+        runtime: SMLRuntime,
+        replayGuard: any SMLCommandReplayGuard,
+        authorityResolver: @escaping AuthorityResolver,
+        commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() },
+        clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
+    ) async throws -> SMLWorkflowRuntimeLaunch {
+        try await launch(
+            mounts: candidateMounts.map { try $0.admit() },
+            runtime: runtime,
+            replayGuard: replayGuard,
+            authorityResolver: authorityResolver,
+            commandID: commandID,
+            taskID: taskID,
+            clock: clock
+        )
+    }
+
+    public static func launch(
+        workflows: [SMLWorkflow],
+        admissionCatalog: SMLExecutionAdmissionCatalog,
+        runtime: SMLRuntime,
+        replayGuard: any SMLCommandReplayGuard,
+        role: String,
+        actor: String,
+        replActions: Set<SMLWorkflowControlAction>? = nil,
+        modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
+        apiBasePath: String = "/v1",
+        modelMaximumCommandRounds: Int = 4,
+        authorityResolver: @escaping AuthorityResolver,
+        commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() },
+        clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
+    ) async throws -> SMLWorkflowRuntimeLaunch {
+        try await launch(
+            candidateMounts: workflows.map {
+                SMLWorkflowRuntimeCandidateMount(
+                    workflow: $0,
+                    admissionCatalog: admissionCatalog,
+                    role: role,
+                    actor: actor,
+                    replActions: replActions,
+                    modelActions: modelActions,
+                    apiBasePath: apiBasePath,
+                    modelMaximumCommandRounds: modelMaximumCommandRounds
+                )
+            },
+            runtime: runtime,
+            replayGuard: replayGuard,
+            authorityResolver: authorityResolver,
+            commandID: commandID,
+            taskID: taskID,
+            clock: clock
+        )
+    }
+
     public var catalog: SMLWorkflowRuntimeCatalog { registry.catalog }
 
     public var workflowIDs: [String] { registry.workflowIDs }
@@ -1809,8 +2634,24 @@ public struct SMLWorkflowRuntimeApp: Sendable {
         registry.planningManifest
     }
 
+    public var mountContract: SMLWorkflowRuntimeMountContract {
+        registry.mountContract
+    }
+
     public var metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint] {
         registry.metadataEndpoints
+    }
+
+    public func resolveMount(
+        for request: SMLWorkflowAPIRequest
+    ) throws -> SMLWorkflowRuntimeResolvedAPIRoute {
+        try registry.resolveMount(for: request)
+    }
+
+    public func resolveWorkflowMount(
+        workflowID: String
+    ) throws -> SMLWorkflowRuntimeWorkflowMount {
+        try registry.resolveWorkflowMount(workflowID: workflowID)
     }
 
     public var runtimeAPI: SMLWorkflowRuntimeAPI {
@@ -2001,6 +2842,11 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "x-sml-runtime": .object([
                 "schemaVersion": .number(Decimal(catalog.schemaVersion)),
                 "workflowIDs": .array(catalog.workflowIDs.map { .string($0) }),
+                "mountContractSchemaVersion": .number(
+                    Decimal(catalog.mountContract.schemaVersion)
+                ),
+                "mountAPIRouteCount": .number(Decimal(catalog.mountContract.apiRoutes.count)),
+                "mountREPLCount": .number(Decimal(catalog.mountContract.replMounts.count)),
                 "onyxDriverIDs": .array(catalog.onyxDrivers.map { .string($0.driverID) }),
                 "modelToolNames": .array(catalog.modelTools.map { .string($0.tool.name) }),
                 "modelRouterToolName": .string(catalog.modelRouter.tool.name),

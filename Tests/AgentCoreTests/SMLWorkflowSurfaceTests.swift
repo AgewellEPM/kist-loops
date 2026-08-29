@@ -345,6 +345,37 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 .invalidAPIPath("/automation/workflows/content.review/%2e%2e")
             )
         }
+        XCTAssertThrowsError(
+            try registry.compileAPI(
+                SMLWorkflowAPIRequest(
+                    method: .get,
+                    path: "/automation/workflows/content.review/tasks/TASK-REGISTRY/unknown"
+                ),
+                issuedAtEpoch: 4_003
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .routeNotFound(
+                    method: "GET",
+                    path: "/automation/workflows/content.review/tasks/TASK-REGISTRY/unknown"
+                )
+            )
+        }
+        XCTAssertThrowsError(
+            try registry.compileAPI(
+                SMLWorkflowAPIRequest(
+                    method: .get,
+                    path: "/automation/runtime/mount"
+                ),
+                issuedAtEpoch: 4_004
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .routeNotFound(method: "GET", path: "/automation/runtime/mount")
+            )
+        }
     }
 
     func testRuntimeRegistryRejectsEmptyAndDuplicateWorkflowMounts() throws {
@@ -361,6 +392,167 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 .duplicateWorkflowID("content.release")
             )
         }
+    }
+
+    func testRuntimeRegistryAdmitsCandidateWorkflowsIntoMountedSurfaces() throws {
+        let catalog = SMLExecutionAdmissionCatalog(
+            toolCapabilities: ["repository.write"],
+            modelPurposes: ["content.plan"],
+            modelOutputSchemas: ["content.plan.v1"],
+            verifiers: ["artifact_verified"],
+            approvalAuthorities: ["release_approver"]
+        )
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            workflows: [
+                workflow(),
+                workflow(
+                    id: "content.review",
+                    name: "Content review",
+                    sourceReference: "graphs/content_review.py"
+                ),
+            ],
+            admissionCatalog: catalog,
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation",
+            commandID: { "candidate-command" },
+            taskID: { "TASK-CANDIDATE" }
+        )
+
+        XCTAssertEqual(registry.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(try registry.descriptor(workflowID: "content.review").sourceKind, .langGraph)
+        XCTAssertEqual(
+            try registry.resolveWorkflowMount(workflowID: "content.review").apiRoutes.count,
+            7
+        )
+        guard case .command(let replStart) = try registry.compileREPL(
+            #"start {"target":"candidate.md"}"#,
+            workflowID: "content.review",
+            issuedAtEpoch: 4_100
+        ) else { return XCTFail("expected candidate workflow REPL command") }
+        XCTAssertEqual(replStart.task, "TASK-CANDIDATE")
+        XCTAssertEqual(replStart.arguments["workflow_id"], .string("content.review"))
+
+        let apiStart = try registry.compileAPI(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/workflows/content.review/tasks",
+                body: [
+                    "task_id": .string("TASK-CANDIDATE-API"),
+                    "input": .object(["target": .string("candidate-api.md")]),
+                ]
+            ),
+            issuedAtEpoch: 4_101
+        )
+        XCTAssertEqual(apiStart.op, SMLRuntimeCommandOperation.workflowRun)
+        XCTAssertEqual(apiStart.arguments["workflow_id"], .string("content.review"))
+        XCTAssertEqual(registry.export().mountContract.workflowMounts.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
+
+        XCTAssertThrowsError(
+            try SMLWorkflowRuntimeRegistry.compile(
+                workflows: [workflow()],
+                admissionCatalog: SMLExecutionAdmissionCatalog(),
+                role: "release-manager",
+                actor: "operator.luke",
+                apiBasePath: "/automation"
+            )
+        ) {
+            guard let error = $0 as? SMLWorkflowAdmissionError else {
+                return XCTFail("expected admission failure, got \($0)")
+            }
+            XCTAssertTrue(
+                error.diagnostics.contains { $0.code == "unregistered_model_purpose" }
+            )
+            XCTAssertTrue(
+                error.diagnostics.contains { $0.code == "unregistered_tool" }
+            )
+        }
+    }
+
+    func testRuntimeAppLaunchesCandidateWorkflowsIntoBoundFacade() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-launch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SMLRuntimeStore(
+            fileURL: directory.appendingPathComponent("runtime.json"),
+            clock: { 4_200 }
+        )
+        let runtime = SMLRuntime(store: store, clock: { 4_200 })
+        let catalog = SMLExecutionAdmissionCatalog(
+            toolCapabilities: ["repository.write"],
+            modelPurposes: ["content.plan"],
+            modelOutputSchemas: ["content.plan.v1"],
+            verifiers: ["artifact_verified"],
+            approvalAuthorities: ["release_approver"]
+        )
+        let authority: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = { command in
+            SMLCommandAuthority(
+                authenticatedActor: "operator.luke",
+                leaseID: "launch-lease",
+                roles: [command.role],
+                tasks: [command.task],
+                operations: [command.op],
+                scope: command.scope
+            )
+        }
+
+        let launch = try await SMLWorkflowRuntimeApp.launch(
+            workflows: [
+                workflow(),
+                workflow(
+                    id: "content.review",
+                    name: "Content review",
+                    sourceReference: "graphs/content_review.py"
+                ),
+            ],
+            admissionCatalog: catalog,
+            runtime: runtime,
+            replayGuard: store,
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation",
+            authorityResolver: authority,
+            commandID: { "launch-command" },
+            taskID: { "TASK-LAUNCH-GENERATED" },
+            clock: { 4_200 }
+        )
+
+        XCTAssertEqual(launch.installedWorkflows.map(\.id), [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(launch.app.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(launch.mountContract.workflowMounts.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(
+            try launch.app.resolveWorkflowMount(workflowID: "content.review").apiRoutes.count,
+            7
+        )
+
+        let started = try await launch.app.handleRuntimeAPI(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/workflows/content.review/tasks",
+                body: [
+                    "task_id": .string("TASK-LAUNCH"),
+                    "input": .object(["target": .string("launch.md")]),
+                ]
+            )
+        )
+        XCTAssertEqual(started.statusCode, 201)
+        XCTAssertEqual(started.route?.operationID, "start_workflow_task_ContentReview")
+        XCTAssertEqual(started.command?.role, "release-manager")
+        XCTAssertEqual(started.result?.task?.workflowID, "content.review")
+
+        let exported = launch.export(title: "Launched Runtime", version: "2026.08")
+        XCTAssertEqual(exported.mountContract.workflowMounts.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
+        let encodedExport = String(decoding: try JSONEncoder().encode(exported), as: UTF8.self)
+        XCTAssertFalse(encodedExport.contains("operator.luke"))
+        XCTAssertFalse(encodedExport.contains("launch-lease"))
     }
 
     func testRuntimeRegistryCatalogRoundTripsWithoutActorsOrLeases() throws {
@@ -391,11 +583,36 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             decoded.planningManifest.approvalGates.map(\.instructionID),
             ["approval"]
         )
+        let mount = decoded.mountContract
+        XCTAssertEqual(mount.schemaVersion, SMLWorkflowRuntimeMountContract.currentSchemaVersion)
+        XCTAssertEqual(mount.workflowIDs, ["content.release"])
+        XCTAssertEqual(mount.apiBasePaths, ["/automation"])
+        XCTAssertEqual(mount.replMounts.map(\.workflowID), ["content.release"])
+        XCTAssertEqual(mount.replMounts.map(\.modelRouterToolName), [
+            SMLWorkflowRuntimeModelAdapter.toolName,
+        ])
+        XCTAssertEqual(mount.apiRoutes.count, 14)
+        XCTAssertEqual(mount.workflowMounts.map(\.workflowID), ["content.release"])
+        XCTAssertEqual(mount.workflowMounts.first?.apiRoutes.count, 7)
+        XCTAssertEqual(mount.workflowMounts.first?.modelToolName, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(
+            mount.workflowMounts.first?.modelRouterToolName,
+            SMLWorkflowRuntimeModelAdapter.toolName
+        )
+        XCTAssertEqual(
+            mount.workflowMounts.first?.onyxDriverID,
+            decoded.onyxDrivers.first?.driverID
+        )
+        XCTAssertEqual(mount.workflowMounts.first?.planningWorkflowID, "content.release")
+        XCTAssertEqual(mount.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(mount.onyxDriverIDs, decoded.onyxDrivers.map(\.driverID).sorted())
+        XCTAssertEqual(mount.planningWorkflowIDs, ["content.release"])
         XCTAssertEqual(decoded.apiBasePaths, ["/automation"])
         XCTAssertEqual(
             decoded.metadataEndpoints.map(\.pathTemplate),
             [
                 "/automation/runtime/catalog",
+                "/automation/runtime/mount",
                 "/automation/runtime/export",
                 "/automation/runtime/openapi",
                 "/automation/runtime/planning",
@@ -427,6 +644,80 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
 
         XCTAssertEqual(export.schemaVersion, SMLWorkflowRuntimeExport.currentSchemaVersion)
         XCTAssertEqual(export.catalog.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.mountContract.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(export.mountContract.apiBasePaths, ["/automation"])
+        XCTAssertEqual(export.mountContract.replMounts.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(export.mountContract.replMounts.map(\.modelRouterToolName), [
+            SMLWorkflowRuntimeModelAdapter.toolName,
+            SMLWorkflowRuntimeModelAdapter.toolName,
+        ])
+        XCTAssertEqual(export.mountContract.apiRoutes.count, 21)
+        XCTAssertEqual(export.mountContract.workflowMounts.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(export.mountContract.workflowMounts.map(\.apiRoutes.count), [7, 7])
+        XCTAssertEqual(export.mountContract.workflowMounts.map(\.modelToolName), [
+            SMLWorkflowModelAdapter.toolName,
+            SMLWorkflowModelAdapter.toolName,
+        ])
+        XCTAssertEqual(export.mountContract.workflowMounts.map(\.modelRouterToolName), [
+            SMLWorkflowRuntimeModelAdapter.toolName,
+            SMLWorkflowRuntimeModelAdapter.toolName,
+        ])
+        XCTAssertEqual(
+            export.mountContract.workflowMounts.map(\.onyxDriverID),
+            export.onyxDrivers.map(\.driverID).sorted()
+        )
+        XCTAssertEqual(export.mountContract.workflowMounts.map(\.planningWorkflowID), [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(export.mountContract.modelRouter.workflowIDs, [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(
+            export.mountContract.onyxDriverIDs,
+            export.onyxDrivers.map(\.driverID).sorted()
+        )
+        XCTAssertEqual(export.mountContract.planningWorkflowIDs, [
+            "content.release", "content.review",
+        ])
+        let mountMetadataRoute = try XCTUnwrap(
+            export.mountContract.apiRoutes.first { $0.metadataResource == .mount }
+        )
+        XCTAssertEqual(mountMetadataRoute.method, .get)
+        XCTAssertEqual(mountMetadataRoute.pathTemplate, "/automation/runtime/mount")
+        XCTAssertEqual(mountMetadataRoute.handlerKind, .metadata)
+        XCTAssertEqual(mountMetadataRoute.authority, .descriptorOnly)
+        XCTAssertTrue(mountMetadataRoute.readOnly)
+        XCTAssertNil(mountMetadataRoute.workflowID)
+        XCTAssertNil(mountMetadataRoute.action)
+        XCTAssertEqual(mountMetadataRoute.bodyKind, .none)
+        XCTAssertEqual(mountMetadataRoute.bodyFields, [])
+        let startMountRoute = try XCTUnwrap(
+            export.mountContract.apiRoutes.first {
+                $0.workflowID == "content.release" && $0.action == .start
+            }
+        )
+        XCTAssertEqual(startMountRoute.pathTemplate, "/automation/workflows/content.release/tasks")
+        XCTAssertEqual(startMountRoute.operationID, "start_workflow_task_ContentRelease")
+        XCTAssertEqual(startMountRoute.handlerKind, .workflow)
+        XCTAssertEqual(startMountRoute.authority, .hostCommandGateway)
+        XCTAssertFalse(startMountRoute.readOnly)
+        XCTAssertNil(startMountRoute.metadataResource)
+        XCTAssertEqual(startMountRoute.bodyKind, .startTask)
+        XCTAssertEqual(startMountRoute.bodyFields.map(\.name), ["target"])
+        let describeMountRoute = try XCTUnwrap(
+            export.mountContract.apiRoutes.first {
+                $0.workflowID == "content.release" && $0.action == .describe
+            }
+        )
+        XCTAssertTrue(describeMountRoute.readOnly)
+        XCTAssertEqual(describeMountRoute.operationID, "describe_workflow_ContentRelease")
+        XCTAssertEqual(describeMountRoute.bodyKind, .none)
+        let mountOperationIDs = export.mountContract.apiRoutes.map(\.operationID)
+        XCTAssertEqual(Set(mountOperationIDs).count, mountOperationIDs.count)
         XCTAssertEqual(export.modelTools.map(\.workflowID), ["content.release", "content.review"])
         XCTAssertEqual(export.modelTools.map(\.tool.name), [
             SMLWorkflowModelAdapter.toolName,
@@ -453,6 +744,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(info["version"], .string("2026.08"))
 
         let paths = try object(export.openAPI["paths"])
+        let runtimeMountPath = try object(paths["/automation/runtime/mount"])
+        let runtimeMount = try object(runtimeMountPath["get"])
+        XCTAssertEqual(
+            runtimeMount["operationId"],
+            .string(SMLWorkflowRuntimeMetadataResource.mount.operationID)
+        )
+        XCTAssertEqual(runtimeMount["x-sml-runtime-resource"], .string("mount"))
         let runtimePlanningPath = try object(paths["/automation/runtime/planning"])
         let runtimePlanning = try object(runtimePlanningPath["get"])
         XCTAssertEqual(
@@ -502,6 +800,12 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             [.string("content.release"), .string("content.review")]
         )
         XCTAssertEqual(
+            runtime["mountContractSchemaVersion"],
+            .number(Decimal(SMLWorkflowRuntimeMountContract.currentSchemaVersion))
+        )
+        XCTAssertEqual(runtime["mountAPIRouteCount"], .number(21))
+        XCTAssertEqual(runtime["mountREPLCount"], .number(2))
+        XCTAssertEqual(
             try array(runtime["modelToolNames"]),
             [.string(SMLWorkflowModelAdapter.toolName), .string(SMLWorkflowModelAdapter.toolName)]
         )
@@ -515,8 +819,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let routerParameters = try array(routerTool["parameters"])
         XCTAssertEqual(routerParameters.count, 2)
         let metadataEndpoints = try array(runtime["metadataEndpoints"])
-        XCTAssertEqual(metadataEndpoints.count, 6)
-        let metadataPlanningEndpoint = try object(metadataEndpoints[3])
+        XCTAssertEqual(metadataEndpoints.count, 7)
+        let metadataPlanningEndpoint = try object(metadataEndpoints.first {
+            if case .object(let object) = $0 {
+                return object["resource"] == .string("planning")
+            }
+            return false
+        })
         XCTAssertEqual(metadataPlanningEndpoint["pathTemplate"], .string("/automation/runtime/planning"))
         XCTAssertEqual(metadataPlanningEndpoint["resource"], .string("planning"))
         XCTAssertEqual(
@@ -539,6 +848,152 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertFalse(encoded.contains("operator.luke"))
         XCTAssertFalse(encoded.contains("leaseID"))
         XCTAssertFalse(encoded.contains("lease_id"))
+    }
+
+    func testRuntimeMountContractResolvesRequestsToExactMountedRoutes() throws {
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            admitted: [
+                makeAdmitted(),
+                makeAdmitted(
+                    id: "content.review",
+                    name: "Content review",
+                    sourceReference: "graphs/content_review.py"
+                ),
+            ],
+            role: "release-manager",
+            actor: "operator.luke",
+            apiBasePath: "/automation"
+        )
+        let contract = registry.mountContract
+
+        let workflowMount = try contract.resolveWorkflow(workflowID: "content.review")
+        XCTAssertEqual(workflowMount.workflowID, "content.review")
+        XCTAssertEqual(workflowMount.workflowName, "Content review")
+        XCTAssertEqual(workflowMount.apiBasePath, "/automation")
+        XCTAssertEqual(workflowMount.repl.workflowID, "content.review")
+        XCTAssertEqual(workflowMount.apiRoutes.count, 7)
+        XCTAssertEqual(workflowMount.apiRoutes.map(\.handlerKind), Array(repeating: .workflow, count: 7))
+        XCTAssertEqual(workflowMount.modelToolName, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(workflowMount.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertTrue(contract.onyxDriverIDs.contains(workflowMount.onyxDriverID))
+        XCTAssertEqual(workflowMount.planningWorkflowID, "content.review")
+
+        let start = try contract.resolveAPI(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/automation/workflows/content.release/tasks",
+                body: [
+                    "task_id": .string("TASK-START"),
+                    "input": .object(["target": .string("notes.md")]),
+                ]
+            )
+        )
+        XCTAssertEqual(start.route.operationID, "start_workflow_task_ContentRelease")
+        XCTAssertEqual(start.route.handlerKind, .workflow)
+        XCTAssertEqual(start.route.authority, .hostCommandGateway)
+        XCTAssertEqual(start.route.workflowID, "content.release")
+        XCTAssertEqual(start.route.action, .start)
+        XCTAssertEqual(start.route.bodyKind, .startTask)
+        XCTAssertEqual(start.route.bodyFields.map(\.name), ["target"])
+        XCTAssertEqual(start.pathParameters, [:])
+
+        let receipts = try contract.resolveAPI(
+            method: .get,
+            path: "/automation/workflows/content.review/tasks/TASK-77/receipts"
+        )
+        XCTAssertEqual(receipts.route.operationID, "list_workflow_task_receipts_ContentReview")
+        XCTAssertEqual(receipts.route.workflowID, "content.review")
+        XCTAssertEqual(receipts.route.action, .receipts)
+        XCTAssertTrue(receipts.route.readOnly)
+        XCTAssertEqual(receipts.pathParameters, ["task_id": "TASK-77"])
+
+        let metadata = try contract.resolveAPI(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/mount")
+        )
+        XCTAssertEqual(metadata.route.operationID, SMLWorkflowRuntimeMetadataResource.mount.operationID)
+        XCTAssertEqual(metadata.route.handlerKind, .metadata)
+        XCTAssertEqual(metadata.route.authority, .descriptorOnly)
+        XCTAssertEqual(metadata.route.metadataResource, .mount)
+        XCTAssertTrue(metadata.route.readOnly)
+        XCTAssertEqual(metadata.pathParameters, [:])
+
+        let routedWatch = try registry.resolveMount(
+            for: SMLWorkflowAPIRequest(
+                method: .get,
+                path: "/automation/workflows/content.release/tasks/TASK-1"
+            )
+        )
+        XCTAssertEqual(routedWatch.route.operationID, "watch_workflow_task_ContentRelease")
+        XCTAssertEqual(routedWatch.pathParameters, ["task_id": "TASK-1"])
+        XCTAssertEqual(
+            try registry.route(
+                for: SMLWorkflowAPIRequest(
+                    method: .get,
+                    path: "/automation/workflows/content.release/tasks/TASK-1"
+                )
+            ),
+            .workflow(workflowID: "content.release")
+        )
+
+        XCTAssertThrowsError(
+            try contract.resolveAPI(
+                SMLWorkflowAPIRequest(
+                    method: .post,
+                    path: "/automation/runtime/mount",
+                    body: ["ignored": .bool(true)]
+                )
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeMountContractError,
+                .metadataRequestMustBeReadOnly
+            )
+        }
+        XCTAssertThrowsError(
+            try registry.route(
+                for: SMLWorkflowAPIRequest(
+                    method: .post,
+                    path: "/automation/runtime/mount",
+                    body: ["ignored": .bool(true)]
+                )
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .metadataRequestMustBeReadOnly
+            )
+        }
+        XCTAssertThrowsError(
+            try contract.resolveAPI(
+                method: .get,
+                path: "/automation/workflows/content.review/%2e%2e"
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeMountContractError,
+                .invalidAPIPath("/automation/workflows/content.review/%2e%2e")
+            )
+        }
+        XCTAssertThrowsError(
+            try contract.resolveAPI(
+                method: .get,
+                path: "/automation/workflows/content.review/tasks/TASK-77/unknown"
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeMountContractError,
+                .routeNotFound(
+                    method: "GET",
+                    path: "/automation/workflows/content.review/tasks/TASK-77/unknown"
+                )
+            )
+        }
+        XCTAssertThrowsError(try contract.resolveWorkflow(workflowID: "missing.workflow")) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeMountContractError,
+                .workflowNotMounted("missing.workflow")
+            )
+        }
     }
 
     func testRuntimeAppBindsCatalogAPIREPLModelRouterAndOnyxFacade() async throws {
@@ -589,10 +1044,15 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(app.catalog.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(app.planningManifest.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(app.planningManifest.toolIndex.count, 6)
-        XCTAssertEqual(app.metadataEndpoints.count, 6)
+        XCTAssertEqual(app.mountContract.apiRoutes.count, 21)
+        XCTAssertEqual(app.mountContract.replMounts.map(\.workflowID), [
+            "content.release", "content.review",
+        ])
+        XCTAssertEqual(app.metadataEndpoints.count, 7)
         XCTAssertEqual(app.runtimeAPI.catalog.workflowIDs, ["content.release", "content.review"])
+        XCTAssertEqual(app.runtimeAPI.mountContract.apiRoutes.count, 21)
         XCTAssertEqual(app.runtimeAPI.metadataEndpoints.map(\.resource), [
-            .catalog, .export, .openAPI, .planning, .modelRouter, .onyxDrivers,
+            .catalog, .mount, .export, .openAPI, .planning, .modelRouter, .onyxDrivers,
         ])
         XCTAssertEqual(try app.descriptor(workflowID: "content.review").workflowName, "Content review")
         XCTAssertEqual(try app.onyxDriver(workflowID: "content.release").plan.entrypoint, "plan")
@@ -620,6 +1080,9 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(started.kind, .workflow)
         XCTAssertEqual(started.statusCode, 201)
         XCTAssertNil(started.metadataResource)
+        XCTAssertEqual(started.route?.operationID, "start_workflow_task_ContentReview")
+        XCTAssertEqual(started.route?.workflowID, "content.review")
+        XCTAssertEqual(started.pathParameters, [:])
         XCTAssertEqual(started.command?.op, SMLRuntimeCommandOperation.workflowRun)
         XCTAssertEqual(started.result?.task?.workflowID, "content.review")
         let startedBody = try object(started.body)
@@ -637,18 +1100,56 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(try array(planningBody["toolIndex"]).count, 6)
 
+        let mountMetadata = try app.handleMetadata(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/mount")
+        )
+        XCTAssertEqual(mountMetadata.statusCode, 200)
+        XCTAssertEqual(mountMetadata.resource, .mount)
+        let mountBody = try object(mountMetadata.body)
+        XCTAssertEqual(try array(mountBody["workflowIDs"]), [
+            .string("content.release"), .string("content.review"),
+        ])
+        XCTAssertEqual(try array(mountBody["apiRoutes"]).count, 21)
+        XCTAssertEqual(try array(mountBody["replMounts"]).count, 2)
+
         let routedPlanning = try await app.handleRuntimeAPI(
             SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/planning")
         )
         XCTAssertEqual(routedPlanning.kind, .metadata)
         XCTAssertEqual(routedPlanning.statusCode, 200)
         XCTAssertEqual(routedPlanning.metadataResource, .planning)
+        XCTAssertEqual(routedPlanning.route?.operationID, SMLWorkflowRuntimeMetadataResource.planning.operationID)
+        XCTAssertEqual(routedPlanning.pathParameters, [:])
         XCTAssertNil(routedPlanning.command)
         XCTAssertNil(routedPlanning.result)
         XCTAssertEqual(
             try array(try object(routedPlanning.body)["workflowIDs"]),
             [.string("content.release"), .string("content.review")]
         )
+
+        let routedMount = try await app.handleRuntimeAPI(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/mount")
+        )
+        XCTAssertEqual(routedMount.kind, .metadata)
+        XCTAssertEqual(routedMount.metadataResource, .mount)
+        XCTAssertEqual(routedMount.route?.operationID, SMLWorkflowRuntimeMetadataResource.mount.operationID)
+        XCTAssertNil(routedMount.command)
+        XCTAssertNil(routedMount.result)
+        XCTAssertEqual(try array(try object(routedMount.body)["apiRoutes"]).count, 21)
+
+        let appResolvedWatch = try app.resolveMount(
+            for: SMLWorkflowAPIRequest(
+                method: .get,
+                path: "/automation/workflows/content.review/tasks/TASK-APP/receipts"
+            )
+        )
+        XCTAssertEqual(appResolvedWatch.route.operationID, "list_workflow_task_receipts_ContentReview")
+        XCTAssertEqual(appResolvedWatch.pathParameters, ["task_id": "TASK-APP"])
+        let appWorkflowMount = try app.resolveWorkflowMount(workflowID: "content.review")
+        XCTAssertEqual(appWorkflowMount.repl.workflowID, "content.review")
+        XCTAssertEqual(appWorkflowMount.apiRoutes.map(\.workflowID), Array(repeating: "content.review", count: 7))
+        XCTAssertEqual(appWorkflowMount.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(appWorkflowMount.planningWorkflowID, "content.review")
 
         let routerMetadata = try app.handleMetadata(
             SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/model-router")
