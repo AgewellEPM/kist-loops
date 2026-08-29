@@ -109,29 +109,45 @@ public enum SMLWorkflowSourceImporter {
             allowed: [
                 "manifest_version", "id", "version", "name", "source_reference",
                 "source_digest", "trigger", "state_schema", "input_fields",
-                "output_fields", "entrypoint", "nodes",
+                "output_fields", "entrypoint", "nodes", "edges", "conditional_edges",
             ]
         )
         let manifestVersion = try int(object, "manifest_version", path: "$.manifest_version")
         guard manifestVersion == 1 else {
             throw SMLWorkflowSourceImportError.unsupportedManifestVersion(manifestVersion)
         }
+        let workflowID = try string(object, "id", path: "$.id")
+        let workflowVersion = try string(object, "version", path: "$.version")
+        let workflowName = try string(object, "name", path: "$.name")
+        let sourceReference = try string(
+            object,
+            "source_reference",
+            path: "$.source_reference"
+        )
+        let sourceDigest = try optionalString(
+            object,
+            "source_digest",
+            path: "$.source_digest"
+        )
+        let inputFields = try stringArray(
+            object,
+            "input_fields",
+            path: "$.input_fields"
+        )
+        let outputFields = try stringArray(
+            object,
+            "output_fields",
+            path: "$.output_fields"
+        )
+        let entrypoint = try string(object, "entrypoint", path: "$.entrypoint")
         let workflow = SMLWorkflow(
-            id: try string(object, "id", path: "$.id"),
-            version: try string(object, "version", path: "$.version"),
-            name: try string(object, "name", path: "$.name"),
+            id: workflowID,
+            version: workflowVersion,
+            name: workflowName,
             source: SMLWorkflowSource(
                 kind: .langGraph,
-                reference: try string(
-                    object,
-                    "source_reference",
-                    path: "$.source_reference"
-                ),
-                digest: try optionalString(
-                    object,
-                    "source_digest",
-                    path: "$.source_digest"
-                )
+                reference: sourceReference,
+                digest: sourceDigest
             ),
             trigger: try trigger(
                 object["trigger"],
@@ -139,19 +155,16 @@ public enum SMLWorkflowSourceImporter {
             ) ?? SMLTrigger(kind: .manual),
             stateSchema: try stateSchema(object, path: "$.state_schema"),
             interface: SMLWorkflowInterface(
-                inputFields: try stringArray(
-                    object,
-                    "input_fields",
-                    path: "$.input_fields"
-                ),
-                outputFields: try stringArray(
-                    object,
-                    "output_fields",
-                    path: "$.output_fields"
-                )
+                inputFields: inputFields,
+                outputFields: outputFields
             ),
-            entrypoint: try string(object, "entrypoint", path: "$.entrypoint"),
-            instructions: try instructions(object, path: "$.nodes")
+            entrypoint: entrypoint,
+            instructions: try instructions(
+                object,
+                path: "$.nodes",
+                entrypoint: entrypoint,
+                outputFields: outputFields
+            )
         )
         do {
             _ = try SMLWorkflowValidator.requireValidForImport(workflow)
@@ -228,11 +241,86 @@ public enum SMLWorkflowSourceImporter {
         }
     }
 
-    private static func instructions(_ object: SMLObject, path: String) throws -> [SMLInstruction] {
+    private struct LangGraphEdge {
+        let from: String
+        let to: String
+        let label: String?
+        let path: String
+        let fromPath: String
+        let toPath: String
+        let labelPath: String?
+    }
+
+    private enum LangGraphEdgeSlot {
+        case next
+        case onPass
+        case onFailure
+        case trueTarget
+        case falseTarget
+    }
+
+    private static func instructions(
+        _ object: SMLObject,
+        path: String,
+        entrypoint: String,
+        outputFields: [String]
+    ) throws -> [SMLInstruction] {
         let values = try array(object, "nodes", path: path)
-        return try values.enumerated().map { index, value in
+        var parsed = try values.enumerated().map { index, value in
             try instruction(value, path: "\(path)[\(index)]")
         }
+        let edges = try edgeList(object)
+        guard !edges.isEmpty else { return parsed }
+
+        let knownNodeIDs = Set(parsed.map(\.id))
+        let generatedEndID = generatedEndID(avoiding: knownNodeIDs)
+        var outgoing: [String: [LangGraphEdge]] = [:]
+        var needsGeneratedEnd = false
+
+        for edge in edges {
+            if isLangGraphStart(edge.from) {
+                guard edge.to == entrypoint else {
+                    throw SMLWorkflowSourceImportError.invalidField(
+                        path: edge.toPath,
+                        reason: "START edge must point to declared entrypoint \(entrypoint)"
+                    )
+                }
+                continue
+            }
+            guard knownNodeIDs.contains(edge.from) else {
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: edge.fromPath,
+                    reason: "unknown edge source \(edge.from)"
+                )
+            }
+            if isLangGraphStart(edge.to) {
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: edge.toPath,
+                    reason: "edge target cannot be START"
+                )
+            }
+            if !isLangGraphEnd(edge.to) && !knownNodeIDs.contains(edge.to) {
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: edge.toPath,
+                    reason: "unknown edge target \(edge.to)"
+                )
+            }
+            outgoing[edge.from, default: []].append(edge)
+        }
+
+        parsed = try parsed.map { instruction in
+            try applying(
+                outgoing[instruction.id] ?? [],
+                to: instruction,
+                outputFields: outputFields,
+                generatedEndID: generatedEndID,
+                needsGeneratedEnd: &needsGeneratedEnd
+            )
+        }
+        if needsGeneratedEnd {
+            parsed.append(SMLInstruction(id: generatedEndID, op: .complete))
+        }
+        return parsed
     }
 
     private static func instruction(
@@ -292,6 +380,282 @@ public enum SMLWorkflowSourceImporter {
             trueTarget: try optionalString(object, "true", path: "\(path).true"),
             falseTarget: try optionalString(object, "false", path: "\(path).false")
         )
+    }
+
+    private static func edgeList(_ object: SMLObject) throws -> [LangGraphEdge] {
+        var edges = try directEdges(object)
+        edges.append(contentsOf: try conditionalEdges(object))
+        return edges
+    }
+
+    private static func directEdges(_ object: SMLObject) throws -> [LangGraphEdge] {
+        guard let values = try optionalArray(object, "edges", path: "$.edges") else {
+            return []
+        }
+        return try values.enumerated().map { index, value in
+            let itemPath = "$.edges[\(index)]"
+            guard case .object(let edge) = value else {
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: itemPath,
+                    reason: "expected object"
+                )
+            }
+            try requireKnownKeys(edge, path: itemPath, allowed: ["from", "to", "label"])
+            return LangGraphEdge(
+                from: try string(edge, "from", path: "\(itemPath).from"),
+                to: try string(edge, "to", path: "\(itemPath).to"),
+                label: try optionalString(edge, "label", path: "\(itemPath).label"),
+                path: itemPath,
+                fromPath: "\(itemPath).from",
+                toPath: "\(itemPath).to",
+                labelPath: edge["label"] == nil ? nil : "\(itemPath).label"
+            )
+        }
+    }
+
+    private static func conditionalEdges(_ object: SMLObject) throws -> [LangGraphEdge] {
+        guard let values = try optionalArray(
+            object,
+            "conditional_edges",
+            path: "$.conditional_edges"
+        ) else {
+            return []
+        }
+        let labels = [
+            "true", "false", "pass", "failure", "on_pass", "on_failure",
+            "approved", "refused",
+        ]
+        var edges: [LangGraphEdge] = []
+        for (index, value) in values.enumerated() {
+            let itemPath = "$.conditional_edges[\(index)]"
+            guard case .object(let edge) = value else {
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: itemPath,
+                    reason: "expected object"
+                )
+            }
+            try requireKnownKeys(edge, path: itemPath, allowed: Set(["from"] + labels))
+            let from = try string(edge, "from", path: "\(itemPath).from")
+            var added = 0
+            for label in labels {
+                if let target = try optionalString(edge, label, path: "\(itemPath).\(label)") {
+                    edges.append(LangGraphEdge(
+                        from: from,
+                        to: target,
+                        label: label,
+                        path: itemPath,
+                        fromPath: "\(itemPath).from",
+                        toPath: "\(itemPath).\(label)",
+                        labelPath: "\(itemPath).\(label)"
+                    ))
+                    added += 1
+                }
+            }
+            guard added > 0 else {
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: itemPath,
+                    reason: "expected at least one labeled target"
+                )
+            }
+        }
+        return edges
+    }
+
+    private static func applying(
+        _ edges: [LangGraphEdge],
+        to instruction: SMLInstruction,
+        outputFields: [String],
+        generatedEndID: String,
+        needsGeneratedEnd: inout Bool
+    ) throws -> SMLInstruction {
+        guard !edges.isEmpty else { return instruction }
+
+        var next = instruction.next
+        var onPass = instruction.onPass
+        var onFailure = instruction.onFailure
+        var trueTarget = instruction.trueTarget
+        var falseTarget = instruction.falseTarget
+
+        for edge in edges {
+            guard let target = try normalizedTarget(
+                edge,
+                from: instruction,
+                outputFields: outputFields,
+                generatedEndID: generatedEndID,
+                needsGeneratedEnd: &needsGeneratedEnd
+            ) else {
+                continue
+            }
+            let slot = try transitionSlot(
+                edge.label,
+                for: instruction.op,
+                path: edge.labelPath ?? edge.path
+            )
+            switch slot {
+            case .next:
+                try mergeTransition(&next, target: target, edge: edge, field: "next")
+            case .onPass:
+                try mergeTransition(&onPass, target: target, edge: edge, field: "on_pass")
+            case .onFailure:
+                try mergeTransition(&onFailure, target: target, edge: edge, field: "on_failure")
+            case .trueTarget:
+                try mergeTransition(&trueTarget, target: target, edge: edge, field: "true")
+            case .falseTarget:
+                try mergeTransition(&falseTarget, target: target, edge: edge, field: "false")
+            }
+        }
+
+        return SMLInstruction(
+            id: instruction.id,
+            op: instruction.op,
+            source: instruction.source,
+            purpose: instruction.purpose,
+            capability: instruction.capability,
+            workflow: instruction.workflow,
+            verifier: instruction.verifier,
+            outputSchema: instruction.outputSchema,
+            reason: instruction.reason,
+            owner: instruction.owner,
+            arguments: instruction.arguments,
+            scope: instruction.scope,
+            expectedState: instruction.expectedState,
+            condition: instruction.condition,
+            plugin: instruction.plugin,
+            retryPolicy: instruction.retryPolicy,
+            receiptFields: instruction.receiptFields,
+            next: next,
+            onPass: onPass,
+            onFailure: onFailure,
+            trueTarget: trueTarget,
+            falseTarget: falseTarget
+        )
+    }
+
+    private static func normalizedTarget(
+        _ edge: LangGraphEdge,
+        from instruction: SMLInstruction,
+        outputFields: [String],
+        generatedEndID: String,
+        needsGeneratedEnd: inout Bool
+    ) throws -> String? {
+        guard isLangGraphEnd(edge.to) else { return edge.to }
+        switch instruction.op {
+        case .complete, .emitReceipt, .escalate:
+            return nil
+        default:
+            guard outputFields.isEmpty else {
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: edge.toPath,
+                    reason: "END edge from non-terminal node requires an explicit receipt node when output_fields are declared"
+                )
+            }
+            needsGeneratedEnd = true
+            return generatedEndID
+        }
+    }
+
+    private static func transitionSlot(
+        _ label: String?,
+        for operation: SMLInstructionOperation,
+        path: String
+    ) throws -> LangGraphEdgeSlot {
+        let normalized = label?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch operation {
+        case .branch:
+            switch normalized {
+            case "true": return .trueTarget
+            case "false": return .falseTarget
+            default:
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: path,
+                    reason: "BRANCH edges require true/false labels"
+                )
+            }
+        case .assert, .verify:
+            switch normalized {
+            case "pass", "passed", "success", "on_pass", "true":
+                return .onPass
+            case "failure", "failed", "error", "on_failure", "false":
+                return .onFailure
+            default:
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: path,
+                    reason: "\(operation.rawValue) edges require pass/failure labels"
+                )
+            }
+        case .waitApproval:
+            switch normalized {
+            case nil, "", "next", "approved", "approve", "pass", "on_pass", "true":
+                return .next
+            case "refused", "refuse", "failure", "failed", "on_failure", "false":
+                return .onFailure
+            default:
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: path,
+                    reason: "WAIT_APPROVAL edges require approved/refused labels"
+                )
+            }
+        case .retry:
+            switch normalized {
+            case "failure", "failed", "exhausted", "on_failure", "false":
+                return .onFailure
+            default:
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: path,
+                    reason: "RETRY edge lists only define the exhausted/failure transition; retry target stays in retry_policy"
+                )
+            }
+        case .complete, .emitReceipt, .escalate:
+            throw SMLWorkflowSourceImportError.invalidField(
+                path: path,
+                reason: "\(operation.rawValue) is terminal and cannot have outgoing edges"
+            )
+        default:
+            switch normalized {
+            case nil, "", "next", "then":
+                return .next
+            default:
+                throw SMLWorkflowSourceImportError.invalidField(
+                    path: path,
+                    reason: "\(operation.rawValue) edges require an unlabeled or next label"
+                )
+            }
+        }
+    }
+
+    private static func mergeTransition(
+        _ current: inout String?,
+        target: String,
+        edge: LangGraphEdge,
+        field: String
+    ) throws {
+        if let current, current != target {
+            throw SMLWorkflowSourceImportError.invalidField(
+                path: edge.toPath,
+                reason: "edge conflicts with existing \(field) transition \(current)"
+            )
+        }
+        current = target
+    }
+
+    private static func generatedEndID(avoiding knownNodeIDs: Set<String>) -> String {
+        var candidate = "__sml_end"
+        var index = 2
+        while knownNodeIDs.contains(candidate) {
+            candidate = "__sml_end_\(index)"
+            index += 1
+        }
+        return candidate
+    }
+
+    private static func isLangGraphStart(_ id: String) -> Bool {
+        id == "START" || id == "__start__"
+    }
+
+    private static func isLangGraphEnd(_ id: String) -> Bool {
+        id == "END" || id == "__end__"
     }
 
     private static func operation(
@@ -622,6 +986,15 @@ public enum SMLWorkflowSourceImporter {
             )
         }
         return values
+    }
+
+    private static func optionalArray(
+        _ object: SMLObject,
+        _ key: String,
+        path: String
+    ) throws -> [SMLValue]? {
+        guard object[key] != nil else { return nil }
+        return try array(object, key, path: path)
     }
 
     private static func stringArray(
