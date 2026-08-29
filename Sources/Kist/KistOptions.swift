@@ -153,6 +153,7 @@ struct KistOptions {
     var smlRuntimeAgentGuide: String? // --sml-runtime-agent-guide <source.json>: emit agent operating guide
     var smlRuntimeHostGuide: String? // --sml-runtime-host-guide <source.json>: emit host wiring guide
     var smlRuntimeHostWiring: String? // --sml-runtime-host-wiring <source.json>: emit compact host wiring map
+    var smlRuntimeScaffold: String? // --sml-runtime-scaffold <source.json>: write all host-consumable runtime artifacts
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/attachments
@@ -166,6 +167,7 @@ struct KistOptions {
     var smlRuntimeRole: String?     // --sml-role <role>: override mounted workflow role
     var smlRuntimeActor: String?    // --sml-actor <actor>: synthetic host actor for offline install proof
     var smlRuntimeAPIBasePath: String? // --sml-api-base <path>: override generated API base path
+    var smlRuntimeOutputDirectory: String? // --sml-out <dir>: output directory for --sml-runtime-scaffold
     var smlRuntimeTitle: String?    // --sml-title <title>: OpenAPI/runtime export title
     var smlRuntimeVersion: String?  // --sml-version <version>: OpenAPI/runtime export version
     var smlRuntimeModelRounds: Int? // --sml-model-rounds <1...8>: model-router command-round ceiling
@@ -246,6 +248,9 @@ struct KistOptions {
             case let flag where ["--sml-runtime-host-wiring", "--sml-host-wiring"].contains(flag):
                                             if let v = next() { o.smlRuntimeHostWiring = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-scaffold", "--sml-scaffold"].contains(flag):
+                                            if let v = next() { o.smlRuntimeScaffold = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-attachments", "--sml-attachments"].contains(flag):
                                             if let v = next() { o.smlRuntimeAttachments = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
@@ -289,6 +294,9 @@ struct KistOptions {
                                             else { o.optionErrors.append("--sml-actor requires <actor>") }
             case "--sml-api-base":          if let v = next() { o.smlRuntimeAPIBasePath = v }
                                             else { o.optionErrors.append("--sml-api-base requires <path>") }
+            case let flag where ["--sml-out", "--sml-output-dir"].contains(flag):
+                                            if let v = next() { o.smlRuntimeOutputDirectory = v }
+                                            else { o.optionErrors.append("\(flag) requires <dir>") }
             case "--sml-title":             if let v = next() { o.smlRuntimeTitle = v }
                                             else { o.optionErrors.append("--sml-title requires <title>") }
             case "--sml-version":           if let v = next() { o.smlRuntimeVersion = v }
@@ -519,6 +527,7 @@ struct KistOptions {
             ("--sml-runtime-agent-guide", o.smlRuntimeAgentGuide != nil),
             ("--sml-runtime-host-guide", o.smlRuntimeHostGuide != nil),
             ("--sml-runtime-host-wiring", o.smlRuntimeHostWiring != nil),
+            ("--sml-runtime-scaffold", o.smlRuntimeScaffold != nil),
             ("--sml-runtime-attachments", o.smlRuntimeAttachments != nil),
             ("--sml-runtime-repl", o.smlRuntimeREPL != nil),
             ("--sml-runtime-api", o.smlRuntimeAPI != nil),
@@ -562,6 +571,13 @@ struct KistOptions {
             if o.smlRuntimeAPIBody != nil {
                 o.optionErrors.append("--sml-body requires --sml-runtime-api <source.json>")
             }
+        }
+        if o.smlRuntimeScaffold != nil {
+            if o.smlRuntimeOutputDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--sml-runtime-scaffold requires --sml-out <dir>")
+            }
+        } else if o.smlRuntimeOutputDirectory != nil {
+            o.optionErrors.append("--sml-out requires --sml-runtime-scaffold <source.json>")
         }
         if o.smlRuntimeModel != nil {
             let prompt = o.smlRuntimeModelPrompt ?? o.goal
@@ -810,6 +826,10 @@ struct KistOptions {
           --sml-runtime-host-wiring <json>
                                     Launch the wrapped source offline and emit the compact host
                                     wiring map for REPL/API/model-router/Onyx/planning adapters.
+          --sml-runtime-scaffold <json> --sml-out <dir>
+                                    Launch the wrapped source offline and write catalog, mount,
+                                    OpenAPI, model-router, Onyx, planning, guide, wiring, and
+                                    attachment artifacts into one host-consumable directory.
           --sml-runtime-attachments <json> [--sml-workflow <id>]
                                     Emit the per-workflow attachment manifests for generated REPL,
                                     API, model-router, Onyx driver, and planning adapters; optionally
@@ -826,6 +846,7 @@ struct KistOptions {
                                     drive mounted workflows through propose_sml_runtime_command.
               --sml-role <role>         Override workflow role for the generated mount.
               --sml-api-base <path>     Override API base path for generated endpoints.
+              --sml-out <dir>           Output directory for --sml-runtime-scaffold.
               --sml-model-rounds <n>    Override model-router round ceiling (1...8).
           --bench                   Provider bake-off for the given task: success, latency, usage/cost,
                                     tool failures, and tests evidence where available.

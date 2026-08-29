@@ -242,6 +242,16 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertNil(hostWiring.goal)
         XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-host-wiring <json>"))
 
+        let scaffold = KistOptions.parse([
+            "--sml-runtime-scaffold", "graphs/review.langgraph.json",
+            "--sml-out", ".kist/generated/review-runtime",
+        ])
+        XCTAssertEqual(scaffold.smlRuntimeScaffold, "graphs/review.langgraph.json")
+        XCTAssertEqual(scaffold.smlRuntimeOutputDirectory, ".kist/generated/review-runtime")
+        XCTAssertNil(scaffold.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-scaffold <json> --sml-out <dir>"))
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-out <dir>"))
+
         XCTAssertEqual(
             KistOptions.parse(["--sml-catalog", "graphs/review.langgraph.json"]).smlRuntimeCatalog,
             "graphs/review.langgraph.json"
@@ -262,6 +272,12 @@ final class KistOptionsTests: XCTestCase {
             KistOptions.parse(["--sml-host-wiring", "graphs/review.langgraph.json"]).smlRuntimeHostWiring,
             "graphs/review.langgraph.json"
         )
+        let scaffoldAlias = KistOptions.parse([
+            "--sml-scaffold", "graphs/review.langgraph.json",
+            "--sml-output-dir", ".kist/generated/review-runtime",
+        ])
+        XCTAssertEqual(scaffoldAlias.smlRuntimeScaffold, "graphs/review.langgraph.json")
+        XCTAssertEqual(scaffoldAlias.smlRuntimeOutputDirectory, ".kist/generated/review-runtime")
     }
 
     func testSMLRuntimeAttachmentsFlags() {
@@ -457,6 +473,33 @@ final class KistOptionsTests: XCTestCase {
         })
         XCTAssertNil(hostWiring.smlRuntimeHostWiring)
 
+        let scaffold = KistOptions.parse(["--sml-runtime-scaffold"])
+        XCTAssertTrue(scaffold.optionErrors.contains {
+            $0.contains("--sml-runtime-scaffold requires <source.json>")
+        })
+        XCTAssertNil(scaffold.smlRuntimeScaffold)
+
+        let scaffoldMissingOutput = KistOptions.parse([
+            "--sml-runtime-scaffold", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(scaffoldMissingOutput.optionErrors.contains {
+            $0.contains("--sml-runtime-scaffold requires --sml-out <dir>")
+        })
+        XCTAssertEqual(scaffoldMissingOutput.smlRuntimeScaffold, "graphs/review.langgraph.json")
+        XCTAssertNil(scaffoldMissingOutput.smlRuntimeOutputDirectory)
+
+        let output = KistOptions.parse(["--sml-out"])
+        XCTAssertTrue(output.optionErrors.contains {
+            $0.contains("--sml-out requires <dir>")
+        })
+        XCTAssertNil(output.smlRuntimeOutputDirectory)
+
+        let outputOnly = KistOptions.parse(["--sml-out", ".kist/generated/review-runtime"])
+        XCTAssertTrue(outputOnly.optionErrors.contains {
+            $0.contains("--sml-out requires --sml-runtime-scaffold <source.json>")
+        })
+        XCTAssertEqual(outputOnly.smlRuntimeOutputDirectory, ".kist/generated/review-runtime")
+
         let role = KistOptions.parse(["--sml-role"])
         XCTAssertTrue(role.optionErrors.contains { $0.contains("--sml-role requires") })
 
@@ -540,6 +583,15 @@ final class KistOptionsTests: XCTestCase {
         ])
         XCTAssertTrue(descriptorConflict.optionErrors.contains {
             $0.contains("--sml-runtime-catalog conflicts with --sml-runtime-host-wiring")
+        })
+
+        let scaffoldConflict = KistOptions.parse([
+            "--sml-runtime-scaffold", "graphs/review.langgraph.json",
+            "--sml-out", ".kist/generated/review-runtime",
+            "--sml-runtime-attachments", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(scaffoldConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-scaffold conflicts with --sml-runtime-attachments")
         })
     }
 

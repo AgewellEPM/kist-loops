@@ -4,6 +4,7 @@ import AgentCore
 extension KistRunner {
     enum SMLRuntimeHostExportSourceFormat: String, Sendable, Codable, Equatable {
         case runtimeSourcePackage = "runtime_source_package"
+        case runtimeScaffold = "runtime_scaffold"
         case langGraphManifest = "langgraph_manifest"
         case smlWorkflowJSON = "sml_workflow_json"
     }
@@ -341,6 +342,70 @@ extension KistRunner {
         }
     }
 
+    struct SMLRuntimeHostScaffoldFile: Sendable, Codable, Equatable {
+        let relativePath: String
+        let path: String
+        let resource: SMLWorkflowRuntimeMetadataResource?
+        let byteCount: Int
+        let sha256: String
+        let summary: String
+
+        init(
+            relativePath: String,
+            path: String,
+            resource: SMLWorkflowRuntimeMetadataResource? = nil,
+            byteCount: Int,
+            sha256: String,
+            summary: String
+        ) {
+            self.relativePath = relativePath
+            self.path = path
+            self.resource = resource
+            self.byteCount = byteCount
+            self.sha256 = sha256
+            self.summary = summary
+        }
+    }
+
+    struct SMLRuntimeHostScaffold: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let outputDirectory: String
+        let indexPath: String
+        let workflowIDs: [String]
+        let apiBasePaths: [String]
+        let files: [SMLRuntimeHostScaffoldFile]
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostScaffold.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            outputDirectory: String,
+            indexPath: String = "scaffold.json",
+            workflowIDs: [String],
+            apiBasePaths: [String],
+            files: [SMLRuntimeHostScaffoldFile],
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.outputDirectory = outputDirectory
+            self.indexPath = indexPath
+            self.workflowIDs = workflowIDs.sorted()
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.files = files.sorted {
+                if $0.relativePath != $1.relativePath { return $0.relativePath < $1.relativePath }
+                return $0.sha256 < $1.sha256
+            }
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
     struct SMLRuntimeHostAttachments: Sendable, Codable, Equatable {
         static let currentSchemaVersion = 4
 
@@ -539,20 +604,28 @@ extension KistRunner {
 
     enum SMLRuntimeHostExportError: Error, CustomStringConvertible {
         case missingSourcePath
+        case missingOutputDirectory
         case missingREPLLine
         case missingAPIPath
         case missingModelPrompt
         case invalidJSONObject(flag: String, reason: String)
+        case invalidScaffold(path: String, reason: String)
         case readFailed(path: String, reason: String)
         case unsupportedSource(path: String, diagnostics: [String])
         case noREPLWorkflows
         case ambiguousREPLWorkflow([String])
         case unknownREPLWorkflow(requested: String, available: [String])
+        case outputDirectoryNotAllowed(String)
+        case outputDirectoryIsFile(String)
+        case outputDirectoryNotEmpty(String)
+        case writeFailed(path: String, reason: String)
 
         var description: String {
             switch self {
             case .missingSourcePath:
-                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-openapi/--sml-runtime-model-router/--sml-runtime-onyx/--sml-runtime-planning/--sml-runtime-catalog/--sml-runtime-mount/--sml-runtime-agent-guide/--sml-runtime-host-guide/--sml-runtime-host-wiring/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
+                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-openapi/--sml-runtime-model-router/--sml-runtime-onyx/--sml-runtime-planning/--sml-runtime-catalog/--sml-runtime-mount/--sml-runtime-agent-guide/--sml-runtime-host-guide/--sml-runtime-host-wiring/--sml-runtime-scaffold/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
+            case .missingOutputDirectory:
+                return "--sml-runtime-scaffold requires --sml-out <dir>"
             case .missingREPLLine:
                 return "--sml-runtime-repl requires --sml-line <line>"
             case .missingAPIPath:
@@ -561,11 +634,13 @@ extension KistRunner {
                 return "--sml-runtime-model requires --sml-prompt <text> or a positional prompt"
             case .invalidJSONObject(let flag, let reason):
                 return "\(flag) must be a valid SML JSON object: \(reason)"
+            case .invalidScaffold(let path, let reason):
+                return "invalid SML runtime scaffold '\(path)': \(reason)"
             case .readFailed(let path, let reason):
                 return "could not read SML runtime source '\(path)': \(reason)"
             case .unsupportedSource(let path, let diagnostics):
                 return """
-                unsupported SML runtime source '\(path)'. Expected a runtime source package, LangGraph manifest, or SML workflow JSON.
+                unsupported SML runtime source '\(path)'. Expected a runtime source package, runtime scaffold, LangGraph manifest, or SML workflow JSON.
                 \(diagnostics.map { "  - \($0)" }.joined(separator: "\n"))
                 """
             case .noREPLWorkflows:
@@ -574,6 +649,14 @@ extension KistRunner {
                 return "--sml-workflow is required because the runtime source contains multiple workflows: \(workflows.joined(separator: ", "))"
             case .unknownREPLWorkflow(let requested, let available):
                 return "unknown --sml-workflow '\(requested)'. Available workflows: \(available.joined(separator: ", "))"
+            case .outputDirectoryNotAllowed(let path):
+                return "--sml-out refuses broad output directory: \(path)"
+            case .outputDirectoryIsFile(let path):
+                return "--sml-out path exists and is not a directory: \(path)"
+            case .outputDirectoryNotEmpty(let path):
+                return "--sml-out refuses to overwrite non-empty directory: \(path)"
+            case .writeFailed(let path, let reason):
+                return "could not write SML runtime scaffold file '\(path)': \(reason)"
             }
         }
     }
@@ -783,6 +866,27 @@ extension KistRunner {
         do {
             let json = try await renderSMLRuntimeHostWiring(
                 sourcePath: opts.smlRuntimeHostWiring,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeScaffold(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostScaffold(
+                sourcePath: opts.smlRuntimeScaffold,
+                outputDirectory: opts.smlRuntimeOutputDirectory,
                 projectRoot: opts.project,
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
@@ -1169,6 +1273,33 @@ extension KistRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return String(decoding: try encoder.encode(wiring), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostScaffold(
+        sourcePath: String?,
+        outputDirectory: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let scaffold = try await writeSMLRuntimeHostScaffold(
+            sourcePath: sourcePath,
+            outputDirectory: outputDirectory,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(scaffold), as: UTF8.self)
     }
 
     static func renderSMLRuntimeHostREPLCommand(
@@ -1669,6 +1800,423 @@ extension KistRunner {
         }
     }
 
+    static func writeSMLRuntimeHostScaffold(
+        sourcePath: String?,
+        outputDirectory: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostScaffold {
+        let outputURL = try smlRuntimeScaffoldOutputURL(
+            outputDirectory,
+            projectRoot: projectRoot
+        )
+        try validateSMLRuntimeScaffoldOutputDirectory(
+            outputURL,
+            projectRoot: projectRoot
+        )
+        return try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            try prepareSMLRuntimeScaffoldOutputDirectory(
+                outputURL,
+                projectRoot: projectRoot
+            )
+            let runtime = host.runtimePackage.runtime
+            let launchDescriptor = host.launch.launchDescriptor
+            var files: [SMLRuntimeHostScaffoldFile] = []
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "catalog.json",
+                outputDirectory: outputURL,
+                resource: .catalog,
+                summary: "Mounted workflow runtime catalog.",
+                payload: runtime.catalog
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "mount.json",
+                outputDirectory: outputURL,
+                resource: .mount,
+                summary: "Host mount contract for generated REPL/API/model/Onyx/planning surfaces.",
+                payload: runtime.mountContract
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "launch.json",
+                outputDirectory: outputURL,
+                resource: .launch,
+                summary: "Launch descriptor proving the wrapped source mounted cleanly.",
+                payload: launchDescriptor
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "runtime-export.json",
+                outputDirectory: outputURL,
+                resource: .export,
+                summary: "Complete descriptor-only runtime export.",
+                payload: runtime
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "runtime-source-package.json",
+                outputDirectory: outputURL,
+                summary: "Portable source package plus generated runtime export.",
+                payload: host.runtimePackage
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "openapi.json",
+                outputDirectory: outputURL,
+                resource: .openAPI,
+                summary: "Generated OpenAPI document for custom runtime API endpoints.",
+                payload: runtime.openAPI
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "model-tools.json",
+                outputDirectory: outputURL,
+                summary: "Per-workflow model tool descriptors.",
+                payload: runtime.modelTools
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "model-router.json",
+                outputDirectory: outputURL,
+                resource: .modelRouter,
+                summary: "Native model-router tool descriptor for selecting and driving mounted workflows.",
+                payload: runtime.modelRouter
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "onyx-drivers.json",
+                outputDirectory: outputURL,
+                resource: .onyxDrivers,
+                summary: "Generated Onyx driver manifests with skill trees, tools, and plans.",
+                payload: runtime.onyxDrivers
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "planning.json",
+                outputDirectory: outputURL,
+                resource: .planning,
+                summary: "Aggregate planning manifest with skill index, tool index, graph units, and gates.",
+                payload: runtime.planning
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "agent-guide.json",
+                outputDirectory: outputURL,
+                resource: .agentGuide,
+                summary: "Canonical model/agent operating guide.",
+                payload: runtime.agentGuide
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "host-guide.json",
+                outputDirectory: outputURL,
+                resource: .hostGuide,
+                summary: "Canonical host integration checklist.",
+                payload: runtime.hostGuide
+            ))
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "host-wiring.json",
+                outputDirectory: outputURL,
+                resource: .hostWiring,
+                summary: "Compact host wiring map for dashboards, CLIs, HTTP routers, model hosts, and Onyx bridges.",
+                payload: runtime.hostWiring
+            ))
+            let attachments = runtime.hostWiring.attachmentManifests
+            files.append(try writeSMLRuntimeScaffoldJSONFile(
+                relativePath: "attachments.json",
+                outputDirectory: outputURL,
+                resource: .attachments,
+                summary: "All per-workflow attachment manifests.",
+                payload: attachments
+            ))
+            for attachment in attachments {
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "attachments/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).json",
+                    outputDirectory: outputURL,
+                    resource: .workflowAttachment,
+                    summary: "Attachment manifest for \(attachment.workflowID).",
+                    payload: attachment
+                ))
+            }
+            files.append(try writeSMLRuntimeScaffoldTextFile(
+                relativePath: "README.md",
+                outputDirectory: outputURL,
+                summary: "Human-readable scaffold usage guide.",
+                text: smlRuntimeScaffoldReadme(
+                    sourcePath: host.sourcePath,
+                    sourceFormat: host.sourceFormat,
+                    outputDirectory: outputURL.standardizedFileURL.path,
+                    launchDescriptor: launchDescriptor,
+                    files: files
+                )
+            ))
+            let scaffold = SMLRuntimeHostScaffold(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                outputDirectory: outputURL.standardizedFileURL.path,
+                workflowIDs: launchDescriptor.workflowIDs,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                files: files,
+                launchDescriptor: launchDescriptor
+            )
+            try writeSMLRuntimeScaffoldJSONData(
+                relativePath: scaffold.indexPath,
+                outputDirectory: outputURL,
+                payload: scaffold
+            )
+            return scaffold
+        }
+    }
+
+    private static func smlRuntimeScaffoldOutputURL(
+        _ outputDirectory: String?,
+        projectRoot: String
+    ) throws -> URL {
+        guard let outputDirectory else {
+            throw SMLRuntimeHostExportError.missingOutputDirectory
+        }
+        let trimmed = outputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw SMLRuntimeHostExportError.missingOutputDirectory
+        }
+        if trimmed.hasPrefix("/") {
+            return URL(fileURLWithPath: trimmed, isDirectory: true).standardizedFileURL
+        }
+        return URL(fileURLWithPath: projectRoot, isDirectory: true)
+            .appendingPathComponent(trimmed, isDirectory: true)
+            .standardizedFileURL
+    }
+
+    private static func validateSMLRuntimeScaffoldOutputDirectory(
+        _ outputURL: URL,
+        projectRoot: String
+    ) throws {
+        let manager = FileManager.default
+        let path = normalizedDirectoryPath(outputURL)
+        let projectPath = normalizedDirectoryPath(
+            URL(fileURLWithPath: projectRoot, isDirectory: true).standardizedFileURL
+        )
+        let homePath = normalizedDirectoryPath(manager.homeDirectoryForCurrentUser.standardizedFileURL)
+        guard path != "/", path != projectPath, path != homePath else {
+            throw SMLRuntimeHostExportError.outputDirectoryNotAllowed(path)
+        }
+        if (try? manager.destinationOfSymbolicLink(atPath: path)) != nil {
+            throw SMLRuntimeHostExportError.outputDirectoryNotAllowed(path)
+        }
+        var isDirectory = ObjCBool(false)
+        guard manager.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return
+        }
+        guard isDirectory.boolValue else {
+            throw SMLRuntimeHostExportError.outputDirectoryIsFile(path)
+        }
+        do {
+            if try !manager.contentsOfDirectory(atPath: path).isEmpty {
+                throw SMLRuntimeHostExportError.outputDirectoryNotEmpty(path)
+            }
+        } catch let error as SMLRuntimeHostExportError {
+            throw error
+        } catch {
+            throw SMLRuntimeHostExportError.writeFailed(
+                path: path,
+                reason: String(describing: error)
+            )
+        }
+    }
+
+    private static func prepareSMLRuntimeScaffoldOutputDirectory(
+        _ outputURL: URL,
+        projectRoot: String
+    ) throws {
+        try validateSMLRuntimeScaffoldOutputDirectory(
+            outputURL,
+            projectRoot: projectRoot
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: outputURL,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            throw SMLRuntimeHostExportError.writeFailed(
+                path: outputURL.standardizedFileURL.path,
+                reason: String(describing: error)
+            )
+        }
+    }
+
+    private static func normalizedDirectoryPath(_ url: URL) -> String {
+        var path = url.standardizedFileURL.path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
+
+    @discardableResult
+    private static func writeSMLRuntimeScaffoldJSONData<T: Encodable>(
+        relativePath: String,
+        outputDirectory: URL,
+        payload: T
+    ) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(payload)
+        try writeSMLRuntimeScaffoldData(
+            data,
+            relativePath: relativePath,
+            outputDirectory: outputDirectory
+        )
+        return data
+    }
+
+    private static func writeSMLRuntimeScaffoldJSONFile<T: Encodable>(
+        relativePath: String,
+        outputDirectory: URL,
+        resource: SMLWorkflowRuntimeMetadataResource? = nil,
+        summary: String,
+        payload: T
+    ) throws -> SMLRuntimeHostScaffoldFile {
+        let data = try writeSMLRuntimeScaffoldJSONData(
+            relativePath: relativePath,
+            outputDirectory: outputDirectory,
+            payload: payload
+        )
+        return smlRuntimeScaffoldFileRecord(
+            relativePath: relativePath,
+            outputDirectory: outputDirectory,
+            resource: resource,
+            summary: summary,
+            data: data
+        )
+    }
+
+    private static func writeSMLRuntimeScaffoldTextFile(
+        relativePath: String,
+        outputDirectory: URL,
+        summary: String,
+        text: String
+    ) throws -> SMLRuntimeHostScaffoldFile {
+        let data = Data(text.utf8)
+        try writeSMLRuntimeScaffoldData(
+            data,
+            relativePath: relativePath,
+            outputDirectory: outputDirectory
+        )
+        return smlRuntimeScaffoldFileRecord(
+            relativePath: relativePath,
+            outputDirectory: outputDirectory,
+            summary: summary,
+            data: data
+        )
+    }
+
+    private static func writeSMLRuntimeScaffoldData(
+        _ data: Data,
+        relativePath: String,
+        outputDirectory: URL
+    ) throws {
+        let targetURL = outputDirectory.appendingPathComponent(relativePath, isDirectory: false)
+        do {
+            try FileManager.default.createDirectory(
+                at: targetURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            guard !FileManager.default.fileExists(atPath: targetURL.path) else {
+                throw SMLRuntimeHostExportError.writeFailed(
+                    path: targetURL.path,
+                    reason: "target already exists"
+                )
+            }
+            try data.write(to: targetURL, options: [.atomic])
+        } catch let error as SMLRuntimeHostExportError {
+            throw error
+        } catch {
+            throw SMLRuntimeHostExportError.writeFailed(
+                path: targetURL.path,
+                reason: String(describing: error)
+            )
+        }
+    }
+
+    private static func smlRuntimeScaffoldFileRecord(
+        relativePath: String,
+        outputDirectory: URL,
+        resource: SMLWorkflowRuntimeMetadataResource? = nil,
+        summary: String,
+        data: Data
+    ) -> SMLRuntimeHostScaffoldFile {
+        SMLRuntimeHostScaffoldFile(
+            relativePath: relativePath,
+            path: outputDirectory
+                .appendingPathComponent(relativePath, isDirectory: false)
+                .standardizedFileURL
+                .path,
+            resource: resource,
+            byteCount: data.count,
+            sha256: BuilderEvidenceDigest.sha256(String(decoding: data, as: UTF8.self)),
+            summary: summary
+        )
+    }
+
+    private static func smlRuntimeScaffoldSafeFileStem(_ workflowID: String) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        let stem = String(workflowID.map { allowed.contains($0) ? $0 : "_" })
+        return stem.isEmpty ? "workflow" : stem
+    }
+
+    private static func smlRuntimeScaffoldReadme(
+        sourcePath: String,
+        sourceFormat: SMLRuntimeHostExportSourceFormat,
+        outputDirectory: String,
+        launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor,
+        files: [SMLRuntimeHostScaffoldFile]
+    ) -> String {
+        let workflowList = launchDescriptor.workflowIDs.map { "- \($0)" }.joined(separator: "\n")
+        let apiBaseList = launchDescriptor.apiBasePaths.map { "- \($0)" }.joined(separator: "\n")
+        let fileList = files.sorted {
+            if $0.relativePath != $1.relativePath { return $0.relativePath < $1.relativePath }
+            return $0.sha256 < $1.sha256
+        }.map {
+            "- `\($0.relativePath)` — \($0.summary) SHA-256: `\($0.sha256)`"
+        }.joined(separator: "\n")
+        return """
+        # SML runtime scaffold
+
+        Source: `\(sourcePath)`
+        Source format: `\(sourceFormat.rawValue)`
+        Output directory: `\(outputDirectory)`
+        Launch complete: `\(launchDescriptor.launchComplete)`
+
+        ## Mounted workflows
+
+        \(workflowList.isEmpty ? "- none" : workflowList)
+
+        ## API base paths
+
+        \(apiBaseList.isEmpty ? "- none" : apiBaseList)
+
+        ## Files
+
+        \(fileList)
+
+        ## Host wiring order
+
+        1. Decode `runtime-source-package.json` or inspect `runtime-export.json`.
+        2. Mount routes from `mount.json` and `openapi.json`.
+        3. Attach `model-router.json` as the native tool exposed to the selected model.
+        4. Load `onyx-drivers.json` for skill trees, tool bindings, and plans.
+        5. Use `planning.json`, `agent-guide.json`, and `host-guide.json` as the agent/host operating contract.
+        6. Use `host-wiring.json` or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
+
+        Descriptor files do not carry actor identity, leases, credentials, provider registries, runtime handles, or completion authority. State changes still have to cross the generated host command gateway and replay/admission checks.
+        """
+    }
+
     static func makeSMLRuntimeHostAPIExchange(
         sourcePath: String?,
         projectRoot: String,
@@ -1897,7 +2445,8 @@ extension KistRunner {
               !sourcePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SMLRuntimeHostExportError.missingSourcePath
         }
-        let sourceURL = smlRuntimeSourceURL(sourcePath, projectRoot: projectRoot)
+        let requestedSourceURL = smlRuntimeSourceURL(sourcePath, projectRoot: projectRoot)
+        let sourceURL = smlRuntimeReadableSourceURL(requestedSourceURL)
         let sourceData: Data
         do {
             sourceData = try Data(contentsOf: sourceURL)
@@ -2068,6 +2617,17 @@ extension KistRunner {
             .appendingPathComponent(sourcePath)
     }
 
+    private static func smlRuntimeReadableSourceURL(_ sourceURL: URL) -> URL {
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(
+            atPath: sourceURL.path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            return sourceURL
+        }
+        return sourceURL.appendingPathComponent("scaffold.json", isDirectory: false)
+    }
+
     private static func loadSMLRuntimeSource(
         data: Data,
         path: String
@@ -2082,6 +2642,17 @@ extension KistRunner {
             )
         } catch {
             diagnostics.append("runtime source package: \(error)")
+        }
+        do {
+            let scaffold = try JSONDecoder().decode(SMLRuntimeHostScaffold.self, from: data)
+            let package = try loadSMLRuntimePackage(from: scaffold, indexPath: path)
+            return LoadedSMLRuntimeSource(
+                format: .runtimeScaffold,
+                package: package,
+                workflows: package.normalizedWorkflows
+            )
+        } catch {
+            diagnostics.append("runtime scaffold: \(error)")
         }
         do {
             let workflow = try SMLWorkflowSourceImporter.langGraphWorkflow(from: data)
@@ -2107,6 +2678,48 @@ extension KistRunner {
             path: path,
             diagnostics: diagnostics
         )
+    }
+
+    private static func loadSMLRuntimePackage(
+        from scaffold: SMLRuntimeHostScaffold,
+        indexPath: String
+    ) throws -> SMLWorkflowRuntimeSourcePackage {
+        guard let packageFile = scaffold.files.first(where: {
+            $0.relativePath == "runtime-source-package.json"
+        }) else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath,
+                reason: "missing runtime-source-package.json file record"
+            )
+        }
+        let indexURL = URL(fileURLWithPath: indexPath)
+        let packageURL = indexURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(packageFile.relativePath, isDirectory: false)
+            .standardizedFileURL
+        let packageData: Data
+        do {
+            packageData = try Data(contentsOf: packageURL)
+        } catch {
+            throw SMLRuntimeHostExportError.readFailed(
+                path: packageURL.path,
+                reason: String(describing: error)
+            )
+        }
+        guard packageData.count == packageFile.byteCount else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath,
+                reason: "runtime-source-package.json byte count changed"
+            )
+        }
+        let packageText = String(decoding: packageData, as: UTF8.self)
+        guard BuilderEvidenceDigest.sha256(packageText) == packageFile.sha256 else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath,
+                reason: "runtime-source-package.json digest changed"
+            )
+        }
+        return try JSONDecoder().decode(SMLWorkflowRuntimeSourcePackage.self, from: packageData)
     }
 
     /// Offline export needs an admission catalog only to prove the generated surfaces are structurally

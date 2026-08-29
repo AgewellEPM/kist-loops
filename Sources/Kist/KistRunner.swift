@@ -154,6 +154,9 @@ enum KistRunner {
         if opts.smlRuntimeHostWiring != nil {
             return await runSMLRuntimeHostWiring(opts)
         }
+        if opts.smlRuntimeScaffold != nil {
+            return await runSMLRuntimeScaffold(opts)
+        }
         if opts.smlRuntimeLaunch != nil {
             return await runSMLRuntimeLaunch(opts)
         }
