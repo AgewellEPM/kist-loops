@@ -343,6 +343,42 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
             SMLWorkflowREPLCommandDescriptor(
                 kind: .local,
                 action: nil,
+                verb: "api",
+                usage: "api",
+                summary: "Print this workflow's generated API endpoints and request examples.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "model",
+                usage: "model",
+                summary: "Print the generated model tool and router attachment.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "onyx",
+                usage: "onyx",
+                summary: "Print the generated Onyx driver, tools, and skill tree.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "planning",
+                usage: "planning",
+                summary: "Print the generated planning units for this workflow.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
                 verb: "exit",
                 aliases: ["quit"],
                 usage: "exit",
@@ -398,7 +434,7 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
         }
     }
 
-    private func sampleInputObject() -> SMLObject {
+    func sampleInputObject() -> SMLObject {
         Dictionary(uniqueKeysWithValues: inputs.map { field in
             (field.name, Self.sampleValue(for: field))
         })

@@ -9,7 +9,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostExport: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 3
+        static let currentSchemaVersion = 4
 
         let schemaVersion: Int
         let sourcePath: String
@@ -78,7 +78,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostAPIExchange: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 1
+        static let currentSchemaVersion = 2
 
         let schemaVersion: Int
         let sourcePath: String

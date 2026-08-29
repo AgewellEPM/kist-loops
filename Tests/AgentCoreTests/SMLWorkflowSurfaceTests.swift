@@ -17,7 +17,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let replCommands = surface.replCommandDescriptors()
         XCTAssertEqual(
             Set(replCommands.map(\.verb)),
-            ["approve", "describe", "exit", "help", "receipts", "refuse", "rollback", "schema", "start", "watch"]
+            [
+                "api", "approve", "describe", "exit", "help", "model", "onyx",
+                "planning", "receipts", "refuse", "rollback", "schema", "start", "watch",
+            ]
         )
         let replStart = try XCTUnwrap(replCommands.first { $0.verb == "start" })
         XCTAssertEqual(replStart.kind, .runtime)
@@ -58,6 +61,14 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(api.endpoints.first { $0.action == .start }?.bodyKind, .startTask)
         XCTAssertEqual(api.endpoints.first { $0.action == .approve }?.bodyKind, .expectedState)
         XCTAssertEqual(api.endpoints.first { $0.action == .start }?.bodyFields.map(\.name), ["target"])
+        let apiStart = try XCTUnwrap(api.endpoints.first { $0.action == .start })
+        let apiStartExample = try XCTUnwrap(apiStart.examples.first)
+        XCTAssertEqual(apiStartExample.method, .post)
+        XCTAssertEqual(apiStartExample.path, "/v1/workflows/content.release/tasks")
+        XCTAssertEqual(apiStartExample.body["task_id"], .string("TASK-ID"))
+        XCTAssertEqual(apiStartExample.body["input"], .object(["target": .string("target")]))
+        let apiApprove = try XCTUnwrap(api.endpoints.first { $0.action == .approve })
+        XCTAssertEqual(apiApprove.examples.first?.body["task_revision"], .number(0))
 
         let onyx = SMLOnyxDriverCompiler.compile(surface: surface)
         XCTAssertEqual(onyx.providerFamily, "onyx")
@@ -189,6 +200,27 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
 
         let help = try await replSession.submit("help")
         XCTAssertTrue(help.output.contains("graph:"))
+        XCTAssertTrue(help.output.contains("api"))
+        XCTAssertTrue(help.output.contains("model"))
+        XCTAssertTrue(help.output.contains("onyx"))
+        XCTAssertTrue(help.output.contains("planning"))
+        let apiInfo = try await replSession.submit("api")
+        XCTAssertNil(apiInfo.command)
+        XCTAssertTrue(apiInfo.output.contains("base path: /automation"))
+        XCTAssertTrue(apiInfo.output.contains("POST /automation/workflows/content.release/tasks"))
+        XCTAssertTrue(apiInfo.output.contains(#"{"input":{"target":"target"},"task_id":"TASK-ID"}"#))
+        let modelInfo = try await replSession.submit("model")
+        XCTAssertNil(modelInfo.command)
+        XCTAssertTrue(modelInfo.output.contains(SMLWorkflowModelAdapter.toolName))
+        XCTAssertTrue(modelInfo.output.contains(SMLWorkflowRuntimeModelAdapter.toolName))
+        let onyxInfo = try await replSession.submit("onyx")
+        XCTAssertNil(onyxInfo.command)
+        XCTAssertTrue(onyxInfo.output.contains(bundle.onyxDriver.driverID))
+        XCTAssertTrue(onyxInfo.output.contains("skill tree:"))
+        let planningInfo = try await replSession.submit("planning")
+        XCTAssertNil(planningInfo.command)
+        XCTAssertTrue(planningInfo.output.contains("unit:model_reasoning"))
+        XCTAssertTrue(planningInfo.output.contains("unit:external_capability"))
         XCTAssertEqual(api.compiler.catalog.basePath, "/automation")
         XCTAssertEqual(modelAdapter.surface.workflowID, "content.release")
         XCTAssertEqual(modelAdapter.allowedActions, SMLWorkflowSurface.modelDefaultActions)
@@ -734,6 +766,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             $0.line == #"start TASK-ID {"target":"target"}"#
         })
         XCTAssertEqual(mount.apiRoutes.count, 17)
+        let startRoute = try XCTUnwrap(mount.apiRoutes.first {
+            $0.workflowID == "content.release" && $0.action == .start
+        })
+        XCTAssertEqual(
+            startRoute.examples.first?.body["input"],
+            .object(["target": .string("target")])
+        )
         XCTAssertEqual(mount.workflowMounts.map(\.workflowID), ["content.release"])
         XCTAssertEqual(mount.workflowMounts.first?.apiRoutes.count, 7)
         XCTAssertEqual(
@@ -790,6 +829,20 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(legacyMount.commands, [])
         XCTAssertEqual(legacyMount.examples, [])
+
+        var legacyRouteObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(startRoute)) as? [String: Any]
+        )
+        legacyRouteObject.removeValue(forKey: "examples")
+        let legacyRouteData = try JSONSerialization.data(
+            withJSONObject: legacyRouteObject,
+            options: [.sortedKeys]
+        )
+        let legacyRoute = try JSONDecoder().decode(
+            SMLWorkflowRuntimeAPIMount.self,
+            from: legacyRouteData
+        )
+        XCTAssertEqual(legacyRoute.examples, [])
     }
 
     func testRuntimeAgentGuideExportsModelREPLAPIOnyxAndPlanningInstructions() throws {
@@ -1210,8 +1263,24 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let startPath = try object(paths["/automation/workflows/content.release/tasks"])
         let start = try object(startPath["post"])
         XCTAssertEqual(start["operationId"], .string("start_workflow_task_ContentRelease"))
+        let openAPIExamples = try array(start["x-sml-request-examples"])
+        let openAPIStartExample = try object(openAPIExamples.first)
+        XCTAssertEqual(openAPIStartExample["method"], .string("POST"))
+        XCTAssertEqual(openAPIStartExample["path"], .string("/automation/workflows/content.release/tasks"))
+        XCTAssertEqual(
+            try object(openAPIStartExample["body"])["input"],
+            .object(["target": .string("target")])
+        )
         let requestBody = try object(start["requestBody"])
         XCTAssertEqual(requestBody["required"], .bool(true))
+        let requestBodyContent = try object(requestBody["content"])
+        let jsonRequestBody = try object(requestBodyContent["application/json"])
+        let requestBodyExamples = try object(jsonRequestBody["examples"])
+        let requestBodyExample = try object(requestBodyExamples["example1"])
+        XCTAssertEqual(
+            try object(requestBodyExample["value"])["input"],
+            .object(["target": .string("target")])
+        )
 
         let components = try object(export.openAPI["components"])
         let schemas = try object(components["schemas"])
@@ -1413,6 +1482,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(start.route.action, .start)
         XCTAssertEqual(start.route.bodyKind, .startTask)
         XCTAssertEqual(start.route.bodyFields.map(\.name), ["target"])
+        let startExample = try XCTUnwrap(start.route.examples.first)
+        XCTAssertEqual(startExample.method, .post)
+        XCTAssertEqual(startExample.path, "/automation/workflows/content.release/tasks")
+        XCTAssertEqual(startExample.body["task_id"], .string("TASK-ID"))
+        XCTAssertEqual(startExample.body["input"], .object(["target": .string("target")]))
         XCTAssertEqual(start.pathParameters, [:])
 
         let receipts = try contract.resolveAPI(
@@ -1433,6 +1507,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(metadata.route.authority, .descriptorOnly)
         XCTAssertEqual(metadata.route.metadataResource, .mount)
         XCTAssertTrue(metadata.route.readOnly)
+        XCTAssertEqual(metadata.route.examples.first?.path, "/automation/runtime/mount")
         XCTAssertEqual(metadata.pathParameters, [:])
 
         let routedWatch = try registry.resolveMount(
@@ -1871,6 +1946,22 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             return XCTFail("expected local schema")
         }
         XCTAssertTrue(schema.contains("target:string"))
+        guard case .local(let apiInfo) = try repl.compile("api", issuedAtEpoch: 1_002) else {
+            return XCTFail("expected local API metadata")
+        }
+        XCTAssertTrue(apiInfo.contains("POST /v1/workflows/content.release/tasks"))
+        guard case .local(let modelInfo) = try repl.compile("model", issuedAtEpoch: 1_002) else {
+            return XCTFail("expected local model metadata")
+        }
+        XCTAssertTrue(modelInfo.contains(SMLWorkflowModelAdapter.toolName))
+        guard case .local(let onyxInfo) = try repl.compile("onyx", issuedAtEpoch: 1_002) else {
+            return XCTFail("expected local Onyx metadata")
+        }
+        XCTAssertTrue(onyxInfo.contains("skill tree:"))
+        guard case .local(let planningInfo) = try repl.compile("planning", issuedAtEpoch: 1_002) else {
+            return XCTFail("expected local planning metadata")
+        }
+        XCTAssertTrue(planningInfo.contains("entrypoint: plan"))
 
         XCTAssertThrowsError(try repl.compile("start TASK-42 {}", issuedAtEpoch: 1_003)) {
             XCTAssertEqual($0 as? SMLWorkflowSurfaceError, .missingInput("target"))
@@ -2001,6 +2092,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
 
         XCTAssertEqual(endpoint.bodyKind, .none)
         XCTAssertTrue(endpoint.bodyFields.isEmpty)
+        XCTAssertTrue(endpoint.examples.isEmpty)
     }
 
     func testOnyxPlanningContractsExposeControlsRetryPluginsAndNestedWorkflows() throws {

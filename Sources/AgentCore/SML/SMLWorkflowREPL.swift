@@ -29,17 +29,29 @@ public enum SMLWorkflowREPLCompilation: Sendable, Equatable {
 public struct SMLWorkflowREPLCompiler: Sendable {
     public let surface: SMLWorkflowSurface
     public let allowedActions: Set<SMLWorkflowControlAction>
+    public let apiCatalog: SMLWorkflowAPICatalog
+    public let modelTool: SMLWorkflowModelToolDescriptor
+    public let modelRouterToolName: String?
+    public let onyxDriver: SMLOnyxDriverManifest
     private let compiler: SMLWorkflowCommandCompiler
 
     public init(
         surface: SMLWorkflowSurface,
         actor: String,
         allowedActions: Set<SMLWorkflowControlAction>? = nil,
+        apiCatalog: SMLWorkflowAPICatalog? = nil,
+        modelTool: SMLWorkflowModelToolDescriptor? = nil,
+        modelRouterToolName: String? = nil,
+        onyxDriver: SMLOnyxDriverManifest? = nil,
         commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() }
     ) {
         self.surface = surface
         self.allowedActions = allowedActions ?? Set(SMLWorkflowControlAction.allCases)
+        self.apiCatalog = apiCatalog ?? SMLWorkflowAPICatalog(surface: surface)
+        self.modelTool = modelTool ?? SMLWorkflowModelToolDescriptor(surface.modelCommandTool())
+        self.modelRouterToolName = modelRouterToolName
+        self.onyxDriver = onyxDriver ?? SMLOnyxDriverCompiler.compile(surface: surface)
         compiler = SMLWorkflowCommandCompiler(
             surface: surface, actor: actor, commandID: commandID, taskID: taskID
         )
@@ -61,6 +73,18 @@ public struct SMLWorkflowREPLCompiler: Sendable {
         case "schema":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .local(surface.schemaSummary)
+        case "api":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(apiText)
+        case "model":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(modelText)
+        case "onyx":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(onyxText)
+        case "planning":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(planningText)
         case "exit", "quit":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .exit
@@ -105,10 +129,106 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             surface.grammar(allowedActions: allowedActions),
             "help",
             "schema",
+            "api",
+            "model",
+            "onyx",
+            "planning",
             "exit",
         ] + exampleLines + [
             "Approve, refuse, and rollback require the task_revision returned by watch.",
         ]).joined(separator: "\n")
+    }
+
+    private var apiText: String {
+        let endpoints = apiCatalog.endpoints.map { endpoint in
+            let fields = endpoint.bodyFields.isEmpty
+                ? "none"
+                : endpoint.bodyFields.map(\.name).joined(separator: ",")
+            let examples = endpoint.examples.isEmpty
+                ? []
+                : endpoint.examples.map {
+                    "  e.g. \($0.method.rawValue) \($0.path)\(renderBody($0.body)) - \($0.summary)"
+                }
+            return ([
+                "\(endpoint.method.rawValue) \(endpoint.pathTemplate)",
+                "action:\(endpoint.action.rawValue)",
+                "body:\(endpoint.bodyKind.rawValue)",
+                "fields:\(fields)",
+                "- \(endpoint.summary)",
+            ] + examples).joined(separator: "\n")
+        }
+        return ([
+            "api:",
+            "\(apiCatalog.workflowID)@\(apiCatalog.workflowVersion)",
+            "base path: \(apiCatalog.basePath)",
+        ] + endpoints).joined(separator: "\n")
+    }
+
+    private var modelText: String {
+        let parameters = modelTool.parameters.isEmpty
+            ? ["none"]
+            : modelTool.parameters.map {
+                "\($0.name):\($0.type) required:\($0.required) - \($0.description)"
+            }
+        return ([
+            "model:",
+            "tool: \(modelTool.name)",
+            "router: \(modelRouterToolName ?? "none")",
+            "description: \(modelTool.description)",
+            "parameters:",
+        ] + parameters).joined(separator: "\n")
+    }
+
+    private var onyxText: String {
+        let tools = onyxDriver.tools.isEmpty
+            ? ["none"]
+            : onyxDriver.tools.map {
+                "\($0.instructionID):\($0.operation.rawValue) ref:\($0.reference)"
+            }
+        let nodes = onyxDriver.skillTree.map {
+            let predecessors = $0.prerequisites.isEmpty
+                ? "none"
+                : $0.prerequisites.joined(separator: ",")
+            let successors = $0.successors.isEmpty
+                ? "none"
+                : $0.successors.joined(separator: ",")
+            return "\($0.id):\($0.kind.rawValue) prev:\(predecessors) next:\(successors)"
+        }
+        return ([
+            "onyx:",
+            "driver: \(onyxDriver.driverID)",
+            "workflow: \(onyxDriver.workflowID)@\(onyxDriver.workflowVersion)",
+            "role: \(onyxDriver.role)",
+            "model tool: \(onyxDriver.modelToolName)",
+            "plan entrypoint: \(onyxDriver.plan.entrypoint)",
+            "tools:",
+        ] + tools + [
+            "skill tree:",
+        ] + nodes).joined(separator: "\n")
+    }
+
+    private var planningText: String {
+        let nodes = onyxDriver.skillTree.map { node in
+            guard let planning = node.planning else {
+                return "\(node.id):\(node.operation.rawValue) unit:unknown"
+            }
+            let preconditions = planning.statePreconditions.isEmpty
+                ? "none"
+                : planning.statePreconditions.joined(separator: ",")
+            let outputs = planning.declaredOutputs.isEmpty
+                ? "none"
+                : planning.declaredOutputs.joined(separator: ",")
+            return [
+                "\(node.id):\(node.operation.rawValue)",
+                "unit:\(planning.unitKind.rawValue)",
+                "pre:\(preconditions)",
+                "outputs:\(outputs)",
+            ].joined(separator: " ")
+        }
+        return ([
+            "planning:",
+            "entrypoint: \(onyxDriver.plan.entrypoint)",
+        ] + nodes).joined(separator: "\n")
     }
 
     private func require(_ action: SMLWorkflowControlAction, verb: String) throws {
@@ -175,6 +295,38 @@ public struct SMLWorkflowREPLCompiler: Sendable {
         } catch {
             throw SMLWorkflowREPLCompileError.invalidJSON(String(describing: error))
         }
+    }
+
+    private func renderBody(_ body: SMLObject) -> String {
+        body.isEmpty ? "" : " \(Self.renderJSONObject(body))"
+    }
+
+    private static func renderJSONObject(_ object: SMLObject) -> String {
+        "{" + object.keys.sorted().map { key in
+            "\(renderJSONString(key)):\(renderJSONValue(object[key] ?? .null))"
+        }.joined(separator: ",") + "}"
+    }
+
+    private static func renderJSONValue(_ value: SMLValue) -> String {
+        switch value {
+        case .null:
+            return "null"
+        case .bool(let bool):
+            return bool ? "true" : "false"
+        case .number(let number):
+            return NSDecimalNumber(decimal: number).stringValue
+        case .string(let string):
+            return renderJSONString(string)
+        case .array(let array):
+            return "[" + array.map(renderJSONValue).joined(separator: ",") + "]"
+        case .object(let object):
+            return renderJSONObject(object)
+        }
+    }
+
+    private static func renderJSONString(_ string: String) -> String {
+        let data = try? JSONEncoder().encode(string)
+        return data.map { String(decoding: $0, as: UTF8.self) } ?? #""""#
     }
 
     private func splitHead(_ text: String) -> (String, String) {

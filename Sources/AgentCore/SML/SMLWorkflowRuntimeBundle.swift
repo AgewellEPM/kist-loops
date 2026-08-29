@@ -214,7 +214,7 @@ public struct SMLWorkflowModelDescriptor: Sendable, Codable, Equatable {
 /// state, runtime handle, provider registry, or executable closure. Hosts can persist or serve it as
 /// a descriptor, then route live mutations back through the generated compilers and admission gate.
 public struct SMLWorkflowRuntimeDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public let workflowID: String
@@ -316,13 +316,6 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
         taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() }
     ) throws -> SMLWorkflowRuntimeBundle {
         let surface = try SMLWorkflowSurface.compile(admitted: admitted, role: role)
-        let replCompiler = SMLWorkflowREPLCompiler(
-            surface: surface,
-            actor: actor,
-            allowedActions: replActions,
-            commandID: commandID,
-            taskID: taskID
-        )
         let apiCompiler = try SMLWorkflowAPICompiler(
             surface: surface,
             actor: actor,
@@ -333,6 +326,20 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             surface: surface,
             modelActions: modelActions,
             apiBasePath: apiBasePath
+        )
+        let modelTool = SMLWorkflowModelToolDescriptor(
+            surface.modelCommandTool(allowedActions: modelActions)
+        )
+        let replCompiler = SMLWorkflowREPLCompiler(
+            surface: surface,
+            actor: actor,
+            allowedActions: replActions,
+            apiCatalog: apiCompiler.catalog,
+            modelTool: modelTool,
+            modelRouterToolName: SMLWorkflowRuntimeModelAdapter.toolName,
+            onyxDriver: onyxDriver,
+            commandID: commandID,
+            taskID: taskID
         )
         let descriptor = SMLWorkflowRuntimeDescriptor(
             workflowID: surface.workflowID,
@@ -358,9 +365,7 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             model: SMLWorkflowModelDescriptor(
                 requiresNativeTools: true,
                 allowedActions: modelActions.stableOrder,
-                tool: SMLWorkflowModelToolDescriptor(
-                    surface.modelCommandTool(allowedActions: modelActions)
-                ),
+                tool: modelTool,
                 maximumAdvisoryBytes: SMLWorkflowModelAdapter.maximumAdvisoryBytes,
                 maximumCommandRounds: min(max(1, modelMaximumCommandRounds), 8)
             ),
@@ -843,6 +848,7 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
     public let metadataResource: SMLWorkflowRuntimeMetadataResource?
     public let bodyKind: SMLWorkflowAPIRequestBodyKind
     public let bodyFields: [SMLWorkflowFieldDescriptor]
+    public let examples: [SMLWorkflowAPIRequestExample]
 
     public init(
         method: SMLWorkflowAPIMethod,
@@ -855,7 +861,8 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
         action: SMLWorkflowControlAction? = nil,
         metadataResource: SMLWorkflowRuntimeMetadataResource? = nil,
         bodyKind: SMLWorkflowAPIRequestBodyKind = .none,
-        bodyFields: [SMLWorkflowFieldDescriptor] = []
+        bodyFields: [SMLWorkflowFieldDescriptor] = [],
+        examples: [SMLWorkflowAPIRequestExample] = []
     ) {
         self.method = method
         self.pathTemplate = pathTemplate
@@ -868,6 +875,80 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
         self.metadataResource = metadataResource
         self.bodyKind = bodyKind
         self.bodyFields = bodyFields
+        self.examples = examples.sorted {
+            if $0.path != $1.path { return $0.path < $1.path }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.summary < $1.summary
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case method
+        case pathTemplate
+        case operationID
+        case handlerKind
+        case authority
+        case readOnly
+        case workflowID
+        case action
+        case metadataResource
+        case bodyKind
+        case bodyFields
+        case examples
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            method: try container.decode(SMLWorkflowAPIMethod.self, forKey: .method),
+            pathTemplate: try container.decode(String.self, forKey: .pathTemplate),
+            operationID: try container.decode(String.self, forKey: .operationID),
+            handlerKind: try container.decode(
+                SMLWorkflowRuntimeRouteHandlerKind.self,
+                forKey: .handlerKind
+            ),
+            authority: try container.decode(
+                SMLWorkflowRuntimeRouteAuthority.self,
+                forKey: .authority
+            ),
+            readOnly: try container.decode(Bool.self, forKey: .readOnly),
+            workflowID: try container.decodeIfPresent(String.self, forKey: .workflowID),
+            action: try container.decodeIfPresent(SMLWorkflowControlAction.self, forKey: .action),
+            metadataResource: try container.decodeIfPresent(
+                SMLWorkflowRuntimeMetadataResource.self,
+                forKey: .metadataResource
+            ),
+            bodyKind: try container.decodeIfPresent(
+                SMLWorkflowAPIRequestBodyKind.self,
+                forKey: .bodyKind
+            ) ?? .none,
+            bodyFields: try container.decodeIfPresent(
+                [SMLWorkflowFieldDescriptor].self,
+                forKey: .bodyFields
+            ) ?? [],
+            examples: try container.decodeIfPresent(
+                [SMLWorkflowAPIRequestExample].self,
+                forKey: .examples
+            ) ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(method, forKey: .method)
+        try container.encode(pathTemplate, forKey: .pathTemplate)
+        try container.encode(operationID, forKey: .operationID)
+        try container.encode(handlerKind, forKey: .handlerKind)
+        try container.encode(authority, forKey: .authority)
+        try container.encode(readOnly, forKey: .readOnly)
+        try container.encodeIfPresent(workflowID, forKey: .workflowID)
+        try container.encodeIfPresent(action, forKey: .action)
+        try container.encodeIfPresent(metadataResource, forKey: .metadataResource)
+        try container.encode(bodyKind, forKey: .bodyKind)
+        try container.encode(bodyFields, forKey: .bodyFields)
+        try container.encode(examples, forKey: .examples)
     }
 }
 
@@ -982,7 +1063,7 @@ public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
 /// to expose and which handler to call, but it carries no actor identity, authority lease,
 /// credential, runtime handle, provider registry, or executable closure.
 public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -1175,7 +1256,14 @@ public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
                 handlerKind: .metadata,
                 authority: .descriptorOnly,
                 readOnly: true,
-                metadataResource: endpoint.resource
+                metadataResource: endpoint.resource,
+                examples: [
+                    SMLWorkflowAPIRequestExample(
+                        method: endpoint.method,
+                        path: endpoint.pathTemplate,
+                        summary: endpoint.summary
+                    ),
+                ]
             )
         }
         let workflowRoutes = catalog.workflows.flatMap { workflow in
@@ -1193,7 +1281,8 @@ public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
                     workflowID: workflow.workflowID,
                     action: endpoint.action,
                     bodyKind: endpoint.bodyKind,
-                    bodyFields: endpoint.bodyFields
+                    bodyFields: endpoint.bodyFields,
+                    examples: endpoint.examples
                 )
             }
         }
@@ -1578,7 +1667,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -2480,7 +2569,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -3660,6 +3749,7 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "x-sml-model-tool": .string(workflow.model.tool.name),
             "x-sml-model-router-tool": .string(SMLWorkflowRuntimeModelAdapter.toolName),
             "x-sml-onyx-driver-id": .string(workflow.onyx.driverID),
+            "x-sml-request-examples": .array(endpoint.examples.map(apiExample)),
         ]
 
         if endpoint.pathTemplate.contains("{task_id}") {
@@ -3679,25 +3769,58 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
         case .none:
             break
         case .startTask:
+            var jsonContent: SMLObject = [
+                "schema": .object(reference(startBodySchemaName(workflow))),
+            ]
+            if let examples = requestBodyExamples(endpoint) {
+                jsonContent["examples"] = .object(examples)
+            }
             object["requestBody"] = .object([
                 "required": .bool(true),
                 "content": .object([
-                    "application/json": .object([
-                        "schema": .object(reference(startBodySchemaName(workflow))),
-                    ]),
+                    "application/json": .object(jsonContent),
                 ]),
             ])
         case .expectedState:
+            var jsonContent: SMLObject = [
+                "schema": .object(reference("SMLExpectedState")),
+            ]
+            if let examples = requestBodyExamples(endpoint) {
+                jsonContent["examples"] = .object(examples)
+            }
             object["requestBody"] = .object([
                 "required": .bool(true),
                 "content": .object([
-                    "application/json": .object([
-                        "schema": .object(reference("SMLExpectedState")),
-                    ]),
+                    "application/json": .object(jsonContent),
                 ]),
             ])
         }
         return object
+    }
+
+    private static func apiExample(_ example: SMLWorkflowAPIRequestExample) -> SMLValue {
+        .object([
+            "method": .string(example.method.rawValue),
+            "path": .string(example.path),
+            "summary": .string(example.summary),
+            "body": .object(example.body),
+        ])
+    }
+
+    private static func requestBodyExamples(
+        _ endpoint: SMLWorkflowAPIEndpoint
+    ) -> SMLObject? {
+        let examples = endpoint.examples.filter { !$0.body.isEmpty }
+        guard !examples.isEmpty else { return nil }
+        return Dictionary(uniqueKeysWithValues: examples.enumerated().map { index, example in
+            (
+                "example\(index + 1)",
+                .object([
+                    "summary": .string(example.summary),
+                    "value": .object(example.body),
+                ])
+            )
+        })
     }
 
     private static func startBodySchema(_ workflow: SMLWorkflowRuntimeDescriptor) -> SMLObject {

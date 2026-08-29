@@ -157,6 +157,13 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.hostWiring.apiBasePaths, ["/source"])
         let workflowWiring = try XCTUnwrap(package.runtime.hostWiring.workflows.first)
         XCTAssertEqual(workflowWiring.apiRoutes.count, 7)
+        let workflowStartRoute = try XCTUnwrap(workflowWiring.apiRoutes.first {
+            $0.action == .start
+        })
+        XCTAssertEqual(
+            workflowStartRoute.examples.first?.body["input"],
+            .object(["topic": .string("topic")])
+        )
         XCTAssertEqual(workflowWiring.replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
         XCTAssertTrue(workflowWiring.replMount.examples.contains {
             $0.line == #"start TASK-ID {"topic":"topic"}"#
@@ -214,6 +221,15 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertNotNil(openAPIPaths["/source/runtime/host-wiring"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/model-router"])
         XCTAssertNotNil(openAPIPaths["/source/runtime/onyx-drivers"])
+        let sourceStartPath = try object(openAPIPaths["/source/workflows/langgraph.review/tasks"])
+        let sourceStart = try object(sourceStartPath["post"])
+        guard case .array(let sourceStartExamples)? = sourceStart["x-sml-request-examples"] else {
+            return XCTFail("expected request examples")
+        }
+        XCTAssertEqual(
+            try object(try object(sourceStartExamples.first)["body"])["input"],
+            .object(["topic": .string("topic")])
+        )
 
         let encoded = try JSONEncoder().encode(package)
         let encodedString = String(decoding: encoded, as: UTF8.self)

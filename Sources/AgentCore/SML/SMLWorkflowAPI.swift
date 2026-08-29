@@ -11,6 +11,25 @@ public enum SMLWorkflowAPIRequestBodyKind: String, Sendable, Codable, Equatable 
     case expectedState = "expected_state"
 }
 
+public struct SMLWorkflowAPIRequestExample: Sendable, Codable, Equatable {
+    public let method: SMLWorkflowAPIMethod
+    public let path: String
+    public let body: SMLObject
+    public let summary: String
+
+    public init(
+        method: SMLWorkflowAPIMethod,
+        path: String,
+        body: SMLObject = [:],
+        summary: String
+    ) {
+        self.method = method
+        self.path = path
+        self.body = body
+        self.summary = summary
+    }
+}
+
 public struct SMLWorkflowAPIEndpoint: Sendable, Codable, Equatable {
     public let method: SMLWorkflowAPIMethod
     public let pathTemplate: String
@@ -19,6 +38,7 @@ public struct SMLWorkflowAPIEndpoint: Sendable, Codable, Equatable {
     public let summary: String
     public let bodyKind: SMLWorkflowAPIRequestBodyKind
     public let bodyFields: [SMLWorkflowFieldDescriptor]
+    public let examples: [SMLWorkflowAPIRequestExample]
 
     public init(
         method: SMLWorkflowAPIMethod,
@@ -27,7 +47,8 @@ public struct SMLWorkflowAPIEndpoint: Sendable, Codable, Equatable {
         action: SMLWorkflowControlAction,
         summary: String,
         bodyKind: SMLWorkflowAPIRequestBodyKind = .none,
-        bodyFields: [SMLWorkflowFieldDescriptor] = []
+        bodyFields: [SMLWorkflowFieldDescriptor] = [],
+        examples: [SMLWorkflowAPIRequestExample] = []
     ) {
         self.method = method
         self.pathTemplate = pathTemplate
@@ -36,25 +57,40 @@ public struct SMLWorkflowAPIEndpoint: Sendable, Codable, Equatable {
         self.summary = summary
         self.bodyKind = bodyKind
         self.bodyFields = bodyFields
+        self.examples = examples.sorted {
+            if $0.path != $1.path { return $0.path < $1.path }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.summary < $1.summary
+        }
     }
 
     enum CodingKeys: String, CodingKey {
-        case method, pathTemplate, operationID, action, summary, bodyKind, bodyFields
+        case method, pathTemplate, operationID, action, summary, bodyKind, bodyFields, examples
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        method = try container.decode(SMLWorkflowAPIMethod.self, forKey: .method)
-        pathTemplate = try container.decode(String.self, forKey: .pathTemplate)
-        operationID = try container.decode(String.self, forKey: .operationID)
-        action = try container.decode(SMLWorkflowControlAction.self, forKey: .action)
-        summary = try container.decode(String.self, forKey: .summary)
-        bodyKind = try container.decodeIfPresent(
-            SMLWorkflowAPIRequestBodyKind.self, forKey: .bodyKind
-        ) ?? .none
-        bodyFields = try container.decodeIfPresent(
-            [SMLWorkflowFieldDescriptor].self, forKey: .bodyFields
-        ) ?? []
+        self.init(
+            method: try container.decode(SMLWorkflowAPIMethod.self, forKey: .method),
+            pathTemplate: try container.decode(String.self, forKey: .pathTemplate),
+            operationID: try container.decode(String.self, forKey: .operationID),
+            action: try container.decode(SMLWorkflowControlAction.self, forKey: .action),
+            summary: try container.decode(String.self, forKey: .summary),
+            bodyKind: try container.decodeIfPresent(
+                SMLWorkflowAPIRequestBodyKind.self,
+                forKey: .bodyKind
+            ) ?? .none,
+            bodyFields: try container.decodeIfPresent(
+                [SMLWorkflowFieldDescriptor].self,
+                forKey: .bodyFields
+            ) ?? [],
+            examples: try container.decodeIfPresent(
+                [SMLWorkflowAPIRequestExample].self,
+                forKey: .examples
+            ) ?? []
+        )
     }
 }
 
@@ -73,33 +109,95 @@ public struct SMLWorkflowAPICatalog: Sendable, Codable, Equatable {
         self.basePath = normalizedBase
         let workflowPath = "\(normalizedBase)/workflows/\(surface.workflowID)"
         let taskPath = "\(workflowPath)/tasks/{task_id}"
+        let exampleTaskPath = "\(workflowPath)/tasks/TASK-ID"
+        let sampleInput = surface.sampleInputObject()
+        let startBody: SMLObject = sampleInput.isEmpty
+            ? ["task_id": .string("TASK-ID")]
+            : [
+                "task_id": .string("TASK-ID"),
+                "input": .object(sampleInput),
+            ]
+        let expectedStateBody: SMLObject = ["task_revision": .number(0)]
         endpoints = [
             .init(method: .get, pathTemplate: workflowPath,
                   operationID: "describe_workflow", action: .describe,
-                  summary: "Describe the exact admitted workflow surface"),
+                  summary: "Describe the exact admitted workflow surface",
+                  examples: [
+                    .init(
+                        method: .get,
+                        path: workflowPath,
+                        summary: "Describe the exact admitted workflow revision."
+                    ),
+                  ]),
             .init(method: .post, pathTemplate: "\(workflowPath)/tasks",
                   operationID: "start_workflow_task", action: .start,
                   summary: "Start a task; body requires task_id and accepts input",
                   bodyKind: .startTask,
-                  bodyFields: surface.inputs),
+                  bodyFields: surface.inputs,
+                  examples: [
+                    .init(
+                        method: .post,
+                        path: "\(workflowPath)/tasks",
+                        body: startBody,
+                        summary: "Start a workflow task with declared input fields."
+                    ),
+                  ]),
             .init(method: .get, pathTemplate: taskPath,
                   operationID: "watch_workflow_task", action: .watch,
-                  summary: "Read a task projection"),
+                  summary: "Read a task projection",
+                  examples: [
+                    .init(
+                        method: .get,
+                        path: exampleTaskPath,
+                        summary: "Read the latest task projection."
+                    ),
+                  ]),
             .init(method: .post, pathTemplate: "\(taskPath)/approve",
                   operationID: "approve_workflow_task", action: .approve,
                   summary: "Approve the current task gate",
-                  bodyKind: .expectedState),
+                  bodyKind: .expectedState,
+                  examples: [
+                    .init(
+                        method: .post,
+                        path: "\(exampleTaskPath)/approve",
+                        body: expectedStateBody,
+                        summary: "Approve the current gate using the latest task revision."
+                    ),
+                  ]),
             .init(method: .post, pathTemplate: "\(taskPath)/refuse",
                   operationID: "refuse_workflow_task", action: .refuse,
                   summary: "Refuse the current task gate",
-                  bodyKind: .expectedState),
+                  bodyKind: .expectedState,
+                  examples: [
+                    .init(
+                        method: .post,
+                        path: "\(exampleTaskPath)/refuse",
+                        body: expectedStateBody,
+                        summary: "Refuse the current gate using the latest task revision."
+                    ),
+                  ]),
             .init(method: .post, pathTemplate: "\(taskPath)/rollback",
                   operationID: "rollback_workflow_task", action: .rollback,
                   summary: "Request terminal operator rollback",
-                  bodyKind: .expectedState),
+                  bodyKind: .expectedState,
+                  examples: [
+                    .init(
+                        method: .post,
+                        path: "\(exampleTaskPath)/rollback",
+                        body: expectedStateBody,
+                        summary: "Roll the task back using the latest task revision."
+                    ),
+                  ]),
             .init(method: .get, pathTemplate: "\(taskPath)/receipts",
                   operationID: "list_workflow_task_receipts", action: .receipts,
-                  summary: "List task receipts"),
+                  summary: "List task receipts",
+                  examples: [
+                    .init(
+                        method: .get,
+                        path: "\(exampleTaskPath)/receipts",
+                        summary: "List accepted or sealed receipts for the task."
+                    ),
+                  ]),
         ]
     }
 }

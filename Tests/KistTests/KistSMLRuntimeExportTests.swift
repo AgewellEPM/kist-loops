@@ -88,6 +88,13 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(runtimeWorkflow.repl.examples.contains {
             $0.line == #"start TASK-ID {"topic":"topic"}"#
         })
+        let runtimeStartEndpoint = try XCTUnwrap(runtimeWorkflow.api.endpoints.first {
+            $0.action == .start
+        })
+        XCTAssertEqual(
+            runtimeStartEndpoint.examples.first?.body["input"],
+            .object(["topic": .string("topic")])
+        )
 
         let paths = try object(export.runtimePackage.runtime.openAPI["paths"])
         XCTAssertNotNil(paths["/source/workflows/langgraph.review/tasks"])
@@ -108,6 +115,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(launched.replMount.workflowID, "langgraph.review")
         XCTAssertEqual(launched.replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
         XCTAssertEqual(launched.apiRoutes.count, 7)
+        XCTAssertEqual(
+            launched.apiRoutes.first { $0.action == .start }?.examples.first?.body["input"],
+            .object(["topic": .string("topic")])
+        )
         XCTAssertEqual(launched.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(launched.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(
@@ -146,6 +157,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             $0.line == #"start TASK-ID {"topic":"topic"}"#
         })
         XCTAssertEqual(wiring.apiRoutes.count, 7)
+        XCTAssertEqual(
+            wiring.apiRoutes.first { $0.action == .start }?.examples.first?.body["input"],
+            .object(["topic": .string("topic")])
+        )
         XCTAssertEqual(wiring.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(wiring.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(wiring.onyxDriverID, export.runtimePackage.runtime.onyxDrivers.first?.driverID)
