@@ -127,6 +127,33 @@ enum KistRunner {
         if opts.stickyBarSelfTest {
             return await runStickyBarSelfTest()
         }
+        if opts.smlRuntimeOpenAPI != nil {
+            return await runSMLRuntimeOpenAPI(opts)
+        }
+        if opts.smlRuntimeModelRouter != nil {
+            return await runSMLRuntimeModelRouter(opts)
+        }
+        if opts.smlRuntimeOnyx != nil {
+            return await runSMLRuntimeOnyx(opts)
+        }
+        if opts.smlRuntimePlanning != nil {
+            return await runSMLRuntimePlanning(opts)
+        }
+        if opts.smlRuntimeCatalog != nil {
+            return await runSMLRuntimeCatalog(opts)
+        }
+        if opts.smlRuntimeMount != nil {
+            return await runSMLRuntimeMount(opts)
+        }
+        if opts.smlRuntimeAgentGuide != nil {
+            return await runSMLRuntimeAgentGuide(opts)
+        }
+        if opts.smlRuntimeHostGuide != nil {
+            return await runSMLRuntimeHostGuide(opts)
+        }
+        if opts.smlRuntimeHostWiring != nil {
+            return await runSMLRuntimeHostWiring(opts)
+        }
         if opts.smlRuntimeLaunch != nil {
             return await runSMLRuntimeLaunch(opts)
         }

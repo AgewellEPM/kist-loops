@@ -144,6 +144,15 @@ struct KistOptions {
     var modelRunManifest: String?
     var smlRuntimeExport: String?   // --sml-runtime-export <source.json>: offline source/package -> REPL/API/model/Onyx/planning JSON
     var smlRuntimeLaunch: String?   // --sml-runtime-launch <source.json>: emit offline launch descriptor/receipt
+    var smlRuntimeOpenAPI: String?  // --sml-runtime-openapi <source.json>: emit generated OpenAPI document
+    var smlRuntimeModelRouter: String? // --sml-runtime-model-router <source.json>: emit model-router tool descriptor
+    var smlRuntimeOnyx: String?     // --sml-runtime-onyx <source.json>: emit Onyx driver manifests
+    var smlRuntimePlanning: String? // --sml-runtime-planning <source.json>: emit aggregate planning manifest
+    var smlRuntimeCatalog: String?  // --sml-runtime-catalog <source.json>: emit mounted workflow catalog
+    var smlRuntimeMount: String?    // --sml-runtime-mount <source.json>: emit host mount contract
+    var smlRuntimeAgentGuide: String? // --sml-runtime-agent-guide <source.json>: emit agent operating guide
+    var smlRuntimeHostGuide: String? // --sml-runtime-host-guide <source.json>: emit host wiring guide
+    var smlRuntimeHostWiring: String? // --sml-runtime-host-wiring <source.json>: emit compact host wiring map
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/attachments
@@ -209,6 +218,33 @@ struct KistOptions {
                                             else { o.optionErrors.append("--sml-runtime-export requires <source.json>") }
             case let flag where ["--sml-runtime-launch", "--sml-launch"].contains(flag):
                                             if let v = next() { o.smlRuntimeLaunch = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-openapi", "--sml-openapi"].contains(flag):
+                                            if let v = next() { o.smlRuntimeOpenAPI = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-model-router", "--sml-model-router"].contains(flag):
+                                            if let v = next() { o.smlRuntimeModelRouter = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-onyx", "--sml-onyx"].contains(flag):
+                                            if let v = next() { o.smlRuntimeOnyx = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-planning", "--sml-planning"].contains(flag):
+                                            if let v = next() { o.smlRuntimePlanning = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-catalog", "--sml-catalog"].contains(flag):
+                                            if let v = next() { o.smlRuntimeCatalog = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-mount", "--sml-mount"].contains(flag):
+                                            if let v = next() { o.smlRuntimeMount = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-agent-guide", "--sml-agent-guide"].contains(flag):
+                                            if let v = next() { o.smlRuntimeAgentGuide = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-host-guide", "--sml-host-guide"].contains(flag):
+                                            if let v = next() { o.smlRuntimeHostGuide = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-host-wiring", "--sml-host-wiring"].contains(flag):
+                                            if let v = next() { o.smlRuntimeHostWiring = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
             case let flag where ["--sml-runtime-attachments", "--sml-attachments"].contains(flag):
                                             if let v = next() { o.smlRuntimeAttachments = v }
@@ -471,58 +507,42 @@ struct KistOptions {
         if sawCobolMaxRevisions && !o.cobolo {
             o.optionErrors.append("--cobol-max-revisions requires --cobolo or --cobol-loop")
         }
-        if o.smlRuntimeExport != nil && o.smlRuntimeREPL != nil {
-            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-repl")
-        }
-        if o.smlRuntimeExport != nil && o.smlRuntimeLaunch != nil {
-            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-launch")
-        }
-        if o.smlRuntimeExport != nil && o.smlRuntimeAttachments != nil {
-            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-attachments")
-        }
-        if o.smlRuntimeExport != nil && o.smlRuntimeAPI != nil {
-            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-api")
-        }
-        if o.smlRuntimeExport != nil && o.smlRuntimeModel != nil {
-            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-model")
-        }
-        if o.smlRuntimeLaunch != nil && o.smlRuntimeAttachments != nil {
-            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-attachments")
-        }
-        if o.smlRuntimeLaunch != nil && o.smlRuntimeREPL != nil {
-            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-repl")
-        }
-        if o.smlRuntimeLaunch != nil && o.smlRuntimeAPI != nil {
-            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-api")
-        }
-        if o.smlRuntimeLaunch != nil && o.smlRuntimeModel != nil {
-            o.optionErrors.append("--sml-runtime-launch conflicts with --sml-runtime-model")
-        }
-        if o.smlRuntimeAttachments != nil && o.smlRuntimeREPL != nil {
-            o.optionErrors.append("--sml-runtime-attachments conflicts with --sml-runtime-repl")
-        }
-        if o.smlRuntimeAttachments != nil && o.smlRuntimeAPI != nil {
-            o.optionErrors.append("--sml-runtime-attachments conflicts with --sml-runtime-api")
-        }
-        if o.smlRuntimeAttachments != nil && o.smlRuntimeModel != nil {
-            o.optionErrors.append("--sml-runtime-attachments conflicts with --sml-runtime-model")
-        }
-        if o.smlRuntimeREPL != nil && o.smlRuntimeAPI != nil {
-            o.optionErrors.append("--sml-runtime-repl conflicts with --sml-runtime-api")
-        }
-        if o.smlRuntimeREPL != nil && o.smlRuntimeModel != nil {
-            o.optionErrors.append("--sml-runtime-repl conflicts with --sml-runtime-model")
-        }
-        if o.smlRuntimeAPI != nil && o.smlRuntimeModel != nil {
-            o.optionErrors.append("--sml-runtime-api conflicts with --sml-runtime-model")
+        let smlRuntimeModes: [(flag: String, active: Bool)] = [
+            ("--sml-runtime-export", o.smlRuntimeExport != nil),
+            ("--sml-runtime-launch", o.smlRuntimeLaunch != nil),
+            ("--sml-runtime-openapi", o.smlRuntimeOpenAPI != nil),
+            ("--sml-runtime-model-router", o.smlRuntimeModelRouter != nil),
+            ("--sml-runtime-onyx", o.smlRuntimeOnyx != nil),
+            ("--sml-runtime-planning", o.smlRuntimePlanning != nil),
+            ("--sml-runtime-catalog", o.smlRuntimeCatalog != nil),
+            ("--sml-runtime-mount", o.smlRuntimeMount != nil),
+            ("--sml-runtime-agent-guide", o.smlRuntimeAgentGuide != nil),
+            ("--sml-runtime-host-guide", o.smlRuntimeHostGuide != nil),
+            ("--sml-runtime-host-wiring", o.smlRuntimeHostWiring != nil),
+            ("--sml-runtime-attachments", o.smlRuntimeAttachments != nil),
+            ("--sml-runtime-repl", o.smlRuntimeREPL != nil),
+            ("--sml-runtime-api", o.smlRuntimeAPI != nil),
+            ("--sml-runtime-model", o.smlRuntimeModel != nil),
+        ]
+        let activeSMLRuntimeModes = smlRuntimeModes.filter { $0.active }
+        for firstIndex in activeSMLRuntimeModes.indices {
+            for secondIndex in activeSMLRuntimeModes.indices where secondIndex > firstIndex {
+                o.optionErrors.append(
+                    "\(activeSMLRuntimeModes[firstIndex].flag) conflicts with \(activeSMLRuntimeModes[secondIndex].flag)"
+                )
+            }
         }
         if o.smlRuntimeREPL != nil {
             if o.smlRuntimeREPLLine?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                 o.optionErrors.append("--sml-runtime-repl requires --sml-line <line>")
             }
         } else {
-            if o.smlRuntimeWorkflowID != nil && o.smlRuntimeAttachments == nil {
-                o.optionErrors.append("--sml-workflow requires --sml-runtime-repl or --sml-runtime-attachments <source.json>")
+            if o.smlRuntimeWorkflowID != nil
+                && o.smlRuntimeAttachments == nil
+                && o.smlRuntimeOnyx == nil {
+                o.optionErrors.append(
+                    "--sml-workflow requires --sml-runtime-repl or --sml-runtime-attachments <source.json>; it can also filter --sml-runtime-onyx <source.json>"
+                )
             }
             if o.smlRuntimeREPLLine != nil {
                 o.optionErrors.append("--sml-line requires --sml-runtime-repl <source.json>")
@@ -762,6 +782,34 @@ struct KistOptions {
                                     Launch the wrapped source offline and emit the exact launch
                                     descriptor/receipt for mounted REPL, API, model, Onyx, and
                                     planning adapters.
+          --sml-runtime-openapi <json>
+                                    Launch the wrapped source offline and emit the generated
+                                    OpenAPI document plus its runtime endpoint and launch receipt.
+          --sml-runtime-model-router <json>
+                                    Launch the wrapped source offline and emit the native
+                                    model-router tool descriptor plus launch receipt.
+          --sml-runtime-onyx <json> [--sml-workflow <id>]
+                                    Launch the wrapped source offline and emit all generated Onyx
+                                    driver manifests, or one workflow's driver when filtered.
+          --sml-runtime-planning <json>
+                                    Launch the wrapped source offline and emit the aggregate
+                                    planning manifest: skill index, tool index, graph units,
+                                    approval gates, and command bindings.
+          --sml-runtime-catalog <json>
+                                    Launch the wrapped source offline and emit the mounted
+                                    workflow runtime catalog.
+          --sml-runtime-mount <json>
+                                    Launch the wrapped source offline and emit the host mount
+                                    contract for generated REPL/API/model/Onyx/planning surfaces.
+          --sml-runtime-agent-guide <json>
+                                    Launch the wrapped source offline and emit the canonical
+                                    agent/model operating guide.
+          --sml-runtime-host-guide <json>
+                                    Launch the wrapped source offline and emit the canonical
+                                    host integration guide.
+          --sml-runtime-host-wiring <json>
+                                    Launch the wrapped source offline and emit the compact host
+                                    wiring map for REPL/API/model-router/Onyx/planning adapters.
           --sml-runtime-attachments <json> [--sml-workflow <id>]
                                     Emit the per-workflow attachment manifests for generated REPL,
                                     API, model-router, Onyx driver, and planning adapters; optionally

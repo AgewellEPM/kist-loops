@@ -62,6 +62,285 @@ extension KistRunner {
         }
     }
 
+    struct SMLRuntimeHostOpenAPIExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let openAPIEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let openAPI: SMLObject
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostOpenAPIExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            openAPIEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            openAPI: SMLObject,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.openAPIEndpoint = openAPIEndpoint
+            self.openAPI = openAPI
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostModelRouterExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let modelRouterEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let modelRouter: SMLWorkflowRuntimeModelRouterDescriptor
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostModelRouterExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            modelRouterEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            modelRouter: SMLWorkflowRuntimeModelRouterDescriptor,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.modelRouterEndpoint = modelRouterEndpoint
+            self.modelRouter = modelRouter
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostOnyxDrivers: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let workflowID: String?
+        let availableWorkflowIDs: [String]
+        let apiBasePaths: [String]
+        let onyxDriversEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let onyxDrivers: [SMLOnyxDriverManifest]
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostOnyxDrivers.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            workflowID: String?,
+            availableWorkflowIDs: [String],
+            apiBasePaths: [String],
+            onyxDriversEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            onyxDrivers: [SMLOnyxDriverManifest],
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.workflowID = workflowID
+            self.availableWorkflowIDs = availableWorkflowIDs.sorted()
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.onyxDriversEndpoint = onyxDriversEndpoint
+            self.onyxDrivers = onyxDrivers.sorted {
+                if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+                return $0.workflowVersion < $1.workflowVersion
+            }
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostPlanningExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let planningEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let planning: SMLWorkflowRuntimePlanningManifest
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostPlanningExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            planningEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            planning: SMLWorkflowRuntimePlanningManifest,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.planningEndpoint = planningEndpoint
+            self.planning = planning
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostCatalogExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let catalogEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let catalog: SMLWorkflowRuntimeCatalog
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostCatalogExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            catalogEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            catalog: SMLWorkflowRuntimeCatalog,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.catalogEndpoint = catalogEndpoint
+            self.catalog = catalog
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostMountExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let mountEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let mountContract: SMLWorkflowRuntimeMountContract
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostMountExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            mountEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            mountContract: SMLWorkflowRuntimeMountContract,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.mountEndpoint = mountEndpoint
+            self.mountContract = mountContract
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostAgentGuideExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let agentGuideEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let agentGuide: SMLWorkflowRuntimeAgentGuide
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostAgentGuideExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            agentGuideEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            agentGuide: SMLWorkflowRuntimeAgentGuide,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.agentGuideEndpoint = agentGuideEndpoint
+            self.agentGuide = agentGuide
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostGuideExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let hostGuideEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let hostGuide: SMLWorkflowRuntimeHostGuide
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostGuideExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            hostGuideEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            hostGuide: SMLWorkflowRuntimeHostGuide,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.hostGuideEndpoint = hostGuideEndpoint
+            self.hostGuide = hostGuide
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
+    struct SMLRuntimeHostWiringExport: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let sourcePath: String
+        let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let apiBasePaths: [String]
+        let hostWiringEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
+        let hostWiring: SMLWorkflowRuntimeHostWiring
+        let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostWiringExport.currentSchemaVersion,
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            apiBasePaths: [String],
+            hostWiringEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
+            hostWiring: SMLWorkflowRuntimeHostWiring,
+            launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
+        ) {
+            self.schemaVersion = schemaVersion
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.apiBasePaths = apiBasePaths.sorted()
+            self.hostWiringEndpoint = hostWiringEndpoint
+            self.hostWiring = hostWiring
+            self.launchDescriptor = launchDescriptor
+        }
+    }
+
     struct SMLRuntimeHostAttachments: Sendable, Codable, Equatable {
         static let currentSchemaVersion = 4
 
@@ -273,7 +552,7 @@ extension KistRunner {
         var description: String {
             switch self {
             case .missingSourcePath:
-                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
+                return "--sml-runtime-export/--sml-runtime-launch/--sml-runtime-openapi/--sml-runtime-model-router/--sml-runtime-onyx/--sml-runtime-planning/--sml-runtime-catalog/--sml-runtime-mount/--sml-runtime-agent-guide/--sml-runtime-host-guide/--sml-runtime-host-wiring/--sml-runtime-attachments/--sml-runtime-repl/--sml-runtime-api/--sml-runtime-model requires <source.json>"
             case .missingREPLLine:
                 return "--sml-runtime-repl requires --sml-line <line>"
             case .missingAPIPath:
@@ -323,6 +602,187 @@ extension KistRunner {
         do {
             let json = try await renderSMLRuntimeHostLaunchDescriptor(
                 sourcePath: opts.smlRuntimeLaunch,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeOpenAPI(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostOpenAPI(
+                sourcePath: opts.smlRuntimeOpenAPI,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeModelRouter(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostModelRouter(
+                sourcePath: opts.smlRuntimeModelRouter,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeOnyx(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostOnyxDrivers(
+                sourcePath: opts.smlRuntimeOnyx,
+                projectRoot: opts.project,
+                workflowID: opts.smlRuntimeWorkflowID,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimePlanning(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostPlanning(
+                sourcePath: opts.smlRuntimePlanning,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeCatalog(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostCatalog(
+                sourcePath: opts.smlRuntimeCatalog,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeMount(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostMount(
+                sourcePath: opts.smlRuntimeMount,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeAgentGuide(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostAgentGuide(
+                sourcePath: opts.smlRuntimeAgentGuide,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeHostGuide(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostGuide(
+                sourcePath: opts.smlRuntimeHostGuide,
+                projectRoot: opts.project,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            )
+            print(json)
+            return 0
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    static func runSMLRuntimeHostWiring(_ opts: KistOptions) async -> Int32 {
+        do {
+            let json = try await renderSMLRuntimeHostWiring(
+                sourcePath: opts.smlRuntimeHostWiring,
                 projectRoot: opts.project,
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
@@ -482,6 +942,233 @@ extension KistRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return String(decoding: try encoder.encode(launch), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostOpenAPI(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let openAPI = try await makeSMLRuntimeHostOpenAPI(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(openAPI), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostModelRouter(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let modelRouter = try await makeSMLRuntimeHostModelRouter(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(modelRouter), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostOnyxDrivers(
+        sourcePath: String?,
+        projectRoot: String,
+        workflowID: String? = nil,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let onyxDrivers = try await makeSMLRuntimeHostOnyxDrivers(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            workflowID: workflowID,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(onyxDrivers), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostPlanning(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let planning = try await makeSMLRuntimeHostPlanning(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(planning), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostCatalog(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let catalog = try await makeSMLRuntimeHostCatalog(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(catalog), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostMount(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let mount = try await makeSMLRuntimeHostMount(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(mount), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostAgentGuide(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let guide = try await makeSMLRuntimeHostAgentGuide(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(guide), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostGuide(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let guide = try await makeSMLRuntimeHostGuide(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(guide), as: UTF8.self)
+    }
+
+    static func renderSMLRuntimeHostWiring(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> String {
+        let wiring = try await makeSMLRuntimeHostWiring(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(wiring), as: UTF8.self)
     }
 
     static func renderSMLRuntimeHostREPLCommand(
@@ -661,6 +1348,322 @@ extension KistRunner {
                 launchEndpoint: launchDescriptor.metadataEndpoints.first {
                     $0.resource == .launch
                 },
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostOpenAPI(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostOpenAPIExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostOpenAPIExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                openAPIEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .openAPI
+                },
+                openAPI: host.runtimePackage.runtime.openAPI,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostModelRouter(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostModelRouterExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostModelRouterExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                modelRouterEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .modelRouter
+                },
+                modelRouter: host.runtimePackage.runtime.modelRouter,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostOnyxDrivers(
+        sourcePath: String?,
+        projectRoot: String,
+        workflowID: String? = nil,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostOnyxDrivers {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            let selectedWorkflowID = try selectSMLRuntimeOptionalWorkflowID(
+                workflowID,
+                availableWorkflowIDs: launchDescriptor.workflowIDs
+            )
+            let drivers = host.runtimePackage.runtime.onyxDrivers.filter { driver in
+                selectedWorkflowID.map { $0 == driver.workflowID } ?? true
+            }
+            return SMLRuntimeHostOnyxDrivers(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                workflowID: selectedWorkflowID,
+                availableWorkflowIDs: launchDescriptor.workflowIDs,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                onyxDriversEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .onyxDrivers
+                },
+                onyxDrivers: drivers,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostPlanning(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostPlanningExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostPlanningExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                planningEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .planning
+                },
+                planning: host.runtimePackage.runtime.planning,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostCatalog(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostCatalogExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostCatalogExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                catalogEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .catalog
+                },
+                catalog: host.runtimePackage.runtime.catalog,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostMount(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostMountExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostMountExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                mountEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .mount
+                },
+                mountContract: host.runtimePackage.runtime.mountContract,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostAgentGuide(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostAgentGuideExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostAgentGuideExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                agentGuideEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .agentGuide
+                },
+                agentGuide: host.runtimePackage.runtime.agentGuide,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostGuide(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostGuideExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostGuideExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                hostGuideEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .hostGuide
+                },
+                hostGuide: host.runtimePackage.runtime.hostGuide,
+                launchDescriptor: launchDescriptor
+            )
+        }
+    }
+
+    static func makeSMLRuntimeHostWiring(
+        sourcePath: String?,
+        projectRoot: String,
+        roleOverride: String? = nil,
+        actor: String? = nil,
+        apiBasePathOverride: String? = nil,
+        title: String? = nil,
+        version: String? = nil,
+        modelMaximumCommandRoundsOverride: Int? = nil
+    ) async throws -> SMLRuntimeHostWiringExport {
+        try await withSMLRuntimeHostLaunch(
+            sourcePath: sourcePath,
+            projectRoot: projectRoot,
+            roleOverride: roleOverride,
+            actor: actor,
+            apiBasePathOverride: apiBasePathOverride,
+            title: title,
+            version: version,
+            modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
+        ) { host in
+            let launchDescriptor = host.launch.launchDescriptor
+            return SMLRuntimeHostWiringExport(
+                sourcePath: host.sourcePath,
+                sourceFormat: host.sourceFormat,
+                apiBasePaths: launchDescriptor.apiBasePaths,
+                hostWiringEndpoint: launchDescriptor.metadataEndpoints.first {
+                    $0.resource == .hostWiring
+                },
+                hostWiring: host.runtimePackage.runtime.hostWiring,
                 launchDescriptor: launchDescriptor
             )
         }

@@ -140,6 +140,130 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertEqual(alias.smlRuntimeLaunch, "graphs/review.langgraph.json")
     }
 
+    func testSMLRuntimeOpenAPIFlags() {
+        let o = KistOptions.parse([
+            "--sml-runtime-openapi", "graphs/review.langgraph.json",
+            "--sml-role", "reviewer",
+            "--sml-actor", "operator.test",
+            "--sml-api-base", "/source",
+            "--sml-title", "Source Runtime",
+            "--sml-version", "2026.08",
+            "--sml-model-rounds", "3",
+        ])
+        XCTAssertEqual(o.smlRuntimeOpenAPI, "graphs/review.langgraph.json")
+        XCTAssertEqual(o.smlRuntimeRole, "reviewer")
+        XCTAssertEqual(o.smlRuntimeActor, "operator.test")
+        XCTAssertEqual(o.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(o.smlRuntimeTitle, "Source Runtime")
+        XCTAssertEqual(o.smlRuntimeVersion, "2026.08")
+        XCTAssertEqual(o.smlRuntimeModelRounds, 3)
+        XCTAssertNil(o.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-openapi <json>"))
+
+        let alias = KistOptions.parse([
+            "--sml-openapi", "graphs/review.langgraph.json",
+        ])
+        XCTAssertEqual(alias.smlRuntimeOpenAPI, "graphs/review.langgraph.json")
+    }
+
+    func testSMLRuntimeDescriptorAdapterFlags() {
+        let modelRouter = KistOptions.parse([
+            "--sml-runtime-model-router", "graphs/review.langgraph.json",
+            "--sml-role", "reviewer",
+            "--sml-actor", "operator.test",
+            "--sml-api-base", "/source",
+            "--sml-title", "Source Runtime",
+            "--sml-version", "2026.08",
+            "--sml-model-rounds", "3",
+        ])
+        XCTAssertEqual(modelRouter.smlRuntimeModelRouter, "graphs/review.langgraph.json")
+        XCTAssertEqual(modelRouter.smlRuntimeRole, "reviewer")
+        XCTAssertEqual(modelRouter.smlRuntimeActor, "operator.test")
+        XCTAssertEqual(modelRouter.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(modelRouter.smlRuntimeTitle, "Source Runtime")
+        XCTAssertEqual(modelRouter.smlRuntimeVersion, "2026.08")
+        XCTAssertEqual(modelRouter.smlRuntimeModelRounds, 3)
+        XCTAssertNil(modelRouter.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-model-router <json>"))
+
+        let onyx = KistOptions.parse([
+            "--sml-runtime-onyx", "graphs/review.langgraph.json",
+            "--sml-workflow", "langgraph.review",
+        ])
+        XCTAssertEqual(onyx.smlRuntimeOnyx, "graphs/review.langgraph.json")
+        XCTAssertEqual(onyx.smlRuntimeWorkflowID, "langgraph.review")
+        XCTAssertTrue(onyx.optionErrors.isEmpty)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-onyx <json> [--sml-workflow <id>]"))
+
+        let planning = KistOptions.parse([
+            "--sml-runtime-planning", "graphs/review.langgraph.json",
+        ])
+        XCTAssertEqual(planning.smlRuntimePlanning, "graphs/review.langgraph.json")
+        XCTAssertNil(planning.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-planning <json>"))
+
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-model-router", "graphs/review.langgraph.json"]).smlRuntimeModelRouter,
+            "graphs/review.langgraph.json"
+        )
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-onyx", "graphs/review.langgraph.json"]).smlRuntimeOnyx,
+            "graphs/review.langgraph.json"
+        )
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-planning", "graphs/review.langgraph.json"]).smlRuntimePlanning,
+            "graphs/review.langgraph.json"
+        )
+    }
+
+    func testSMLRuntimeHostDescriptorFlags() {
+        let catalog = KistOptions.parse(["--sml-runtime-catalog", "graphs/review.langgraph.json"])
+        XCTAssertEqual(catalog.smlRuntimeCatalog, "graphs/review.langgraph.json")
+        XCTAssertNil(catalog.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-catalog <json>"))
+
+        let mount = KistOptions.parse(["--sml-runtime-mount", "graphs/review.langgraph.json"])
+        XCTAssertEqual(mount.smlRuntimeMount, "graphs/review.langgraph.json")
+        XCTAssertNil(mount.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-mount <json>"))
+
+        let agentGuide = KistOptions.parse(["--sml-runtime-agent-guide", "graphs/review.langgraph.json"])
+        XCTAssertEqual(agentGuide.smlRuntimeAgentGuide, "graphs/review.langgraph.json")
+        XCTAssertNil(agentGuide.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-agent-guide <json>"))
+
+        let hostGuide = KistOptions.parse(["--sml-runtime-host-guide", "graphs/review.langgraph.json"])
+        XCTAssertEqual(hostGuide.smlRuntimeHostGuide, "graphs/review.langgraph.json")
+        XCTAssertNil(hostGuide.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-host-guide <json>"))
+
+        let hostWiring = KistOptions.parse(["--sml-runtime-host-wiring", "graphs/review.langgraph.json"])
+        XCTAssertEqual(hostWiring.smlRuntimeHostWiring, "graphs/review.langgraph.json")
+        XCTAssertNil(hostWiring.goal)
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-host-wiring <json>"))
+
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-catalog", "graphs/review.langgraph.json"]).smlRuntimeCatalog,
+            "graphs/review.langgraph.json"
+        )
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-mount", "graphs/review.langgraph.json"]).smlRuntimeMount,
+            "graphs/review.langgraph.json"
+        )
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-agent-guide", "graphs/review.langgraph.json"]).smlRuntimeAgentGuide,
+            "graphs/review.langgraph.json"
+        )
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-host-guide", "graphs/review.langgraph.json"]).smlRuntimeHostGuide,
+            "graphs/review.langgraph.json"
+        )
+        XCTAssertEqual(
+            KistOptions.parse(["--sml-host-wiring", "graphs/review.langgraph.json"]).smlRuntimeHostWiring,
+            "graphs/review.langgraph.json"
+        )
+    }
+
     func testSMLRuntimeAttachmentsFlags() {
         let o = KistOptions.parse([
             "--sml-runtime-attachments", "graphs/review.langgraph.json",
@@ -279,6 +403,60 @@ final class KistOptionsTests: XCTestCase {
         })
         XCTAssertNil(launch.smlRuntimeLaunch)
 
+        let openAPI = KistOptions.parse(["--sml-runtime-openapi"])
+        XCTAssertTrue(openAPI.optionErrors.contains {
+            $0.contains("--sml-runtime-openapi requires <source.json>")
+        })
+        XCTAssertNil(openAPI.smlRuntimeOpenAPI)
+
+        let modelRouter = KistOptions.parse(["--sml-runtime-model-router"])
+        XCTAssertTrue(modelRouter.optionErrors.contains {
+            $0.contains("--sml-runtime-model-router requires <source.json>")
+        })
+        XCTAssertNil(modelRouter.smlRuntimeModelRouter)
+
+        let onyx = KistOptions.parse(["--sml-runtime-onyx"])
+        XCTAssertTrue(onyx.optionErrors.contains {
+            $0.contains("--sml-runtime-onyx requires <source.json>")
+        })
+        XCTAssertNil(onyx.smlRuntimeOnyx)
+
+        let planning = KistOptions.parse(["--sml-runtime-planning"])
+        XCTAssertTrue(planning.optionErrors.contains {
+            $0.contains("--sml-runtime-planning requires <source.json>")
+        })
+        XCTAssertNil(planning.smlRuntimePlanning)
+
+        let catalog = KistOptions.parse(["--sml-runtime-catalog"])
+        XCTAssertTrue(catalog.optionErrors.contains {
+            $0.contains("--sml-runtime-catalog requires <source.json>")
+        })
+        XCTAssertNil(catalog.smlRuntimeCatalog)
+
+        let mount = KistOptions.parse(["--sml-runtime-mount"])
+        XCTAssertTrue(mount.optionErrors.contains {
+            $0.contains("--sml-runtime-mount requires <source.json>")
+        })
+        XCTAssertNil(mount.smlRuntimeMount)
+
+        let agentGuide = KistOptions.parse(["--sml-runtime-agent-guide"])
+        XCTAssertTrue(agentGuide.optionErrors.contains {
+            $0.contains("--sml-runtime-agent-guide requires <source.json>")
+        })
+        XCTAssertNil(agentGuide.smlRuntimeAgentGuide)
+
+        let hostGuide = KistOptions.parse(["--sml-runtime-host-guide"])
+        XCTAssertTrue(hostGuide.optionErrors.contains {
+            $0.contains("--sml-runtime-host-guide requires <source.json>")
+        })
+        XCTAssertNil(hostGuide.smlRuntimeHostGuide)
+
+        let hostWiring = KistOptions.parse(["--sml-runtime-host-wiring"])
+        XCTAssertTrue(hostWiring.optionErrors.contains {
+            $0.contains("--sml-runtime-host-wiring requires <source.json>")
+        })
+        XCTAssertNil(hostWiring.smlRuntimeHostWiring)
+
         let role = KistOptions.parse(["--sml-role"])
         XCTAssertTrue(role.optionErrors.contains { $0.contains("--sml-role requires") })
 
@@ -331,6 +509,22 @@ final class KistOptionsTests: XCTestCase {
             $0.contains("--sml-runtime-attachments conflicts with --sml-runtime-api")
         })
 
+        let openAPIConflict = KistOptions.parse([
+            "--sml-runtime-openapi", "graphs/review.langgraph.json",
+            "--sml-runtime-attachments", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(openAPIConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-openapi conflicts with --sml-runtime-attachments")
+        })
+
+        let onyxConflict = KistOptions.parse([
+            "--sml-runtime-onyx", "graphs/review.langgraph.json",
+            "--sml-runtime-attachments", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(onyxConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-onyx conflicts with --sml-runtime-attachments")
+        })
+
         let modelConflict = KistOptions.parse([
             "--sml-runtime-attachments", "graphs/review.langgraph.json",
             "--sml-runtime-model", "graphs/review.langgraph.json",
@@ -338,6 +532,14 @@ final class KistOptionsTests: XCTestCase {
         ])
         XCTAssertTrue(modelConflict.optionErrors.contains {
             $0.contains("--sml-runtime-attachments conflicts with --sml-runtime-model")
+        })
+
+        let descriptorConflict = KistOptions.parse([
+            "--sml-runtime-catalog", "graphs/review.langgraph.json",
+            "--sml-runtime-host-wiring", "graphs/review.langgraph.json",
+        ])
+        XCTAssertTrue(descriptorConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-catalog conflicts with --sml-runtime-host-wiring")
         })
     }
 
@@ -370,6 +572,15 @@ final class KistOptionsTests: XCTestCase {
             "--sml-line", "help",
         ])
         XCTAssertTrue(launchConflict.optionErrors.contains { $0.contains("--sml-runtime-launch conflicts") })
+
+        let openAPIConflict = KistOptions.parse([
+            "--sml-runtime-openapi", "graphs/review.langgraph.json",
+            "--sml-runtime-repl", "graphs/review.langgraph.json",
+            "--sml-line", "help",
+        ])
+        XCTAssertTrue(openAPIConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-openapi conflicts with --sml-runtime-repl")
+        })
     }
 
     func testSMLRuntimeAPIFlagsRequireRunnableMode() {
@@ -410,6 +621,15 @@ final class KistOptionsTests: XCTestCase {
         ])
         XCTAssertTrue(launchConflict.optionErrors.contains { $0.contains("--sml-runtime-launch conflicts with --sml-runtime-api") })
 
+        let openAPIConflict = KistOptions.parse([
+            "--sml-runtime-openapi", "graphs/review.langgraph.json",
+            "--sml-runtime-api", "graphs/review.langgraph.json",
+            "--sml-path", "/source/runtime/planning",
+        ])
+        XCTAssertTrue(openAPIConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-openapi conflicts with --sml-runtime-api")
+        })
+
         let replConflict = KistOptions.parse([
             "--sml-runtime-repl", "graphs/review.langgraph.json",
             "--sml-line", "help",
@@ -443,6 +663,24 @@ final class KistOptionsTests: XCTestCase {
             "--sml-prompt", "start it",
         ])
         XCTAssertTrue(launchConflict.optionErrors.contains { $0.contains("--sml-runtime-launch conflicts with --sml-runtime-model") })
+
+        let openAPIConflict = KistOptions.parse([
+            "--sml-runtime-openapi", "graphs/review.langgraph.json",
+            "--sml-runtime-model", "graphs/review.langgraph.json",
+            "--sml-prompt", "start it",
+        ])
+        XCTAssertTrue(openAPIConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-openapi conflicts with --sml-runtime-model")
+        })
+
+        let planningConflict = KistOptions.parse([
+            "--sml-runtime-planning", "graphs/review.langgraph.json",
+            "--sml-runtime-model", "graphs/review.langgraph.json",
+            "--sml-prompt", "start it",
+        ])
+        XCTAssertTrue(planningConflict.optionErrors.contains {
+            $0.contains("--sml-runtime-planning conflicts with --sml-runtime-model")
+        })
 
         let replConflict = KistOptions.parse([
             "--sml-runtime-repl", "graphs/review.langgraph.json",
