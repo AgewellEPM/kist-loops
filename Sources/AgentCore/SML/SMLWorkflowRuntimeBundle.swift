@@ -485,6 +485,11 @@ public struct SMLWorkflowRuntimeMetadataEndpoint: Sendable, Codable, Equatable {
     }
 }
 
+public enum SMLWorkflowRuntimeAPIRoute: Sendable, Equatable {
+    case metadata(SMLWorkflowRuntimeMetadataResource)
+    case workflow(workflowID: String)
+}
+
 public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
     public let workflowID: String
     public let workflowVersion: String
@@ -1039,24 +1044,41 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
         return try bundle.apiCompiler.compile(request, issuedAtEpoch: issuedAtEpoch)
     }
 
+    public func route(
+        for request: SMLWorkflowAPIRequest
+    ) throws -> SMLWorkflowRuntimeAPIRoute {
+        let metadataMatches = try metadataResources(matchingPath: request.path)
+        if let resource = metadataMatches.first {
+            if metadataMatches.count > 1 {
+                throw SMLWorkflowRuntimeRegistryError.ambiguousAPIRoute(
+                    method: request.method.rawValue,
+                    path: request.path
+                )
+            }
+            guard request.method == .get,
+                  request.body.isEmpty,
+                  request.scope.isEmpty,
+                  request.expectedState.isEmpty else {
+                throw SMLWorkflowRuntimeRegistryError.metadataRequestMustBeReadOnly
+            }
+            return .metadata(resource)
+        }
+
+        let bundle = try routeBundle(for: request)
+        return .workflow(workflowID: bundle.surface.workflowID)
+    }
+
     public func metadataResource(
         for request: SMLWorkflowAPIRequest
     ) throws -> SMLWorkflowRuntimeMetadataResource {
-        guard request.method == .get,
-              request.body.isEmpty,
-              request.scope.isEmpty,
-              request.expectedState.isEmpty else {
-            throw SMLWorkflowRuntimeRegistryError.metadataRequestMustBeReadOnly
-        }
-        let segments = try pathSegments(request.path)
-        let matches = catalog.apiBasePaths.compactMap { basePath -> SMLWorkflowRuntimeMetadataResource? in
-            let baseSegments = basePath.split(separator: "/").map(String.init)
-            guard segments.starts(with: baseSegments) else { return nil }
-            let tail = Array(segments.dropFirst(baseSegments.count))
-            guard tail.count == 2, tail[0] == "runtime" else { return nil }
-            return SMLWorkflowRuntimeMetadataResource(rawValue: tail[1])
-        }
+        let matches = try metadataResources(matchingPath: request.path)
         if let match = matches.first, matches.count == 1 {
+            guard request.method == .get,
+                  request.body.isEmpty,
+                  request.scope.isEmpty,
+                  request.expectedState.isEmpty else {
+                throw SMLWorkflowRuntimeRegistryError.metadataRequestMustBeReadOnly
+            }
             return match
         }
         if matches.count > 1 {
@@ -1069,6 +1091,19 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
             method: request.method.rawValue,
             path: request.path
         )
+    }
+
+    private func metadataResources(
+        matchingPath path: String
+    ) throws -> [SMLWorkflowRuntimeMetadataResource] {
+        let segments = try pathSegments(path)
+        return catalog.apiBasePaths.compactMap { basePath -> SMLWorkflowRuntimeMetadataResource? in
+            let baseSegments = basePath.split(separator: "/").map(String.init)
+            guard segments.starts(with: baseSegments) else { return nil }
+            let tail = Array(segments.dropFirst(baseSegments.count))
+            guard tail.count == 2, tail[0] == "runtime" else { return nil }
+            return SMLWorkflowRuntimeMetadataResource(rawValue: tail[1])
+        }
     }
 
     public func makeREPLSession(
@@ -1286,6 +1321,25 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
         )
     }
 
+    public func handleRuntime(
+        _ request: SMLWorkflowAPIRequest
+    ) async throws -> SMLWorkflowRuntimeAPIResponse {
+        switch try registry.route(for: request) {
+        case .metadata(let resource):
+            let metadata = try SMLWorkflowRuntimeMetadataResponse(
+                resource: resource,
+                path: request.path,
+                body: metadataPayload(for: resource)
+            )
+            return SMLWorkflowRuntimeAPIResponse(metadata: metadata)
+        case .workflow:
+            return try SMLWorkflowRuntimeAPIResponse(
+                workflow: try await handle(request),
+                path: request.path
+            )
+        }
+    }
+
     public func handle(_ request: SMLWorkflowAPIRequest) async throws -> SMLWorkflowAPIResponse {
         let now = clock()
         let command = try registry.compileAPI(request, issuedAtEpoch: now)
@@ -1300,23 +1354,18 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
     ) throws -> SMLValue {
         switch resource {
         case .catalog:
-            return try Self.encodeMetadata(registry.catalog)
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog)
         case .export:
-            return try Self.encodeMetadata(registry.export())
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.export())
         case .openAPI:
             return .object(registry.openAPIDocument())
         case .planning:
-            return try Self.encodeMetadata(registry.planningManifest)
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.planningManifest)
         case .modelRouter:
-            return try Self.encodeMetadata(registry.catalog.modelRouter)
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.modelRouter)
         case .onyxDrivers:
-            return try Self.encodeMetadata(registry.catalog.onyxDrivers)
+            return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.onyxDrivers)
         }
-    }
-
-    private static func encodeMetadata<T: Encodable>(_ value: T) throws -> SMLValue {
-        let data = try JSONEncoder().encode(value)
-        return try JSONDecoder().decode(SMLValue.self, from: data)
     }
 }
 
@@ -1336,6 +1385,70 @@ public struct SMLWorkflowRuntimeMetadataResponse: Sendable, Equatable {
         self.resource = resource
         self.path = path
         self.body = body
+    }
+}
+
+public enum SMLWorkflowRuntimeAPIResponseKind: String, Sendable, Codable, Equatable {
+    case metadata
+    case workflow
+}
+
+public struct SMLWorkflowRuntimeAPIResponse: Sendable, Equatable {
+    public let statusCode: Int
+    public let kind: SMLWorkflowRuntimeAPIResponseKind
+    public let path: String
+    public let body: SMLValue
+    public let metadataResource: SMLWorkflowRuntimeMetadataResource?
+    public let command: SMLCommandEnvelope?
+    public let result: SMLCommandResult?
+
+    public init(
+        statusCode: Int,
+        kind: SMLWorkflowRuntimeAPIResponseKind,
+        path: String,
+        body: SMLValue,
+        metadataResource: SMLWorkflowRuntimeMetadataResource? = nil,
+        command: SMLCommandEnvelope? = nil,
+        result: SMLCommandResult? = nil
+    ) {
+        self.statusCode = statusCode
+        self.kind = kind
+        self.path = path
+        self.body = body
+        self.metadataResource = metadataResource
+        self.command = command
+        self.result = result
+    }
+
+    public init(metadata response: SMLWorkflowRuntimeMetadataResponse) {
+        self.init(
+            statusCode: response.statusCode,
+            kind: .metadata,
+            path: response.path,
+            body: response.body,
+            metadataResource: response.resource
+        )
+    }
+
+    public init(
+        workflow response: SMLWorkflowAPIResponse,
+        path: String
+    ) throws {
+        self.init(
+            statusCode: response.statusCode,
+            kind: .workflow,
+            path: path,
+            body: try SMLWorkflowRuntimePayloadCodec.encode(response.result),
+            command: response.command,
+            result: response.result
+        )
+    }
+}
+
+private enum SMLWorkflowRuntimePayloadCodec {
+    static func encode<T: Encodable>(_ value: T) throws -> SMLValue {
+        let data = try JSONEncoder().encode(value)
+        return try JSONDecoder().decode(SMLValue.self, from: data)
     }
 }
 
@@ -1738,6 +1851,12 @@ public struct SMLWorkflowRuntimeApp: Sendable {
         _ request: SMLWorkflowAPIRequest
     ) throws -> SMLWorkflowRuntimeMetadataResponse {
         try runtimeAPI.handleMetadata(request)
+    }
+
+    public func handleRuntimeAPI(
+        _ request: SMLWorkflowAPIRequest
+    ) async throws -> SMLWorkflowRuntimeAPIResponse {
+        try await runtimeAPI.handleRuntime(request)
     }
 
     public func replSession(workflowID: String) throws -> SMLWorkflowREPLSession {

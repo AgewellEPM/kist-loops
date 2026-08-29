@@ -225,6 +225,34 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(apiDescribe.op, SMLRuntimeCommandOperation.workflowInspect)
         XCTAssertEqual(apiDescribe.arguments["workflow_id"], .string("content.release"))
 
+        XCTAssertEqual(
+            try registry.route(
+                for: SMLWorkflowAPIRequest(
+                    method: .get,
+                    path: "/automation/runtime/planning"
+                )
+            ),
+            .metadata(.planning)
+        )
+        let workflowStartRequest = SMLWorkflowAPIRequest(
+            method: .post,
+            path: "/automation/workflows/content.review/tasks",
+            body: [
+                "task_id": .string("TASK-ROUTE"),
+                "input": .object(["target": .string("route.md")]),
+            ]
+        )
+        XCTAssertEqual(
+            try registry.route(for: workflowStartRequest),
+            .workflow(workflowID: "content.review")
+        )
+        XCTAssertThrowsError(try registry.metadataResource(for: workflowStartRequest)) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .routeNotFound(method: "POST", path: "/automation/workflows/content.review/tasks")
+            )
+        }
+
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("sml-registry-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -579,7 +607,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let help = try await repl.submit("help")
         XCTAssertTrue(help.output.contains("content.release"))
 
-        let started = try await app.handleAPI(
+        let started = try await app.handleRuntimeAPI(
             SMLWorkflowAPIRequest(
                 method: .post,
                 path: "/automation/workflows/content.review/tasks",
@@ -589,9 +617,13 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 ]
             )
         )
+        XCTAssertEqual(started.kind, .workflow)
         XCTAssertEqual(started.statusCode, 201)
-        XCTAssertEqual(started.command.op, SMLRuntimeCommandOperation.workflowRun)
-        XCTAssertEqual(started.result.task?.workflowID, "content.review")
+        XCTAssertNil(started.metadataResource)
+        XCTAssertEqual(started.command?.op, SMLRuntimeCommandOperation.workflowRun)
+        XCTAssertEqual(started.result?.task?.workflowID, "content.review")
+        let startedBody = try object(started.body)
+        XCTAssertEqual(startedBody["kind"], .string(SMLCommandResultKind.task.rawValue))
 
         let planningMetadata = try app.handleMetadata(
             SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/planning")
@@ -604,6 +636,19 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             [.string("content.release"), .string("content.review")]
         )
         XCTAssertEqual(try array(planningBody["toolIndex"]).count, 6)
+
+        let routedPlanning = try await app.handleRuntimeAPI(
+            SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/planning")
+        )
+        XCTAssertEqual(routedPlanning.kind, .metadata)
+        XCTAssertEqual(routedPlanning.statusCode, 200)
+        XCTAssertEqual(routedPlanning.metadataResource, .planning)
+        XCTAssertNil(routedPlanning.command)
+        XCTAssertNil(routedPlanning.result)
+        XCTAssertEqual(
+            try array(try object(routedPlanning.body)["workflowIDs"]),
+            [.string("content.release"), .string("content.review")]
+        )
 
         let routerMetadata = try app.handleMetadata(
             SMLWorkflowAPIRequest(method: .get, path: "/automation/runtime/model-router")
