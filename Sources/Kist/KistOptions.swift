@@ -143,6 +143,15 @@ struct KistOptions {
     var modelRunStage: String?      // --model-run <stage> <manifest.json>: execute verified manifest stage
     var modelRunManifest: String?
     var smlRuntimeExport: String?   // --sml-runtime-export <source.json>: offline source/package -> REPL/API/model/Onyx/planning JSON
+    var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
+    var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl
+    var smlRuntimeREPLLine: String? // --sml-line <line>: generated workflow REPL line to run
+    var smlRuntimeAPI: String?      // --sml-runtime-api <source.json>: run one generated runtime API request offline
+    var smlRuntimeAPIMethod: SMLWorkflowAPIMethod = .get // --sml-method <GET|POST>
+    var smlRuntimeAPIPath: String?  // --sml-path <path>: generated runtime API path to invoke
+    var smlRuntimeAPIBody: String?  // --sml-body <json>: generated runtime API request body
+    var smlRuntimeModel: String?    // --sml-runtime-model <source.json>: let a native-tool model drive mounted workflows
+    var smlRuntimeModelPrompt: String? // --sml-prompt <text>: user prompt for --sml-runtime-model
     var smlRuntimeRole: String?     // --sml-role <role>: override mounted workflow role
     var smlRuntimeActor: String?    // --sml-actor <actor>: synthetic host actor for offline install proof
     var smlRuntimeAPIBasePath: String? // --sml-api-base <path>: override generated API base path
@@ -166,6 +175,7 @@ struct KistOptions {
         var o = KistOptions(project: FileManager.default.currentDirectoryPath)
         var positional: [String] = []
         var sawCobolMaxRevisions = false
+        var sawSMLRuntimeAPIMethod = false
         var i = 0
         func next() -> String? { i += 1; return i < args.count ? args[i] : nil }
         while i < args.count {
@@ -195,6 +205,40 @@ struct KistOptions {
             case "--sml-runtime-export":
                                             if let v = next() { o.smlRuntimeExport = v }
                                             else { o.optionErrors.append("--sml-runtime-export requires <source.json>") }
+            case let flag where ["--sml-runtime-repl", "--sml-repl"].contains(flag):
+                                            if let v = next() { o.smlRuntimeREPL = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-api", "--sml-api"].contains(flag):
+                                            if let v = next() { o.smlRuntimeAPI = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case let flag where ["--sml-runtime-model", "--sml-model-runtime"].contains(flag):
+                                            if let v = next() { o.smlRuntimeModel = v }
+                                            else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case "--sml-workflow":
+                                            if let v = next() { o.smlRuntimeWorkflowID = v }
+                                            else { o.optionErrors.append("--sml-workflow requires <workflow-id>") }
+            case let flag where ["--sml-line", "--sml-repl-line"].contains(flag):
+                                            if let v = next() { o.smlRuntimeREPLLine = v }
+                                            else { o.optionErrors.append("\(flag) requires <line>") }
+            case "--sml-method":
+                                            sawSMLRuntimeAPIMethod = true
+                                            if let v = next() {
+                                                let method = v.uppercased()
+                                                if let parsed = SMLWorkflowAPIMethod(rawValue: method) {
+                                                    o.smlRuntimeAPIMethod = parsed
+                                                } else {
+                                                    o.optionErrors.append("--sml-method requires GET or POST")
+                                                }
+                                            } else {
+                                                o.optionErrors.append("--sml-method requires GET or POST")
+                                            }
+            case "--sml-path":              if let v = next() { o.smlRuntimeAPIPath = v }
+                                            else { o.optionErrors.append("--sml-path requires <path>") }
+            case "--sml-body":              if let v = next() { o.smlRuntimeAPIBody = v }
+                                            else { o.optionErrors.append("--sml-body requires <json>") }
+            case let flag where ["--sml-prompt", "--sml-model-prompt"].contains(flag):
+                                            if let v = next() { o.smlRuntimeModelPrompt = v }
+                                            else { o.optionErrors.append("\(flag) requires <text>") }
             case "--sml-role":              if let v = next() { o.smlRuntimeRole = v }
                                             else { o.optionErrors.append("--sml-role requires <role>") }
             case "--sml-actor":             if let v = next() { o.smlRuntimeActor = v }
@@ -419,6 +463,59 @@ struct KistOptions {
         if sawCobolMaxRevisions && !o.cobolo {
             o.optionErrors.append("--cobol-max-revisions requires --cobolo or --cobol-loop")
         }
+        if o.smlRuntimeExport != nil && o.smlRuntimeREPL != nil {
+            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-repl")
+        }
+        if o.smlRuntimeExport != nil && o.smlRuntimeAPI != nil {
+            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-api")
+        }
+        if o.smlRuntimeExport != nil && o.smlRuntimeModel != nil {
+            o.optionErrors.append("--sml-runtime-export conflicts with --sml-runtime-model")
+        }
+        if o.smlRuntimeREPL != nil && o.smlRuntimeAPI != nil {
+            o.optionErrors.append("--sml-runtime-repl conflicts with --sml-runtime-api")
+        }
+        if o.smlRuntimeREPL != nil && o.smlRuntimeModel != nil {
+            o.optionErrors.append("--sml-runtime-repl conflicts with --sml-runtime-model")
+        }
+        if o.smlRuntimeAPI != nil && o.smlRuntimeModel != nil {
+            o.optionErrors.append("--sml-runtime-api conflicts with --sml-runtime-model")
+        }
+        if o.smlRuntimeREPL != nil {
+            if o.smlRuntimeREPLLine?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--sml-runtime-repl requires --sml-line <line>")
+            }
+        } else {
+            if o.smlRuntimeWorkflowID != nil {
+                o.optionErrors.append("--sml-workflow requires --sml-runtime-repl <source.json>")
+            }
+            if o.smlRuntimeREPLLine != nil {
+                o.optionErrors.append("--sml-line requires --sml-runtime-repl <source.json>")
+            }
+        }
+        if o.smlRuntimeAPI != nil {
+            if o.smlRuntimeAPIPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--sml-runtime-api requires --sml-path <path>")
+            }
+        } else {
+            if sawSMLRuntimeAPIMethod {
+                o.optionErrors.append("--sml-method requires --sml-runtime-api <source.json>")
+            }
+            if o.smlRuntimeAPIPath != nil {
+                o.optionErrors.append("--sml-path requires --sml-runtime-api <source.json>")
+            }
+            if o.smlRuntimeAPIBody != nil {
+                o.optionErrors.append("--sml-body requires --sml-runtime-api <source.json>")
+            }
+        }
+        if o.smlRuntimeModel != nil {
+            let prompt = o.smlRuntimeModelPrompt ?? o.goal
+            if prompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                o.optionErrors.append("--sml-runtime-model requires --sml-prompt <text> or a positional prompt")
+            }
+        } else if o.smlRuntimeModelPrompt != nil {
+            o.optionErrors.append("--sml-prompt requires --sml-runtime-model <source.json>")
+        }
         // Autopilot is an UMBRELLA: it implies no-prompt (yolo) + shell + a FORCED OS sandbox.
         // Forced last so it can never be silently un-set by flag order or a future --no-sandbox.
         // Rationale (Luke's policy): everything always runs through a sandbox — autonomy is bought
@@ -626,6 +723,16 @@ struct KistOptions {
                                     runtime source package into a host JSON payload containing the
                                     generated custom REPL mount, API/OpenAPI routes, native model-router
                                     tool, Onyx driver manifests, planning graph, and launch descriptor.
+          --sml-runtime-repl <json> --sml-line <line> [--sml-workflow <id>]
+                                    Launch the same wrapped source offline and run one generated
+                                    workflow REPL command, returning command/result JSON for host
+                                    adapters and model drivers.
+          --sml-runtime-api <json> --sml-path <path> [--sml-method <GET|POST>] [--sml-body <json>]
+                                    Launch the same wrapped source offline and handle one generated
+                                    runtime API request, returning route, command, result, and body JSON.
+          --sml-runtime-model <json> [--sml-prompt <text>] [--provider <id>] [--model <id>]
+                                    Launch the wrapped source and let the selected native-tool model
+                                    drive mounted workflows through propose_sml_runtime_command.
               --sml-role <role>         Override workflow role for the generated mount.
               --sml-api-base <path>     Override API base path for generated endpoints.
               --sml-model-rounds <n>    Override model-router round ceiling (1...8).

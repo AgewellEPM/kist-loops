@@ -127,6 +127,12 @@ enum KistRunner {
         if opts.stickyBarSelfTest {
             return await runStickyBarSelfTest()
         }
+        if opts.smlRuntimeAPI != nil {
+            return await runSMLRuntimeAPI(opts)
+        }
+        if opts.smlRuntimeREPL != nil {
+            return await runSMLRuntimeREPL(opts)
+        }
         if opts.smlRuntimeExport != nil {
             return await runSMLRuntimeExport(opts)
         }
@@ -288,6 +294,15 @@ enum KistRunner {
         if let pinnedModel = goalPin?.model { model = pinnedModel }
         guard let root = ToolContext.canonicalize(opts.project) else {
             err("error: project path does not exist: \(opts.project)"); return 2
+        }
+        if opts.smlRuntimeModel != nil {
+            return await runSMLRuntimeModel(
+                opts,
+                registry: registry,
+                providerId: providerId,
+                model: model,
+                projectRoot: root
+            )
         }
         let auditRunID = "cli-" + UUID().uuidString.lowercased()
         let auditLog = AuditLog.forRun(root: root, runID: auditRunID)
