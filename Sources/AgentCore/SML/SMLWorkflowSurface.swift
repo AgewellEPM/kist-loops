@@ -230,6 +230,11 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
                 line: "schema",
                 summary: "Print the workflow input/output summary."
             ),
+            SMLWorkflowREPLExample(
+                verb: "attachment",
+                line: "attachment",
+                summary: "Print the machine-readable REPL/API/model/Onyx/planning attachment."
+            ),
         ]
         if allowed.contains(.describe) {
             examples.append(SMLWorkflowREPLExample(
@@ -373,6 +378,16 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
                 verb: "planning",
                 usage: "planning",
                 summary: "Print the generated planning units for this workflow.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "attachment",
+                aliases: ["manifest"],
+                usage: "attachment",
+                summary: "Print the machine-readable REPL/API/model/Onyx/planning attachment descriptor.",
                 requiresTask: false,
                 changesTaskState: false
             ),

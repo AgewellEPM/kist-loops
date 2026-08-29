@@ -116,6 +116,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertNotNil(paths["/source/runtime/planning"])
         XCTAssertNotNil(paths["/source/runtime/host-wiring"])
         XCTAssertNotNil(paths["/source/runtime/attachments"])
+        XCTAssertNotNil(paths["/source/runtime/attachments/{workflow_id}"])
 
         XCTAssertEqual(export.launchDescriptor.sourcePackageSchemaVersion, SMLWorkflowRuntimeSourcePackage.currentSchemaVersion)
         XCTAssertEqual(export.launchDescriptor.workflowIDs, ["langgraph.review"])
@@ -162,6 +163,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(metadataPaths.contains("/source/runtime/host-guide"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/host-wiring"))
         XCTAssertTrue(metadataPaths.contains("/source/runtime/attachments"))
+        XCTAssertTrue(metadataPaths.contains("/source/runtime/attachments/{workflow_id}"))
 
         let wiring = try XCTUnwrap(export.hostWiring.workflows.first)
         XCTAssertEqual(wiring.workflowID, "langgraph.review")
@@ -222,6 +224,12 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(wiring.attachment.apiBasePath, "/source")
         XCTAssertEqual(wiring.attachment.plannerEntrypoint, "plan")
         XCTAssertEqual(wiring.attachment.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(wiring.attachment.skillTree.map(\.id), ["plan", "write", "receipt"])
+        XCTAssertEqual(wiring.attachment.toolBindings.map(\.reference), [
+            "review.plan", "repository.write",
+        ])
+        XCTAssertEqual(wiring.attachment.plan?.entrypoint, "plan")
+        XCTAssertEqual(wiring.attachment.plan?.nodes.count, 3)
         XCTAssertTrue(wiring.attachment.apiExamples.contains {
             $0.path == "/source/workflows/langgraph.review/tasks"
                 && $0.body["input"] == .object(["topic": .string("topic")])
@@ -264,6 +272,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
 
         XCTAssertEqual(attachments.schemaVersion, KistRunner.SMLRuntimeHostAttachments.currentSchemaVersion)
         XCTAssertEqual(attachments.sourceFormat, .langGraphManifest)
+        XCTAssertNil(attachments.workflowID)
+        XCTAssertEqual(attachments.availableWorkflowIDs, ["langgraph.review"])
         XCTAssertEqual(attachments.apiBasePaths, ["/source"])
         XCTAssertEqual(attachments.attachmentEndpoint?.pathTemplate, "/source/runtime/attachments")
         XCTAssertEqual(attachments.attachmentEndpoint?.resource, .attachments)
@@ -276,6 +286,13 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
             .onyxDriver, .planningWorkflow,
         ])
+        XCTAssertEqual(attachment.skillTree.map(\.id), ["plan", "write", "receipt"])
+        XCTAssertEqual(attachment.skillTree.first { $0.id == "write" }?.planning?.unitKind, .externalCapability)
+        XCTAssertEqual(attachment.toolBindings.map(\.reference), [
+            "review.plan", "repository.write",
+        ])
+        XCTAssertEqual(attachment.plan?.entrypoint, "plan")
+        XCTAssertEqual(attachment.plan?.nodes.map(\.id), ["plan", "write", "receipt"])
         XCTAssertTrue(attachment.replExamples.contains {
             $0.line == #"start TASK-ID {"topic":"topic"}"#
         })
@@ -293,6 +310,29 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertFalse(json.contains("operator.test"))
         XCTAssertFalse(json.contains("sml-runtime-export-lease"))
         XCTAssertFalse(json.contains("authenticatedActor"))
+
+        let filteredJSON = try await KistRunner.renderSMLRuntimeHostAttachments(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            workflowID: "langgraph.review",
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let filtered = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostAttachments.self,
+            from: Data(filteredJSON.utf8)
+        )
+        XCTAssertEqual(filtered.workflowID, "langgraph.review")
+        XCTAssertEqual(filtered.availableWorkflowIDs, ["langgraph.review"])
+        XCTAssertEqual(filtered.attachments.map(\.workflowID), ["langgraph.review"])
+        XCTAssertEqual(filtered.attachments.first?.skillTree.map(\.id), ["plan", "write", "receipt"])
+        XCTAssertFalse(filteredJSON.contains("operator.test"))
+        XCTAssertFalse(filteredJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(filteredJSON.contains("authenticatedActor"))
     }
 
     func testLangGraphManifestAPIHandlesMetadataEndpointThroughLaunch() async throws {
@@ -402,6 +442,38 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(attachment["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
         XCTAssertFalse(attachmentsJSON.contains("sml-runtime-export-lease"))
         XCTAssertFalse(attachmentsJSON.contains("authenticatedActor"))
+
+        let workflowAttachmentJSON = try await KistRunner.renderSMLRuntimeHostAPIExchange(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            method: .get,
+            path: "/source/runtime/attachments/langgraph.review",
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08"
+        )
+        let workflowAttachmentAPI = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostAPIExchange.self,
+            from: Data(workflowAttachmentJSON.utf8)
+        )
+        XCTAssertEqual(workflowAttachmentAPI.statusCode, 200)
+        XCTAssertEqual(workflowAttachmentAPI.kind, .metadata)
+        XCTAssertEqual(workflowAttachmentAPI.metadataResource, .workflowAttachment)
+        XCTAssertEqual(
+            workflowAttachmentAPI.route?.operationID,
+            SMLWorkflowRuntimeMetadataResource.workflowAttachment.operationID
+        )
+        XCTAssertEqual(workflowAttachmentAPI.pathParameters, ["workflow_id": "langgraph.review"])
+        XCTAssertNil(workflowAttachmentAPI.command)
+        XCTAssertNil(workflowAttachmentAPI.result)
+        let workflowAttachment = try object(workflowAttachmentAPI.responseBody)
+        XCTAssertEqual(workflowAttachment["workflowID"], .string("langgraph.review"))
+        XCTAssertEqual(try array(workflowAttachment["skillTree"]).count, 3)
+        XCTAssertEqual(try array(workflowAttachment["toolBindings"]).count, 2)
+        XCTAssertFalse(workflowAttachmentJSON.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(workflowAttachmentJSON.contains("authenticatedActor"))
 
         XCTAssertFalse(json.contains("sml-runtime-export-lease"))
         XCTAssertFalse(json.contains("authenticatedActor"))
@@ -615,6 +687,66 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertFalse(json.contains("authenticatedActor"))
     }
 
+    func testLangGraphManifestREPLPrintsMachineReadableAttachment() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifestURL = directory.appendingPathComponent("review.langgraph.json")
+        try langGraphReviewManifest().write(to: manifestURL)
+
+        let json = try await KistRunner.renderSMLRuntimeHostREPLCommand(
+            sourcePath: "review.langgraph.json",
+            projectRoot: directory.path,
+            workflowID: "langgraph.review",
+            line: "attachment",
+            roleOverride: "reviewer",
+            actor: "operator.test",
+            apiBasePathOverride: "/source",
+            title: "Source Runtime",
+            version: "2026.08",
+            modelMaximumCommandRoundsOverride: 3
+        )
+        let repl = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostREPLCommand.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(repl.schemaVersion, KistRunner.SMLRuntimeHostREPLCommand.currentSchemaVersion)
+        XCTAssertEqual(repl.workflowID, "langgraph.review")
+        XCTAssertEqual(repl.availableWorkflowIDs, ["langgraph.review"])
+        XCTAssertEqual(repl.line, "attachment")
+        XCTAssertFalse(repl.shouldExit)
+        XCTAssertNil(repl.command)
+        XCTAssertNil(repl.result)
+
+        let attachment = try JSONDecoder().decode(
+            SMLWorkflowREPLAttachmentDescriptor.self,
+            from: Data(repl.output.utf8)
+        )
+        XCTAssertEqual(attachment.workflowID, "langgraph.review")
+        XCTAssertEqual(attachment.sourceReference, "graphs/review.py")
+        XCTAssertEqual(attachment.apiBasePath, "/source")
+        XCTAssertEqual(attachment.runtimeAttachmentsPath, "/source/runtime/attachments")
+        XCTAssertEqual(
+            attachment.runtimeWorkflowAttachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(attachment.replCommands.first { $0.verb == "attachment" }?.aliases, ["manifest"])
+        XCTAssertEqual(attachment.replExamples.first { $0.verb == "attachment" }?.line, "attachment")
+        XCTAssertEqual(attachment.apiCatalog.endpoints.count, 7)
+        XCTAssertEqual(attachment.modelTool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(attachment.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
+        XCTAssertEqual(attachment.skillTree.map(\.id), ["plan", "write", "receipt"])
+        XCTAssertEqual(attachment.toolBindings.map(\.reference), [
+            "review.plan", "repository.write",
+        ])
+        XCTAssertEqual(attachment.plan.entrypoint, "plan")
+        XCTAssertEqual(repl.launchDescriptor.hostWiring.attachmentManifests.first?.workflowID, "langgraph.review")
+
+        XCTAssertFalse(json.contains("operator.test"))
+        XCTAssertFalse(json.contains("sml-runtime-export-lease"))
+        XCTAssertFalse(json.contains("authenticatedActor"))
+    }
+
     func testRuntimeAPIRejectsInvalidBodyJSON() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -648,6 +780,27 @@ final class KistSMLRuntimeExportTests: XCTestCase {
                 projectRoot: directory.path,
                 workflowID: "langgraph.missing",
                 line: "help",
+                roleOverride: "reviewer"
+            )
+            XCTFail("unknown workflow ID should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("unknown --sml-workflow 'langgraph.missing'"))
+            XCTAssertTrue(message.contains("langgraph.review"))
+        }
+    }
+
+    func testRuntimeAttachmentsRejectsUnknownWorkflowID() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifestURL = directory.appendingPathComponent("review.langgraph.json")
+        try langGraphReviewManifest().write(to: manifestURL)
+
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostAttachments(
+                sourcePath: "review.langgraph.json",
+                projectRoot: directory.path,
+                workflowID: "langgraph.missing",
                 roleOverride: "reviewer"
             )
             XCTFail("unknown workflow ID should fail closed")

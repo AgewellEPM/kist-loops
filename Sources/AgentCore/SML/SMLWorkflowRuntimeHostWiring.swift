@@ -28,6 +28,9 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let onyxDriverID: String
     public let planningWorkflowID: String?
     public let plannerEntrypoint: String?
+    public let skillTree: [SMLOnyxSkillNode]
+    public let toolBindings: [SMLOnyxToolBinding]
+    public let plan: SMLOnyxPlan?
     public let toolReferences: [String]
     public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
     public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
@@ -48,6 +51,9 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         onyxDriverID: String,
         planningWorkflowID: String?,
         plannerEntrypoint: String?,
+        skillTree: [SMLOnyxSkillNode] = [],
+        toolBindings: [SMLOnyxToolBinding] = [],
+        plan: SMLOnyxPlan? = nil,
         toolReferences: [String],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
@@ -88,6 +94,14 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         self.onyxDriverID = onyxDriverID
         self.planningWorkflowID = planningWorkflowID
         self.plannerEntrypoint = plannerEntrypoint
+        self.skillTree = skillTree
+        self.toolBindings = toolBindings.sorted {
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.reference < $1.reference
+        }
+        self.plan = plan
         self.toolReferences = Array(Set(toolReferences)).sorted()
         self.decomposableUnits = decomposableUnits.sorted {
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
@@ -97,6 +111,91 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.instructionID < $1.instructionID
         }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case workflowName
+        case role
+        case sourceKind
+        case sourceReference
+        case sourceDigest
+        case apiBasePath
+        case channels
+        case replMount
+        case replExamples
+        case apiRoutes
+        case apiExamples
+        case modelToolName
+        case modelRouterToolName
+        case modelToolExamples
+        case modelRouterExamples
+        case onyxDriverID
+        case planningWorkflowID
+        case plannerEntrypoint
+        case skillTree
+        case toolBindings
+        case plan
+        case toolReferences
+        case decomposableUnits
+        case approvalGates
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workflowID = try container.decode(String.self, forKey: .workflowID)
+        workflowVersion = try container.decode(String.self, forKey: .workflowVersion)
+        workflowName = try container.decode(String.self, forKey: .workflowName)
+        role = try container.decode(String.self, forKey: .role)
+        sourceKind = try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind)
+        sourceReference = try container.decode(String.self, forKey: .sourceReference)
+        sourceDigest = try container.decodeIfPresent(String.self, forKey: .sourceDigest)
+        apiBasePath = try container.decode(String.self, forKey: .apiBasePath)
+        channels = try container.decode([SMLWorkflowRuntimeHostBindingChannel].self, forKey: .channels).sorted {
+            $0.rawValue < $1.rawValue
+        }
+        replMount = try container.decode(SMLWorkflowRuntimeREPLMount.self, forKey: .replMount)
+        replExamples = try container.decode([SMLWorkflowREPLExample].self, forKey: .replExamples)
+        apiRoutes = try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes).sorted {
+            if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.operationID < $1.operationID
+        }
+        apiExamples = try container.decode([SMLWorkflowAPIRequestExample].self, forKey: .apiExamples).sorted {
+            if $0.path != $1.path { return $0.path < $1.path }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.summary < $1.summary
+        }
+        modelToolName = try container.decode(String.self, forKey: .modelToolName)
+        modelRouterToolName = try container.decode(String.self, forKey: .modelRouterToolName)
+        modelToolExamples = try container.decode(
+            [SMLWorkflowRuntimeModelToolCallExample].self,
+            forKey: .modelToolExamples
+        )
+        modelRouterExamples = try container.decode(
+            [SMLWorkflowRuntimeModelToolCallExample].self,
+            forKey: .modelRouterExamples
+        )
+        onyxDriverID = try container.decode(String.self, forKey: .onyxDriverID)
+        planningWorkflowID = try container.decodeIfPresent(String.self, forKey: .planningWorkflowID)
+        plannerEntrypoint = try container.decodeIfPresent(String.self, forKey: .plannerEntrypoint)
+        skillTree = try container.decodeIfPresent([SMLOnyxSkillNode].self, forKey: .skillTree) ?? []
+        toolBindings = try container.decodeIfPresent([SMLOnyxToolBinding].self, forKey: .toolBindings) ?? []
+        plan = try container.decodeIfPresent(SMLOnyxPlan.self, forKey: .plan)
+        toolReferences = try container.decode([String].self, forKey: .toolReferences)
+        decomposableUnits = try container.decode(
+            [SMLWorkflowRuntimePlanningDecompositionUnit].self,
+            forKey: .decomposableUnits
+        )
+        approvalGates = try container.decode(
+            [SMLWorkflowRuntimePlanningApprovalGate].self,
+            forKey: .approvalGates
+        )
     }
 
     private static func modelExamples(
@@ -155,6 +254,9 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         onyxDriverID: String,
         planningWorkflowID: String?,
         plannerEntrypoint: String? = nil,
+        skillTree: [SMLOnyxSkillNode] = [],
+        toolBindings: [SMLOnyxToolBinding] = [],
+        plan: SMLOnyxPlan? = nil,
         toolReferences: [String],
         decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
         approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
@@ -218,6 +320,9 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             onyxDriverID: onyxDriverID,
             planningWorkflowID: planningWorkflowID,
             plannerEntrypoint: plannerEntrypoint,
+            skillTree: skillTree,
+            toolBindings: toolBindings,
+            plan: plan,
             toolReferences: sortedToolReferences,
             decomposableUnits: sortedDecomposableUnits,
             approvalGates: sortedApprovalGates,
@@ -246,6 +351,9 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             onyxDriverID: mount.onyxDriverID,
             planningWorkflowID: mount.planningWorkflowID,
             plannerEntrypoint: hostGuide?.plannerEntrypoint,
+            skillTree: descriptor.onyx.skillTree,
+            toolBindings: descriptor.onyx.tools,
+            plan: descriptor.onyx.plan,
             toolReferences: hostGuide?.toolReferences ?? [],
             decomposableUnits: hostGuide?.decomposableUnits ?? [],
             approvalGates: hostGuide?.approvalGates ?? [],
@@ -365,7 +473,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 9
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

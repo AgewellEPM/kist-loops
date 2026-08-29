@@ -366,6 +366,39 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
     private static func requireDerivedRuntimePayloadsMatch(
         _ runtime: SMLWorkflowRuntimeExport
     ) throws {
+        guard runtime.mountContract == runtime.catalog.mountContract else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.mountContract"
+            )
+        }
+        guard runtime.openAPI == runtime.catalog.openAPIDocument(
+            title: openAPITitle(from: runtime.openAPI),
+            version: openAPIVersion(from: runtime.openAPI)
+        ) else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.openAPI"
+            )
+        }
+        guard runtime.modelTools == runtime.catalog.modelTools else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.modelTools"
+            )
+        }
+        guard runtime.modelRouter == runtime.catalog.modelRouter else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.modelRouter"
+            )
+        }
+        guard runtime.onyxDrivers == runtime.catalog.onyxDrivers else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.onyxDrivers"
+            )
+        }
+        guard runtime.planning == runtime.catalog.planningManifest else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
+                field: "runtime.planning"
+            )
+        }
         guard runtime.agentGuide == runtime.catalog.agentGuide else {
             throw SMLWorkflowRuntimeSourcePackageError.runtimeDerivedPayloadMismatch(
                 field: "runtime.agentGuide"
@@ -381,6 +414,24 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 field: "runtime.hostWiring"
             )
         }
+    }
+
+    private static func openAPITitle(from openAPI: SMLObject) -> String {
+        string(openAPIInfo(openAPI)["title"]) ?? "SML Workflow Runtime API"
+    }
+
+    private static func openAPIVersion(from openAPI: SMLObject) -> String {
+        string(openAPIInfo(openAPI)["version"]) ?? "1.0.0"
+    }
+
+    private static func openAPIInfo(_ openAPI: SMLObject) -> SMLObject {
+        guard case .object(let info)? = openAPI["info"] else { return [:] }
+        return info
+    }
+
+    private static func string(_ value: SMLValue?) -> String? {
+        guard case .string(let string) = value else { return nil }
+        return string
     }
 
     private static func require(

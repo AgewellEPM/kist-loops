@@ -465,7 +465,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 7
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]
@@ -547,7 +547,7 @@ public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
             id: "serve_descriptor_metadata",
             entrypoint: "SMLWorkflowRuntimeAPI.handleMetadata(_:)",
             authority: .descriptorOnly,
-            summary: "Serve catalog, mount, OpenAPI, planning, agent, host, model-router, and Onyx metadata."
+            summary: "Serve catalog, mount, OpenAPI, planning, agent, host, attachment, model-router, and Onyx metadata."
         ),
         SMLWorkflowRuntimeHostLaunchStep(
             id: "route_repl_and_api",

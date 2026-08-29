@@ -145,7 +145,7 @@ struct KistOptions {
     var smlRuntimeExport: String?   // --sml-runtime-export <source.json>: offline source/package -> REPL/API/model/Onyx/planning JSON
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
-    var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl
+    var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/attachments
     var smlRuntimeREPLLine: String? // --sml-line <line>: generated workflow REPL line to run
     var smlRuntimeAPI: String?      // --sml-runtime-api <source.json>: run one generated runtime API request offline
     var smlRuntimeAPIMethod: SMLWorkflowAPIMethod = .get // --sml-method <GET|POST>
@@ -502,8 +502,8 @@ struct KistOptions {
                 o.optionErrors.append("--sml-runtime-repl requires --sml-line <line>")
             }
         } else {
-            if o.smlRuntimeWorkflowID != nil {
-                o.optionErrors.append("--sml-workflow requires --sml-runtime-repl <source.json>")
+            if o.smlRuntimeWorkflowID != nil && o.smlRuntimeAttachments == nil {
+                o.optionErrors.append("--sml-workflow requires --sml-runtime-repl or --sml-runtime-attachments <source.json>")
             }
             if o.smlRuntimeREPLLine != nil {
                 o.optionErrors.append("--sml-line requires --sml-runtime-repl <source.json>")
@@ -739,9 +739,10 @@ struct KistOptions {
                                     runtime source package into a host JSON payload containing the
                                     generated custom REPL mount, API/OpenAPI routes, native model-router
                                     tool, Onyx driver manifests, planning graph, and launch descriptor.
-          --sml-runtime-attachments <json>
+          --sml-runtime-attachments <json> [--sml-workflow <id>]
                                     Emit the per-workflow attachment manifests for generated REPL,
-                                    API, model-router, Onyx driver, and planning adapters.
+                                    API, model-router, Onyx driver, and planning adapters; optionally
+                                    filter to one mounted workflow.
           --sml-runtime-repl <json> --sml-line <line> [--sml-workflow <id>]
                                     Launch the same wrapped source offline and run one generated
                                     workflow REPL command, returning command/result JSON for host

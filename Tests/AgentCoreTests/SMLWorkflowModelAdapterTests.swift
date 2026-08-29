@@ -59,6 +59,7 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertFalse(toolDescription.contains("approve TASK_ID"))
         XCTAssertFalse(toolDescription.contains("json:expected_state fields:task_revision"))
         XCTAssertFalse(toolDescription.contains("help [local]"))
+        XCTAssertFalse(toolDescription.contains("attachment [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("prose is advisory"))
         XCTAssertTrue(capture.systemPrompt.contains("Workflow graph:"))
         XCTAssertTrue(capture.systemPrompt.contains("work CALL_TOOL [tool.execute] -> receipt"))
@@ -69,6 +70,7 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertFalse(capture.systemPrompt.contains("approve TASK_ID"))
         XCTAssertFalse(capture.systemPrompt.contains("json:expected_state fields:task_revision"))
         XCTAssertFalse(capture.systemPrompt.contains("help [local]"))
+        XCTAssertFalse(capture.systemPrompt.contains("attachment [local]"))
     }
 
     func testMultipleWrongAndMalformedCallsAreAtomicNoOps() async throws {
@@ -257,6 +259,7 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertFalse(toolDescription.contains("approve TASK_ID"))
         XCTAssertFalse(toolDescription.contains("json:expected_state fields:task_revision"))
         XCTAssertFalse(toolDescription.contains("help [local]"))
+        XCTAssertFalse(toolDescription.contains("attachment [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("mounted workflow_id"))
         XCTAssertTrue(capture.systemPrompt.contains("model.workflow@1.0.0"))
         XCTAssertTrue(capture.systemPrompt.contains("model.review@1.0.0"))
@@ -269,6 +272,7 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertFalse(capture.systemPrompt.contains("approve TASK_ID"))
         XCTAssertFalse(capture.systemPrompt.contains("json:expected_state fields:task_revision"))
         XCTAssertFalse(capture.systemPrompt.contains("help [local]"))
+        XCTAssertFalse(capture.systemPrompt.contains("attachment [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("API routes:"))
         XCTAssertTrue(
             capture.systemPrompt.contains(
@@ -301,6 +305,15 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
                 .call(
                     name: SMLWorkflowRuntimeModelAdapter.toolName,
                     arguments: #"{"workflow_id":"model.workflow","line":"schema"}"#
+                ),
+                { error in
+                    error as? SMLWorkflowModelError == .nonCommandProposal
+                }
+            ),
+            (
+                .call(
+                    name: SMLWorkflowRuntimeModelAdapter.toolName,
+                    arguments: #"{"workflow_id":"model.workflow","line":"attachment"}"#
                 ),
                 { error in
                     error as? SMLWorkflowModelError == .nonCommandProposal

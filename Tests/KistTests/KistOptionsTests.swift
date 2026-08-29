@@ -117,6 +117,7 @@ final class KistOptionsTests: XCTestCase {
     func testSMLRuntimeAttachmentsFlags() {
         let o = KistOptions.parse([
             "--sml-runtime-attachments", "graphs/review.langgraph.json",
+            "--sml-workflow", "langgraph.review",
             "--sml-role", "reviewer",
             "--sml-actor", "operator.test",
             "--sml-api-base", "/source",
@@ -125,6 +126,7 @@ final class KistOptionsTests: XCTestCase {
             "--sml-model-rounds", "3",
         ])
         XCTAssertEqual(o.smlRuntimeAttachments, "graphs/review.langgraph.json")
+        XCTAssertEqual(o.smlRuntimeWorkflowID, "langgraph.review")
         XCTAssertEqual(o.smlRuntimeRole, "reviewer")
         XCTAssertEqual(o.smlRuntimeActor, "operator.test")
         XCTAssertEqual(o.smlRuntimeAPIBasePath, "/source")
@@ -132,7 +134,7 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertEqual(o.smlRuntimeVersion, "2026.08")
         XCTAssertEqual(o.smlRuntimeModelRounds, 3)
         XCTAssertNil(o.goal)
-        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-attachments <json>"))
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-attachments <json> [--sml-workflow <id>]"))
 
         let alias = KistOptions.parse([
             "--sml-attachments", "graphs/review.langgraph.json",
@@ -311,7 +313,9 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(lineOnly.optionErrors.contains { $0.contains("--sml-line requires --sml-runtime-repl") })
 
         let workflowOnly = KistOptions.parse(["--sml-workflow", "langgraph.review"])
-        XCTAssertTrue(workflowOnly.optionErrors.contains { $0.contains("--sml-workflow requires --sml-runtime-repl") })
+        XCTAssertTrue(workflowOnly.optionErrors.contains {
+            $0.contains("--sml-workflow requires --sml-runtime-repl or --sml-runtime-attachments")
+        })
 
         let conflict = KistOptions.parse([
             "--sml-runtime-export", "graphs/review.langgraph.json",

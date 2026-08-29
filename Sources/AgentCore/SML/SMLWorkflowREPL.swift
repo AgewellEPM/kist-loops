@@ -24,6 +24,89 @@ public enum SMLWorkflowREPLCompilation: Sendable, Equatable {
     case exit
 }
 
+public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let workflowID: String
+    public let workflowVersion: String
+    public let workflowName: String
+    public let role: String
+    public let sourceKind: SMLWorkflowSourceKind
+    public let sourceReference: String
+    public let sourceDigest: String?
+    public let apiBasePath: String
+    public let runtimeAttachmentsPath: String
+    public let runtimeWorkflowAttachmentPath: String
+    public let replGrammar: String
+    public let replCommands: [SMLWorkflowREPLCommandDescriptor]
+    public let replExamples: [SMLWorkflowREPLExample]
+    public let apiCatalog: SMLWorkflowAPICatalog
+    public let modelTool: SMLWorkflowModelToolDescriptor
+    public let modelRouterToolName: String?
+    public let onyxDriverID: String
+    public let skillTree: [SMLOnyxSkillNode]
+    public let toolBindings: [SMLOnyxToolBinding]
+    public let plan: SMLOnyxPlan
+
+    public init(
+        schemaVersion: Int = SMLWorkflowREPLAttachmentDescriptor.currentSchemaVersion,
+        workflowID: String,
+        workflowVersion: String,
+        workflowName: String,
+        role: String,
+        sourceKind: SMLWorkflowSourceKind,
+        sourceReference: String,
+        sourceDigest: String?,
+        apiBasePath: String,
+        runtimeAttachmentsPath: String,
+        runtimeWorkflowAttachmentPath: String,
+        replGrammar: String,
+        replCommands: [SMLWorkflowREPLCommandDescriptor],
+        replExamples: [SMLWorkflowREPLExample],
+        apiCatalog: SMLWorkflowAPICatalog,
+        modelTool: SMLWorkflowModelToolDescriptor,
+        modelRouterToolName: String?,
+        onyxDriverID: String,
+        skillTree: [SMLOnyxSkillNode],
+        toolBindings: [SMLOnyxToolBinding],
+        plan: SMLOnyxPlan
+    ) {
+        self.schemaVersion = schemaVersion
+        self.workflowID = workflowID
+        self.workflowVersion = workflowVersion
+        self.workflowName = workflowName
+        self.role = role
+        self.sourceKind = sourceKind
+        self.sourceReference = sourceReference
+        self.sourceDigest = sourceDigest
+        self.apiBasePath = apiBasePath
+        self.runtimeAttachmentsPath = runtimeAttachmentsPath
+        self.runtimeWorkflowAttachmentPath = runtimeWorkflowAttachmentPath
+        self.replGrammar = replGrammar
+        self.replCommands = replCommands.sorted {
+            if $0.kind.rawValue != $1.kind.rawValue { return $0.kind.rawValue < $1.kind.rawValue }
+            return $0.verb < $1.verb
+        }
+        self.replExamples = replExamples.sorted {
+            if $0.verb != $1.verb { return $0.verb < $1.verb }
+            return $0.line < $1.line
+        }
+        self.apiCatalog = apiCatalog
+        self.modelTool = modelTool
+        self.modelRouterToolName = modelRouterToolName
+        self.onyxDriverID = onyxDriverID
+        self.skillTree = skillTree
+        self.toolBindings = toolBindings.sorted {
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.reference < $1.reference
+        }
+        self.plan = plan
+    }
+}
+
 /// A workflow-scoped compiler. The workflow id/version/role are fixed by its admitted surface, so a
 /// line can select only a lifecycle action and task—not redirect execution to another workflow.
 public struct SMLWorkflowREPLCompiler: Sendable {
@@ -85,6 +168,9 @@ public struct SMLWorkflowREPLCompiler: Sendable {
         case "planning":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .local(planningText)
+        case "attachment", "manifest":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try attachmentText())
         case "exit", "quit":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .exit
@@ -133,10 +219,36 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "model",
             "onyx",
             "planning",
+            "attachment",
             "exit",
         ] + exampleLines + [
             "Approve, refuse, and rollback require the task_revision returned by watch.",
         ]).joined(separator: "\n")
+    }
+
+    public var attachmentDescriptor: SMLWorkflowREPLAttachmentDescriptor {
+        SMLWorkflowREPLAttachmentDescriptor(
+            workflowID: surface.workflowID,
+            workflowVersion: surface.workflowVersion,
+            workflowName: surface.workflowName,
+            role: surface.role,
+            sourceKind: surface.sourceKind,
+            sourceReference: surface.workflow.source.reference,
+            sourceDigest: surface.workflow.source.digest,
+            apiBasePath: apiCatalog.basePath,
+            runtimeAttachmentsPath: "\(apiCatalog.basePath)/runtime/attachments",
+            runtimeWorkflowAttachmentPath: "\(apiCatalog.basePath)/runtime/attachments/\(surface.workflowID)",
+            replGrammar: surface.grammar(allowedActions: allowedActions),
+            replCommands: surface.replCommandDescriptors(allowedActions: allowedActions),
+            replExamples: surface.replExamples(allowedActions: allowedActions),
+            apiCatalog: apiCatalog,
+            modelTool: modelTool,
+            modelRouterToolName: modelRouterToolName,
+            onyxDriverID: onyxDriver.driverID,
+            skillTree: onyxDriver.skillTree,
+            toolBindings: onyxDriver.tools,
+            plan: onyxDriver.plan
+        )
     }
 
     private var apiText: String {
@@ -229,6 +341,13 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "planning:",
             "entrypoint: \(onyxDriver.plan.entrypoint)",
         ] + nodes).joined(separator: "\n")
+    }
+
+    private func attachmentText() throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(attachmentDescriptor)
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func require(_ action: SMLWorkflowControlAction, verb: String) throws {

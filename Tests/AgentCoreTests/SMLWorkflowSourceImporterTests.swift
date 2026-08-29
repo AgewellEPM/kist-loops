@@ -671,6 +671,112 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         }
     }
 
+    func testRuntimePackageFailsClosedWhenGeneratedRuntimePayloadsDisagreeWithCatalog() throws {
+        let workflow = try SMLWorkflowSourceImporter.langGraphWorkflow(from: langGraphReviewManifest())
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            sourceMounts: [
+                SMLWorkflowRuntimeSourceMount(
+                    document: .langGraphManifest(langGraphReviewManifest()),
+                    admissionCatalog: reviewCatalog(),
+                    role: "reviewer",
+                    actor: "operator.luke",
+                    apiBasePath: "/source"
+                ),
+            ]
+        )
+        let driftedPathRegistry = try SMLWorkflowRuntimeRegistry.compile(
+            sourceMounts: [
+                SMLWorkflowRuntimeSourceMount(
+                    document: .langGraphManifest(langGraphReviewManifest()),
+                    admissionCatalog: reviewCatalog(),
+                    role: "reviewer",
+                    actor: "operator.luke",
+                    apiBasePath: "/drifted"
+                ),
+            ]
+        )
+        let driftedRoundsRegistry = try SMLWorkflowRuntimeRegistry.compile(
+            sourceMounts: [
+                SMLWorkflowRuntimeSourceMount(
+                    document: .langGraphManifest(langGraphReviewManifest()),
+                    admissionCatalog: reviewCatalog(),
+                    role: "reviewer",
+                    actor: "operator.luke",
+                    apiBasePath: "/source",
+                    modelMaximumCommandRounds: 2
+                ),
+            ]
+        )
+        let runtime = registry.export(title: "Source Runtime", version: "2026.08")
+        let driftedPathRuntime = driftedPathRegistry.export(title: "Source Runtime", version: "2026.08")
+        let driftedRoundsRuntime = driftedRoundsRegistry.export(title: "Source Runtime", version: "2026.08")
+
+        func makeRuntime(
+            mountContract: SMLWorkflowRuntimeMountContract? = nil,
+            openAPI: SMLObject? = nil,
+            modelTools: [SMLWorkflowRuntimeModelToolExport]? = nil,
+            modelRouter: SMLWorkflowRuntimeModelRouterDescriptor? = nil,
+            onyxDrivers: [SMLOnyxDriverManifest]? = nil,
+            planning: SMLWorkflowRuntimePlanningManifest? = nil
+        ) -> SMLWorkflowRuntimeExport {
+            SMLWorkflowRuntimeExport(
+                schemaVersion: runtime.schemaVersion,
+                catalog: runtime.catalog,
+                mountContract: mountContract ?? runtime.mountContract,
+                openAPI: openAPI ?? runtime.openAPI,
+                modelTools: modelTools ?? runtime.modelTools,
+                modelRouter: modelRouter ?? runtime.modelRouter,
+                onyxDrivers: onyxDrivers ?? runtime.onyxDrivers,
+                planning: planning ?? runtime.planning,
+                agentGuide: runtime.agentGuide,
+                hostGuide: runtime.hostGuide,
+                hostWiring: runtime.hostWiring
+            )
+        }
+
+        let cases: [(field: String, runtime: SMLWorkflowRuntimeExport)] = [
+            (
+                "runtime.mountContract",
+                makeRuntime(mountContract: driftedPathRuntime.mountContract)
+            ),
+            (
+                "runtime.openAPI",
+                makeRuntime(openAPI: driftedPathRuntime.openAPI)
+            ),
+            (
+                "runtime.modelTools",
+                makeRuntime(modelTools: driftedRoundsRuntime.modelTools)
+            ),
+            (
+                "runtime.modelRouter",
+                makeRuntime(modelRouter: driftedRoundsRuntime.modelRouter)
+            ),
+            (
+                "runtime.onyxDrivers",
+                makeRuntime(onyxDrivers: driftedPathRuntime.onyxDrivers)
+            ),
+            (
+                "runtime.planning",
+                makeRuntime(planning: driftedPathRuntime.planning)
+            ),
+        ]
+
+        for testCase in cases {
+            XCTAssertThrowsError(
+                try SMLWorkflowRuntimeSourcePackage(
+                    normalizedWorkflows: [workflow],
+                    runtime: testCase.runtime
+                ),
+                "expected \(testCase.field) drift to fail closed"
+            ) {
+                XCTAssertEqual(
+                    $0 as? SMLWorkflowRuntimeSourcePackageError,
+                    .runtimeDerivedPayloadMismatch(field: testCase.field)
+                )
+            }
+        }
+    }
+
     func testLangGraphManifestImportsConditionalEdgesForBranchNodes() throws {
         let manifest = data("""
         {

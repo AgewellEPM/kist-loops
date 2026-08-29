@@ -9,7 +9,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostExport: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 8
+        static let currentSchemaVersion = 10
 
         let schemaVersion: Int
         let sourcePath: String
@@ -36,11 +36,13 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostAttachments: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 1
+        static let currentSchemaVersion = 4
 
         let schemaVersion: Int
         let sourcePath: String
         let sourceFormat: SMLRuntimeHostExportSourceFormat
+        let workflowID: String?
+        let availableWorkflowIDs: [String]
         let apiBasePaths: [String]
         let attachmentEndpoint: SMLWorkflowRuntimeMetadataEndpoint?
         let attachments: [SMLWorkflowRuntimeWorkflowAttachmentManifest]
@@ -50,6 +52,8 @@ extension KistRunner {
             schemaVersion: Int = SMLRuntimeHostAttachments.currentSchemaVersion,
             sourcePath: String,
             sourceFormat: SMLRuntimeHostExportSourceFormat,
+            workflowID: String?,
+            availableWorkflowIDs: [String],
             apiBasePaths: [String],
             attachmentEndpoint: SMLWorkflowRuntimeMetadataEndpoint?,
             attachments: [SMLWorkflowRuntimeWorkflowAttachmentManifest],
@@ -58,6 +62,8 @@ extension KistRunner {
             self.schemaVersion = schemaVersion
             self.sourcePath = sourcePath
             self.sourceFormat = sourceFormat
+            self.workflowID = workflowID
+            self.availableWorkflowIDs = availableWorkflowIDs.sorted()
             self.apiBasePaths = apiBasePaths.sorted()
             self.attachmentEndpoint = attachmentEndpoint
             self.attachments = attachments.sorted {
@@ -69,7 +75,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostREPLCommand: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 1
+        static let currentSchemaVersion = 2
 
         let schemaVersion: Int
         let sourcePath: String
@@ -291,6 +297,7 @@ extension KistRunner {
             let json = try await renderSMLRuntimeHostAttachments(
                 sourcePath: opts.smlRuntimeAttachments,
                 projectRoot: opts.project,
+                workflowID: opts.smlRuntimeWorkflowID,
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
@@ -437,6 +444,7 @@ extension KistRunner {
     static func renderSMLRuntimeHostAttachments(
         sourcePath: String?,
         projectRoot: String,
+        workflowID: String? = nil,
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
@@ -447,6 +455,7 @@ extension KistRunner {
         let attachments = try await makeSMLRuntimeHostAttachments(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            workflowID: workflowID,
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
@@ -611,6 +620,7 @@ extension KistRunner {
     static func makeSMLRuntimeHostAttachments(
         sourcePath: String?,
         projectRoot: String,
+        workflowID: String? = nil,
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
@@ -629,14 +639,24 @@ extension KistRunner {
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
         ) { host in
             let hostWiring = host.runtimePackage.runtime.hostWiring
+            let availableWorkflowIDs = host.runtimePackage.workflowIDs
+            let selectedWorkflowID = try selectSMLRuntimeOptionalWorkflowID(
+                workflowID,
+                availableWorkflowIDs: availableWorkflowIDs
+            )
+            let attachmentManifests = selectedWorkflowID.map { selected in
+                hostWiring.attachmentManifests.filter { $0.workflowID == selected }
+            } ?? hostWiring.attachmentManifests
             return SMLRuntimeHostAttachments(
                 sourcePath: host.sourcePath,
                 sourceFormat: host.sourceFormat,
+                workflowID: selectedWorkflowID,
+                availableWorkflowIDs: availableWorkflowIDs,
                 apiBasePaths: hostWiring.apiBasePaths,
                 attachmentEndpoint: hostWiring.metadataEndpoints.first {
                     $0.resource == .attachments
                 },
-                attachments: hostWiring.attachmentManifests,
+                attachments: attachmentManifests,
                 launchDescriptor: host.launch.launchDescriptor
             )
         }
@@ -877,6 +897,23 @@ extension KistRunner {
             throw SMLRuntimeHostExportError.ambiguousREPLWorkflow(availableWorkflowIDs)
         }
         return only
+    }
+
+    private static func selectSMLRuntimeOptionalWorkflowID(
+        _ workflowID: String?,
+        availableWorkflowIDs: [String]
+    ) throws -> String? {
+        guard let workflowID,
+              !workflowID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        guard availableWorkflowIDs.contains(workflowID) else {
+            throw SMLRuntimeHostExportError.unknownREPLWorkflow(
+                requested: workflowID,
+                available: availableWorkflowIDs
+            )
+        }
+        return workflowID
     }
 
     private static func decodeSMLRuntimeOpenObject(

@@ -214,7 +214,7 @@ public struct SMLWorkflowModelDescriptor: Sendable, Codable, Equatable {
 /// state, runtime handle, provider registry, or executable closure. Hosts can persist or serve it as
 /// a descriptor, then route live mutations back through the generated compilers and admission gate.
 public struct SMLWorkflowRuntimeDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let workflowID: String
@@ -572,7 +572,7 @@ public struct SMLWorkflowRuntimeCatalog: Sendable, Codable, Equatable {
             SMLWorkflowRuntimeMetadataResource.allCases.map { resource in
                 SMLWorkflowRuntimeMetadataEndpoint(
                     method: .get,
-                    pathTemplate: "\(basePath)/runtime/\(resource.rawValue)",
+                    pathTemplate: "\(basePath)/runtime/\(resource.pathSuffix)",
                     operationID: resource.operationID,
                     resource: resource,
                     summary: resource.summary
@@ -690,11 +690,25 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
     case hostGuide = "host-guide"
     case hostWiring = "host-wiring"
     case attachments
+    case workflowAttachment = "workflow-attachment"
     case modelRouter = "model-router"
     case onyxDrivers = "onyx-drivers"
 
     public var operationID: String {
-        "get_sml_runtime_" + rawValue.replacingOccurrences(of: "-", with: "_")
+        if self == .workflowAttachment {
+            return "get_sml_runtime_workflow_attachment"
+        }
+        return "get_sml_runtime_" + rawValue.replacingOccurrences(of: "-", with: "_")
+    }
+
+    public var pathSuffix: String {
+        switch self {
+        case .workflowAttachment:
+            return "attachments/{workflow_id}"
+        case .catalog, .mount, .export, .openAPI, .planning, .agentGuide,
+             .hostGuide, .hostWiring, .attachments, .modelRouter, .onyxDrivers:
+            return rawValue
+        }
     }
 
     public var summary: String {
@@ -717,6 +731,8 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "Return the compact host adapter wiring map for mounted SML workflow runtimes"
         case .attachments:
             return "Return per-workflow attachment manifests for REPL/API/model/Onyx/planning adapters"
+        case .workflowAttachment:
+            return "Return one workflow attachment manifest for REPL/API/model/Onyx/planning adapters"
         case .modelRouter:
             return "Return the native model-router tool descriptor for mounted SML workflows"
         case .onyxDrivers:
@@ -1110,7 +1126,7 @@ public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
 /// to expose and which handler to call, but it carries no actor identity, authority lease,
 /// credential, runtime handle, provider registry, or executable closure.
 public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 8
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -1714,7 +1730,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 10
+    public static let currentSchemaVersion = 12
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -2417,11 +2433,21 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
     public func handleMetadata(
         _ request: SMLWorkflowAPIRequest
     ) throws -> SMLWorkflowRuntimeMetadataResponse {
-        let resource = try registry.metadataResource(for: request)
+        let resolved = try registry.resolveMount(for: request)
+        guard resolved.route.handlerKind == .metadata,
+              let resource = resolved.route.metadataResource else {
+            throw SMLWorkflowRuntimeRegistryError.routeNotFound(
+                method: request.method.rawValue,
+                path: request.path
+            )
+        }
         return try SMLWorkflowRuntimeMetadataResponse(
             resource: resource,
             path: request.path,
-            body: metadataPayload(for: resource)
+            body: metadataPayload(
+                for: resource,
+                pathParameters: resolved.pathParameters
+            )
         )
     }
 
@@ -2440,7 +2466,10 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
             let metadata = try SMLWorkflowRuntimeMetadataResponse(
                 resource: resource,
                 path: request.path,
-                body: metadataPayload(for: resource)
+                body: metadataPayload(
+                    for: resource,
+                    pathParameters: resolved.pathParameters
+                )
             )
             return SMLWorkflowRuntimeAPIResponse(
                 metadata: metadata,
@@ -2467,7 +2496,8 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
     }
 
     private func metadataPayload(
-        for resource: SMLWorkflowRuntimeMetadataResource
+        for resource: SMLWorkflowRuntimeMetadataResource,
+        pathParameters: [String: String] = [:]
     ) throws -> SMLValue {
         switch resource {
         case .catalog:
@@ -2488,6 +2518,21 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostWiring)
         case .attachments:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostWiring.attachmentManifests)
+        case .workflowAttachment:
+            guard let workflowID = pathParameters["workflow_id"] else {
+                throw SMLWorkflowRuntimeRegistryError.routeNotFound(
+                    method: "GET",
+                    path: registry.catalog.apiBasePaths.first.map {
+                        "\($0)/runtime/\(resource.pathSuffix)"
+                    } ?? resource.pathSuffix
+                )
+            }
+            guard let attachment = registry.catalog.hostWiring.attachmentManifests.first(where: {
+                $0.workflowID == workflowID
+            }) else {
+                throw SMLWorkflowRuntimeRegistryError.unknownWorkflow(workflowID)
+            }
+            return try SMLWorkflowRuntimePayloadCodec.encode(attachment)
         case .modelRouter:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.modelRouter)
         case .onyxDrivers:
@@ -2681,7 +2726,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 8
+    public static let currentSchemaVersion = 10
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -3802,6 +3847,15 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "attachmentWorkflowIDs": .array(
                     hostWiring.attachmentManifests.map { .string($0.workflowID) }
                 ),
+                "attachmentSkillTreeNodeCount": .number(Decimal(
+                    hostWiring.attachmentManifests.reduce(0) { $0 + $1.skillTree.count }
+                )),
+                "attachmentToolBindingCount": .number(Decimal(
+                    hostWiring.attachmentManifests.reduce(0) { $0 + $1.toolBindings.count }
+                )),
+                "attachmentPlanCount": .number(Decimal(
+                    hostWiring.attachmentManifests.reduce(0) { $0 + ($1.plan == nil ? 0 : 1) }
+                )),
                 "planningManifestSchemaVersion": .number(
                     Decimal(catalog.planningManifest.schemaVersion)
                 ),
@@ -3824,7 +3878,7 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
     private static func metadataOperation(
         _ endpoint: SMLWorkflowRuntimeMetadataEndpoint
     ) -> SMLObject {
-        [
+        var object: SMLObject = [
             "operationId": .string(endpoint.operationID),
             "summary": .string(endpoint.summary),
             "tags": .array([.string("sml-runtime")]),
@@ -3842,6 +3896,19 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "x-sml-read-only": .bool(true),
             "x-sml-authority": .string("descriptor-only"),
         ]
+        if endpoint.pathTemplate.contains("{workflow_id}") {
+            object["parameters"] = .array([
+                .object([
+                    "name": .string("workflow_id"),
+                    "in": .string("path"),
+                    "required": .bool(true),
+                    "schema": .object([
+                        "type": .string("string"),
+                    ]),
+                ]),
+            ])
+        }
+        return object
     }
 
     private static func operation(
