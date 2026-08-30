@@ -1223,6 +1223,7 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
     public let workflowID: String?
     public let action: SMLWorkflowControlAction?
     public let metadataResource: SMLWorkflowRuntimeMetadataResource?
+    public let workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks?
     public let bodyKind: SMLWorkflowAPIRequestBodyKind
     public let bodyFields: [SMLWorkflowFieldDescriptor]
     public let examples: [SMLWorkflowAPIRequestExample]
@@ -1237,6 +1238,7 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
         workflowID: String? = nil,
         action: SMLWorkflowControlAction? = nil,
         metadataResource: SMLWorkflowRuntimeMetadataResource? = nil,
+        workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks? = nil,
         bodyKind: SMLWorkflowAPIRequestBodyKind = .none,
         bodyFields: [SMLWorkflowFieldDescriptor] = [],
         examples: [SMLWorkflowAPIRequestExample] = []
@@ -1250,6 +1252,7 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
         self.workflowID = workflowID
         self.action = action
         self.metadataResource = metadataResource
+        self.workflowMetadata = workflowMetadata
         self.bodyKind = bodyKind
         self.bodyFields = bodyFields
         self.examples = examples.sorted {
@@ -1271,6 +1274,7 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
         case workflowID
         case action
         case metadataResource
+        case workflowMetadata
         case bodyKind
         case bodyFields
         case examples
@@ -1296,6 +1300,10 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
             metadataResource: try container.decodeIfPresent(
                 SMLWorkflowRuntimeMetadataResource.self,
                 forKey: .metadataResource
+            ),
+            workflowMetadata: try container.decodeIfPresent(
+                SMLWorkflowRuntimeWorkflowMetadataLinks.self,
+                forKey: .workflowMetadata
             ),
             bodyKind: try container.decodeIfPresent(
                 SMLWorkflowAPIRequestBodyKind.self,
@@ -1323,6 +1331,7 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
         try container.encodeIfPresent(workflowID, forKey: .workflowID)
         try container.encodeIfPresent(action, forKey: .action)
         try container.encodeIfPresent(metadataResource, forKey: .metadataResource)
+        try container.encodeIfPresent(workflowMetadata, forKey: .workflowMetadata)
         try container.encode(bodyKind, forKey: .bodyKind)
         try container.encode(bodyFields, forKey: .bodyFields)
         try container.encode(examples, forKey: .examples)
@@ -1602,7 +1611,7 @@ public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
 /// to expose and which handler to call, but it carries no actor identity, authority lease,
 /// credential, runtime handle, provider registry, or executable closure.
 public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 13
+    public static let currentSchemaVersion = 14
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -1762,7 +1771,10 @@ public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
                   planningLinkIsValid,
                   !mount.apiRoutes.isEmpty,
                   mount.apiRoutes.allSatisfy({
-                      $0.handlerKind == .workflow && $0.workflowID == mount.workflowID
+                      $0.handlerKind == .workflow
+                          && $0.workflowID == mount.workflowID
+                          && ($0.workflowMetadata == nil
+                              || $0.workflowMetadata?.workflowID == mount.workflowID)
                   }) else {
                 throw SMLWorkflowRuntimeMountContractError.invalidWorkflowMount(workflowID)
             }
@@ -1821,6 +1833,7 @@ public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
                     readOnly: readOnly,
                     workflowID: workflow.workflowID,
                     action: endpoint.action,
+                    workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks(workflow),
                     bodyKind: endpoint.bodyKind,
                     bodyFields: endpoint.bodyFields,
                     examples: endpoint.examples
@@ -2718,7 +2731,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 25
+    public static let currentSchemaVersion = 26
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -4015,7 +4028,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 18
+    public static let currentSchemaVersion = 19
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?

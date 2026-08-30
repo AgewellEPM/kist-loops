@@ -590,6 +590,7 @@ public struct SMLWorkflowREPLCompiler: Sendable {
                 readOnly: readOnly,
                 workflowID: surface.workflowID,
                 action: endpoint.action,
+                workflowMetadata: workflowMetadata,
                 bodyKind: endpoint.bodyKind,
                 bodyFields: endpoint.bodyFields,
                 examples: endpoint.examples

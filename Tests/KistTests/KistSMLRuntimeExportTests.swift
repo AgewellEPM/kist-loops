@@ -4759,6 +4759,23 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             export.hostWiring.attachmentManifests.first?.workflowMetadata.modelToolPath,
             "/native/runtime/model-tools/native.review"
         )
+        XCTAssertEqual(
+            export.runtimePackage.runtime.mountContract.apiRoutes.first {
+                $0.workflowID == "native.review" && $0.action == .start
+            }?.workflowMetadata?.planningBundlePath,
+            "/native/runtime/planning/native.review"
+        )
+        XCTAssertEqual(
+            export.hostWiring.workflows.first?.apiRoutes.first {
+                $0.action == .start
+            }?.workflowMetadata?.apiMountPath,
+            "/native/runtime/api-mounts/native.review"
+        )
+        XCTAssertNil(
+            export.runtimePackage.runtime.mountContract.apiRoutes.first {
+                $0.handlerKind == .metadata && $0.metadataResource == .workflowPlanning
+            }?.workflowMetadata
+        )
         let paths = try object(export.runtimePackage.runtime.openAPI["paths"])
         XCTAssertNotNil(paths["/native/review/tasks"])
         XCTAssertNotNil(paths["/native/runtime/planning"])
@@ -4787,6 +4804,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(workflowRunbook.apiScript.count, 12)
         XCTAssertEqual(workflowRunbook.replMount.apiWorkflowPath, "/review")
         XCTAssertEqual(workflowRunbook.apiMounts.first { $0.action == .start }?.pathTemplate, "/native/review/tasks")
+        XCTAssertEqual(
+            workflowRunbook.apiMounts.first { $0.action == .start }?.workflowMetadata?.apiMountPath,
+            "/native/runtime/api-mounts/native.review"
+        )
         XCTAssertEqual(workflowRunbook.modelTool.workflowID, "native.review")
         XCTAssertEqual(workflowRunbook.modelTool.maximumCommandRounds, 2)
         XCTAssertTrue(workflowRunbook.replScript.contains("planning-bundle"))

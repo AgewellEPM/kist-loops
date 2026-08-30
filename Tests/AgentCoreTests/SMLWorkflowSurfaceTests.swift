@@ -661,11 +661,35 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(workflowMount.apiWorkflowPath, "/review")
         XCTAssertEqual(workflowMount.workflowMetadata, replMount.workflowMetadata)
         XCTAssertEqual(workflowMount.repl.apiWorkflowPath, "/review")
+        let workflowMountStartRoute = try XCTUnwrap(workflowMount.apiRoutes.first {
+            $0.action == .start
+        })
+        XCTAssertEqual(workflowMountStartRoute.workflowMetadata, workflowMount.workflowMetadata)
+        XCTAssertEqual(
+            workflowMountStartRoute.workflowMetadata?.apiMountPath,
+            "/automation/runtime/api-mounts/content.release"
+        )
+        let mountContractStartRoute = try XCTUnwrap(registry.mountContract.apiRoutes.first {
+            $0.workflowID == "content.release" && $0.action == .start
+        })
+        XCTAssertEqual(mountContractStartRoute.workflowMetadata, workflowMount.workflowMetadata)
+        let metadataRoute = try XCTUnwrap(registry.mountContract.apiRoutes.first {
+            $0.handlerKind == .metadata && $0.metadataResource == .workflowAPIMount
+        })
+        XCTAssertNil(metadataRoute.workflowMetadata)
         XCTAssertEqual(registry.catalog.planningManifest.workflows.first?.apiWorkflowPath, "/review")
         XCTAssertEqual(registry.catalog.agentGuide.workflowGuides.first?.apiWorkflowPath, "/review")
         XCTAssertEqual(registry.catalog.hostGuide.workflowBindings.first?.apiWorkflowPath, "/review")
-        XCTAssertEqual(registry.hostWiring.workflows.first?.apiWorkflowPath, "/review")
+        let hostWorkflow = try XCTUnwrap(registry.hostWiring.workflows.first)
+        XCTAssertEqual(hostWorkflow.apiWorkflowPath, "/review")
+        XCTAssertEqual(hostWorkflow.apiRoutes.first { $0.action == .start }?.workflowMetadata, workflowMount.workflowMetadata)
         XCTAssertEqual(registry.hostWiring.attachmentManifests.first?.apiWorkflowPath, "/review")
+        XCTAssertEqual(
+            registry.hostWiring.attachmentManifests.first?.apiRoutes.first {
+                $0.action == .start
+            }?.workflowMetadata,
+            workflowMount.workflowMetadata
+        )
         let launchDescriptor = SMLWorkflowRuntimeLaunchDescriptor(
             registry: registry,
             installedWorkflows: [],
@@ -675,6 +699,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             )
         )
         XCTAssertEqual(launchDescriptor.workflows.first?.apiWorkflowPath, "/review")
+        XCTAssertEqual(
+            launchDescriptor.workflows.first?.apiRoutes.first { $0.action == .start }?.workflowMetadata,
+            workflowMount.workflowMetadata
+        )
         XCTAssertEqual(launchDescriptor.sourceSummaries.first?.apiWorkflowPath, "/review")
         let legacyMountData = try JSONEncoder().encode(workflowMount)
         var legacyMountObject = try XCTUnwrap(
@@ -686,6 +714,15 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             from: JSONSerialization.data(withJSONObject: legacyMountObject, options: [.sortedKeys])
         )
         XCTAssertEqual(decodedLegacyMount.apiWorkflowPath, "/review")
+        var legacyRouteObject = try XCTUnwrap(
+            (legacyMountObject["apiRoutes"] as? [[String: Any]])?.first
+        )
+        legacyRouteObject.removeValue(forKey: "workflowMetadata")
+        let decodedLegacyRoute = try JSONDecoder().decode(
+            SMLWorkflowRuntimeAPIMount.self,
+            from: JSONSerialization.data(withJSONObject: legacyRouteObject, options: [.sortedKeys])
+        )
+        XCTAssertNil(decodedLegacyRoute.workflowMetadata)
 
         let start = try registry.mountContract.resolveAPI(
             SMLWorkflowAPIRequest(
@@ -700,6 +737,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(start.route.workflowID, "content.release")
         XCTAssertEqual(start.route.action, .start)
         XCTAssertEqual(start.route.pathTemplate, "/automation/review/tasks")
+        XCTAssertEqual(start.route.workflowMetadata, workflowMount.workflowMetadata)
 
         XCTAssertThrowsError(try registry.mountContract.resolveAPI(
             method: .post,
@@ -3668,6 +3706,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             guard case .object(let route) = $0 else { return false }
             return route["pathTemplate"] == .string("/automation/workflows/content.release/tasks")
                 && route["operationID"] == .string("start_workflow_task_ContentRelease")
+                && (try? object(route["workflowMetadata"]))?["apiMountPath"]
+                    == .string("/automation/runtime/api-mounts/content.release")
         })
 
         let workflowModelToolMetadata = try app.handleMetadata(
