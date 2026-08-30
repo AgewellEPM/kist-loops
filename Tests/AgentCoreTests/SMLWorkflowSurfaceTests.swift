@@ -298,6 +298,50 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             attachmentDescriptor.runtimeWorkflowAttachmentPath,
             "/automation/runtime/attachments/content.release"
         )
+        XCTAssertEqual(
+            attachmentDescriptor.runtimeWorkflowOnyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.runtimeWorkflowSkillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.runtimeWorkflowToolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.runtimeWorkflowPlanningPath,
+            "/automation/runtime/planning/content.release"
+        )
+        let legacyAttachmentData = try JSONEncoder().encode(attachmentDescriptor)
+        var legacyAttachmentObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: legacyAttachmentData) as? [String: Any]
+        )
+        legacyAttachmentObject.removeValue(forKey: "runtimeWorkflowOnyxDriverPath")
+        legacyAttachmentObject.removeValue(forKey: "runtimeWorkflowSkillTreePath")
+        legacyAttachmentObject.removeValue(forKey: "runtimeWorkflowToolBindingsPath")
+        legacyAttachmentObject.removeValue(forKey: "runtimeWorkflowPlanningPath")
+        let legacyAttachmentDecoded = try JSONDecoder().decode(
+            SMLWorkflowREPLAttachmentDescriptor.self,
+            from: JSONSerialization.data(withJSONObject: legacyAttachmentObject, options: [.sortedKeys])
+        )
+        XCTAssertEqual(
+            legacyAttachmentDecoded.runtimeWorkflowOnyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            legacyAttachmentDecoded.runtimeWorkflowSkillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            legacyAttachmentDecoded.runtimeWorkflowToolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
+        XCTAssertEqual(
+            legacyAttachmentDecoded.runtimeWorkflowPlanningPath,
+            "/automation/runtime/planning/content.release"
+        )
         XCTAssertEqual(attachmentDescriptor.replCommands.first { $0.verb == "attachment" }?.aliases, ["manifest"])
         XCTAssertEqual(attachmentDescriptor.apiCatalog.endpoints.count, 7)
         XCTAssertEqual(attachmentDescriptor.modelTool.name, SMLWorkflowModelAdapter.toolName)
@@ -1216,6 +1260,12 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(guide.systemPrompt.contains("REPL examples:"))
         XCTAssertTrue(guide.systemPrompt.contains(#"start TASK-ID {"target":"target"}"#))
         XCTAssertTrue(guide.systemPrompt.contains("API routes:"))
+        XCTAssertTrue(guide.systemPrompt.contains("workflow metadata:"))
+        XCTAssertTrue(guide.systemPrompt.contains("attachment: GET /automation/runtime/attachments/content.release"))
+        XCTAssertTrue(guide.systemPrompt.contains("onyx driver: GET /automation/runtime/onyx-drivers/content.release"))
+        XCTAssertTrue(guide.systemPrompt.contains("skill tree: GET /automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(guide.systemPrompt.contains("tool bindings: GET /automation/runtime/tool-bindings/content.release"))
+        XCTAssertTrue(guide.systemPrompt.contains("planning bundle: GET /automation/runtime/planning/content.release"))
         XCTAssertTrue(guide.systemPrompt.contains("Onyx driver"))
         XCTAssertTrue(guide.systemPrompt.contains("Skill tree:"))
         XCTAssertTrue(guide.systemPrompt.contains("plan:CALL_MODEL kind:reasoning"))
@@ -1228,6 +1278,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             guide.workflowGuides.first { $0.workflowID == "content.release" }
         )
         XCTAssertEqual(release.apiBasePath, "/automation")
+        XCTAssertEqual(release.runtimeWorkflowAttachmentPath, "/automation/runtime/attachments/content.release")
+        XCTAssertEqual(release.runtimeWorkflowOnyxDriverPath, "/automation/runtime/onyx-drivers/content.release")
+        XCTAssertEqual(release.runtimeWorkflowSkillTreePath, "/automation/runtime/skill-trees/content.release")
+        XCTAssertEqual(release.runtimeWorkflowToolBindingsPath, "/automation/runtime/tool-bindings/content.release")
+        XCTAssertEqual(release.runtimeWorkflowPlanningPath, "/automation/runtime/planning/content.release")
         XCTAssertEqual(release.apiRoutes.count, 7)
         XCTAssertEqual(release.modelTool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(release.model?.tool.name, SMLWorkflowModelAdapter.toolName)
@@ -1278,6 +1333,39 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertTrue(releaseStartCommandBinding.modelEligible)
         XCTAssertFalse(release.onyxDriverID.isEmpty)
+        let legacyAgentWorkflowData = try JSONEncoder().encode(release)
+        var legacyAgentWorkflowObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: legacyAgentWorkflowData) as? [String: Any]
+        )
+        legacyAgentWorkflowObject.removeValue(forKey: "runtimeWorkflowAttachmentPath")
+        legacyAgentWorkflowObject.removeValue(forKey: "runtimeWorkflowOnyxDriverPath")
+        legacyAgentWorkflowObject.removeValue(forKey: "runtimeWorkflowSkillTreePath")
+        legacyAgentWorkflowObject.removeValue(forKey: "runtimeWorkflowToolBindingsPath")
+        legacyAgentWorkflowObject.removeValue(forKey: "runtimeWorkflowPlanningPath")
+        let legacyAgentWorkflow = try JSONDecoder().decode(
+            SMLWorkflowRuntimeWorkflowAgentGuide.self,
+            from: JSONSerialization.data(withJSONObject: legacyAgentWorkflowObject, options: [.sortedKeys])
+        )
+        XCTAssertEqual(
+            legacyAgentWorkflow.runtimeWorkflowAttachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            legacyAgentWorkflow.runtimeWorkflowOnyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            legacyAgentWorkflow.runtimeWorkflowSkillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            legacyAgentWorkflow.runtimeWorkflowToolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
+        XCTAssertEqual(
+            legacyAgentWorkflow.runtimeWorkflowPlanningPath,
+            "/automation/runtime/planning/content.release"
+        )
 
         let encoded = String(decoding: try JSONEncoder().encode(guide), as: UTF8.self)
         XCTAssertFalse(encoded.contains("operator.luke"))
@@ -1462,15 +1550,24 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(onyxBinding.authority, .descriptorOnly)
         XCTAssertTrue(onyxBinding.readOnly)
         XCTAssertEqual(onyxBinding.driverID, release.onyxDriverID)
-        XCTAssertTrue(onyxBinding.pathTemplates.contains("/automation/runtime/onyx-drivers"))
+        XCTAssertTrue(onyxBinding.pathTemplates.contains("/automation/runtime/onyx-drivers/content.release"))
         XCTAssertTrue(onyxBinding.apiExamples.contains {
-            $0.path == "/automation/runtime/onyx-drivers"
+            $0.path == "/automation/runtime/onyx-drivers/content.release"
         })
         let planningBinding = try XCTUnwrap(
             release.hostBindings.first { $0.channel == .planningWorkflow }
         )
+        XCTAssertTrue(planningBinding.pathTemplates.contains("/automation/runtime/planning/content.release"))
+        XCTAssertTrue(planningBinding.pathTemplates.contains("/automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(planningBinding.pathTemplates.contains("/automation/runtime/tool-bindings/content.release"))
         XCTAssertTrue(planningBinding.apiExamples.contains {
-            $0.path == "/automation/runtime/planning"
+            $0.path == "/automation/runtime/planning/content.release"
+        })
+        XCTAssertTrue(planningBinding.apiExamples.contains {
+            $0.path == "/automation/runtime/skill-trees/content.release"
+        })
+        XCTAssertTrue(planningBinding.apiExamples.contains {
+            $0.path == "/automation/runtime/tool-bindings/content.release"
         })
 
         let encoded = String(decoding: try JSONEncoder().encode(guide), as: UTF8.self)
@@ -1778,6 +1875,27 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(releaseAttachment.workflowName, "Content release")
         XCTAssertEqual(releaseAttachment.sourceReference, "graphs/content_release.py")
         XCTAssertEqual(releaseAttachment.apiBasePath, "/automation")
+        XCTAssertEqual(releaseAttachment.runtimeAttachmentsPath, "/automation/runtime/attachments")
+        XCTAssertEqual(
+            releaseAttachment.runtimeWorkflowAttachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            releaseAttachment.runtimeWorkflowOnyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            releaseAttachment.runtimeWorkflowSkillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            releaseAttachment.runtimeWorkflowToolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
+        XCTAssertEqual(
+            releaseAttachment.runtimeWorkflowPlanningPath,
+            "/automation/runtime/planning/content.release"
+        )
         XCTAssertEqual(releaseAttachment.plannerEntrypoint, "plan")
         XCTAssertEqual(releaseAttachment.channels, [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
@@ -1803,6 +1921,41 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(releaseAttachment.skillIndex, releaseWiring.skillIndex)
         XCTAssertEqual(releaseAttachment.onyxDriverID, releaseWiring.onyxDriverID)
         XCTAssertEqual(releaseAttachment.planningWorkflowID, "content.release")
+        let legacyRuntimeAttachmentData = try JSONEncoder().encode(releaseAttachment)
+        var legacyRuntimeAttachmentObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: legacyRuntimeAttachmentData) as? [String: Any]
+        )
+        legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeAttachmentsPath")
+        legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeWorkflowAttachmentPath")
+        legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeWorkflowOnyxDriverPath")
+        legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeWorkflowSkillTreePath")
+        legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeWorkflowToolBindingsPath")
+        legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeWorkflowPlanningPath")
+        let legacyRuntimeAttachmentDecoded = try JSONDecoder().decode(
+            SMLWorkflowRuntimeWorkflowAttachmentManifest.self,
+            from: JSONSerialization.data(withJSONObject: legacyRuntimeAttachmentObject, options: [.sortedKeys])
+        )
+        XCTAssertEqual(legacyRuntimeAttachmentDecoded.runtimeAttachmentsPath, "/automation/runtime/attachments")
+        XCTAssertEqual(
+            legacyRuntimeAttachmentDecoded.runtimeWorkflowAttachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            legacyRuntimeAttachmentDecoded.runtimeWorkflowOnyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            legacyRuntimeAttachmentDecoded.runtimeWorkflowSkillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            legacyRuntimeAttachmentDecoded.runtimeWorkflowToolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
+        XCTAssertEqual(
+            legacyRuntimeAttachmentDecoded.runtimeWorkflowPlanningPath,
+            "/automation/runtime/planning/content.release"
+        )
         XCTAssertEqual(releaseAttachment.toolReferences, [
             "artifact_verified", "content.plan", "repository.write",
         ])

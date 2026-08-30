@@ -17,6 +17,12 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let sourceDigest: String?
     public let apiBasePath: String
     public let apiWorkflowPath: String
+    public let runtimeAttachmentsPath: String
+    public let runtimeWorkflowAttachmentPath: String
+    public let runtimeWorkflowOnyxDriverPath: String
+    public let runtimeWorkflowSkillTreePath: String
+    public let runtimeWorkflowToolBindingsPath: String
+    public let runtimeWorkflowPlanningPath: String
     public let channels: [SMLWorkflowRuntimeHostBindingChannel]
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let replExamples: [SMLWorkflowREPLExample]
@@ -49,6 +55,12 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         sourceDigest: String?,
         apiBasePath: String,
         apiWorkflowPath: String? = nil,
+        runtimeAttachmentsPath: String? = nil,
+        runtimeWorkflowAttachmentPath: String? = nil,
+        runtimeWorkflowOnyxDriverPath: String? = nil,
+        runtimeWorkflowSkillTreePath: String? = nil,
+        runtimeWorkflowToolBindingsPath: String? = nil,
+        runtimeWorkflowPlanningPath: String? = nil,
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
@@ -83,6 +95,38 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
         self.apiWorkflowPath = apiWorkflowPath ?? replMount.apiWorkflowPath
+        self.runtimeAttachmentsPath = runtimeAttachmentsPath
+            ?? Self.runtimeResourcePath(apiBasePath: apiBasePath, resourcePath: "attachments")
+        self.runtimeWorkflowAttachmentPath = runtimeWorkflowAttachmentPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "attachments",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowOnyxDriverPath = runtimeWorkflowOnyxDriverPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "onyx-drivers",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowSkillTreePath = runtimeWorkflowSkillTreePath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "skill-trees",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowToolBindingsPath = runtimeWorkflowToolBindingsPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "tool-bindings",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowPlanningPath = runtimeWorkflowPlanningPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "planning",
+                workflowID: workflowID
+            )
         self.channels = Array(Set(hostBindings.map(\.channel))).sorted {
             $0.rawValue < $1.rawValue
         }
@@ -135,6 +179,12 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         case sourceDigest
         case apiBasePath
         case apiWorkflowPath
+        case runtimeAttachmentsPath
+        case runtimeWorkflowAttachmentPath
+        case runtimeWorkflowOnyxDriverPath
+        case runtimeWorkflowSkillTreePath
+        case runtimeWorkflowToolBindingsPath
+        case runtimeWorkflowPlanningPath
         case channels
         case replMount
         case replExamples
@@ -186,6 +236,50 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
                 apiBasePath: apiBasePath,
                 apiRoutes: apiRoutes
             )
+        runtimeAttachmentsPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeAttachmentsPath
+        ) ?? Self.runtimeResourcePath(apiBasePath: apiBasePath, resourcePath: "attachments")
+        runtimeWorkflowAttachmentPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowAttachmentPath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "attachments",
+            workflowID: workflowID
+        )
+        runtimeWorkflowOnyxDriverPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowOnyxDriverPath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "onyx-drivers",
+            workflowID: workflowID
+        )
+        runtimeWorkflowSkillTreePath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowSkillTreePath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "skill-trees",
+            workflowID: workflowID
+        )
+        runtimeWorkflowToolBindingsPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowToolBindingsPath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "tool-bindings",
+            workflowID: workflowID
+        )
+        runtimeWorkflowPlanningPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowPlanningPath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "planning",
+            workflowID: workflowID
+        )
         apiExamples = try container.decode([SMLWorkflowAPIRequestExample].self, forKey: .apiExamples).sorted {
             if $0.path != $1.path { return $0.path < $1.path }
             if $0.method.rawValue != $1.method.rawValue {
@@ -272,6 +366,18 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
                 if $0.toolName != $1.toolName { return $0.toolName < $1.toolName }
                 return $0.summary < $1.summary
             }
+    }
+
+    private static func runtimeResourcePath(apiBasePath: String, resourcePath: String) -> String {
+        "\(apiBasePath)/runtime/\(resourcePath)"
+    }
+
+    private static func runtimeWorkflowPath(
+        apiBasePath: String,
+        resourcePath: String,
+        workflowID: String
+    ) -> String {
+        "\(runtimeResourcePath(apiBasePath: apiBasePath, resourcePath: resourcePath))/\(workflowID)"
     }
 }
 
@@ -604,7 +710,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 14
+    public static let currentSchemaVersion = 15
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

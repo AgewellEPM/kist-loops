@@ -484,10 +484,6 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         planningWorkflowID: String?,
         metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
     ) -> [SMLWorkflowRuntimeHostBinding] {
-        let metadataPathsByResource = Dictionary(
-            grouping: metadataEndpoints,
-            by: \.resource
-        ).mapValues { endpoints in endpoints.map(\.pathTemplate).sorted() }
         let metadataExamplesByResource = Dictionary(
             grouping: metadataEndpoints,
             by: \.resource
@@ -500,6 +496,30 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 )
             }
         }
+        let workflowOnyxDriverPaths = Self.workflowMetadataPaths(
+            resources: [.workflowOnyxDriver],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowOnyxDriverExamples = Self.workflowMetadataExamples(
+            resources: [.workflowOnyxDriver],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowPlanningPaths = Self.workflowMetadataPaths(
+            resources: [.workflowPlanning, .workflowSkillTree, .workflowToolBindings],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowPlanningExamples = Self.workflowMetadataExamples(
+            resources: [.workflowPlanning, .workflowSkillTree, .workflowToolBindings],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
         let workflowAPIExamples = apiRoutes.flatMap(\.examples)
         let modelToolExamples = Self.modelExamples(
             toolName: modelToolName,
@@ -555,19 +575,19 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .descriptorOnly,
                 readOnly: true,
                 summary: "Load the provider-neutral Onyx driver descriptor; side effects still cross the gateway.",
-                pathTemplates: metadataPathsByResource[.onyxDrivers] ?? [],
+                pathTemplates: workflowOnyxDriverPaths,
                 driverID: onyxDriverID,
-                apiExamples: metadataExamplesByResource[.onyxDrivers] ?? []
+                apiExamples: workflowOnyxDriverExamples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .planningWorkflow,
                 reference: planningWorkflowID ?? workflowID,
                 authority: .descriptorOnly,
                 readOnly: true,
-                summary: "Load the planning graph, tool index, decomposition units, and approval gates.",
-                pathTemplates: metadataPathsByResource[.planning] ?? [],
+                summary: "Load the workflow planning bundle, skill tree, tool bindings, decomposition units, and approval gates.",
+                pathTemplates: workflowPlanningPaths,
                 planningWorkflowID: planningWorkflowID,
-                apiExamples: metadataExamplesByResource[.planning] ?? []
+                apiExamples: workflowPlanningExamples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .agentGuide,
@@ -575,10 +595,76 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .descriptorOnly,
                 readOnly: true,
                 summary: "Give the model/operator the canonical operating guide before routing commands.",
-                pathTemplates: metadataPathsByResource[.agentGuide] ?? [],
+                pathTemplates: metadataEndpoints
+                    .filter { $0.resource == .agentGuide }
+                    .map(\.pathTemplate)
+                    .sorted(),
                 apiExamples: metadataExamplesByResource[.agentGuide] ?? []
             ),
         ]
+    }
+
+    private static func workflowMetadataPaths(
+        resources: Set<SMLWorkflowRuntimeMetadataResource>,
+        workflowID: String,
+        apiBasePath: String,
+        metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
+    ) -> [String] {
+        workflowMetadataEndpoints(
+            resources: resources,
+            apiBasePath: apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        .map { materializeWorkflowPath($0.pathTemplate, workflowID: workflowID) }
+        .sorted()
+    }
+
+    private static func workflowMetadataExamples(
+        resources: Set<SMLWorkflowRuntimeMetadataResource>,
+        workflowID: String,
+        apiBasePath: String,
+        metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
+    ) -> [SMLWorkflowAPIRequestExample] {
+        workflowMetadataEndpoints(
+            resources: resources,
+            apiBasePath: apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        .map {
+            SMLWorkflowAPIRequestExample(
+                method: $0.method,
+                path: materializeWorkflowPath($0.pathTemplate, workflowID: workflowID),
+                summary: $0.summary
+            )
+        }
+        .sorted {
+            if $0.path != $1.path { return $0.path < $1.path }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.summary < $1.summary
+        }
+    }
+
+    private static func workflowMetadataEndpoints(
+        resources: Set<SMLWorkflowRuntimeMetadataResource>,
+        apiBasePath: String,
+        metadataEndpoints: [SMLWorkflowRuntimeMetadataEndpoint]
+    ) -> [SMLWorkflowRuntimeMetadataEndpoint] {
+        let runtimePrefix = "\(apiBasePath)/runtime/"
+        return metadataEndpoints
+            .filter {
+                resources.contains($0.resource)
+                    && $0.pathTemplate.hasPrefix(runtimePrefix)
+            }
+            .sorted {
+                if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+                return $0.operationID < $1.operationID
+            }
+    }
+
+    private static func materializeWorkflowPath(_ pathTemplate: String, workflowID: String) -> String {
+        pathTemplate.replacingOccurrences(of: "{workflow_id}", with: workflowID)
     }
 
     private static func modelExamples(
@@ -614,7 +700,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 12
+    public static let currentSchemaVersion = 13
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]

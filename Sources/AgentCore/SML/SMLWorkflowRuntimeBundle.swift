@@ -445,6 +445,7 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             binding: binding,
             providers: providers,
             gateway: gateway,
+            apiBasePath: descriptor.api.basePath,
             allowedActions: Set(descriptor.model.allowedActions),
             authorityResolver: authorityResolver,
             settings: settings,
@@ -4278,6 +4279,12 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         api workflow path: \(descriptor.api.workflowPath)
         model tool: \(descriptor.model.tool.name) via \(toolName)
         onyx driver: \(descriptor.onyx.driverID)
+        workflow metadata:
+        attachment: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "attachments", workflowID: descriptor.workflowID))
+        onyx driver: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "onyx-drivers", workflowID: descriptor.workflowID))
+        skill tree: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "skill-trees", workflowID: descriptor.workflowID))
+        tool bindings: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "tool-bindings", workflowID: descriptor.workflowID))
+        planning bundle: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "planning", workflowID: descriptor.workflowID))
 
         \(descriptor.schemaSummary)
 
@@ -4311,6 +4318,14 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         Command bindings:
         \(commandBindingIndex)
         """
+    }
+
+    private static func workflowMetadataPath(
+        apiBasePath: String,
+        resourcePath: String,
+        workflowID: String
+    ) -> String {
+        "\(apiBasePath)/runtime/\(resourcePath)/\(workflowID)"
     }
 
     private func requireModelActionAllowed(

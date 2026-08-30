@@ -25,7 +25,7 @@ public enum SMLWorkflowREPLCompilation: Sendable, Equatable {
 }
 
 public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let workflowID: String
@@ -39,6 +39,10 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
     public let apiWorkflowPath: String
     public let runtimeAttachmentsPath: String
     public let runtimeWorkflowAttachmentPath: String
+    public let runtimeWorkflowOnyxDriverPath: String
+    public let runtimeWorkflowSkillTreePath: String
+    public let runtimeWorkflowToolBindingsPath: String
+    public let runtimeWorkflowPlanningPath: String
     public let replGrammar: String
     public let replCommands: [SMLWorkflowREPLCommandDescriptor]
     public let replExamples: [SMLWorkflowREPLExample]
@@ -64,6 +68,10 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         apiWorkflowPath: String? = nil,
         runtimeAttachmentsPath: String,
         runtimeWorkflowAttachmentPath: String,
+        runtimeWorkflowOnyxDriverPath: String? = nil,
+        runtimeWorkflowSkillTreePath: String? = nil,
+        runtimeWorkflowToolBindingsPath: String? = nil,
+        runtimeWorkflowPlanningPath: String? = nil,
         replGrammar: String,
         replCommands: [SMLWorkflowREPLCommandDescriptor],
         replExamples: [SMLWorkflowREPLExample],
@@ -88,6 +96,30 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         self.apiWorkflowPath = apiWorkflowPath ?? apiCatalog.workflowPath
         self.runtimeAttachmentsPath = runtimeAttachmentsPath
         self.runtimeWorkflowAttachmentPath = runtimeWorkflowAttachmentPath
+        self.runtimeWorkflowOnyxDriverPath = runtimeWorkflowOnyxDriverPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "onyx-drivers",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowSkillTreePath = runtimeWorkflowSkillTreePath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "skill-trees",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowToolBindingsPath = runtimeWorkflowToolBindingsPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "tool-bindings",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowPlanningPath = runtimeWorkflowPlanningPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "planning",
+                workflowID: workflowID
+            )
         self.replGrammar = replGrammar
         self.replCommands = replCommands.sorted {
             if $0.kind.rawValue != $1.kind.rawValue { return $0.kind.rawValue < $1.kind.rawValue }
@@ -125,6 +157,10 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         case apiWorkflowPath
         case runtimeAttachmentsPath
         case runtimeWorkflowAttachmentPath
+        case runtimeWorkflowOnyxDriverPath
+        case runtimeWorkflowSkillTreePath
+        case runtimeWorkflowToolBindingsPath
+        case runtimeWorkflowPlanningPath
         case replGrammar
         case replCommands
         case replExamples
@@ -160,6 +196,22 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
             runtimeWorkflowAttachmentPath: try container.decode(
                 String.self,
                 forKey: .runtimeWorkflowAttachmentPath
+            ),
+            runtimeWorkflowOnyxDriverPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowOnyxDriverPath
+            ),
+            runtimeWorkflowSkillTreePath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowSkillTreePath
+            ),
+            runtimeWorkflowToolBindingsPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowToolBindingsPath
+            ),
+            runtimeWorkflowPlanningPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowPlanningPath
             ),
             replGrammar: try container.decode(String.self, forKey: .replGrammar),
             replCommands: try container.decode(
@@ -201,6 +253,10 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(runtimeAttachmentsPath, forKey: .runtimeAttachmentsPath)
         try container.encode(runtimeWorkflowAttachmentPath, forKey: .runtimeWorkflowAttachmentPath)
+        try container.encode(runtimeWorkflowOnyxDriverPath, forKey: .runtimeWorkflowOnyxDriverPath)
+        try container.encode(runtimeWorkflowSkillTreePath, forKey: .runtimeWorkflowSkillTreePath)
+        try container.encode(runtimeWorkflowToolBindingsPath, forKey: .runtimeWorkflowToolBindingsPath)
+        try container.encode(runtimeWorkflowPlanningPath, forKey: .runtimeWorkflowPlanningPath)
         try container.encode(replGrammar, forKey: .replGrammar)
         try container.encode(replCommands, forKey: .replCommands)
         try container.encode(replExamples, forKey: .replExamples)
@@ -224,6 +280,14 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
             }
             return $0.replVerb < $1.replVerb
         }
+    }
+
+    private static func runtimeWorkflowPath(
+        apiBasePath: String,
+        resourcePath: String,
+        workflowID: String
+    ) -> String {
+        "\(apiBasePath)/runtime/\(resourcePath)/\(workflowID)"
     }
 }
 
@@ -358,6 +422,10 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             apiBasePath: apiCatalog.basePath,
             runtimeAttachmentsPath: "\(apiCatalog.basePath)/runtime/attachments",
             runtimeWorkflowAttachmentPath: "\(apiCatalog.basePath)/runtime/attachments/\(surface.workflowID)",
+            runtimeWorkflowOnyxDriverPath: "\(apiCatalog.basePath)/runtime/onyx-drivers/\(surface.workflowID)",
+            runtimeWorkflowSkillTreePath: "\(apiCatalog.basePath)/runtime/skill-trees/\(surface.workflowID)",
+            runtimeWorkflowToolBindingsPath: "\(apiCatalog.basePath)/runtime/tool-bindings/\(surface.workflowID)",
+            runtimeWorkflowPlanningPath: "\(apiCatalog.basePath)/runtime/planning/\(surface.workflowID)",
             replGrammar: surface.grammar(allowedActions: allowedActions),
             replCommands: surface.replCommandDescriptors(allowedActions: allowedActions),
             replExamples: surface.replExamples(allowedActions: allowedActions),

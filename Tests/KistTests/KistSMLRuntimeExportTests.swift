@@ -787,13 +787,40 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(wiringStartBinding.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertTrue(wiringStartBinding.modelEligible)
         XCTAssertTrue(wiring.hostBindings.contains {
-            $0.channel == .onyxDriver && $0.driverID == wiring.onyxDriverID
+            $0.channel == .onyxDriver
+                && $0.driverID == wiring.onyxDriverID
+                && $0.pathTemplates.contains("/source/runtime/onyx-drivers/langgraph.review")
         })
         XCTAssertTrue(wiring.hostBindings.contains {
-            $0.channel == .planningWorkflow && $0.planningWorkflowID == wiring.planningWorkflowID
+            $0.channel == .planningWorkflow
+                && $0.planningWorkflowID == wiring.planningWorkflowID
+                && $0.pathTemplates.contains("/source/runtime/planning/langgraph.review")
+                && $0.pathTemplates.contains("/source/runtime/skill-trees/langgraph.review")
+                && $0.pathTemplates.contains("/source/runtime/tool-bindings/langgraph.review")
         })
         XCTAssertEqual(wiring.attachment.workflowID, "langgraph.review")
         XCTAssertEqual(wiring.attachment.apiBasePath, "/source")
+        XCTAssertEqual(wiring.attachment.runtimeAttachmentsPath, "/source/runtime/attachments")
+        XCTAssertEqual(
+            wiring.attachment.runtimeWorkflowAttachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            wiring.attachment.runtimeWorkflowOnyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            wiring.attachment.runtimeWorkflowSkillTreePath,
+            "/source/runtime/skill-trees/langgraph.review"
+        )
+        XCTAssertEqual(
+            wiring.attachment.runtimeWorkflowToolBindingsPath,
+            "/source/runtime/tool-bindings/langgraph.review"
+        )
+        XCTAssertEqual(
+            wiring.attachment.runtimeWorkflowPlanningPath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertEqual(wiring.attachment.plannerEntrypoint, "plan")
         XCTAssertEqual(wiring.attachment.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(wiring.attachment.model, wiring.model)
@@ -2270,6 +2297,27 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let attachment = try XCTUnwrap(attachments.attachments.first)
         XCTAssertEqual(attachment.workflowName, "LangGraph review")
         XCTAssertEqual(attachment.apiBasePath, "/source")
+        XCTAssertEqual(attachment.runtimeAttachmentsPath, "/source/runtime/attachments")
+        XCTAssertEqual(
+            attachment.runtimeWorkflowAttachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowOnyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowSkillTreePath,
+            "/source/runtime/skill-trees/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowToolBindingsPath,
+            "/source/runtime/tool-bindings/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowPlanningPath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertEqual(attachment.plannerEntrypoint, "plan")
         XCTAssertEqual(attachment.model?.tool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(attachment.model?.maximumCommandRounds, 3)
@@ -3222,6 +3270,22 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(
             attachment.runtimeWorkflowAttachmentPath,
             "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowOnyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowSkillTreePath,
+            "/source/runtime/skill-trees/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowToolBindingsPath,
+            "/source/runtime/tool-bindings/langgraph.review"
+        )
+        XCTAssertEqual(
+            attachment.runtimeWorkflowPlanningPath,
+            "/source/runtime/planning/langgraph.review"
         )
         XCTAssertEqual(attachment.replCommands.first { $0.verb == "attachment" }?.aliases, ["manifest"])
         XCTAssertEqual(attachment.replExamples.first { $0.verb == "attachment" }?.line, "attachment")

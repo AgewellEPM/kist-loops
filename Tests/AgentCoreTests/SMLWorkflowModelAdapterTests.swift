@@ -63,6 +63,12 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertTrue(capture.systemPrompt.contains("prose is advisory"))
         XCTAssertTrue(capture.systemPrompt.contains("Workflow graph:"))
         XCTAssertTrue(capture.systemPrompt.contains("work CALL_TOOL [tool.execute] -> receipt"))
+        XCTAssertTrue(capture.systemPrompt.contains("Workflow metadata:"))
+        XCTAssertTrue(capture.systemPrompt.contains("attachment: GET /v1/runtime/attachments/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("onyx driver: GET /v1/runtime/onyx-drivers/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("skill tree: GET /v1/runtime/skill-trees/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("tool bindings: GET /v1/runtime/tool-bindings/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("planning bundle: GET /v1/runtime/planning/model.workflow"))
         XCTAssertTrue(capture.systemPrompt.contains("Structured REPL commands:"))
         XCTAssertTrue(capture.systemPrompt.contains("json:workflow_input fields:value"))
         XCTAssertTrue(capture.systemPrompt.contains("REPL examples:"))
@@ -285,6 +291,12 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertTrue(capture.systemPrompt.contains("api workflow path: /workflows/model.review"))
         XCTAssertTrue(capture.systemPrompt.contains("model tool: propose_sml_command via propose_sml_runtime_command"))
         XCTAssertTrue(capture.systemPrompt.contains("onyx driver: onyx.model.review."))
+        XCTAssertTrue(capture.systemPrompt.contains("workflow metadata:"))
+        XCTAssertTrue(capture.systemPrompt.contains("attachment: GET /model/runtime/attachments/model.review"))
+        XCTAssertTrue(capture.systemPrompt.contains("onyx driver: GET /model/runtime/onyx-drivers/model.review"))
+        XCTAssertTrue(capture.systemPrompt.contains("skill tree: GET /model/runtime/skill-trees/model.review"))
+        XCTAssertTrue(capture.systemPrompt.contains("tool bindings: GET /model/runtime/tool-bindings/model.review"))
+        XCTAssertTrue(capture.systemPrompt.contains("planning bundle: GET /model/runtime/planning/model.review"))
         XCTAssertTrue(
             capture.systemPrompt.contains(
                 "work:CALL_TOOL ref:tool.execute unit:external_capability"

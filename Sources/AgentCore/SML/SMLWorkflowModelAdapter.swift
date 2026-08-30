@@ -78,6 +78,7 @@ public struct SMLWorkflowModelAdapter: Sendable {
     private let authorityResolver: AuthorityResolver
     private let clock: @Sendable () -> Double
     private let baseSettings: ModelSettings
+    private let apiBasePath: String
 
     public init(
         surface: SMLWorkflowSurface,
@@ -85,6 +86,7 @@ public struct SMLWorkflowModelAdapter: Sendable {
         binding: ProviderBinding,
         providers: ProviderRegistry,
         gateway: SMLCommandGateway,
+        apiBasePath: String = "/v1",
         allowedActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
         authorityResolver: @escaping AuthorityResolver,
         settings: ModelSettings = ModelSettings(),
@@ -99,6 +101,7 @@ public struct SMLWorkflowModelAdapter: Sendable {
         self.allowedActions = allowedActions
         self.authorityResolver = authorityResolver
         self.clock = clock
+        self.apiBasePath = SMLWorkflowAPICatalog(surface: surface, basePath: apiBasePath).basePath
         baseSettings = settings
         repl = SMLWorkflowREPLCompiler(
             surface: surface,
@@ -237,6 +240,13 @@ public struct SMLWorkflowModelAdapter: Sendable {
         Workflow graph:
         \(surface.graphSummary)
 
+        Workflow metadata:
+        attachment: GET \(workflowMetadataPath(resourcePath: "attachments"))
+        onyx driver: GET \(workflowMetadataPath(resourcePath: "onyx-drivers"))
+        skill tree: GET \(workflowMetadataPath(resourcePath: "skill-trees"))
+        tool bindings: GET \(workflowMetadataPath(resourcePath: "tool-bindings"))
+        planning bundle: GET \(workflowMetadataPath(resourcePath: "planning"))
+
         Allowed grammar:
         \(surface.grammar(allowedActions: allowedActions))
 
@@ -246,6 +256,10 @@ public struct SMLWorkflowModelAdapter: Sendable {
             allowedActions: allowedActions
         ))
         """
+    }
+
+    private func workflowMetadataPath(resourcePath: String) -> String {
+        "\(apiBasePath)/runtime/\(resourcePath)/\(surface.workflowID)"
     }
 
     private func decodeArguments(_ json: String) throws -> SMLObject {
