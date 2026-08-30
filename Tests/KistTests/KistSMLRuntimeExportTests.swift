@@ -820,7 +820,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             Set(launched.hostBindingChannels),
             [
                 .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-                .onyxDriver, .planningWorkflow,
+                .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
             ]
         )
 
@@ -886,7 +886,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             Set(wiring.hostBindings.map(\.channel)),
             [
                 .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-                .onyxDriver, .planningWorkflow,
+                .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
             ]
         )
         XCTAssertTrue(wiring.hostBindings.contains {
@@ -939,7 +939,17 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             $0.channel == .planningWorkflow
                 && $0.planningWorkflowID == wiring.planningWorkflowID
                 && $0.pathTemplates.contains("/source/runtime/planning/langgraph.review")
+        })
+        XCTAssertTrue(wiring.hostBindings.contains {
+            $0.channel == .skillTree
+                && $0.authority == .descriptorOnly
+                && $0.readOnly
                 && $0.pathTemplates.contains("/source/runtime/skill-trees/langgraph.review")
+        })
+        XCTAssertTrue(wiring.hostBindings.contains {
+            $0.channel == .toolBindings
+                && $0.authority == .descriptorOnly
+                && $0.readOnly
                 && $0.pathTemplates.contains("/source/runtime/tool-bindings/langgraph.review")
         })
         XCTAssertEqual(wiring.attachment.workflowID, "langgraph.review")
@@ -3081,7 +3091,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(attachment.model?.maximumCommandRounds, 3)
         XCTAssertEqual(attachment.channels, [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-            .onyxDriver, .planningWorkflow,
+            .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
         ])
         XCTAssertEqual(attachment.skillTree.map(\.id), ["plan", "write", "receipt"])
         XCTAssertEqual(attachment.skillTree.first { $0.id == "write" }?.planning?.unitKind, .externalCapability)

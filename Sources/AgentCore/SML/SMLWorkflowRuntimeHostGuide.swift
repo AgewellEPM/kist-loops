@@ -6,6 +6,8 @@ public enum SMLWorkflowRuntimeHostBindingChannel: String, Sendable, Codable, Equ
     case modelTool = "model_tool"
     case modelRouter = "model_router"
     case onyxDriver = "onyx_driver"
+    case skillTree = "skill_tree"
+    case toolBindings = "tool_bindings"
     case planningWorkflow = "planning_workflow"
     case agentGuide = "agent_guide"
 }
@@ -544,14 +546,38 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             apiBasePath: replMount.apiBasePath,
             metadataEndpoints: metadataEndpoints
         )
+        let workflowSkillTreePaths = Self.workflowMetadataPaths(
+            resources: [.workflowSkillTree],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowSkillTreeExamples = Self.workflowMetadataExamples(
+            resources: [.workflowSkillTree],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowToolBindingPaths = Self.workflowMetadataPaths(
+            resources: [.workflowToolBindings],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowToolBindingExamples = Self.workflowMetadataExamples(
+            resources: [.workflowToolBindings],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
         let workflowPlanningPaths = Self.workflowMetadataPaths(
-            resources: [.workflowPlanning, .workflowSkillTree, .workflowToolBindings],
+            resources: [.workflowPlanning],
             workflowID: workflowID,
             apiBasePath: replMount.apiBasePath,
             metadataEndpoints: metadataEndpoints
         )
         let workflowPlanningExamples = Self.workflowMetadataExamples(
-            resources: [.workflowPlanning, .workflowSkillTree, .workflowToolBindings],
+            resources: [.workflowPlanning],
             workflowID: workflowID,
             apiBasePath: replMount.apiBasePath,
             metadataEndpoints: metadataEndpoints
@@ -620,11 +646,29 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 apiExamples: workflowOnyxDriverExamples
             ),
             SMLWorkflowRuntimeHostBinding(
+                channel: .skillTree,
+                reference: SMLWorkflowRuntimeMetadataResource.workflowSkillTree.rawValue,
+                authority: .descriptorOnly,
+                readOnly: true,
+                summary: "Load this workflow's skill tree descriptor for model, Onyx, and planner adapters.",
+                pathTemplates: workflowSkillTreePaths,
+                apiExamples: workflowSkillTreeExamples
+            ),
+            SMLWorkflowRuntimeHostBinding(
+                channel: .toolBindings,
+                reference: SMLWorkflowRuntimeMetadataResource.workflowToolBindings.rawValue,
+                authority: .descriptorOnly,
+                readOnly: true,
+                summary: "Load this workflow's tool binding descriptors for model, Onyx, and planner adapters.",
+                pathTemplates: workflowToolBindingPaths,
+                apiExamples: workflowToolBindingExamples
+            ),
+            SMLWorkflowRuntimeHostBinding(
                 channel: .planningWorkflow,
                 reference: planningWorkflowID ?? workflowID,
                 authority: .descriptorOnly,
                 readOnly: true,
-                summary: "Load the workflow planning bundle, skill tree, tool bindings, decomposition units, and approval gates.",
+                summary: "Load the workflow planning bundle, decomposition units, and approval gates.",
                 pathTemplates: workflowPlanningPaths,
                 planningWorkflowID: planningWorkflowID,
                 apiExamples: workflowPlanningExamples
@@ -740,7 +784,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 14
+    public static let currentSchemaVersion = 15
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]
@@ -826,7 +870,7 @@ public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
             id: "serve_descriptor_metadata",
             entrypoint: "SMLWorkflowRuntimeAPI.handleMetadata(_:)",
             authority: .descriptorOnly,
-            summary: "Serve catalog, mount, launch, OpenAPI, planning, agent, host, attachment, REPL, API, model-tool, model-router, and Onyx metadata."
+            summary: "Serve catalog, mount, launch, OpenAPI, planning, agent, host, attachment, REPL, API, model-tool, model-router, Onyx, skill-tree, and tool-binding metadata."
         ),
         SMLWorkflowRuntimeHostLaunchStep(
             id: "route_repl_and_api",

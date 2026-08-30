@@ -180,7 +180,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
             Set(workflowWiring.hostBindings.map(\.channel)),
             Set([
                 .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-                .onyxDriver, .planningWorkflow,
+                .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
             ])
         )
         XCTAssertTrue(workflowWiring.hostBindings.contains {
@@ -224,7 +224,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
             "attach_model_router",
             "attach_onyx_and_planning",
         ])
-        XCTAssertEqual(package.runtime.hostGuide.hostBindingCount, 7)
+        XCTAssertEqual(package.runtime.hostGuide.hostBindingCount, 9)
         XCTAssertTrue(
             package.runtime.agentGuide.systemPrompt.contains(
                 "Break work into small contextual workflow steps"
@@ -446,7 +446,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(launchedWorkflow.planningWorkflowID, "langgraph.review")
         XCTAssertEqual(Set(launchedWorkflow.hostBindingChannels), [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-            .onyxDriver, .planningWorkflow,
+            .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
         ])
         let encodedLaunchDescriptor = String(
             decoding: try JSONEncoder().encode(launchDescriptor),

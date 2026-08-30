@@ -2731,7 +2731,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 26
+    public static let currentSchemaVersion = 27
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -4028,7 +4028,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 19
+    public static let currentSchemaVersion = 20
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?

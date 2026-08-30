@@ -1244,7 +1244,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(reviewLaunch.planningWorkflowID, "content.review")
         XCTAssertEqual(Set(reviewLaunch.hostBindingChannels), [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-            .onyxDriver, .planningWorkflow,
+            .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
         ])
         XCTAssertEqual(reviewLaunch.commandBindings, reviewLaunch.replMount.commandBindings)
         XCTAssertEqual(reviewLaunch.commandBindings.count, 7)
@@ -1850,7 +1850,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 .workflowSkillTree, .workflowToolBindings,
             ]
         )
-        XCTAssertEqual(guide.hostBindingCount, 14)
+        XCTAssertEqual(guide.hostBindingCount, 18)
 
         let release = try XCTUnwrap(
             guide.workflowBindings.first { $0.workflowID == "content.release" }
@@ -1899,7 +1899,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             Set(release.hostBindings.map(\.channel)),
             [
                 .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-                .onyxDriver, .planningWorkflow,
+                .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
             ]
         )
         let apiBinding = try XCTUnwrap(
@@ -1967,15 +1967,25 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             release.hostBindings.first { $0.channel == .planningWorkflow }
         )
         XCTAssertTrue(planningBinding.pathTemplates.contains("/automation/runtime/planning/content.release"))
-        XCTAssertTrue(planningBinding.pathTemplates.contains("/automation/runtime/skill-trees/content.release"))
-        XCTAssertTrue(planningBinding.pathTemplates.contains("/automation/runtime/tool-bindings/content.release"))
         XCTAssertTrue(planningBinding.apiExamples.contains {
             $0.path == "/automation/runtime/planning/content.release"
         })
-        XCTAssertTrue(planningBinding.apiExamples.contains {
+        let skillTreeBinding = try XCTUnwrap(
+            release.hostBindings.first { $0.channel == .skillTree }
+        )
+        XCTAssertEqual(skillTreeBinding.authority, .descriptorOnly)
+        XCTAssertTrue(skillTreeBinding.readOnly)
+        XCTAssertTrue(skillTreeBinding.pathTemplates.contains("/automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(skillTreeBinding.apiExamples.contains {
             $0.path == "/automation/runtime/skill-trees/content.release"
         })
-        XCTAssertTrue(planningBinding.apiExamples.contains {
+        let toolBindingsBinding = try XCTUnwrap(
+            release.hostBindings.first { $0.channel == .toolBindings }
+        )
+        XCTAssertEqual(toolBindingsBinding.authority, .descriptorOnly)
+        XCTAssertTrue(toolBindingsBinding.readOnly)
+        XCTAssertTrue(toolBindingsBinding.pathTemplates.contains("/automation/runtime/tool-bindings/content.release"))
+        XCTAssertTrue(toolBindingsBinding.apiExamples.contains {
             $0.path == "/automation/runtime/tool-bindings/content.release"
         })
 
@@ -2263,7 +2273,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(export.hostGuide.workflowBindings.map(\.workflowID), [
             "content.release", "content.review",
         ])
-        XCTAssertEqual(export.hostGuide.hostBindingCount, 14)
+        XCTAssertEqual(export.hostGuide.hostBindingCount, 18)
         XCTAssertEqual(export.hostWiring.schemaVersion, SMLWorkflowRuntimeHostWiring.currentSchemaVersion)
         XCTAssertEqual(export.hostWiring.apiBasePaths, ["/automation"])
         XCTAssertEqual(export.hostWiring.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
@@ -2277,7 +2287,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(export.hostWiring.workflows.map(\.workflowID), [
             "content.release", "content.review",
         ])
-        XCTAssertEqual(export.hostWiring.hostBindingCount, 14)
+        XCTAssertEqual(export.hostWiring.hostBindingCount, 18)
         XCTAssertEqual(export.hostWiring.workflows.map(\.apiRoutes.count), [7, 7])
         XCTAssertEqual(export.hostWiring.workflows.map(\.modelRouterToolName), [
             SMLWorkflowRuntimeModelAdapter.toolName,
@@ -2290,7 +2300,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(export.hostWiring.workflows.allSatisfy {
             Set($0.hostBindings.map(\.channel)) == [
                 .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-                .onyxDriver, .planningWorkflow,
+                .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
             ]
         })
         let releaseWiring = try XCTUnwrap(
@@ -2409,7 +2419,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(releaseAttachment.plannerEntrypoint, "plan")
         XCTAssertEqual(releaseAttachment.channels, [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-            .onyxDriver, .planningWorkflow,
+            .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
         ])
         XCTAssertTrue(releaseAttachment.replExamples.contains {
             $0.line == #"start TASK-ID {"target":"target"}"#
@@ -2940,7 +2950,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             .number(Decimal(SMLWorkflowRuntimeHostGuide.currentSchemaVersion))
         )
         XCTAssertEqual(runtime["hostGuideWorkflowCount"], .number(2))
-        XCTAssertEqual(runtime["hostGuideBindingCount"], .number(14))
+        XCTAssertEqual(runtime["hostGuideBindingCount"], .number(18))
         XCTAssertEqual(runtime["hostGuideCommandBindingCount"], .number(14))
         XCTAssertEqual(runtime["hostGuideModelDescriptorCount"], .number(2))
         XCTAssertEqual(runtime["hostGuideSkillIndexCount"], .number(14))
@@ -2949,7 +2959,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             .number(Decimal(SMLWorkflowRuntimeHostWiring.currentSchemaVersion))
         )
         XCTAssertEqual(runtime["hostWiringWorkflowCount"], .number(2))
-        XCTAssertEqual(runtime["hostWiringBindingCount"], .number(14))
+        XCTAssertEqual(runtime["hostWiringBindingCount"], .number(18))
         XCTAssertEqual(runtime["hostWiringModelDescriptorCount"], .number(2))
         XCTAssertEqual(runtime["hostWiringSkillIndexCount"], .number(14))
         XCTAssertEqual(runtime["attachmentManifestCount"], .number(2))
@@ -3302,7 +3312,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             workflow.attachment.channels,
             [
                 .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
-                .onyxDriver, .planningWorkflow,
+                .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
             ]
         )
         XCTAssertTrue(workflow.attachment.modelRouterExamples.contains {
