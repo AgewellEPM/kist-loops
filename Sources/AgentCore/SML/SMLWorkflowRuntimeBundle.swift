@@ -446,6 +446,7 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             providers: providers,
             gateway: gateway,
             apiBasePath: descriptor.api.basePath,
+            apiWorkflowPath: descriptor.api.workflowPath,
             allowedActions: Set(descriptor.model.allowedActions),
             authorityResolver: authorityResolver,
             settings: settings,
@@ -3973,7 +3974,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 15
+    public static let currentSchemaVersion = 16
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -4124,6 +4125,7 @@ public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
                 sourceDigest: workflow.source.digest,
                 apiBasePath: mount?.apiBasePath ?? "",
                 apiWorkflowPath: mount?.apiWorkflowPath,
+                apiRoutePaths: mount?.apiRoutes.map(\.pathTemplate) ?? [],
                 replGrammar: mount?.repl.grammar ?? "",
                 modelToolName: mount?.modelToolName ?? "",
                 modelRouterToolName: mount?.modelRouterToolName
@@ -4451,7 +4453,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
                 return allowedActions.contains(action)
             }
             .map {
-                "\($0.method.rawValue) \($0.pathTemplate) [\($0.authority.rawValue)] -> \($0.operationID)"
+                "\($0.method.rawValue) \($0.pathTemplate) [\($0.authority.rawValue)] body:\($0.bodyKind.rawValue) -> \($0.operationID)"
             }
             .joined(separator: "\n")
         let planningUnits = planningToolIndex.isEmpty
@@ -4517,6 +4519,9 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         onyx driver: \(descriptor.onyx.driverID)
         workflow metadata:
         attachment: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "attachments", workflowID: descriptor.workflowID))
+        repl mount: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "repl-mounts", workflowID: descriptor.workflowID))
+        api mount: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "api-mounts", workflowID: descriptor.workflowID))
+        model tool: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "model-tools", workflowID: descriptor.workflowID))
         onyx driver: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "onyx-drivers", workflowID: descriptor.workflowID))
         skill tree: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "skill-trees", workflowID: descriptor.workflowID))
         tool bindings: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "tool-bindings", workflowID: descriptor.workflowID))

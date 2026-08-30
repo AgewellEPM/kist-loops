@@ -1327,6 +1327,16 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(guide.systemPrompt.contains("REPL examples:"))
         XCTAssertTrue(guide.systemPrompt.contains(#"start TASK-ID {"target":"target"}"#))
         XCTAssertTrue(guide.systemPrompt.contains("API routes:"))
+        XCTAssertTrue(
+            guide.systemPrompt.contains(
+                "POST /automation/workflows/content.release/tasks [host_command_gateway] body:start_task -> start_workflow_task_ContentRelease"
+            )
+        )
+        XCTAssertTrue(
+            guide.systemPrompt.contains(
+                "GET /automation/workflows/content.release/tasks/{task_id} [host_command_gateway] body:none -> watch_workflow_task_ContentRelease"
+            )
+        )
         XCTAssertTrue(guide.systemPrompt.contains("workflow metadata:"))
         XCTAssertTrue(guide.systemPrompt.contains("attachment: GET /automation/runtime/attachments/content.release"))
         XCTAssertTrue(guide.systemPrompt.contains("repl mount: GET /automation/runtime/repl-mounts/content.release"))

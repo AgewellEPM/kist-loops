@@ -307,7 +307,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         let routes = apiRoutes.isEmpty
             ? "none"
             : apiRoutes.map {
-                "\($0.method.rawValue) \($0.pathTemplate) [\($0.authority.rawValue)] -> \($0.operationID)"
+                "\($0.method.rawValue) \($0.pathTemplate) [\($0.authority.rawValue)] body:\($0.bodyKind.rawValue) -> \($0.operationID)"
             }.joined(separator: "\n")
         let planningUnits = planningToolIndex.isEmpty
             ? "none"

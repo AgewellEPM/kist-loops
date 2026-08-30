@@ -61,10 +61,21 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertFalse(toolDescription.contains("help [local]"))
         XCTAssertFalse(toolDescription.contains("attachment [local]"))
         XCTAssertTrue(capture.systemPrompt.contains("prose is advisory"))
+        XCTAssertTrue(capture.systemPrompt.contains("Break work into small contextual workflow steps"))
+        XCTAssertTrue(capture.systemPrompt.contains("host authority plus replay admission"))
         XCTAssertTrue(capture.systemPrompt.contains("Workflow graph:"))
         XCTAssertTrue(capture.systemPrompt.contains("work CALL_TOOL [tool.execute] -> receipt"))
+        XCTAssertTrue(capture.systemPrompt.contains("API routes:"))
+        XCTAssertTrue(capture.systemPrompt.contains("api base path: /v1"))
+        XCTAssertTrue(capture.systemPrompt.contains("api workflow path: /workflows/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("POST /v1/workflows/model.workflow/tasks body:start_task -> start_workflow_task"))
+        XCTAssertTrue(capture.systemPrompt.contains("GET /v1/workflows/model.workflow/tasks/{task_id} body:none -> watch_workflow_task"))
+        XCTAssertFalse(capture.systemPrompt.contains("approve_workflow_task"))
         XCTAssertTrue(capture.systemPrompt.contains("Workflow metadata:"))
         XCTAssertTrue(capture.systemPrompt.contains("attachment: GET /v1/runtime/attachments/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("repl mount: GET /v1/runtime/repl-mounts/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("api mount: GET /v1/runtime/api-mounts/model.workflow"))
+        XCTAssertTrue(capture.systemPrompt.contains("model tool: GET /v1/runtime/model-tools/model.workflow"))
         XCTAssertTrue(capture.systemPrompt.contains("onyx driver: GET /v1/runtime/onyx-drivers/model.workflow"))
         XCTAssertTrue(capture.systemPrompt.contains("skill tree: GET /v1/runtime/skill-trees/model.workflow"))
         XCTAssertTrue(capture.systemPrompt.contains("tool bindings: GET /v1/runtime/tool-bindings/model.workflow"))
@@ -77,6 +88,29 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertFalse(capture.systemPrompt.contains("json:expected_state fields:task_revision"))
         XCTAssertFalse(capture.systemPrompt.contains("help [local]"))
         XCTAssertFalse(capture.systemPrompt.contains("attachment [local]"))
+    }
+
+    func testSingleWorkflowModelPromptUsesCustomAPIWorkflowPath() async throws {
+        let provider = ScriptedWorkflowProvider([.answer("ready")])
+        let fixture = try await makeFixture(
+            provider: provider,
+            apiBasePath: "/custom",
+            apiWorkflowPath: "/review-flow"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        _ = try await fixture.adapter.step(
+            messages: [ChatMessage(role: .user, content: "inspect mounted API")],
+            requestBudget: ProviderRequestBudget(limit: 1)
+        )
+
+        let capture = provider.capture()
+        XCTAssertTrue(capture.systemPrompt.contains("api base path: /custom"))
+        XCTAssertTrue(capture.systemPrompt.contains("api workflow path: /review-flow"))
+        XCTAssertTrue(capture.systemPrompt.contains("POST /custom/review-flow/tasks body:start_task -> start_workflow_task"))
+        XCTAssertTrue(capture.systemPrompt.contains("GET /custom/review-flow/tasks/{task_id} body:none -> watch_workflow_task"))
+        XCTAssertTrue(capture.systemPrompt.contains("api mount: GET /custom/runtime/api-mounts/model.workflow"))
+        XCTAssertFalse(capture.systemPrompt.contains("/custom/workflows/model.workflow/tasks"))
     }
 
     func testMultipleWrongAndMalformedCallsAreAtomicNoOps() async throws {
@@ -284,7 +318,7 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertTrue(capture.systemPrompt.contains("work:CALL_TOOL kind:action"))
         XCTAssertTrue(
             capture.systemPrompt.contains(
-                "POST /model/workflows/model.review/tasks [host_command_gateway] -> start_workflow_task_ModelReview"
+                "POST /model/workflows/model.review/tasks [host_command_gateway] body:start_task -> start_workflow_task_ModelReview"
             )
         )
         XCTAssertTrue(capture.systemPrompt.contains("api base path: /model"))
@@ -293,6 +327,9 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         XCTAssertTrue(capture.systemPrompt.contains("onyx driver: onyx.model.review."))
         XCTAssertTrue(capture.systemPrompt.contains("workflow metadata:"))
         XCTAssertTrue(capture.systemPrompt.contains("attachment: GET /model/runtime/attachments/model.review"))
+        XCTAssertTrue(capture.systemPrompt.contains("repl mount: GET /model/runtime/repl-mounts/model.review"))
+        XCTAssertTrue(capture.systemPrompt.contains("api mount: GET /model/runtime/api-mounts/model.review"))
+        XCTAssertTrue(capture.systemPrompt.contains("model tool: GET /model/runtime/model-tools/model.review"))
         XCTAssertTrue(capture.systemPrompt.contains("onyx driver: GET /model/runtime/onyx-drivers/model.review"))
         XCTAssertTrue(capture.systemPrompt.contains("skill tree: GET /model/runtime/skill-trees/model.review"))
         XCTAssertTrue(capture.systemPrompt.contains("tool bindings: GET /model/runtime/tool-bindings/model.review"))
@@ -377,7 +414,11 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         let session: SMLWorkflowRuntimeModelSession
     }
 
-    private func makeFixture(provider: any ChatProvider) async throws -> Fixture {
+    private func makeFixture(
+        provider: any ChatProvider,
+        apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil
+    ) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("sml-model-\(UUID().uuidString)", isDirectory: true)
         let store = SMLRuntimeStore(
@@ -403,6 +444,8 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
             binding: ProviderBinding(providerId: provider.id, model: provider.defaultModel),
             providers: registry,
             gateway: gateway,
+            apiBasePath: apiBasePath,
+            apiWorkflowPath: apiWorkflowPath,
             authorityResolver: { command in
                 SMLCommandAuthority(
                     authenticatedActor: "model.onyx",

@@ -78,7 +78,7 @@ public struct SMLWorkflowModelAdapter: Sendable {
     private let authorityResolver: AuthorityResolver
     private let clock: @Sendable () -> Double
     private let baseSettings: ModelSettings
-    private let apiBasePath: String
+    private let apiCatalog: SMLWorkflowAPICatalog
 
     public init(
         surface: SMLWorkflowSurface,
@@ -87,6 +87,7 @@ public struct SMLWorkflowModelAdapter: Sendable {
         providers: ProviderRegistry,
         gateway: SMLCommandGateway,
         apiBasePath: String = "/v1",
+        apiWorkflowPath: String? = nil,
         allowedActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
         authorityResolver: @escaping AuthorityResolver,
         settings: ModelSettings = ModelSettings(),
@@ -101,7 +102,13 @@ public struct SMLWorkflowModelAdapter: Sendable {
         self.allowedActions = allowedActions
         self.authorityResolver = authorityResolver
         self.clock = clock
-        self.apiBasePath = SMLWorkflowAPICatalog(surface: surface, basePath: apiBasePath).basePath
+        self.apiCatalog = SMLWorkflowAPICatalog(
+            surface: surface,
+            basePath: apiBasePath,
+            workflowPath: apiWorkflowPath ?? SMLWorkflowAPICatalog.defaultWorkflowPath(
+                workflowID: surface.workflowID
+            )
+        )
         baseSettings = settings
         repl = SMLWorkflowREPLCompiler(
             surface: surface,
@@ -235,13 +242,26 @@ public struct SMLWorkflowModelAdapter: Sendable {
         \(Self.toolName) exactly once with one line from this workflow's grammar. Never call an
         unlisted command, never claim a capability step passed, and never fabricate a receipt.
 
+        Break work into small contextual workflow steps. Use the workflow graph, REPL grammar,
+        API routes, workflow metadata, skill tree, tool bindings, planning bundle, and Onyx driver
+        as the source of truth. Descriptor-only metadata is safe to inspect; mutations must use
+        this model command tool and still require host authority plus replay admission.
+
         \(surface.schemaSummary)
 
         Workflow graph:
         \(surface.graphSummary)
 
+        API routes:
+        api base path: \(apiCatalog.basePath)
+        api workflow path: \(apiCatalog.workflowPath)
+        \(apiRouteIndex)
+
         Workflow metadata:
         attachment: GET \(workflowMetadataPath(resourcePath: "attachments"))
+        repl mount: GET \(workflowMetadataPath(resourcePath: "repl-mounts"))
+        api mount: GET \(workflowMetadataPath(resourcePath: "api-mounts"))
+        model tool: GET \(workflowMetadataPath(resourcePath: "model-tools"))
         onyx driver: GET \(workflowMetadataPath(resourcePath: "onyx-drivers"))
         skill tree: GET \(workflowMetadataPath(resourcePath: "skill-trees"))
         tool bindings: GET \(workflowMetadataPath(resourcePath: "tool-bindings"))
@@ -258,8 +278,17 @@ public struct SMLWorkflowModelAdapter: Sendable {
         """
     }
 
+    private var apiRouteIndex: String {
+        let routes = apiCatalog.endpoints
+            .filter { allowedActions.contains($0.action) }
+            .map {
+                "\($0.method.rawValue) \($0.pathTemplate) body:\($0.bodyKind.rawValue) -> \($0.operationID)"
+            }
+        return routes.isEmpty ? "none" : routes.joined(separator: "\n")
+    }
+
     private func workflowMetadataPath(resourcePath: String) -> String {
-        "\(apiBasePath)/runtime/\(resourcePath)/\(surface.workflowID)"
+        "\(apiCatalog.basePath)/runtime/\(resourcePath)/\(surface.workflowID)"
     }
 
     private func decodeArguments(_ json: String) throws -> SMLObject {

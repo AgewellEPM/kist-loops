@@ -248,6 +248,45 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(summary.sourceKind, .langGraph)
         XCTAssertEqual(summary.sourceReference, "graphs/review.py")
         XCTAssertEqual(summary.apiBasePath, "/source")
+        XCTAssertEqual(summary.apiWorkflowPath, "/workflows/langgraph.review")
+        XCTAssertTrue(summary.apiRoutePaths.contains("/source/workflows/langgraph.review/tasks"))
+        XCTAssertTrue(
+            summary.apiRoutePaths.contains(
+                "/source/workflows/langgraph.review/tasks/{task_id}"
+            )
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowAttachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowREPLMountPath,
+            "/source/runtime/repl-mounts/langgraph.review"
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowAPIMountPath,
+            "/source/runtime/api-mounts/langgraph.review"
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowModelToolPath,
+            "/source/runtime/model-tools/langgraph.review"
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowOnyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowSkillTreePath,
+            "/source/runtime/skill-trees/langgraph.review"
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowToolBindingsPath,
+            "/source/runtime/tool-bindings/langgraph.review"
+        )
+        XCTAssertEqual(
+            summary.runtimeWorkflowPlanningPath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertTrue(summary.replGrammar.contains("start [TASK_ID] [JSON_INPUT_OBJECT]"))
         XCTAssertEqual(summary.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(summary.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
@@ -346,6 +385,22 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(launchDescriptor.sourceSummaries.first?.sourceKind, .langGraph)
         XCTAssertEqual(launchDescriptor.sourceSummaries.first?.apiBasePath, "/source")
+        XCTAssertTrue(
+            try XCTUnwrap(launchDescriptor.sourceSummaries.first)
+                .apiRoutePaths.contains("/source/workflows/langgraph.review/tasks")
+        )
+        XCTAssertEqual(
+            launchDescriptor.sourceSummaries.first?.runtimeWorkflowREPLMountPath,
+            "/source/runtime/repl-mounts/langgraph.review"
+        )
+        XCTAssertEqual(
+            launchDescriptor.sourceSummaries.first?.runtimeWorkflowModelToolPath,
+            "/source/runtime/model-tools/langgraph.review"
+        )
+        XCTAssertEqual(
+            launchDescriptor.sourceSummaries.first?.runtimeWorkflowPlanningPath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)
         XCTAssertEqual(launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
         let launchedWorkflow = try XCTUnwrap(launchDescriptor.workflows.first)
@@ -438,6 +493,23 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(launchDescriptor.apiBasePaths, ["/override"])
         XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.apiBasePath), ["/override"])
         XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.apiWorkflowPath), ["/retargeted-review"])
+        let sourceSummary = try XCTUnwrap(launchDescriptor.sourceSummaries.first)
+        XCTAssertTrue(sourceSummary.apiRoutePaths.contains("/override/retargeted-review/tasks"))
+        XCTAssertFalse(
+            sourceSummary.apiRoutePaths.contains("/source/workflows/langgraph.review/tasks")
+        )
+        XCTAssertEqual(
+            sourceSummary.runtimeWorkflowAPIMountPath,
+            "/override/runtime/api-mounts/langgraph.review"
+        )
+        XCTAssertEqual(
+            sourceSummary.runtimeWorkflowOnyxDriverPath,
+            "/override/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            sourceSummary.runtimeWorkflowSkillTreePath,
+            "/override/runtime/skill-trees/langgraph.review"
+        )
         XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)
         XCTAssertEqual(launchDescriptor.hostWiring.apiBasePaths, ["/override"])
 
@@ -604,6 +676,54 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
                     expected: "2.0.0",
                     actual: "1.0.0"
                 )
+            )
+        }
+    }
+
+    func testRuntimePackageFailsClosedWhenNormalizedSourceGraphDriftsFromRuntimeDescriptor() throws {
+        let workflow = try SMLWorkflowSourceImporter.langGraphWorkflow(from: langGraphReviewManifest())
+        let plan = try XCTUnwrap(workflow.instructions.first { $0.id == "plan" })
+        let receipt = try XCTUnwrap(workflow.instructions.first { $0.id == "receipt" })
+        let graphDriftWorkflow = SMLWorkflow(
+            id: workflow.id,
+            version: workflow.version,
+            name: workflow.name,
+            source: workflow.source,
+            trigger: workflow.trigger,
+            stateSchema: workflow.stateSchema,
+            interface: workflow.interface,
+            entrypoint: workflow.entrypoint,
+            instructions: [
+                SMLInstruction(
+                    id: plan.id,
+                    op: plan.op,
+                    purpose: plan.purpose,
+                    outputSchema: plan.outputSchema,
+                    next: receipt.id
+                ),
+                receipt,
+            ]
+        )
+        let registry = try SMLWorkflowRuntimeRegistry.compile(
+            sourceMounts: [
+                SMLWorkflowRuntimeSourceMount(
+                    document: .langGraphManifest(langGraphReviewManifest()),
+                    admissionCatalog: reviewCatalog(),
+                    role: "reviewer",
+                    actor: "operator.luke"
+                ),
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try SMLWorkflowRuntimeSourcePackage(
+                normalizedWorkflows: [graphDriftWorkflow],
+                runtime: registry.export()
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeSourcePackageError,
+                .runtimeSourceDescriptorMismatch(workflowID: "langgraph.review")
             )
         }
     }

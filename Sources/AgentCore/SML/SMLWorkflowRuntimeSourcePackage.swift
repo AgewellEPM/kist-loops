@@ -9,6 +9,7 @@ public enum SMLWorkflowRuntimeSourcePackageError: Error, Sendable, Equatable, Cu
     case runtimeWorkflowMismatch(workflowID: String, field: String, expected: String, actual: String)
     case runtimeExportMismatch(field: String, expected: [String], actual: [String])
     case runtimeDerivedPayloadMismatch(field: String)
+    case runtimeSourceDescriptorMismatch(workflowID: String)
 
     public var description: String {
         switch self {
@@ -29,6 +30,8 @@ public enum SMLWorkflowRuntimeSourcePackageError: Error, Sendable, Equatable, Cu
             return "SML workflow runtime source package \(field) mismatch: expected \(expected), got \(actual)"
         case .runtimeDerivedPayloadMismatch(let field):
             return "SML workflow runtime source package \(field) does not match the catalog-derived payload"
+        case .runtimeSourceDescriptorMismatch(let workflowID):
+            return "SML workflow runtime source package descriptor for workflow \(workflowID) does not match the normalized source workflow"
         }
     }
 }
@@ -42,6 +45,15 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
     public let sourceDigest: String?
     public let apiBasePath: String
     public let apiWorkflowPath: String
+    public let apiRoutePaths: [String]
+    public let runtimeWorkflowAttachmentPath: String
+    public let runtimeWorkflowREPLMountPath: String
+    public let runtimeWorkflowAPIMountPath: String
+    public let runtimeWorkflowModelToolPath: String
+    public let runtimeWorkflowOnyxDriverPath: String
+    public let runtimeWorkflowSkillTreePath: String
+    public let runtimeWorkflowToolBindingsPath: String
+    public let runtimeWorkflowPlanningPath: String
     public let replGrammar: String
     public let modelToolName: String
     public let modelRouterToolName: String
@@ -57,6 +69,15 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         sourceDigest: String?,
         apiBasePath: String,
         apiWorkflowPath: String? = nil,
+        apiRoutePaths: [String] = [],
+        runtimeWorkflowAttachmentPath: String? = nil,
+        runtimeWorkflowREPLMountPath: String? = nil,
+        runtimeWorkflowAPIMountPath: String? = nil,
+        runtimeWorkflowModelToolPath: String? = nil,
+        runtimeWorkflowOnyxDriverPath: String? = nil,
+        runtimeWorkflowSkillTreePath: String? = nil,
+        runtimeWorkflowToolBindingsPath: String? = nil,
+        runtimeWorkflowPlanningPath: String? = nil,
         replGrammar: String,
         modelToolName: String,
         modelRouterToolName: String,
@@ -72,6 +93,55 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         self.apiBasePath = apiBasePath
         self.apiWorkflowPath = apiWorkflowPath
             ?? SMLWorkflowRuntimeAPIWorkflowPath.defaultWorkflowPath(workflowID: workflowID)
+        self.apiRoutePaths = apiRoutePaths.sorted()
+        self.runtimeWorkflowAttachmentPath = runtimeWorkflowAttachmentPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "attachments",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowREPLMountPath = runtimeWorkflowREPLMountPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "repl-mounts",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowAPIMountPath = runtimeWorkflowAPIMountPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "api-mounts",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowModelToolPath = runtimeWorkflowModelToolPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "model-tools",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowOnyxDriverPath = runtimeWorkflowOnyxDriverPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "onyx-drivers",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowSkillTreePath = runtimeWorkflowSkillTreePath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "skill-trees",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowToolBindingsPath = runtimeWorkflowToolBindingsPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "tool-bindings",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowPlanningPath = runtimeWorkflowPlanningPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "planning",
+                workflowID: workflowID
+            )
         self.replGrammar = replGrammar
         self.modelToolName = modelToolName
         self.modelRouterToolName = modelRouterToolName
@@ -88,6 +158,15 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         case sourceDigest
         case apiBasePath
         case apiWorkflowPath
+        case apiRoutePaths
+        case runtimeWorkflowAttachmentPath
+        case runtimeWorkflowREPLMountPath
+        case runtimeWorkflowAPIMountPath
+        case runtimeWorkflowModelToolPath
+        case runtimeWorkflowOnyxDriverPath
+        case runtimeWorkflowSkillTreePath
+        case runtimeWorkflowToolBindingsPath
+        case runtimeWorkflowPlanningPath
         case replGrammar
         case modelToolName
         case modelRouterToolName
@@ -107,6 +186,42 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
             sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
             apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
             apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath),
+            apiRoutePaths: try container.decodeIfPresent(
+                [String].self,
+                forKey: .apiRoutePaths
+            ) ?? [],
+            runtimeWorkflowAttachmentPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowAttachmentPath
+            ),
+            runtimeWorkflowREPLMountPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowREPLMountPath
+            ),
+            runtimeWorkflowAPIMountPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowAPIMountPath
+            ),
+            runtimeWorkflowModelToolPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowModelToolPath
+            ),
+            runtimeWorkflowOnyxDriverPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowOnyxDriverPath
+            ),
+            runtimeWorkflowSkillTreePath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowSkillTreePath
+            ),
+            runtimeWorkflowToolBindingsPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowToolBindingsPath
+            ),
+            runtimeWorkflowPlanningPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowPlanningPath
+            ),
             replGrammar: try container.decode(String.self, forKey: .replGrammar),
             modelToolName: try container.decode(String.self, forKey: .modelToolName),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
@@ -125,11 +240,28 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
         try container.encode(apiBasePath, forKey: .apiBasePath)
         try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
+        try container.encode(apiRoutePaths, forKey: .apiRoutePaths)
+        try container.encode(runtimeWorkflowAttachmentPath, forKey: .runtimeWorkflowAttachmentPath)
+        try container.encode(runtimeWorkflowREPLMountPath, forKey: .runtimeWorkflowREPLMountPath)
+        try container.encode(runtimeWorkflowAPIMountPath, forKey: .runtimeWorkflowAPIMountPath)
+        try container.encode(runtimeWorkflowModelToolPath, forKey: .runtimeWorkflowModelToolPath)
+        try container.encode(runtimeWorkflowOnyxDriverPath, forKey: .runtimeWorkflowOnyxDriverPath)
+        try container.encode(runtimeWorkflowSkillTreePath, forKey: .runtimeWorkflowSkillTreePath)
+        try container.encode(runtimeWorkflowToolBindingsPath, forKey: .runtimeWorkflowToolBindingsPath)
+        try container.encode(runtimeWorkflowPlanningPath, forKey: .runtimeWorkflowPlanningPath)
         try container.encode(replGrammar, forKey: .replGrammar)
         try container.encode(modelToolName, forKey: .modelToolName)
         try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
         try container.encode(onyxDriverID, forKey: .onyxDriverID)
         try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
+    }
+
+    private static func runtimeWorkflowPath(
+        apiBasePath: String,
+        resourcePath: String,
+        workflowID: String
+    ) -> String {
+        "\(apiBasePath)/runtime/\(resourcePath)/\(workflowID)"
     }
 }
 
@@ -263,6 +395,7 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 sourceDigest: workflow.source.digest,
                 apiBasePath: mount?.apiBasePath ?? "",
                 apiWorkflowPath: mount?.apiWorkflowPath,
+                apiRoutePaths: mount?.apiRoutes.map(\.pathTemplate) ?? [],
                 replGrammar: mount?.repl.grammar ?? "",
                 modelToolName: mount?.modelToolName ?? "",
                 modelRouterToolName: mount?.modelRouterToolName ?? runtime.modelRouter.tool.name,
@@ -429,6 +562,35 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 equals: workflow.entrypoint,
                 workflowID: workflow.id,
                 field: "runtime.planning.entrypoint"
+            )
+            try requireDescriptorMatchesSource(
+                workflow: workflow,
+                descriptor: descriptor
+            )
+        }
+    }
+
+    private static func requireDescriptorMatchesSource(
+        workflow: SMLWorkflow,
+        descriptor: SMLWorkflowRuntimeDescriptor
+    ) throws {
+        let admitted = SMLAdmittedWorkflow(workflow: workflow, pluginAttestations: [:])
+        let expected = try SMLWorkflowRuntimeBundle.compile(
+            admitted: admitted,
+            role: descriptor.role,
+            actor: "__sml_source_package_verifier__",
+            replActions: Set(descriptor.repl.allowedActions),
+            modelActions: Set(descriptor.model.allowedActions),
+            apiBasePath: descriptor.api.basePath,
+            apiWorkflowPath: descriptor.api.workflowPath,
+            modelMaximumCommandRounds: descriptor.model.maximumCommandRounds,
+            commandID: { "__sml_source_package_verifier_command__" },
+            taskID: { "__SML_SOURCE_PACKAGE_VERIFIER_TASK__" }
+        ).descriptor
+
+        guard descriptor == expected else {
+            throw SMLWorkflowRuntimeSourcePackageError.runtimeSourceDescriptorMismatch(
+                workflowID: workflow.id
             )
         }
     }

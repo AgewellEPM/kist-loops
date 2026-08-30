@@ -4082,7 +4082,9 @@ extension KistRunner {
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
             return $0.workflowVersion < $1.workflowVersion
         }.map {
-            "- \($0.workflowID): `\($0.apiWorkflowPath)` mounted at `\($0.apiBasePath)\($0.apiWorkflowPath)/tasks`"
+            let taskEndpoint = $0.apiRoutePaths.first { $0.hasSuffix("/tasks") }
+                ?? "\($0.apiBasePath)\($0.apiWorkflowPath)/tasks"
+            return "- \($0.workflowID): `\($0.apiWorkflowPath)` mounted at `\(taskEndpoint)`"
         }.joined(separator: "\n")
         let workflowCards = launchDescriptor.hostWiring.attachmentManifests.sorted {
             if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
