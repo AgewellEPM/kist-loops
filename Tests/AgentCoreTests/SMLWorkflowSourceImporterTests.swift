@@ -287,6 +287,31 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
             summary.runtimeWorkflowPlanningPath,
             "/source/runtime/planning/langgraph.review"
         )
+        XCTAssertEqual(summary.workflowMetadata.workflowID, "langgraph.review")
+        XCTAssertEqual(summary.workflowMetadata.workflowVersion, "1.0.0")
+        XCTAssertEqual(summary.workflowMetadata.attachmentPath, summary.runtimeWorkflowAttachmentPath)
+        XCTAssertEqual(summary.workflowMetadata.replMountPath, summary.runtimeWorkflowREPLMountPath)
+        XCTAssertEqual(summary.workflowMetadata.apiMountPath, summary.runtimeWorkflowAPIMountPath)
+        XCTAssertEqual(summary.workflowMetadata.modelToolPath, summary.runtimeWorkflowModelToolPath)
+        XCTAssertEqual(summary.workflowMetadata.onyxDriverPath, summary.runtimeWorkflowOnyxDriverPath)
+        XCTAssertEqual(summary.workflowMetadata.skillTreePath, summary.runtimeWorkflowSkillTreePath)
+        XCTAssertEqual(summary.workflowMetadata.toolBindingsPath, summary.runtimeWorkflowToolBindingsPath)
+        XCTAssertEqual(summary.workflowMetadata.planningBundlePath, summary.runtimeWorkflowPlanningPath)
+        var legacySourceSummaryObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(summary)
+            ) as? [String: Any]
+        )
+        legacySourceSummaryObject.removeValue(forKey: "workflowMetadata")
+        let legacySourceSummaryData = try JSONSerialization.data(
+            withJSONObject: legacySourceSummaryObject,
+            options: [.sortedKeys]
+        )
+        let legacySourceSummary = try JSONDecoder().decode(
+            SMLWorkflowRuntimeSourceSummary.self,
+            from: legacySourceSummaryData
+        )
+        XCTAssertEqual(legacySourceSummary.workflowMetadata, summary.workflowMetadata)
         XCTAssertTrue(summary.replGrammar.contains("start [TASK_ID] [JSON_INPUT_OBJECT]"))
         XCTAssertEqual(summary.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(summary.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
@@ -401,6 +426,14 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
             launchDescriptor.sourceSummaries.first?.runtimeWorkflowPlanningPath,
             "/source/runtime/planning/langgraph.review"
         )
+        XCTAssertEqual(
+            launchDescriptor.sourceSummaries.first?.workflowMetadata.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
+        XCTAssertEqual(
+            launchDescriptor.sourceSummaries.first?.workflowMetadata.modelToolPath,
+            "/source/runtime/model-tools/langgraph.review"
+        )
         XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)
         XCTAssertEqual(launchDescriptor.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
         let launchedWorkflow = try XCTUnwrap(launchDescriptor.workflows.first)
@@ -508,6 +541,18 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         )
         XCTAssertEqual(
             sourceSummary.runtimeWorkflowSkillTreePath,
+            "/override/runtime/skill-trees/langgraph.review"
+        )
+        XCTAssertEqual(
+            sourceSummary.workflowMetadata.apiMountPath,
+            "/override/runtime/api-mounts/langgraph.review"
+        )
+        XCTAssertEqual(
+            sourceSummary.workflowMetadata.onyxDriverPath,
+            "/override/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            sourceSummary.workflowMetadata.skillTreePath,
             "/override/runtime/skill-trees/langgraph.review"
         )
         XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)

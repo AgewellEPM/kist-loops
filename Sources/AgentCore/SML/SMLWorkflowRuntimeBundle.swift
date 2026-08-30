@@ -352,6 +352,8 @@ public struct SMLWorkflowRuntimeBundle: Sendable {
             allowedActions: replAllowedActions,
             apiCatalog: apiCompiler.catalog,
             modelTool: modelTool,
+            modelAllowedActions: modelActions,
+            modelMaximumCommandRounds: modelMaximumCommandRounds,
             modelRouterToolName: SMLWorkflowRuntimeModelAdapter.toolName,
             onyxDriver: onyxDriver,
             commandID: commandID,
@@ -2716,7 +2718,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 24
+    public static let currentSchemaVersion = 25
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -4013,7 +4015,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 17
+    public static let currentSchemaVersion = 18
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -4165,6 +4167,7 @@ public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
                 apiBasePath: mount?.apiBasePath ?? "",
                 apiWorkflowPath: mount?.apiWorkflowPath,
                 apiRoutePaths: mount?.apiRoutes.map(\.pathTemplate) ?? [],
+                workflowMetadata: mount?.workflowMetadata,
                 replGrammar: mount?.repl.grammar ?? "",
                 modelToolName: mount?.modelToolName ?? "",
                 modelRouterToolName: mount?.modelRouterToolName
@@ -4278,11 +4281,22 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
                 ))
                 """
             }.joined(separator: "\n\n")
+        let metadataIndex = catalog.workflows.isEmpty
+            ? "none"
+            : catalog.workflows.map { descriptor in
+                let metadata = SMLWorkflowRuntimeWorkflowMetadataLinks(descriptor)
+                return """
+                \(descriptor.workflowID)@\(descriptor.workflowVersion)
+                \(workflowMetadataPromptLines(metadata))
+                """
+            }.joined(separator: "\n\n")
         return ToolSpec(
             name: toolName,
             description: "Propose exactly one command for one mounted SML workflow. "
                 + "The host validates the selected workflow, command grammar, authority, and replay. "
                 + "Mounted workflows: \(catalog.workflowIDs.joined(separator: ", "))."
+                + "\n\nWorkflow metadata index:\n"
+                + metadataIndex
                 + "\n\nAllowed model command index:\n"
                 + commandIndex,
             parameters: [
@@ -4529,6 +4543,8 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
             : approvalGates.map {
                 "\($0.instructionID) successors:\($0.successors.joined(separator: ","))"
             }.joined(separator: "\n")
+        let workflowMetadata = mount?.workflowMetadata
+            ?? SMLWorkflowRuntimeWorkflowMetadataLinks(descriptor)
         let modelCommandBindings = commandBindings.filter(\.modelEligible)
         let commandBindingIndex = modelCommandBindings.isEmpty
             ? "none"
@@ -4557,14 +4573,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         model tool: \(descriptor.model.tool.name) via \(toolName)
         onyx driver: \(descriptor.onyx.driverID)
         workflow metadata:
-        attachment: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "attachments", workflowID: descriptor.workflowID))
-        repl mount: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "repl-mounts", workflowID: descriptor.workflowID))
-        api mount: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "api-mounts", workflowID: descriptor.workflowID))
-        model tool: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "model-tools", workflowID: descriptor.workflowID))
-        onyx driver: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "onyx-drivers", workflowID: descriptor.workflowID))
-        skill tree: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "skill-trees", workflowID: descriptor.workflowID))
-        tool bindings: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "tool-bindings", workflowID: descriptor.workflowID))
-        planning bundle: GET \(workflowMetadataPath(apiBasePath: descriptor.api.basePath, resourcePath: "planning", workflowID: descriptor.workflowID))
+        \(workflowMetadataPromptLines(workflowMetadata))
 
         \(descriptor.schemaSummary)
 
@@ -4600,12 +4609,19 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         """
     }
 
-    private static func workflowMetadataPath(
-        apiBasePath: String,
-        resourcePath: String,
-        workflowID: String
+    private static func workflowMetadataPromptLines(
+        _ metadata: SMLWorkflowRuntimeWorkflowMetadataLinks
     ) -> String {
-        "\(apiBasePath)/runtime/\(resourcePath)/\(workflowID)"
+        """
+        attachment: GET \(metadata.attachmentPath)
+        repl mount: GET \(metadata.replMountPath)
+        api mount: GET \(metadata.apiMountPath)
+        model tool: GET \(metadata.modelToolPath)
+        onyx driver: GET \(metadata.onyxDriverPath)
+        skill tree: GET \(metadata.skillTreePath)
+        tool bindings: GET \(metadata.toolBindingsPath)
+        planning bundle: GET \(metadata.planningBundlePath)
+        """
     }
 
     private func requireModelActionAllowed(
@@ -4613,14 +4629,72 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         workflowID: String
     ) throws {
         let descriptor = try registry.descriptor(workflowID: workflowID)
-        guard let action = descriptor.commands.first(where: {
-            $0.action.runtimeOperation == command.op
-        })?.action else {
-            throw SMLWorkflowModelError.nonCommandProposal
-        }
+        let action = try Self.modelAction(for: command, descriptor: descriptor)
         guard descriptor.model.allowedActions.contains(action) else {
             throw SMLWorkflowREPLCompileError.actionDenied(action.rawValue)
         }
+    }
+
+    static func modelAction(
+        for command: SMLCommandEnvelope,
+        descriptor: SMLWorkflowRuntimeDescriptor
+    ) throws -> SMLWorkflowControlAction {
+        guard command.role == descriptor.role,
+              case .string(let workflowID)? = command.arguments["workflow_id"],
+              workflowID == descriptor.workflowID,
+              case .string(let workflowVersion)? = command.arguments["workflow_version"],
+              workflowVersion == descriptor.workflowVersion else {
+            throw SMLWorkflowModelError.nonCommandProposal
+        }
+
+        let actions = descriptor.commands.compactMap { candidate -> SMLWorkflowControlAction? in
+            candidate.action.runtimeOperation == command.op ? candidate.action : nil
+        }
+        guard actions.count == 1,
+              let action = actions.first,
+              commandShapeMatches(action: action, command: command) else {
+            throw SMLWorkflowModelError.nonCommandProposal
+        }
+        return action
+    }
+
+    private static func commandShapeMatches(
+        action: SMLWorkflowControlAction,
+        command: SMLCommandEnvelope
+    ) -> Bool {
+        switch action {
+        case .describe:
+            return command.task == "runtime"
+                && command.arguments["initial_state"] == nil
+        case .start:
+            return command.task != "runtime"
+                && optionalInitialStateIsValid(command.arguments["initial_state"])
+        case .watch, .receipts:
+            return command.task != "runtime"
+                && command.arguments["initial_state"] == nil
+        case .approve, .refuse, .rollback:
+            return command.task != "runtime"
+                && command.arguments["initial_state"] == nil
+                && validTaskRevision(command.expectedState["task_revision"])
+        }
+    }
+
+    private static func optionalInitialStateIsValid(_ value: SMLValue?) -> Bool {
+        guard let value else { return true }
+        guard case .object = value else { return false }
+        return true
+    }
+
+    private static func validTaskRevision(_ value: SMLValue?) -> Bool {
+        guard case .number(let revision)? = value,
+              revision >= 0,
+              revision <= Decimal(Int.max) else {
+            return false
+        }
+        var input = revision
+        var rounded = Decimal()
+        NSDecimalRound(&rounded, &input, 0, .plain)
+        return rounded == revision
     }
 
     private func decodeArguments(_ json: String) throws -> (workflowID: String, line: String) {

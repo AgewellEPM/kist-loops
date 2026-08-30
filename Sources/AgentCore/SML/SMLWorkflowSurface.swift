@@ -231,9 +231,74 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
                 summary: "Print the workflow input/output summary."
             ),
             SMLWorkflowREPLExample(
+                verb: "api",
+                line: "api",
+                summary: "Print the generated workflow API endpoints and request examples."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "model",
+                line: "model",
+                summary: "Print the generated model tool and router attachment."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "onyx",
+                line: "onyx",
+                summary: "Print the generated Onyx driver, tools, metadata, and skill tree."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "skill-tree",
+                line: "skill-tree",
+                summary: "Print the generated skill tree and related metadata links."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "tool-bindings",
+                line: "tool-bindings",
+                summary: "Print generated tool bindings and related metadata links."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "planning",
+                line: "planning",
+                summary: "Print the generated planning units and metadata links."
+            ),
+            SMLWorkflowREPLExample(
                 verb: "attachment",
                 line: "attachment",
                 summary: "Print the machine-readable REPL/API/model/Onyx/planning attachment."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "repl-mount",
+                line: "repl-mount",
+                summary: "Print the machine-readable REPL mount descriptor."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "api-mount",
+                line: "api-mount",
+                summary: "Print the machine-readable workflow API mount routes."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "model-tool",
+                line: "model-tool",
+                summary: "Print the machine-readable model tool export."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "onyx-driver",
+                line: "onyx-driver",
+                summary: "Print the machine-readable Onyx driver manifest."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "skill-tree-json",
+                line: "skill-tree-json",
+                summary: "Print the machine-readable skill tree."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "tool-bindings-json",
+                line: "tool-bindings-json",
+                summary: "Print the machine-readable tool bindings."
+            ),
+            SMLWorkflowREPLExample(
+                verb: "planning-bundle",
+                line: "planning-bundle",
+                summary: "Print the machine-readable planning bundle."
             ),
         ]
         if allowed.contains(.describe) {
@@ -375,6 +440,26 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
             SMLWorkflowREPLCommandDescriptor(
                 kind: .local,
                 action: nil,
+                verb: "skill-tree",
+                aliases: ["skills"],
+                usage: "skill-tree",
+                summary: "Print the generated skill tree and related metadata links.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "tool-bindings",
+                aliases: ["tools"],
+                usage: "tool-bindings",
+                summary: "Print generated tool bindings and related metadata links.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
                 verb: "planning",
                 usage: "planning",
                 summary: "Print the generated planning units for this workflow.",
@@ -388,6 +473,69 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
                 aliases: ["manifest"],
                 usage: "attachment",
                 summary: "Print the machine-readable REPL/API/model/Onyx/planning attachment descriptor.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "repl-mount",
+                usage: "repl-mount",
+                summary: "Print the machine-readable REPL mount descriptor.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "api-mount",
+                usage: "api-mount",
+                summary: "Print the machine-readable workflow API mount routes.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "model-tool",
+                usage: "model-tool",
+                summary: "Print the machine-readable model tool export.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "onyx-driver",
+                usage: "onyx-driver",
+                summary: "Print the machine-readable Onyx driver manifest.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "skill-tree-json",
+                usage: "skill-tree-json",
+                summary: "Print the machine-readable skill tree.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "tool-bindings-json",
+                usage: "tool-bindings-json",
+                summary: "Print the machine-readable tool bindings.",
+                requiresTask: false,
+                changesTaskState: false
+            ),
+            SMLWorkflowREPLCommandDescriptor(
+                kind: .local,
+                action: nil,
+                verb: "planning-bundle",
+                usage: "planning-bundle",
+                summary: "Print the machine-readable planning bundle.",
                 requiresTask: false,
                 changesTaskState: false
             ),

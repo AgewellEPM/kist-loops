@@ -120,6 +120,13 @@ public struct SMLWorkflowModelAdapter: Sendable {
             allowedActions: allowedActions,
             apiCatalog: resolvedAPICatalog,
             modelTool: modelTool,
+            modelAllowedActions: allowedActions,
+            onyxDriver: SMLOnyxDriverCompiler.compile(
+                surface: surface,
+                modelActions: allowedActions,
+                apiBasePath: apiBasePath,
+                apiWorkflowPath: resolvedAPICatalog.workflowPath
+            ),
             commandID: commandID,
             taskID: taskID
         )

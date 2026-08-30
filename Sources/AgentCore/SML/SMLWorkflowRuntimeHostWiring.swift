@@ -26,6 +26,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let runtimeWorkflowSkillTreePath: String
     public let runtimeWorkflowToolBindingsPath: String
     public let runtimeWorkflowPlanningPath: String
+    public let workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks
     public let channels: [SMLWorkflowRuntimeHostBindingChannel]
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let replExamples: [SMLWorkflowREPLExample]
@@ -67,6 +68,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         runtimeWorkflowSkillTreePath: String? = nil,
         runtimeWorkflowToolBindingsPath: String? = nil,
         runtimeWorkflowPlanningPath: String? = nil,
+        workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks? = nil,
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
@@ -92,6 +94,19 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             }
             return $0.operationID < $1.operationID
         }
+        let metadata = workflowMetadata ?? SMLWorkflowRuntimeWorkflowMetadataLinks(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            apiBasePath: apiBasePath,
+            attachmentPath: runtimeWorkflowAttachmentPath,
+            replMountPath: runtimeWorkflowREPLMountPath,
+            apiMountPath: runtimeWorkflowAPIMountPath,
+            modelToolPath: runtimeWorkflowModelToolPath,
+            onyxDriverPath: runtimeWorkflowOnyxDriverPath,
+            skillTreePath: runtimeWorkflowSkillTreePath,
+            toolBindingsPath: runtimeWorkflowToolBindingsPath,
+            planningBundlePath: runtimeWorkflowPlanningPath
+        )
         self.workflowID = workflowID
         self.workflowVersion = workflowVersion
         self.workflowName = workflowName
@@ -103,54 +118,27 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         self.apiWorkflowPath = apiWorkflowPath ?? replMount.apiWorkflowPath
         self.runtimeAttachmentsPath = runtimeAttachmentsPath
             ?? Self.runtimeResourcePath(apiBasePath: apiBasePath, resourcePath: "attachments")
-        self.runtimeWorkflowAttachmentPath = runtimeWorkflowAttachmentPath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "attachments",
-                workflowID: workflowID
-            )
-        self.runtimeWorkflowREPLMountPath = runtimeWorkflowREPLMountPath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "repl-mounts",
-                workflowID: workflowID
-            )
-        self.runtimeWorkflowAPIMountPath = runtimeWorkflowAPIMountPath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "api-mounts",
-                workflowID: workflowID
-            )
-        self.runtimeWorkflowModelToolPath = runtimeWorkflowModelToolPath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "model-tools",
-                workflowID: workflowID
-            )
-        self.runtimeWorkflowOnyxDriverPath = runtimeWorkflowOnyxDriverPath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "onyx-drivers",
-                workflowID: workflowID
-            )
-        self.runtimeWorkflowSkillTreePath = runtimeWorkflowSkillTreePath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "skill-trees",
-                workflowID: workflowID
-            )
-        self.runtimeWorkflowToolBindingsPath = runtimeWorkflowToolBindingsPath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "tool-bindings",
-                workflowID: workflowID
-            )
-        self.runtimeWorkflowPlanningPath = runtimeWorkflowPlanningPath
-            ?? Self.runtimeWorkflowPath(
-                apiBasePath: apiBasePath,
-                resourcePath: "planning",
-                workflowID: workflowID
-            )
+        self.runtimeWorkflowAttachmentPath = runtimeWorkflowAttachmentPath ?? metadata.attachmentPath
+        self.runtimeWorkflowREPLMountPath = runtimeWorkflowREPLMountPath ?? metadata.replMountPath
+        self.runtimeWorkflowAPIMountPath = runtimeWorkflowAPIMountPath ?? metadata.apiMountPath
+        self.runtimeWorkflowModelToolPath = runtimeWorkflowModelToolPath ?? metadata.modelToolPath
+        self.runtimeWorkflowOnyxDriverPath = runtimeWorkflowOnyxDriverPath ?? metadata.onyxDriverPath
+        self.runtimeWorkflowSkillTreePath = runtimeWorkflowSkillTreePath ?? metadata.skillTreePath
+        self.runtimeWorkflowToolBindingsPath = runtimeWorkflowToolBindingsPath ?? metadata.toolBindingsPath
+        self.runtimeWorkflowPlanningPath = runtimeWorkflowPlanningPath ?? metadata.planningBundlePath
+        self.workflowMetadata = SMLWorkflowRuntimeWorkflowMetadataLinks(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            apiBasePath: apiBasePath,
+            attachmentPath: self.runtimeWorkflowAttachmentPath,
+            replMountPath: self.runtimeWorkflowREPLMountPath,
+            apiMountPath: self.runtimeWorkflowAPIMountPath,
+            modelToolPath: self.runtimeWorkflowModelToolPath,
+            onyxDriverPath: self.runtimeWorkflowOnyxDriverPath,
+            skillTreePath: self.runtimeWorkflowSkillTreePath,
+            toolBindingsPath: self.runtimeWorkflowToolBindingsPath,
+            planningBundlePath: self.runtimeWorkflowPlanningPath
+        )
         self.channels = Array(Set(hostBindings.map(\.channel))).sorted {
             $0.rawValue < $1.rawValue
         }
@@ -212,6 +200,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         case runtimeWorkflowSkillTreePath
         case runtimeWorkflowToolBindingsPath
         case runtimeWorkflowPlanningPath
+        case workflowMetadata
         case channels
         case replMount
         case replExamples
@@ -263,74 +252,78 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
                 apiBasePath: apiBasePath,
                 apiRoutes: apiRoutes
             )
-        runtimeAttachmentsPath = try container.decodeIfPresent(
+        let decodedRuntimeAttachmentsPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeAttachmentsPath
-        ) ?? Self.runtimeResourcePath(apiBasePath: apiBasePath, resourcePath: "attachments")
-        runtimeWorkflowAttachmentPath = try container.decodeIfPresent(
+        )
+        let decodedRuntimeWorkflowAttachmentPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowAttachmentPath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "attachments",
-            workflowID: workflowID
         )
-        runtimeWorkflowREPLMountPath = try container.decodeIfPresent(
+        let decodedRuntimeWorkflowREPLMountPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowREPLMountPath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "repl-mounts",
-            workflowID: workflowID
         )
-        runtimeWorkflowAPIMountPath = try container.decodeIfPresent(
+        let decodedRuntimeWorkflowAPIMountPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowAPIMountPath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "api-mounts",
-            workflowID: workflowID
         )
-        runtimeWorkflowModelToolPath = try container.decodeIfPresent(
+        let decodedRuntimeWorkflowModelToolPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowModelToolPath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "model-tools",
-            workflowID: workflowID
         )
-        runtimeWorkflowOnyxDriverPath = try container.decodeIfPresent(
+        let decodedRuntimeWorkflowOnyxDriverPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowOnyxDriverPath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "onyx-drivers",
-            workflowID: workflowID
         )
-        runtimeWorkflowSkillTreePath = try container.decodeIfPresent(
+        let decodedRuntimeWorkflowSkillTreePath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowSkillTreePath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "skill-trees",
-            workflowID: workflowID
         )
-        runtimeWorkflowToolBindingsPath = try container.decodeIfPresent(
+        let decodedRuntimeWorkflowToolBindingsPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowToolBindingsPath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "tool-bindings",
-            workflowID: workflowID
         )
-        runtimeWorkflowPlanningPath = try container.decodeIfPresent(
+        let decodedRuntimeWorkflowPlanningPath = try container.decodeIfPresent(
             String.self,
             forKey: .runtimeWorkflowPlanningPath
-        ) ?? Self.runtimeWorkflowPath(
-            apiBasePath: apiBasePath,
-            resourcePath: "planning",
-            workflowID: workflowID
         )
+        let decodedWorkflowMetadata = try container.decodeIfPresent(
+            SMLWorkflowRuntimeWorkflowMetadataLinks.self,
+            forKey: .workflowMetadata
+        )
+        let metadata = SMLWorkflowRuntimeWorkflowMetadataLinks(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            apiBasePath: apiBasePath,
+            attachmentPath: decodedRuntimeWorkflowAttachmentPath
+                ?? decodedWorkflowMetadata?.attachmentPath,
+            replMountPath: decodedRuntimeWorkflowREPLMountPath
+                ?? decodedWorkflowMetadata?.replMountPath,
+            apiMountPath: decodedRuntimeWorkflowAPIMountPath
+                ?? decodedWorkflowMetadata?.apiMountPath,
+            modelToolPath: decodedRuntimeWorkflowModelToolPath
+                ?? decodedWorkflowMetadata?.modelToolPath,
+            onyxDriverPath: decodedRuntimeWorkflowOnyxDriverPath
+                ?? decodedWorkflowMetadata?.onyxDriverPath,
+            skillTreePath: decodedRuntimeWorkflowSkillTreePath
+                ?? decodedWorkflowMetadata?.skillTreePath,
+            toolBindingsPath: decodedRuntimeWorkflowToolBindingsPath
+                ?? decodedWorkflowMetadata?.toolBindingsPath,
+            planningBundlePath: decodedRuntimeWorkflowPlanningPath
+                ?? decodedWorkflowMetadata?.planningBundlePath
+        )
+        runtimeAttachmentsPath = decodedRuntimeAttachmentsPath
+            ?? Self.runtimeResourcePath(apiBasePath: apiBasePath, resourcePath: "attachments")
+        runtimeWorkflowAttachmentPath = metadata.attachmentPath
+        runtimeWorkflowREPLMountPath = metadata.replMountPath
+        runtimeWorkflowAPIMountPath = metadata.apiMountPath
+        runtimeWorkflowModelToolPath = metadata.modelToolPath
+        runtimeWorkflowOnyxDriverPath = metadata.onyxDriverPath
+        runtimeWorkflowSkillTreePath = metadata.skillTreePath
+        runtimeWorkflowToolBindingsPath = metadata.toolBindingsPath
+        runtimeWorkflowPlanningPath = metadata.planningBundlePath
+        workflowMetadata = metadata
         apiExamples = try container.decode([SMLWorkflowAPIRequestExample].self, forKey: .apiExamples).sorted {
             if $0.path != $1.path { return $0.path < $1.path }
             if $0.method.rawValue != $1.method.rawValue {
@@ -513,6 +506,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             }
             return $0.reference < $1.reference
         }
+        let resolvedWorkflowMetadata = workflowMetadata ?? replMount.workflowMetadata
         self.workflowID = workflowID
         self.workflowVersion = workflowVersion
         self.workflowName = workflowName
@@ -522,7 +516,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
         self.apiWorkflowPath = apiWorkflowPath ?? replMount.apiWorkflowPath
-        self.workflowMetadata = workflowMetadata ?? replMount.workflowMetadata
+        self.workflowMetadata = resolvedWorkflowMetadata
         self.replMount = replMount
         self.apiRoutes = sortedAPIRoutes
         self.modelToolName = modelToolName
@@ -547,6 +541,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             sourceDigest: sourceDigest,
             apiBasePath: apiBasePath,
             apiWorkflowPath: self.apiWorkflowPath,
+            workflowMetadata: resolvedWorkflowMetadata,
             replMount: replMount,
             apiRoutes: sortedAPIRoutes,
             modelToolName: modelToolName,
@@ -771,7 +766,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 17
+    public static let currentSchemaVersion = 18
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

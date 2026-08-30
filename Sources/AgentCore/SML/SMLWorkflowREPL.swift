@@ -25,7 +25,7 @@ public enum SMLWorkflowREPLCompilation: Sendable, Equatable {
 }
 
 public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public let schemaVersion: Int
     public let workflowID: String
@@ -46,6 +46,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
     public let runtimeWorkflowSkillTreePath: String
     public let runtimeWorkflowToolBindingsPath: String
     public let runtimeWorkflowPlanningPath: String
+    public let workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks
     public let replGrammar: String
     public let replCommands: [SMLWorkflowREPLCommandDescriptor]
     public let replExamples: [SMLWorkflowREPLExample]
@@ -78,6 +79,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         runtimeWorkflowSkillTreePath: String? = nil,
         runtimeWorkflowToolBindingsPath: String? = nil,
         runtimeWorkflowPlanningPath: String? = nil,
+        workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks? = nil,
         replGrammar: String,
         replCommands: [SMLWorkflowREPLCommandDescriptor],
         replExamples: [SMLWorkflowREPLExample],
@@ -144,6 +146,19 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
                 resourcePath: "planning",
                 workflowID: workflowID
             )
+        self.workflowMetadata = workflowMetadata ?? SMLWorkflowRuntimeWorkflowMetadataLinks(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            apiBasePath: apiBasePath,
+            attachmentPath: self.runtimeWorkflowAttachmentPath,
+            replMountPath: self.runtimeWorkflowREPLMountPath,
+            apiMountPath: self.runtimeWorkflowAPIMountPath,
+            modelToolPath: self.runtimeWorkflowModelToolPath,
+            onyxDriverPath: self.runtimeWorkflowOnyxDriverPath,
+            skillTreePath: self.runtimeWorkflowSkillTreePath,
+            toolBindingsPath: self.runtimeWorkflowToolBindingsPath,
+            planningBundlePath: self.runtimeWorkflowPlanningPath
+        )
         self.replGrammar = replGrammar
         self.replCommands = replCommands.sorted {
             if $0.kind.rawValue != $1.kind.rawValue { return $0.kind.rawValue < $1.kind.rawValue }
@@ -188,6 +203,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         case runtimeWorkflowSkillTreePath
         case runtimeWorkflowToolBindingsPath
         case runtimeWorkflowPlanningPath
+        case workflowMetadata
         case replGrammar
         case replCommands
         case replExamples
@@ -252,6 +268,10 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
                 String.self,
                 forKey: .runtimeWorkflowPlanningPath
             ),
+            workflowMetadata: try container.decodeIfPresent(
+                SMLWorkflowRuntimeWorkflowMetadataLinks.self,
+                forKey: .workflowMetadata
+            ),
             replGrammar: try container.decode(String.self, forKey: .replGrammar),
             replCommands: try container.decode(
                 [SMLWorkflowREPLCommandDescriptor].self,
@@ -299,6 +319,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         try container.encode(runtimeWorkflowSkillTreePath, forKey: .runtimeWorkflowSkillTreePath)
         try container.encode(runtimeWorkflowToolBindingsPath, forKey: .runtimeWorkflowToolBindingsPath)
         try container.encode(runtimeWorkflowPlanningPath, forKey: .runtimeWorkflowPlanningPath)
+        try container.encode(workflowMetadata, forKey: .workflowMetadata)
         try container.encode(replGrammar, forKey: .replGrammar)
         try container.encode(replCommands, forKey: .replCommands)
         try container.encode(replExamples, forKey: .replExamples)
@@ -340,6 +361,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
     public let allowedActions: Set<SMLWorkflowControlAction>
     public let apiCatalog: SMLWorkflowAPICatalog
     public let modelTool: SMLWorkflowModelToolDescriptor
+    public let modelAllowedActions: Set<SMLWorkflowControlAction>
+    public let modelMaximumCommandRounds: Int
     public let modelRouterToolName: String?
     public let onyxDriver: SMLOnyxDriverManifest
     private let compiler: SMLWorkflowCommandCompiler
@@ -350,6 +373,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
         allowedActions: Set<SMLWorkflowControlAction>? = nil,
         apiCatalog: SMLWorkflowAPICatalog? = nil,
         modelTool: SMLWorkflowModelToolDescriptor? = nil,
+        modelAllowedActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions,
+        modelMaximumCommandRounds: Int = 4,
         modelRouterToolName: String? = nil,
         onyxDriver: SMLOnyxDriverManifest? = nil,
         commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
@@ -359,6 +384,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
         self.allowedActions = allowedActions ?? Set(SMLWorkflowControlAction.allCases)
         self.apiCatalog = apiCatalog ?? SMLWorkflowAPICatalog(surface: surface)
         self.modelTool = modelTool ?? SMLWorkflowModelToolDescriptor(surface.modelCommandTool())
+        self.modelAllowedActions = modelAllowedActions
+        self.modelMaximumCommandRounds = min(max(1, modelMaximumCommandRounds), 8)
         self.modelRouterToolName = modelRouterToolName
         self.onyxDriver = onyxDriver ?? SMLOnyxDriverCompiler.compile(surface: surface)
         compiler = SMLWorkflowCommandCompiler(
@@ -391,12 +418,39 @@ public struct SMLWorkflowREPLCompiler: Sendable {
         case "onyx":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .local(onyxText)
+        case "skill-tree", "skills":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(skillTreeText)
+        case "tool-bindings", "tools":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(toolBindingsText)
         case "planning":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .local(planningText)
         case "attachment", "manifest":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .local(try attachmentText())
+        case "repl-mount":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try encodeJSON(replMountDescriptor))
+        case "api-mount":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try encodeJSON(apiMountDescriptors))
+        case "model-tool":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try encodeJSON(modelToolExport))
+        case "onyx-driver":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try encodeJSON(onyxDriver))
+        case "skill-tree-json":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try encodeJSON(onyxDriver.skillTree))
+        case "tool-bindings-json":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try encodeJSON(onyxDriver.tools))
+        case "planning-bundle":
+            guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
+            return .local(try encodeJSON(planningWorkflowBundle))
         case "exit", "quit":
             guard tail.isEmpty else { throw SMLWorkflowREPLCompileError.unexpectedArguments(verb) }
             return .exit
@@ -444,8 +498,17 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "api",
             "model",
             "onyx",
+            "skill-tree",
+            "tool-bindings",
             "planning",
             "attachment",
+            "repl-mount",
+            "api-mount",
+            "model-tool",
+            "onyx-driver",
+            "skill-tree-json",
+            "tool-bindings-json",
+            "planning-bundle",
             "exit",
         ] + exampleLines + [
             "Approve, refuse, and rollback require the task_revision returned by watch.",
@@ -482,6 +545,106 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             toolBindings: onyxDriver.tools,
             plan: onyxDriver.plan,
             commandBindings: onyxDriver.commandBindings
+        )
+    }
+
+    private var workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks {
+        attachmentDescriptor.workflowMetadata
+    }
+
+    private var resolvedModelRouterToolName: String {
+        modelRouterToolName ?? SMLWorkflowRuntimeModelAdapter.toolName
+    }
+
+    private var replMountDescriptor: SMLWorkflowRuntimeREPLMount {
+        SMLWorkflowRuntimeREPLMount(
+            workflowID: surface.workflowID,
+            workflowVersion: surface.workflowVersion,
+            workflowName: surface.workflowName,
+            role: surface.role,
+            apiBasePath: apiCatalog.basePath,
+            apiWorkflowPath: apiCatalog.workflowPath,
+            workflowMetadata: workflowMetadata,
+            grammar: surface.grammar(allowedActions: allowedActions),
+            helpText: helpText,
+            commands: surface.replCommandDescriptors(allowedActions: allowedActions),
+            examples: surface.replExamples(allowedActions: allowedActions),
+            modelToolName: modelTool.name,
+            modelRouterToolName: resolvedModelRouterToolName,
+            onyxDriverID: onyxDriver.driverID,
+            commandBindings: onyxDriver.commandBindings
+        )
+    }
+
+    private var apiMountDescriptors: [SMLWorkflowRuntimeAPIMount] {
+        apiCatalog.endpoints.map { endpoint in
+            let readOnly = !(surface.commands.first {
+                $0.action == endpoint.action
+            }?.changesTaskState ?? true)
+            return SMLWorkflowRuntimeAPIMount(
+                method: endpoint.method,
+                pathTemplate: endpoint.pathTemplate,
+                operationID: runtimeOperationID(endpoint),
+                handlerKind: .workflow,
+                authority: .hostCommandGateway,
+                readOnly: readOnly,
+                workflowID: surface.workflowID,
+                action: endpoint.action,
+                bodyKind: endpoint.bodyKind,
+                bodyFields: endpoint.bodyFields,
+                examples: endpoint.examples
+            )
+        }.sorted {
+            if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+            if $0.method.rawValue != $1.method.rawValue {
+                return $0.method.rawValue < $1.method.rawValue
+            }
+            return $0.operationID < $1.operationID
+        }
+    }
+
+    private var modelToolExport: SMLWorkflowRuntimeModelToolExport {
+        SMLWorkflowRuntimeModelToolExport(
+            workflowID: surface.workflowID,
+            workflowVersion: surface.workflowVersion,
+            tool: modelTool,
+            allowedActions: sortedActions(modelAllowedActions),
+            maximumCommandRounds: modelMaximumCommandRounds,
+            workflowMetadata: workflowMetadata
+        )
+    }
+
+    private var planningWorkflowBundle: SMLWorkflowRuntimePlanningWorkflowBundle {
+        let workflow = SMLWorkflowRuntimePlanningWorkflow(
+            workflowID: surface.workflowID,
+            workflowVersion: surface.workflowVersion,
+            workflowName: surface.workflowName,
+            role: surface.role,
+            sourceKind: surface.sourceKind,
+            sourceReference: surface.workflow.source.reference,
+            sourceDigest: surface.workflow.source.digest,
+            entrypoint: onyxDriver.plan.entrypoint,
+            apiBasePath: apiCatalog.basePath,
+            apiWorkflowPath: apiCatalog.workflowPath,
+            workflowMetadata: workflowMetadata,
+            replGrammar: surface.grammar(allowedActions: allowedActions),
+            modelToolName: modelTool.name,
+            modelRouterToolName: resolvedModelRouterToolName,
+            skillTree: onyxDriver.skillTree,
+            tools: onyxDriver.tools,
+            plan: onyxDriver.plan
+        )
+        let planning = SMLWorkflowRuntimePlanningManifest(
+            workflows: [workflow],
+            commandBindings: onyxDriver.commandBindings
+        )
+        return SMLWorkflowRuntimePlanningWorkflowBundle(
+            workflow: workflow,
+            skillIndex: planning.skillIndex,
+            toolIndex: planning.toolIndex,
+            decomposableUnits: planning.decomposableUnits,
+            approvalGates: planning.approvalGates,
+            commandBindings: planning.commandBindings
         )
     }
 
@@ -575,8 +738,72 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "plan entrypoint: \(onyxDriver.plan.entrypoint)",
             "tools:",
         ] + tools + [
+            "onyx metadata:",
+            "onyx driver: GET \(runtimeWorkflowPath(resourcePath: "onyx-drivers"))",
+            "skill tree: GET \(runtimeWorkflowPath(resourcePath: "skill-trees"))",
+            "tool bindings: GET \(runtimeWorkflowPath(resourcePath: "tool-bindings"))",
+            "planning bundle: GET \(runtimeWorkflowPath(resourcePath: "planning"))",
+            "model tool: GET \(runtimeWorkflowPath(resourcePath: "model-tools"))",
             "skill tree:",
         ] + nodes).joined(separator: "\n")
+    }
+
+    private var skillTreeText: String {
+        let nodes = onyxDriver.skillTree.map {
+            let predecessors = $0.prerequisites.isEmpty
+                ? "none"
+                : $0.prerequisites.joined(separator: ",")
+            let successors = $0.successors.isEmpty
+                ? "none"
+                : $0.successors.joined(separator: ",")
+            let planning = $0.planning.map {
+                "unit:\($0.unitKind.rawValue) decompose:\($0.canDecomposeFurther)"
+            } ?? "unit:unknown decompose:false"
+            return [
+                "\($0.id):\($0.operation.rawValue)",
+                "kind:\($0.kind.rawValue)",
+                "prev:\(predecessors)",
+                "next:\(successors)",
+                "approval:\($0.operation == .waitApproval)",
+                planning,
+            ].joined(separator: " ")
+        }
+        return ([
+            "skill tree:",
+            "workflow: \(onyxDriver.workflowID)@\(onyxDriver.workflowVersion)",
+            "skill tree metadata:",
+            "skill tree: GET \(runtimeWorkflowPath(resourcePath: "skill-trees"))",
+            "tool bindings: GET \(runtimeWorkflowPath(resourcePath: "tool-bindings"))",
+            "planning bundle: GET \(runtimeWorkflowPath(resourcePath: "planning"))",
+            "onyx driver: GET \(runtimeWorkflowPath(resourcePath: "onyx-drivers"))",
+        ] + nodes).joined(separator: "\n")
+    }
+
+    private var toolBindingsText: String {
+        let bindings = onyxDriver.tools.isEmpty
+            ? ["none"]
+            : onyxDriver.tools.map {
+                let args = $0.arguments.isEmpty
+                    ? "none"
+                    : $0.arguments.map { "\($0.key)=\(Self.renderJSONValue($0.value))" }
+                        .sorted()
+                        .joined(separator: ",")
+                return [
+                    "\($0.instructionID):\($0.operation.rawValue)",
+                    "ref:\($0.reference)",
+                    "args:\(args)",
+                ].joined(separator: " ")
+            }
+        return ([
+            "tool bindings:",
+            "workflow: \(onyxDriver.workflowID)@\(onyxDriver.workflowVersion)",
+            "tool binding metadata:",
+            "tool bindings: GET \(runtimeWorkflowPath(resourcePath: "tool-bindings"))",
+            "skill tree: GET \(runtimeWorkflowPath(resourcePath: "skill-trees"))",
+            "planning bundle: GET \(runtimeWorkflowPath(resourcePath: "planning"))",
+            "onyx driver: GET \(runtimeWorkflowPath(resourcePath: "onyx-drivers"))",
+            "model tool: GET \(runtimeWorkflowPath(resourcePath: "model-tools"))",
+        ] + bindings).joined(separator: "\n")
     }
 
     private var planningText: String {
@@ -600,14 +827,47 @@ public struct SMLWorkflowREPLCompiler: Sendable {
         return ([
             "planning:",
             "entrypoint: \(onyxDriver.plan.entrypoint)",
+            "planning metadata:",
+            "planning bundle: GET \(runtimeWorkflowPath(resourcePath: "planning"))",
+            "skill tree: GET \(runtimeWorkflowPath(resourcePath: "skill-trees"))",
+            "tool bindings: GET \(runtimeWorkflowPath(resourcePath: "tool-bindings"))",
+            "model tool: GET \(runtimeWorkflowPath(resourcePath: "model-tools"))",
+            "api mount: GET \(runtimeWorkflowPath(resourcePath: "api-mounts"))",
+            "repl mount: GET \(runtimeWorkflowPath(resourcePath: "repl-mounts"))",
         ] + nodes).joined(separator: "\n")
     }
 
     private func attachmentText() throws -> String {
+        try encodeJSON(attachmentDescriptor)
+    }
+
+    private func encodeJSON<T: Encodable>(_ value: T) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let data = try encoder.encode(attachmentDescriptor)
+        let data = try encoder.encode(value)
         return String(decoding: data, as: UTF8.self)
+    }
+
+    private func runtimeOperationID(_ endpoint: SMLWorkflowAPIEndpoint) -> String {
+        "\(endpoint.operationID)_\(runtimeComponentSuffix(surface.workflowID))"
+    }
+
+    private func runtimeComponentSuffix(_ workflowID: String) -> String {
+        workflowID
+            .split(separator: ".")
+            .map { segment in
+                segment
+                    .split(separator: "-")
+                    .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+                    .joined()
+            }
+            .joined()
+    }
+
+    private func sortedActions(
+        _ actions: Set<SMLWorkflowControlAction>
+    ) -> [SMLWorkflowControlAction] {
+        actions.sorted { $0.rawValue < $1.rawValue }
     }
 
     private func require(_ action: SMLWorkflowControlAction, verb: String) throws {

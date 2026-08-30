@@ -293,6 +293,16 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         let toolDescription = try XCTUnwrap(capture.toolDescriptions.first)
         XCTAssertTrue(toolDescription.contains("model.workflow@1.0.0"))
         XCTAssertTrue(toolDescription.contains("model.review@1.0.0"))
+        XCTAssertTrue(toolDescription.contains("Workflow metadata index:"))
+        XCTAssertTrue(toolDescription.contains("attachment: GET /model/runtime/attachments/model.review"))
+        XCTAssertTrue(toolDescription.contains("repl mount: GET /model/runtime/repl-mounts/model.review"))
+        XCTAssertTrue(toolDescription.contains("api mount: GET /model/runtime/api-mounts/model.review"))
+        XCTAssertTrue(toolDescription.contains("model tool: GET /model/runtime/model-tools/model.review"))
+        XCTAssertTrue(toolDescription.contains("onyx driver: GET /model/runtime/onyx-drivers/model.review"))
+        XCTAssertTrue(toolDescription.contains("skill tree: GET /model/runtime/skill-trees/model.review"))
+        XCTAssertTrue(toolDescription.contains("tool bindings: GET /model/runtime/tool-bindings/model.review"))
+        XCTAssertTrue(toolDescription.contains("planning bundle: GET /model/runtime/planning/model.review"))
+        XCTAssertTrue(toolDescription.contains("Allowed model command index:"))
         XCTAssertTrue(toolDescription.contains("Structured REPL commands:"))
         XCTAssertTrue(toolDescription.contains("json:workflow_input fields:value"))
         XCTAssertTrue(toolDescription.contains(#"start TASK-ID {"value":"value"}"#))
@@ -341,6 +351,100 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
         )
         XCTAssertTrue(capture.systemPrompt.contains("Decomposable units:"))
         XCTAssertTrue(capture.systemPrompt.contains("\nnone\n"))
+    }
+
+    func testRuntimeModelActionResolutionRequiresExactCompiledWorkflowBinding() throws {
+        let descriptor = try runtimeDescriptor()
+        let validStart = modelRouterCommand(
+            descriptor: descriptor,
+            action: .start,
+            task: "TASK-ROUTER",
+            arguments: validWorkflowArguments(descriptor).merging([
+                "initial_state": .object(["value": .string("hello")]),
+            ]) { _, new in new }
+        )
+        XCTAssertEqual(
+            try SMLWorkflowRuntimeModelAdapter.modelAction(
+                for: validStart,
+                descriptor: descriptor
+            ),
+            .start
+        )
+
+        let validApproval = modelRouterCommand(
+            descriptor: descriptor,
+            action: .approve,
+            task: "TASK-ROUTER",
+            expectedState: ["task_revision": .number(0)]
+        )
+        XCTAssertEqual(
+            try SMLWorkflowRuntimeModelAdapter.modelAction(
+                for: validApproval,
+                descriptor: descriptor
+            ),
+            .approve
+        )
+
+        let rejected: [SMLCommandEnvelope] = [
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .start,
+                role: "other-role"
+            ),
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .start,
+                arguments: ["workflow_version": .string(descriptor.workflowVersion)]
+            ),
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .start,
+                arguments: ["workflow_id": .string(descriptor.workflowID)]
+            ),
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .start,
+                arguments: validWorkflowArguments(descriptor).merging([
+                    "workflow_id": .string("other.workflow"),
+                ]) { _, new in new }
+            ),
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .start,
+                arguments: validWorkflowArguments(descriptor).merging([
+                    "workflow_version": .string("2.0.0"),
+                ]) { _, new in new }
+            ),
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .start,
+                arguments: validWorkflowArguments(descriptor).merging([
+                    "initial_state": .string("not-an-object"),
+                ]) { _, new in new }
+            ),
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .describe,
+                task: "TASK-NOT-RUNTIME"
+            ),
+            modelRouterCommand(
+                descriptor: descriptor,
+                action: .approve,
+                task: "TASK-ROUTER"
+            ),
+        ]
+
+        for (index, command) in rejected.enumerated() {
+            XCTAssertThrowsError(
+                try SMLWorkflowRuntimeModelAdapter.modelAction(
+                    for: command,
+                    descriptor: descriptor
+                ),
+                "case \(index) should fail closed"
+            ) { error in
+                XCTAssertEqual(error as? SMLWorkflowModelError, .nonCommandProposal)
+            }
+        }
     }
 
     func testRuntimeModelRouterFailsClosedOnUnknownWorkflowAndLocalCommands() async throws {
@@ -517,6 +621,53 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
             clock: { 1_000 }
         )
         return RuntimeFixture(directory: directory, store: store, session: session)
+    }
+
+    private func runtimeDescriptor(
+        modelActions: Set<SMLWorkflowControlAction> = SMLWorkflowSurface.modelDefaultActions
+    ) throws -> SMLWorkflowRuntimeDescriptor {
+        let admitted = try SMLWorkflowAdmission.admitForExecution(
+            SMLWorkflowValidator.requireValidForImport(capabilityWorkflow()),
+            catalog: SMLExecutionAdmissionCatalog(toolCapabilities: ["tool.execute"])
+        )
+        return try SMLWorkflowRuntimeBundle.compile(
+            admitted: admitted,
+            role: "model-role",
+            actor: "model.onyx",
+            modelActions: modelActions,
+            apiBasePath: "/model",
+            commandID: { "resolver-command" },
+            taskID: { "TASK-RESOLVER" }
+        ).descriptor
+    }
+
+    private func modelRouterCommand(
+        descriptor: SMLWorkflowRuntimeDescriptor,
+        action: SMLWorkflowControlAction,
+        task: String = "TASK-ROUTER",
+        arguments: SMLObject? = nil,
+        expectedState: SMLObject = [:],
+        role: String? = nil
+    ) -> SMLCommandEnvelope {
+        SMLCommandEnvelope(
+            commandID: "resolver-\(action.rawValue)",
+            actor: "model.onyx",
+            role: role ?? descriptor.role,
+            task: task,
+            op: action.runtimeOperation,
+            arguments: arguments ?? validWorkflowArguments(descriptor),
+            expectedState: expectedState,
+            issuedAtEpoch: 1_000
+        )
+    }
+
+    private func validWorkflowArguments(
+        _ descriptor: SMLWorkflowRuntimeDescriptor
+    ) -> SMLObject {
+        [
+            "workflow_id": .string(descriptor.workflowID),
+            "workflow_version": .string(descriptor.workflowVersion),
+        ]
     }
 
     private func capabilityWorkflow(

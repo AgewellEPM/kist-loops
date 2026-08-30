@@ -4177,7 +4177,9 @@ extension KistRunner {
     private static func smlRuntimeScaffoldAPIScript(
         for attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
     ) -> [SMLRuntimeHostAPIRequestSpec] {
-        return [SMLWorkflowControlAction.describe, .start, .watch, .receipts].compactMap { action in
+        let workflowRequests: [SMLRuntimeHostAPIRequestSpec] = [
+            SMLWorkflowControlAction.describe, .start, .watch, .receipts,
+        ].compactMap { action in
             let matchingEndpoints = attachment.apiRoutes.filter {
                 $0.action == action
             }.sorted {
@@ -4194,6 +4196,20 @@ extension KistRunner {
                 body: smlRuntimeReplaceTaskID(in: example.body)
             )
         }
+        let metadata = attachment.workflowMetadata
+        let metadataRequests = [
+            metadata.attachmentPath,
+            metadata.replMountPath,
+            metadata.apiMountPath,
+            metadata.modelToolPath,
+            metadata.onyxDriverPath,
+            metadata.skillTreePath,
+            metadata.toolBindingsPath,
+            metadata.planningBundlePath,
+        ].map { path in
+            SMLRuntimeHostAPIRequestSpec(method: .get, path: path)
+        }
+        return workflowRequests + metadataRequests
     }
 
     private static func smlRuntimeScaffoldREPLScript(
@@ -4219,8 +4235,17 @@ extension KistRunner {
             "api",
             "model",
             "onyx",
+            "skill-tree",
+            "tool-bindings",
             "planning",
             "attachment",
+            "repl-mount",
+            "api-mount",
+            "model-tool",
+            "onyx-driver",
+            "skill-tree-json",
+            "tool-bindings-json",
+            "planning-bundle",
         ] + runtimeLines + [
             "# Approval/refusal/rollback commands require the latest task_revision returned by watch.",
             "exit",
@@ -4231,13 +4256,37 @@ extension KistRunner {
     private static func smlRuntimeScaffoldModelScript(
         for attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
     ) -> String {
-        ([
+        let fileStem = smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+        let metadata = attachment.workflowMetadata
+        let metadataContract = [
+            "attachment GET \(metadata.attachmentPath)",
+            "REPL mount GET \(metadata.replMountPath)",
+            "API mount GET \(metadata.apiMountPath)",
+            "model tool GET \(metadata.modelToolPath)",
+            "Onyx driver GET \(metadata.onyxDriverPath)",
+            "skill tree GET \(metadata.skillTreePath)",
+            "tool bindings GET \(metadata.toolBindingsPath)",
+            "planning bundle GET \(metadata.planningBundlePath)",
+        ].joined(separator: "; ")
+        let artifactContract = [
+            "attachments/\(fileStem).json",
+            "repl-mounts/\(fileStem).json",
+            "api-mounts/\(fileStem).json",
+            "model-tools/\(fileStem).json",
+            "onyx-drivers/\(fileStem).json",
+            "skill-trees/\(fileStem).json",
+            "tool-bindings/\(fileStem).json",
+            "planning/\(fileStem).json",
+        ].joined(separator: "; ")
+        return ([
             "# Generated SML workflow model-router prompt script for \(attachment.workflowID)",
             "# Run from the scaffold directory with a native-tool provider/model:",
-            "# kist --sml-runtime-model-script . --sml-model-script model-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).prompts --provider <provider> --model <model>",
-            "Start \(attachment.workflowID) as task TASK-SCAFFOLD with the declared sample input.",
-            "Watch the current \(attachment.workflowID) task and summarize the waiting instruction.",
-            "List receipts for \(attachment.workflowID); treat only accepted or sealed receipts as proof.",
+            "# kist --sml-runtime-model-script . --sml-model-script model-scripts/\(fileStem).prompts --provider <provider> --model <model>",
+            "# Runtime metadata APIs: \(metadataContract)",
+            "# Local scaffold artifacts: \(artifactContract)",
+            "Start \(attachment.workflowID) as task TASK-SCAFFOLD with the declared sample input after consulting the workflow metadata APIs (\(metadataContract)) and local scaffold artifacts (\(artifactContract)); use the planning bundle, skill tree, tool bindings, model tool, and Onyx driver as the operating contract, and propose the smallest admitted command.",
+            "Watch the current \(attachment.workflowID) task using the remembered task id and the same planning/skill/tool/Onyx contract; summarize only the current waiting instruction and next bounded step.",
+            "List receipts for \(attachment.workflowID) using the workflow metadata contract; treat only accepted or sealed receipts as proof and keep advisory prose separate from verified completion.",
             "",
         ]).joined(separator: "\n")
     }

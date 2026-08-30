@@ -18,8 +18,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(
             Set(replCommands.map(\.verb)),
             [
-                "api", "approve", "attachment", "describe", "exit", "help", "model", "onyx",
-                "planning", "receipts", "refuse", "rollback", "schema", "start", "watch",
+                "api", "api-mount", "approve", "attachment", "describe", "exit", "help",
+                "model", "model-tool", "onyx", "onyx-driver", "planning", "planning-bundle",
+                "receipts", "refuse", "repl-mount", "rollback", "schema", "skill-tree",
+                "skill-tree-json", "start", "tool-bindings", "tool-bindings-json", "watch",
             ]
         )
         let replStart = try XCTUnwrap(replCommands.first { $0.verb == "start" })
@@ -40,10 +42,31 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let replAttachment = try XCTUnwrap(replCommands.first { $0.verb == "attachment" })
         XCTAssertEqual(replAttachment.kind, .local)
         XCTAssertEqual(replAttachment.aliases, ["manifest"])
+        let replSkillTree = try XCTUnwrap(replCommands.first { $0.verb == "skill-tree" })
+        XCTAssertEqual(replSkillTree.kind, .local)
+        XCTAssertEqual(replSkillTree.aliases, ["skills"])
+        let replToolBindings = try XCTUnwrap(replCommands.first { $0.verb == "tool-bindings" })
+        XCTAssertEqual(replToolBindings.kind, .local)
+        XCTAssertEqual(replToolBindings.aliases, ["tools"])
+        for verb in [
+            "repl-mount", "api-mount", "model-tool", "onyx-driver", "skill-tree-json",
+            "tool-bindings-json", "planning-bundle",
+        ] {
+            let replArtifact = try XCTUnwrap(replCommands.first { $0.verb == verb })
+            XCTAssertEqual(replArtifact.kind, .local)
+            XCTAssertFalse(replArtifact.requiresTask)
+            XCTAssertFalse(replArtifact.changesTaskState)
+        }
         let replExamples = surface.replExamples()
-        XCTAssertTrue(replExamples.contains {
-            $0.verb == "attachment" && $0.line == "attachment"
-        })
+        for verb in [
+            "api", "model", "onyx", "skill-tree", "tool-bindings", "planning",
+            "attachment", "repl-mount", "api-mount", "model-tool", "onyx-driver",
+            "skill-tree-json", "tool-bindings-json", "planning-bundle",
+        ] {
+            XCTAssertTrue(replExamples.contains {
+                $0.verb == verb && $0.line == verb
+            })
+        }
         XCTAssertTrue(replExamples.contains {
             $0.verb == "start" && $0.line == #"start TASK-ID {"target":"target"}"#
         })
@@ -131,6 +154,17 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(bundle.descriptor.graphSummary.contains("plan CALL_MODEL [content.plan] -> write"))
         XCTAssertTrue(bundle.descriptor.repl.helpText.contains("graph:"))
         XCTAssertTrue(bundle.descriptor.repl.helpText.contains("examples:"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("api - Print the generated workflow API endpoints"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("model - Print the generated model tool"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("onyx - Print the generated Onyx driver"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("skill-tree - Print the generated skill tree"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("tool-bindings - Print generated tool bindings"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("planning - Print the generated planning units"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("repl-mount - Print the machine-readable REPL mount descriptor"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("api-mount - Print the machine-readable workflow API mount routes"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("model-tool - Print the machine-readable model tool export"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("onyx-driver - Print the machine-readable Onyx driver manifest"))
+        XCTAssertTrue(bundle.descriptor.repl.helpText.contains("planning-bundle - Print the machine-readable planning bundle"))
         XCTAssertTrue(bundle.descriptor.repl.commands.contains {
             $0.verb == "start"
                 && $0.jsonBodyKind == .workflowInput
@@ -138,6 +172,9 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         })
         XCTAssertTrue(bundle.descriptor.repl.examples.contains {
             $0.line == #"start TASK-ID {"target":"target"}"#
+        })
+        XCTAssertTrue(bundle.descriptor.repl.examples.contains {
+            $0.verb == "planning" && $0.line == "planning"
         })
         XCTAssertEqual(bundle.descriptor.api.basePath, "/automation")
         XCTAssertEqual(
@@ -216,6 +253,8 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(help.output.contains("api"))
         XCTAssertTrue(help.output.contains("model"))
         XCTAssertTrue(help.output.contains("onyx"))
+        XCTAssertTrue(help.output.contains("skill-tree"))
+        XCTAssertTrue(help.output.contains("tool-bindings"))
         XCTAssertTrue(help.output.contains("planning"))
         XCTAssertTrue(help.output.contains("attachment"))
         let apiInfo = try await replSession.submit("api")
@@ -246,14 +285,107 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let onyxInfo = try await replSession.submit("onyx")
         XCTAssertNil(onyxInfo.command)
         XCTAssertTrue(onyxInfo.output.contains(bundle.onyxDriver.driverID))
+        XCTAssertTrue(onyxInfo.output.contains("onyx metadata:"))
+        XCTAssertTrue(onyxInfo.output.contains("onyx driver: GET /automation/runtime/onyx-drivers/content.release"))
+        XCTAssertTrue(onyxInfo.output.contains("skill tree: GET /automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(onyxInfo.output.contains("tool bindings: GET /automation/runtime/tool-bindings/content.release"))
+        XCTAssertTrue(onyxInfo.output.contains("planning bundle: GET /automation/runtime/planning/content.release"))
+        XCTAssertTrue(onyxInfo.output.contains("model tool: GET /automation/runtime/model-tools/content.release"))
         XCTAssertTrue(onyxInfo.output.contains("skill tree:"))
+        let skillTreeInfo = try await replSession.submit("skill-tree")
+        XCTAssertNil(skillTreeInfo.command)
+        XCTAssertTrue(skillTreeInfo.output.contains("skill tree metadata:"))
+        XCTAssertTrue(skillTreeInfo.output.contains("skill tree: GET /automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(skillTreeInfo.output.contains("tool bindings: GET /automation/runtime/tool-bindings/content.release"))
+        XCTAssertTrue(skillTreeInfo.output.contains("planning bundle: GET /automation/runtime/planning/content.release"))
+        XCTAssertTrue(skillTreeInfo.output.contains("plan:CALL_MODEL"))
+        let toolBindingsInfo = try await replSession.submit("tool-bindings")
+        XCTAssertNil(toolBindingsInfo.command)
+        XCTAssertTrue(toolBindingsInfo.output.contains("tool binding metadata:"))
+        XCTAssertTrue(toolBindingsInfo.output.contains("tool bindings: GET /automation/runtime/tool-bindings/content.release"))
+        XCTAssertTrue(toolBindingsInfo.output.contains("skill tree: GET /automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(toolBindingsInfo.output.contains("planning bundle: GET /automation/runtime/planning/content.release"))
+        XCTAssertTrue(toolBindingsInfo.output.contains("write:CALL_TOOL"))
+        XCTAssertTrue(toolBindingsInfo.output.contains("ref:repository.write"))
         let planningInfo = try await replSession.submit("planning")
         XCTAssertNil(planningInfo.command)
+        XCTAssertTrue(planningInfo.output.contains("planning metadata:"))
+        XCTAssertTrue(planningInfo.output.contains("planning bundle: GET /automation/runtime/planning/content.release"))
+        XCTAssertTrue(planningInfo.output.contains("skill tree: GET /automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(planningInfo.output.contains("tool bindings: GET /automation/runtime/tool-bindings/content.release"))
+        XCTAssertTrue(planningInfo.output.contains("model tool: GET /automation/runtime/model-tools/content.release"))
+        XCTAssertTrue(planningInfo.output.contains("api mount: GET /automation/runtime/api-mounts/content.release"))
+        XCTAssertTrue(planningInfo.output.contains("repl mount: GET /automation/runtime/repl-mounts/content.release"))
         XCTAssertTrue(planningInfo.output.contains("unit:model_reasoning"))
         XCTAssertTrue(planningInfo.output.contains("unit:external_capability"))
         let planningManifest = SMLWorkflowRuntimePlanningManifest(descriptors: [bundle.descriptor])
         XCTAssertEqual(planningManifest.schemaVersion, SMLWorkflowRuntimePlanningManifest.currentSchemaVersion)
         XCTAssertEqual(planningManifest.commandBindings.count, 7)
+        let workflowMetadata = SMLWorkflowRuntimeWorkflowMetadataLinks(bundle.descriptor)
+        let replMountInfo = try await replSession.submit("repl-mount")
+        XCTAssertNil(replMountInfo.command)
+        let replMount = try JSONDecoder().decode(
+            SMLWorkflowRuntimeREPLMount.self,
+            from: Data(replMountInfo.output.utf8)
+        )
+        XCTAssertEqual(replMount.workflowID, "content.release")
+        XCTAssertEqual(replMount.workflowMetadata, workflowMetadata)
+        XCTAssertEqual(replMount.commandBindings, planningManifest.commandBindings)
+        XCTAssertTrue(replMount.commands.contains { $0.verb == "api-mount" })
+        let apiMountInfo = try await replSession.submit("api-mount")
+        XCTAssertNil(apiMountInfo.command)
+        let apiMounts = try JSONDecoder().decode(
+            [SMLWorkflowRuntimeAPIMount].self,
+            from: Data(apiMountInfo.output.utf8)
+        )
+        XCTAssertEqual(apiMounts.count, 7)
+        let apiStartMount = try XCTUnwrap(apiMounts.first { $0.action == .start })
+        XCTAssertEqual(apiStartMount.operationID, "start_workflow_task_ContentRelease")
+        XCTAssertEqual(apiStartMount.authority, .hostCommandGateway)
+        XCTAssertEqual(apiStartMount.pathTemplate, "/automation/workflows/content.release/tasks")
+        let modelToolInfo = try await replSession.submit("model-tool")
+        XCTAssertNil(modelToolInfo.command)
+        let modelToolExport = try JSONDecoder().decode(
+            SMLWorkflowRuntimeModelToolExport.self,
+            from: Data(modelToolInfo.output.utf8)
+        )
+        XCTAssertEqual(modelToolExport.workflowID, "content.release")
+        XCTAssertEqual(modelToolExport.tool, bundle.descriptor.model.tool)
+        XCTAssertEqual(modelToolExport.allowedActions, bundle.descriptor.model.allowedActions)
+        XCTAssertEqual(modelToolExport.maximumCommandRounds, bundle.descriptor.model.maximumCommandRounds)
+        XCTAssertEqual(modelToolExport.workflowMetadata, workflowMetadata)
+        let onyxDriverInfo = try await replSession.submit("onyx-driver")
+        XCTAssertNil(onyxDriverInfo.command)
+        let onyxDriver = try JSONDecoder().decode(
+            SMLOnyxDriverManifest.self,
+            from: Data(onyxDriverInfo.output.utf8)
+        )
+        XCTAssertEqual(onyxDriver, bundle.onyxDriver)
+        let skillTreeJSONInfo = try await replSession.submit("skill-tree-json")
+        XCTAssertNil(skillTreeJSONInfo.command)
+        let skillTreeJSON = try JSONDecoder().decode(
+            [SMLOnyxSkillNode].self,
+            from: Data(skillTreeJSONInfo.output.utf8)
+        )
+        XCTAssertEqual(skillTreeJSON, bundle.onyxDriver.skillTree)
+        let toolBindingsJSONInfo = try await replSession.submit("tool-bindings-json")
+        XCTAssertNil(toolBindingsJSONInfo.command)
+        let toolBindingsJSON = try JSONDecoder().decode(
+            [SMLOnyxToolBinding].self,
+            from: Data(toolBindingsJSONInfo.output.utf8)
+        )
+        XCTAssertEqual(toolBindingsJSON, bundle.onyxDriver.tools)
+        let planningBundleInfo = try await replSession.submit("planning-bundle")
+        XCTAssertNil(planningBundleInfo.command)
+        let planningBundle = try JSONDecoder().decode(
+            SMLWorkflowRuntimePlanningWorkflowBundle.self,
+            from: Data(planningBundleInfo.output.utf8)
+        )
+        XCTAssertEqual(planningBundle.workflowID, "content.release")
+        XCTAssertEqual(planningBundle.workflowMetadata, workflowMetadata)
+        XCTAssertEqual(planningBundle.skillIndex, planningManifest.skillIndex)
+        XCTAssertEqual(planningBundle.toolBindings, bundle.onyxDriver.tools)
+        XCTAssertEqual(planningBundle.commandBindings, planningManifest.commandBindings)
         let startBinding = try XCTUnwrap(planningManifest.commandBindings.first {
             $0.action == .start
         })
@@ -342,10 +474,45 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             attachmentDescriptor.runtimeWorkflowPlanningPath,
             "/automation/runtime/planning/content.release"
         )
+        XCTAssertEqual(attachmentDescriptor.workflowMetadata.workflowID, "content.release")
+        XCTAssertEqual(attachmentDescriptor.workflowMetadata.workflowVersion, "1.0.0")
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.attachmentPath,
+            attachmentDescriptor.runtimeWorkflowAttachmentPath
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.replMountPath,
+            attachmentDescriptor.runtimeWorkflowREPLMountPath
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.apiMountPath,
+            attachmentDescriptor.runtimeWorkflowAPIMountPath
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.modelToolPath,
+            attachmentDescriptor.runtimeWorkflowModelToolPath
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.onyxDriverPath,
+            attachmentDescriptor.runtimeWorkflowOnyxDriverPath
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.skillTreePath,
+            attachmentDescriptor.runtimeWorkflowSkillTreePath
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.toolBindingsPath,
+            attachmentDescriptor.runtimeWorkflowToolBindingsPath
+        )
+        XCTAssertEqual(
+            attachmentDescriptor.workflowMetadata.planningBundlePath,
+            attachmentDescriptor.runtimeWorkflowPlanningPath
+        )
         let legacyAttachmentData = try JSONEncoder().encode(attachmentDescriptor)
         var legacyAttachmentObject = try XCTUnwrap(
             JSONSerialization.jsonObject(with: legacyAttachmentData) as? [String: Any]
         )
+        legacyAttachmentObject.removeValue(forKey: "workflowMetadata")
         legacyAttachmentObject.removeValue(forKey: "runtimeWorkflowOnyxDriverPath")
         legacyAttachmentObject.removeValue(forKey: "runtimeWorkflowREPLMountPath")
         legacyAttachmentObject.removeValue(forKey: "runtimeWorkflowAPIMountPath")
@@ -385,6 +552,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             legacyAttachmentDecoded.runtimeWorkflowPlanningPath,
             "/automation/runtime/planning/content.release"
         )
+        XCTAssertEqual(legacyAttachmentDecoded.workflowMetadata, attachmentDescriptor.workflowMetadata)
         XCTAssertEqual(attachmentDescriptor.replCommands.first { $0.verb == "attachment" }?.aliases, ["manifest"])
         XCTAssertEqual(attachmentDescriptor.apiCatalog.endpoints.count, 7)
         XCTAssertEqual(attachmentDescriptor.modelTool.name, SMLWorkflowModelAdapter.toolName)
@@ -2187,6 +2355,19 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             releaseAttachment.runtimeWorkflowPlanningPath,
             "/automation/runtime/planning/content.release"
         )
+        XCTAssertEqual(releaseAttachment.workflowMetadata, releaseWiring.workflowMetadata)
+        XCTAssertEqual(
+            releaseAttachment.workflowMetadata.attachmentPath,
+            releaseAttachment.runtimeWorkflowAttachmentPath
+        )
+        XCTAssertEqual(
+            releaseAttachment.workflowMetadata.modelToolPath,
+            releaseAttachment.runtimeWorkflowModelToolPath
+        )
+        XCTAssertEqual(
+            releaseAttachment.workflowMetadata.planningBundlePath,
+            releaseAttachment.runtimeWorkflowPlanningPath
+        )
         XCTAssertEqual(releaseAttachment.plannerEntrypoint, "plan")
         XCTAssertEqual(releaseAttachment.channels, [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
@@ -2216,6 +2397,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         var legacyRuntimeAttachmentObject = try XCTUnwrap(
             JSONSerialization.jsonObject(with: legacyRuntimeAttachmentData) as? [String: Any]
         )
+        legacyRuntimeAttachmentObject.removeValue(forKey: "workflowMetadata")
         legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeAttachmentsPath")
         legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeWorkflowAttachmentPath")
         legacyRuntimeAttachmentObject.removeValue(forKey: "runtimeWorkflowREPLMountPath")
@@ -2262,6 +2444,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             legacyRuntimeAttachmentDecoded.runtimeWorkflowPlanningPath,
             "/automation/runtime/planning/content.release"
         )
+        XCTAssertEqual(legacyRuntimeAttachmentDecoded.workflowMetadata, releaseAttachment.workflowMetadata)
         XCTAssertEqual(releaseAttachment.toolReferences, [
             "artifact_verified", "content.plan", "repository.write",
         ])
@@ -3969,10 +4152,27 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         guard case .local(let onyxInfo) = try repl.compile("onyx", issuedAtEpoch: 1_002) else {
             return XCTFail("expected local Onyx metadata")
         }
+        XCTAssertTrue(onyxInfo.contains("onyx metadata:"))
+        XCTAssertTrue(onyxInfo.contains("onyx driver: GET /v1/runtime/onyx-drivers/content.release"))
+        XCTAssertTrue(onyxInfo.contains("planning bundle: GET /v1/runtime/planning/content.release"))
         XCTAssertTrue(onyxInfo.contains("skill tree:"))
+        guard case .local(let skillTreeInfo) = try repl.compile("skills", issuedAtEpoch: 1_002) else {
+            return XCTFail("expected local skill tree metadata")
+        }
+        XCTAssertTrue(skillTreeInfo.contains("skill tree metadata:"))
+        XCTAssertTrue(skillTreeInfo.contains("skill tree: GET /v1/runtime/skill-trees/content.release"))
+        guard case .local(let toolBindingsInfo) = try repl.compile("tools", issuedAtEpoch: 1_002) else {
+            return XCTFail("expected local tool binding metadata")
+        }
+        XCTAssertTrue(toolBindingsInfo.contains("tool binding metadata:"))
+        XCTAssertTrue(toolBindingsInfo.contains("tool bindings: GET /v1/runtime/tool-bindings/content.release"))
         guard case .local(let planningInfo) = try repl.compile("planning", issuedAtEpoch: 1_002) else {
             return XCTFail("expected local planning metadata")
         }
+        XCTAssertTrue(planningInfo.contains("planning metadata:"))
+        XCTAssertTrue(planningInfo.contains("planning bundle: GET /v1/runtime/planning/content.release"))
+        XCTAssertTrue(planningInfo.contains("api mount: GET /v1/runtime/api-mounts/content.release"))
+        XCTAssertTrue(planningInfo.contains("repl mount: GET /v1/runtime/repl-mounts/content.release"))
         XCTAssertTrue(planningInfo.contains("entrypoint: plan"))
 
         XCTAssertThrowsError(try repl.compile("start TASK-42 {}", issuedAtEpoch: 1_003)) {

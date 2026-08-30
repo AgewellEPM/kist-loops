@@ -54,6 +54,7 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
     public let runtimeWorkflowSkillTreePath: String
     public let runtimeWorkflowToolBindingsPath: String
     public let runtimeWorkflowPlanningPath: String
+    public let workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks
     public let replGrammar: String
     public let modelToolName: String
     public let modelRouterToolName: String
@@ -78,6 +79,7 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         runtimeWorkflowSkillTreePath: String? = nil,
         runtimeWorkflowToolBindingsPath: String? = nil,
         runtimeWorkflowPlanningPath: String? = nil,
+        workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks? = nil,
         replGrammar: String,
         modelToolName: String,
         modelRouterToolName: String,
@@ -142,6 +144,19 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
                 resourcePath: "planning",
                 workflowID: workflowID
             )
+        self.workflowMetadata = workflowMetadata ?? SMLWorkflowRuntimeWorkflowMetadataLinks(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            apiBasePath: apiBasePath,
+            attachmentPath: self.runtimeWorkflowAttachmentPath,
+            replMountPath: self.runtimeWorkflowREPLMountPath,
+            apiMountPath: self.runtimeWorkflowAPIMountPath,
+            modelToolPath: self.runtimeWorkflowModelToolPath,
+            onyxDriverPath: self.runtimeWorkflowOnyxDriverPath,
+            skillTreePath: self.runtimeWorkflowSkillTreePath,
+            toolBindingsPath: self.runtimeWorkflowToolBindingsPath,
+            planningBundlePath: self.runtimeWorkflowPlanningPath
+        )
         self.replGrammar = replGrammar
         self.modelToolName = modelToolName
         self.modelRouterToolName = modelRouterToolName
@@ -167,6 +182,7 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         case runtimeWorkflowSkillTreePath
         case runtimeWorkflowToolBindingsPath
         case runtimeWorkflowPlanningPath
+        case workflowMetadata
         case replGrammar
         case modelToolName
         case modelRouterToolName
@@ -222,6 +238,10 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
                 String.self,
                 forKey: .runtimeWorkflowPlanningPath
             ),
+            workflowMetadata: try container.decodeIfPresent(
+                SMLWorkflowRuntimeWorkflowMetadataLinks.self,
+                forKey: .workflowMetadata
+            ),
             replGrammar: try container.decode(String.self, forKey: .replGrammar),
             modelToolName: try container.decode(String.self, forKey: .modelToolName),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
@@ -249,6 +269,7 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         try container.encode(runtimeWorkflowSkillTreePath, forKey: .runtimeWorkflowSkillTreePath)
         try container.encode(runtimeWorkflowToolBindingsPath, forKey: .runtimeWorkflowToolBindingsPath)
         try container.encode(runtimeWorkflowPlanningPath, forKey: .runtimeWorkflowPlanningPath)
+        try container.encode(workflowMetadata, forKey: .workflowMetadata)
         try container.encode(replGrammar, forKey: .replGrammar)
         try container.encode(modelToolName, forKey: .modelToolName)
         try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
@@ -396,6 +417,7 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 apiBasePath: mount?.apiBasePath ?? "",
                 apiWorkflowPath: mount?.apiWorkflowPath,
                 apiRoutePaths: mount?.apiRoutes.map(\.pathTemplate) ?? [],
+                workflowMetadata: mount?.workflowMetadata,
                 replGrammar: mount?.repl.grammar ?? "",
                 modelToolName: mount?.modelToolName ?? "",
                 modelRouterToolName: mount?.modelRouterToolName ?? runtime.modelRouter.tool.name,
