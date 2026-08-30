@@ -19,6 +19,9 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let apiWorkflowPath: String
     public let runtimeAttachmentsPath: String
     public let runtimeWorkflowAttachmentPath: String
+    public let runtimeWorkflowREPLMountPath: String
+    public let runtimeWorkflowAPIMountPath: String
+    public let runtimeWorkflowModelToolPath: String
     public let runtimeWorkflowOnyxDriverPath: String
     public let runtimeWorkflowSkillTreePath: String
     public let runtimeWorkflowToolBindingsPath: String
@@ -57,6 +60,9 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         apiWorkflowPath: String? = nil,
         runtimeAttachmentsPath: String? = nil,
         runtimeWorkflowAttachmentPath: String? = nil,
+        runtimeWorkflowREPLMountPath: String? = nil,
+        runtimeWorkflowAPIMountPath: String? = nil,
+        runtimeWorkflowModelToolPath: String? = nil,
         runtimeWorkflowOnyxDriverPath: String? = nil,
         runtimeWorkflowSkillTreePath: String? = nil,
         runtimeWorkflowToolBindingsPath: String? = nil,
@@ -101,6 +107,24 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             ?? Self.runtimeWorkflowPath(
                 apiBasePath: apiBasePath,
                 resourcePath: "attachments",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowREPLMountPath = runtimeWorkflowREPLMountPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "repl-mounts",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowAPIMountPath = runtimeWorkflowAPIMountPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "api-mounts",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowModelToolPath = runtimeWorkflowModelToolPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "model-tools",
                 workflowID: workflowID
             )
         self.runtimeWorkflowOnyxDriverPath = runtimeWorkflowOnyxDriverPath
@@ -181,6 +205,9 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         case apiWorkflowPath
         case runtimeAttachmentsPath
         case runtimeWorkflowAttachmentPath
+        case runtimeWorkflowREPLMountPath
+        case runtimeWorkflowAPIMountPath
+        case runtimeWorkflowModelToolPath
         case runtimeWorkflowOnyxDriverPath
         case runtimeWorkflowSkillTreePath
         case runtimeWorkflowToolBindingsPath
@@ -246,6 +273,30 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         ) ?? Self.runtimeWorkflowPath(
             apiBasePath: apiBasePath,
             resourcePath: "attachments",
+            workflowID: workflowID
+        )
+        runtimeWorkflowREPLMountPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowREPLMountPath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "repl-mounts",
+            workflowID: workflowID
+        )
+        runtimeWorkflowAPIMountPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowAPIMountPath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "api-mounts",
+            workflowID: workflowID
+        )
+        runtimeWorkflowModelToolPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .runtimeWorkflowModelToolPath
+        ) ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "model-tools",
             workflowID: workflowID
         )
         runtimeWorkflowOnyxDriverPath = try container.decodeIfPresent(
@@ -710,7 +761,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 15
+    public static let currentSchemaVersion = 16
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

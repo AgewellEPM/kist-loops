@@ -496,6 +496,42 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 )
             }
         }
+        let workflowREPLMountPaths = Self.workflowMetadataPaths(
+            resources: [.workflowREPLMount],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowREPLMountExamples = Self.workflowMetadataExamples(
+            resources: [.workflowREPLMount],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowAPIMountPaths = Self.workflowMetadataPaths(
+            resources: [.workflowAPIMount],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowAPIMountExamples = Self.workflowMetadataExamples(
+            resources: [.workflowAPIMount],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowModelToolPaths = Self.workflowMetadataPaths(
+            resources: [.workflowModelTool],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
+        let workflowModelToolMetadataExamples = Self.workflowMetadataExamples(
+            resources: [.workflowModelTool],
+            workflowID: workflowID,
+            apiBasePath: replMount.apiBasePath,
+            metadataEndpoints: metadataEndpoints
+        )
         let workflowOnyxDriverPaths = Self.workflowMetadataPaths(
             resources: [.workflowOnyxDriver],
             workflowID: workflowID,
@@ -540,7 +576,9 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .hostCommandGateway,
                 readOnly: false,
                 summary: "Bind this workflow's generated REPL grammar to a host terminal loop.",
-                replExamples: replMount.examples
+                pathTemplates: workflowREPLMountPaths,
+                replExamples: replMount.examples,
+                apiExamples: workflowREPLMountExamples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .customAPI,
@@ -548,8 +586,8 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .hostCommandGateway,
                 readOnly: false,
                 summary: "Route generated HTTP/API endpoints through the shared runtime dispatcher.",
-                pathTemplates: apiRoutes.map(\.pathTemplate),
-                apiExamples: workflowAPIExamples
+                pathTemplates: apiRoutes.map(\.pathTemplate) + workflowAPIMountPaths,
+                apiExamples: workflowAPIExamples + workflowAPIMountExamples
             ),
             SMLWorkflowRuntimeHostBinding(
                 channel: .modelTool,
@@ -557,7 +595,9 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
                 authority: .hostCommandGateway,
                 readOnly: false,
                 summary: "Expose this workflow-local command proposal tool only behind host admission.",
+                pathTemplates: workflowModelToolPaths,
                 toolName: modelToolName,
+                apiExamples: workflowModelToolMetadataExamples,
                 modelToolExamples: modelToolExamples
             ),
             SMLWorkflowRuntimeHostBinding(
@@ -700,7 +740,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 13
+    public static let currentSchemaVersion = 14
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]
@@ -786,7 +826,7 @@ public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
             id: "serve_descriptor_metadata",
             entrypoint: "SMLWorkflowRuntimeAPI.handleMetadata(_:)",
             authority: .descriptorOnly,
-            summary: "Serve catalog, mount, launch, OpenAPI, planning, agent, host, attachment, model-router, and Onyx metadata."
+            summary: "Serve catalog, mount, launch, OpenAPI, planning, agent, host, attachment, REPL, API, model-tool, model-router, and Onyx metadata."
         ),
         SMLWorkflowRuntimeHostLaunchStep(
             id: "route_repl_and_api",

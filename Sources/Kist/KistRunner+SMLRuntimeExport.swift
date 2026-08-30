@@ -921,6 +921,9 @@ extension KistRunner {
         let planningBundlePath: String
         let runtimeWorkflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks
         let runtimeWorkflowAttachmentPath: String
+        let runtimeWorkflowREPLMountPath: String
+        let runtimeWorkflowAPIMountPath: String
+        let runtimeWorkflowModelToolPath: String
         let runtimeWorkflowOnyxDriverPath: String
         let runtimeWorkflowSkillTreePath: String
         let runtimeWorkflowToolBindingsPath: String
@@ -975,6 +978,9 @@ extension KistRunner {
             let metadata = KistRunner.smlRuntimeWorkflowMetadataLinks(for: attachment)
             runtimeWorkflowMetadata = metadata
             runtimeWorkflowAttachmentPath = metadata.attachmentPath
+            runtimeWorkflowREPLMountPath = metadata.replMountPath
+            runtimeWorkflowAPIMountPath = metadata.apiMountPath
+            runtimeWorkflowModelToolPath = metadata.modelToolPath
             runtimeWorkflowOnyxDriverPath = metadata.onyxDriverPath
             runtimeWorkflowSkillTreePath = metadata.skillTreePath
             runtimeWorkflowToolBindingsPath = metadata.toolBindingsPath
@@ -1056,6 +1062,9 @@ extension KistRunner {
             case planningBundlePath
             case runtimeWorkflowMetadata
             case runtimeWorkflowAttachmentPath
+            case runtimeWorkflowREPLMountPath
+            case runtimeWorkflowAPIMountPath
+            case runtimeWorkflowModelToolPath
             case runtimeWorkflowOnyxDriverPath
             case runtimeWorkflowSkillTreePath
             case runtimeWorkflowToolBindingsPath
@@ -1115,6 +1124,18 @@ extension KistRunner {
                 String.self,
                 forKey: .runtimeWorkflowAttachmentPath
             )
+            let decodedRuntimeWorkflowREPLMountPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowREPLMountPath
+            )
+            let decodedRuntimeWorkflowAPIMountPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowAPIMountPath
+            )
+            let decodedRuntimeWorkflowModelToolPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowModelToolPath
+            )
             let decodedRuntimeWorkflowOnyxDriverPath = try container.decodeIfPresent(
                 String.self,
                 forKey: .runtimeWorkflowOnyxDriverPath
@@ -1139,6 +1160,9 @@ extension KistRunner {
                 workflowVersion: workflowVersion,
                 apiBasePath: apiBasePath,
                 attachmentPath: decodedRuntimeWorkflowAttachmentPath,
+                replMountPath: decodedRuntimeWorkflowREPLMountPath,
+                apiMountPath: decodedRuntimeWorkflowAPIMountPath,
+                modelToolPath: decodedRuntimeWorkflowModelToolPath,
                 onyxDriverPath: decodedRuntimeWorkflowOnyxDriverPath,
                 skillTreePath: decodedRuntimeWorkflowSkillTreePath,
                 toolBindingsPath: decodedRuntimeWorkflowToolBindingsPath,
@@ -1146,6 +1170,9 @@ extension KistRunner {
             )
             runtimeWorkflowMetadata = metadata
             runtimeWorkflowAttachmentPath = decodedRuntimeWorkflowAttachmentPath ?? metadata.attachmentPath
+            runtimeWorkflowREPLMountPath = decodedRuntimeWorkflowREPLMountPath ?? metadata.replMountPath
+            runtimeWorkflowAPIMountPath = decodedRuntimeWorkflowAPIMountPath ?? metadata.apiMountPath
+            runtimeWorkflowModelToolPath = decodedRuntimeWorkflowModelToolPath ?? metadata.modelToolPath
             runtimeWorkflowOnyxDriverPath = decodedRuntimeWorkflowOnyxDriverPath ?? metadata.onyxDriverPath
             runtimeWorkflowSkillTreePath = decodedRuntimeWorkflowSkillTreePath ?? metadata.skillTreePath
             runtimeWorkflowToolBindingsPath = decodedRuntimeWorkflowToolBindingsPath ?? metadata.toolBindingsPath
@@ -1254,6 +1281,9 @@ extension KistRunner {
             try container.encode(planningBundlePath, forKey: .planningBundlePath)
             try container.encode(runtimeWorkflowMetadata, forKey: .runtimeWorkflowMetadata)
             try container.encode(runtimeWorkflowAttachmentPath, forKey: .runtimeWorkflowAttachmentPath)
+            try container.encode(runtimeWorkflowREPLMountPath, forKey: .runtimeWorkflowREPLMountPath)
+            try container.encode(runtimeWorkflowAPIMountPath, forKey: .runtimeWorkflowAPIMountPath)
+            try container.encode(runtimeWorkflowModelToolPath, forKey: .runtimeWorkflowModelToolPath)
             try container.encode(runtimeWorkflowOnyxDriverPath, forKey: .runtimeWorkflowOnyxDriverPath)
             try container.encode(runtimeWorkflowSkillTreePath, forKey: .runtimeWorkflowSkillTreePath)
             try container.encode(runtimeWorkflowToolBindingsPath, forKey: .runtimeWorkflowToolBindingsPath)
@@ -1285,7 +1315,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostScaffoldRunbook: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 7
+        static let currentSchemaVersion = 8
 
         let schemaVersion: Int
         let sourcePath: String
@@ -4070,6 +4100,7 @@ extension KistRunner {
                 : attachment.toolReferences.map { "`\($0)`" }.joined(separator: ", ")
             let planningID = attachment.planningWorkflowID ?? "none"
             let plannerEntrypoint = attachment.plannerEntrypoint ?? "none"
+            let runtimeMetadata = smlRuntimeWorkflowMetadataLinks(for: attachment)
             return """
             ### \(attachment.workflowID)
 
@@ -4087,7 +4118,7 @@ extension KistRunner {
             - Tool bindings: `tool-bindings/\(fileStem).json` (\(toolList))
             - Planning bundle: `planning/\(fileStem).json` (planning workflow `\(planningID)`, entrypoint `\(plannerEntrypoint)`)
             - Attachment manifest: `attachments/\(fileStem).json`
-            - Runtime metadata APIs: attachment `GET \(attachment.runtimeWorkflowAttachmentPath)`; Onyx driver `GET \(attachment.runtimeWorkflowOnyxDriverPath)`; skill tree `GET \(attachment.runtimeWorkflowSkillTreePath)`; tool bindings `GET \(attachment.runtimeWorkflowToolBindingsPath)`; planning bundle `GET \(attachment.runtimeWorkflowPlanningPath)`
+            - Runtime metadata APIs: attachment `GET \(runtimeMetadata.attachmentPath)`; REPL mount `GET \(runtimeMetadata.replMountPath)`; API mount `GET \(runtimeMetadata.apiMountPath)`; model tool `GET \(runtimeMetadata.modelToolPath)`; Onyx driver `GET \(runtimeMetadata.onyxDriverPath)`; skill tree `GET \(runtimeMetadata.skillTreePath)`; tool bindings `GET \(runtimeMetadata.toolBindingsPath)`; planning bundle `GET \(runtimeMetadata.planningBundlePath)`
             """
         }.joined(separator: "\n\n")
         let fileList = files.sorted {

@@ -7,7 +7,7 @@ import Foundation
 /// model router, and Onyx exports. It carries no actor, lease, credentials, runtime handle, replay
 /// state, or host authority; mutations still have to cross the runtime command gateway.
 public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 11
+    public static let currentSchemaVersion = 12
 
     public let schemaVersion: Int
     public let systemPrompt: String
@@ -103,6 +103,9 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
     public let apiBasePath: String
     public let apiWorkflowPath: String
     public let runtimeWorkflowAttachmentPath: String
+    public let runtimeWorkflowREPLMountPath: String
+    public let runtimeWorkflowAPIMountPath: String
+    public let runtimeWorkflowModelToolPath: String
     public let runtimeWorkflowOnyxDriverPath: String
     public let runtimeWorkflowSkillTreePath: String
     public let runtimeWorkflowToolBindingsPath: String
@@ -135,6 +138,9 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         apiBasePath: String,
         apiWorkflowPath: String? = nil,
         runtimeWorkflowAttachmentPath: String? = nil,
+        runtimeWorkflowREPLMountPath: String? = nil,
+        runtimeWorkflowAPIMountPath: String? = nil,
+        runtimeWorkflowModelToolPath: String? = nil,
         runtimeWorkflowOnyxDriverPath: String? = nil,
         runtimeWorkflowSkillTreePath: String? = nil,
         runtimeWorkflowToolBindingsPath: String? = nil,
@@ -174,6 +180,24 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             ?? Self.runtimeWorkflowPath(
                 apiBasePath: apiBasePath,
                 resourcePath: "attachments",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowREPLMountPath = runtimeWorkflowREPLMountPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "repl-mounts",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowAPIMountPath = runtimeWorkflowAPIMountPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "api-mounts",
+                workflowID: workflowID
+            )
+        self.runtimeWorkflowModelToolPath = runtimeWorkflowModelToolPath
+            ?? Self.runtimeWorkflowPath(
+                apiBasePath: apiBasePath,
+                resourcePath: "model-tools",
                 workflowID: workflowID
             )
         self.runtimeWorkflowOnyxDriverPath = runtimeWorkflowOnyxDriverPath
@@ -347,6 +371,9 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         onyx driver: \(onyxDriverID)
         workflow metadata:
         attachment: GET \(runtimeWorkflowAttachmentPath)
+        repl mount: GET \(runtimeWorkflowREPLMountPath)
+        api mount: GET \(runtimeWorkflowAPIMountPath)
+        model tool: GET \(runtimeWorkflowModelToolPath)
         onyx driver: GET \(runtimeWorkflowOnyxDriverPath)
         skill tree: GET \(runtimeWorkflowSkillTreePath)
         tool bindings: GET \(runtimeWorkflowToolBindingsPath)
@@ -397,6 +424,9 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         case apiBasePath
         case apiWorkflowPath
         case runtimeWorkflowAttachmentPath
+        case runtimeWorkflowREPLMountPath
+        case runtimeWorkflowAPIMountPath
+        case runtimeWorkflowModelToolPath
         case runtimeWorkflowOnyxDriverPath
         case runtimeWorkflowSkillTreePath
         case runtimeWorkflowToolBindingsPath
@@ -442,6 +472,18 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             runtimeWorkflowAttachmentPath: try container.decodeIfPresent(
                 String.self,
                 forKey: .runtimeWorkflowAttachmentPath
+            ),
+            runtimeWorkflowREPLMountPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowREPLMountPath
+            ),
+            runtimeWorkflowAPIMountPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowAPIMountPath
+            ),
+            runtimeWorkflowModelToolPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowModelToolPath
             ),
             runtimeWorkflowOnyxDriverPath: try container.decodeIfPresent(
                 String.self,
@@ -511,6 +553,9 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         try container.encode(apiBasePath, forKey: .apiBasePath)
         try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(runtimeWorkflowAttachmentPath, forKey: .runtimeWorkflowAttachmentPath)
+        try container.encode(runtimeWorkflowREPLMountPath, forKey: .runtimeWorkflowREPLMountPath)
+        try container.encode(runtimeWorkflowAPIMountPath, forKey: .runtimeWorkflowAPIMountPath)
+        try container.encode(runtimeWorkflowModelToolPath, forKey: .runtimeWorkflowModelToolPath)
         try container.encode(runtimeWorkflowOnyxDriverPath, forKey: .runtimeWorkflowOnyxDriverPath)
         try container.encode(runtimeWorkflowSkillTreePath, forKey: .runtimeWorkflowSkillTreePath)
         try container.encode(runtimeWorkflowToolBindingsPath, forKey: .runtimeWorkflowToolBindingsPath)

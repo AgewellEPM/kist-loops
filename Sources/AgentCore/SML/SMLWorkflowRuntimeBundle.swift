@@ -696,6 +696,9 @@ public struct SMLWorkflowRuntimeWorkflowMetadataLinks: Sendable, Codable, Equata
     public let workflowID: String
     public let workflowVersion: String
     public let attachmentPath: String
+    public let replMountPath: String
+    public let apiMountPath: String
+    public let modelToolPath: String
     public let onyxDriverPath: String
     public let skillTreePath: String
     public let toolBindingsPath: String
@@ -706,6 +709,9 @@ public struct SMLWorkflowRuntimeWorkflowMetadataLinks: Sendable, Codable, Equata
         workflowVersion: String,
         apiBasePath: String,
         attachmentPath: String? = nil,
+        replMountPath: String? = nil,
+        apiMountPath: String? = nil,
+        modelToolPath: String? = nil,
         onyxDriverPath: String? = nil,
         skillTreePath: String? = nil,
         toolBindingsPath: String? = nil,
@@ -716,6 +722,21 @@ public struct SMLWorkflowRuntimeWorkflowMetadataLinks: Sendable, Codable, Equata
         self.attachmentPath = attachmentPath ?? Self.runtimeWorkflowPath(
             apiBasePath: apiBasePath,
             resourcePath: "attachments",
+            workflowID: workflowID
+        )
+        self.replMountPath = replMountPath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "repl-mounts",
+            workflowID: workflowID
+        )
+        self.apiMountPath = apiMountPath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "api-mounts",
+            workflowID: workflowID
+        )
+        self.modelToolPath = modelToolPath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "model-tools",
             workflowID: workflowID
         )
         self.onyxDriverPath = onyxDriverPath ?? Self.runtimeWorkflowPath(
@@ -746,6 +767,59 @@ public struct SMLWorkflowRuntimeWorkflowMetadataLinks: Sendable, Codable, Equata
             workflowVersion: descriptor.workflowVersion,
             apiBasePath: descriptor.api.basePath
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case attachmentPath
+        case replMountPath
+        case apiMountPath
+        case modelToolPath
+        case onyxDriverPath
+        case skillTreePath
+        case toolBindingsPath
+        case planningBundlePath
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
+        let workflowVersion = try container.decode(String.self, forKey: .workflowVersion)
+        let attachmentPath = try container.decode(String.self, forKey: .attachmentPath)
+        let apiBasePath = Self.apiBasePath(fromRuntimeWorkflowPath: attachmentPath)
+        self.init(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            apiBasePath: apiBasePath,
+            attachmentPath: attachmentPath,
+            replMountPath: try container.decodeIfPresent(String.self, forKey: .replMountPath),
+            apiMountPath: try container.decodeIfPresent(String.self, forKey: .apiMountPath),
+            modelToolPath: try container.decodeIfPresent(String.self, forKey: .modelToolPath),
+            onyxDriverPath: try container.decodeIfPresent(String.self, forKey: .onyxDriverPath),
+            skillTreePath: try container.decodeIfPresent(String.self, forKey: .skillTreePath),
+            toolBindingsPath: try container.decodeIfPresent(String.self, forKey: .toolBindingsPath),
+            planningBundlePath: try container.decodeIfPresent(String.self, forKey: .planningBundlePath)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(attachmentPath, forKey: .attachmentPath)
+        try container.encode(replMountPath, forKey: .replMountPath)
+        try container.encode(apiMountPath, forKey: .apiMountPath)
+        try container.encode(modelToolPath, forKey: .modelToolPath)
+        try container.encode(onyxDriverPath, forKey: .onyxDriverPath)
+        try container.encode(skillTreePath, forKey: .skillTreePath)
+        try container.encode(toolBindingsPath, forKey: .toolBindingsPath)
+        try container.encode(planningBundlePath, forKey: .planningBundlePath)
+    }
+
+    private static func apiBasePath(fromRuntimeWorkflowPath path: String) -> String {
+        guard let range = path.range(of: "/runtime/") else { return "/v1" }
+        return String(path[..<range.lowerBound])
     }
 
     private static func runtimeWorkflowPath(
@@ -847,6 +921,9 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
     case hostWiring = "host-wiring"
     case attachments
     case workflowAttachment = "workflow-attachment"
+    case workflowREPLMount = "workflow-repl-mount"
+    case workflowAPIMount = "workflow-api-mount"
+    case workflowModelTool = "workflow-model-tool"
     case workflowOnyxDriver = "workflow-onyx-driver"
     case workflowSkillTree = "workflow-skill-tree"
     case workflowToolBindings = "workflow-tool-bindings"
@@ -865,6 +942,12 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
         switch self {
         case .workflowAttachment:
             return "attachments/{workflow_id}"
+        case .workflowREPLMount:
+            return "repl-mounts/{workflow_id}"
+        case .workflowAPIMount:
+            return "api-mounts/{workflow_id}"
+        case .workflowModelTool:
+            return "model-tools/{workflow_id}"
         case .workflowOnyxDriver:
             return "onyx-drivers/{workflow_id}"
         case .workflowSkillTree:
@@ -903,6 +986,12 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "Return per-workflow attachment manifests for REPL/API/model/Onyx/planning adapters"
         case .workflowAttachment:
             return "Return one workflow attachment manifest for REPL/API/model/Onyx/planning adapters"
+        case .workflowREPLMount:
+            return "Return one workflow REPL mount descriptor for a mounted SML workflow"
+        case .workflowAPIMount:
+            return "Return one workflow API mount descriptor list for a mounted SML workflow"
+        case .workflowModelTool:
+            return "Return one workflow native model tool descriptor for a mounted SML workflow"
         case .workflowOnyxDriver:
             return "Return one provider-neutral Onyx driver manifest for a mounted SML workflow"
         case .workflowSkillTree:
@@ -3441,6 +3530,25 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
                 resource: resource
             )
             return try SMLWorkflowRuntimePayloadCodec.encode(attachment)
+        case .workflowREPLMount:
+            let attachment = try workflowAttachment(
+                from: pathParameters,
+                resource: resource
+            )
+            return try SMLWorkflowRuntimePayloadCodec.encode(attachment.replMount)
+        case .workflowAPIMount:
+            let attachment = try workflowAttachment(
+                from: pathParameters,
+                resource: resource
+            )
+            return try SMLWorkflowRuntimePayloadCodec.encode(attachment.apiRoutes)
+        case .workflowModelTool:
+            let workflowID = try workflowID(from: pathParameters, resource: resource)
+            return try SMLWorkflowRuntimePayloadCodec.encode(
+                SMLWorkflowRuntimeModelToolExport(
+                    registry.descriptor(workflowID: workflowID)
+                )
+            )
         case .workflowOnyxDriver:
             let workflowID = try workflowID(from: pathParameters, resource: resource)
             guard let driver = registry.catalog.onyxDrivers.first(where: {
@@ -5304,6 +5412,18 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 workflow,
                 resourcePath: "attachments"
             )),
+            "replMount": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "repl-mounts"
+            )),
+            "apiMount": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "api-mounts"
+            )),
+            "modelTool": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "model-tools"
+            )),
             "onyxDriver": .string(runtimeWorkflowPath(
                 workflow,
                 resourcePath: "onyx-drivers"
@@ -5447,6 +5567,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "workflowID": .string(metadata.workflowID),
             "workflowVersion": .string(metadata.workflowVersion),
             "attachmentPath": .string(metadata.attachmentPath),
+            "replMountPath": .string(metadata.replMountPath),
+            "apiMountPath": .string(metadata.apiMountPath),
+            "modelToolPath": .string(metadata.modelToolPath),
             "onyxDriverPath": .string(metadata.onyxDriverPath),
             "skillTreePath": .string(metadata.skillTreePath),
             "toolBindingsPath": .string(metadata.toolBindingsPath),
