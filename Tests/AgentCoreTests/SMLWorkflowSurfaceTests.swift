@@ -1065,6 +1065,20 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(decoded.modelRouter.workflowIDs, ["content.release"])
         XCTAssertEqual(decoded.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(decoded.modelRouter.tool.parameters.map(\.name), ["workflow_id", "line"])
+        let decodedRouterMetadata = try XCTUnwrap(decoded.modelRouter.workflowMetadata.first)
+        XCTAssertEqual(decodedRouterMetadata.workflowID, "content.release")
+        XCTAssertEqual(
+            decodedRouterMetadata.attachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            decodedRouterMetadata.onyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            decodedRouterMetadata.planningBundlePath,
+            "/automation/runtime/planning/content.release"
+        )
         XCTAssertTrue(decoded.modelRouter.examples.contains {
             $0.toolName == SMLWorkflowRuntimeModelAdapter.toolName
                 && $0.workflowID == "content.release"
@@ -1073,6 +1087,16 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                     "line": .string(#"start TASK-ID {"target":"target"}"#),
                 ]
         })
+        let legacyRouterData = try JSONEncoder().encode(decoded.modelRouter)
+        var legacyRouterObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: legacyRouterData) as? [String: Any]
+        )
+        legacyRouterObject.removeValue(forKey: "workflowMetadata")
+        let legacyRouter = try JSONDecoder().decode(
+            SMLWorkflowRuntimeModelRouterDescriptor.self,
+            from: JSONSerialization.data(withJSONObject: legacyRouterObject, options: [.sortedKeys])
+        )
+        XCTAssertEqual(legacyRouter.workflowMetadata, [])
         XCTAssertEqual(decoded.planningManifest.workflowIDs, ["content.release"])
         XCTAssertEqual(decoded.planningManifest.workflows.map(\.entrypoint), ["plan"])
         XCTAssertEqual(
@@ -1728,10 +1752,48 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             SMLWorkflowModelAdapter.toolName,
             SMLWorkflowModelAdapter.toolName,
         ])
+        let releaseModelTool = try XCTUnwrap(export.modelTools.first {
+            $0.workflowID == "content.release"
+        })
+        XCTAssertEqual(
+            releaseModelTool.workflowMetadata.attachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            releaseModelTool.workflowMetadata.skillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            releaseModelTool.workflowMetadata.toolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
         XCTAssertTrue(export.modelRouter.requiresNativeTools)
         XCTAssertEqual(export.modelRouter.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(export.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(export.modelRouter.tool.parameters.map(\.name), ["workflow_id", "line"])
+        let releaseRouterMetadata = try XCTUnwrap(export.modelRouter.workflowMetadata.first {
+            $0.workflowID == "content.release"
+        })
+        XCTAssertEqual(
+            releaseRouterMetadata.attachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            releaseRouterMetadata.onyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            releaseRouterMetadata.skillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            releaseRouterMetadata.toolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
+        XCTAssertEqual(
+            releaseRouterMetadata.planningBundlePath,
+            "/automation/runtime/planning/content.release"
+        )
         XCTAssertEqual(export.modelRouter.maximumCommandRounds, 4)
         XCTAssertTrue(export.modelRouter.examples.contains {
             $0.workflowID == "content.release"
@@ -2057,10 +2119,35 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             .string(SMLWorkflowRuntimeModelAdapter.toolName)
         )
         XCTAssertNotNil(describe["x-sml-onyx-driver-id"])
+        let describeMetadata = try object(describe["x-sml-workflow-runtime-metadata"])
+        XCTAssertEqual(
+            describeMetadata["attachment"],
+            .string("/automation/runtime/attachments/content.release")
+        )
+        XCTAssertEqual(
+            describeMetadata["onyxDriver"],
+            .string("/automation/runtime/onyx-drivers/content.release")
+        )
+        XCTAssertEqual(
+            describeMetadata["skillTree"],
+            .string("/automation/runtime/skill-trees/content.release")
+        )
+        XCTAssertEqual(
+            describeMetadata["toolBindings"],
+            .string("/automation/runtime/tool-bindings/content.release")
+        )
+        XCTAssertEqual(
+            describeMetadata["planningBundle"],
+            .string("/automation/runtime/planning/content.release")
+        )
 
         let startPath = try object(paths["/automation/workflows/content.release/tasks"])
         let start = try object(startPath["post"])
         XCTAssertEqual(start["operationId"], .string("start_workflow_task_ContentRelease"))
+        XCTAssertEqual(
+            try object(start["x-sml-workflow-runtime-metadata"]),
+            describeMetadata
+        )
         let startCommandBinding = try object(start["x-sml-command-binding"])
         XCTAssertEqual(startCommandBinding["workflowID"], .string("content.release"))
         XCTAssertEqual(startCommandBinding["workflowVersion"], .string("1.0.0"))
@@ -2174,6 +2261,32 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(
             try object(releaseRouterExample["arguments"])["line"],
             .string(#"start TASK-ID {"target":"target"}"#)
+        )
+        let routerWorkflowMetadata = try array(runtime["modelRouterWorkflowMetadata"])
+        let releaseRuntimeMetadata = try XCTUnwrap(
+            routerWorkflowMetadata.compactMap { try? object($0) }.first {
+                $0["workflowID"] == .string("content.release")
+            }
+        )
+        XCTAssertEqual(
+            releaseRuntimeMetadata["attachmentPath"],
+            .string("/automation/runtime/attachments/content.release")
+        )
+        XCTAssertEqual(
+            releaseRuntimeMetadata["onyxDriverPath"],
+            .string("/automation/runtime/onyx-drivers/content.release")
+        )
+        XCTAssertEqual(
+            releaseRuntimeMetadata["skillTreePath"],
+            .string("/automation/runtime/skill-trees/content.release")
+        )
+        XCTAssertEqual(
+            releaseRuntimeMetadata["toolBindingsPath"],
+            .string("/automation/runtime/tool-bindings/content.release")
+        )
+        XCTAssertEqual(
+            releaseRuntimeMetadata["planningBundlePath"],
+            .string("/automation/runtime/planning/content.release")
         )
         let metadataEndpoints = try array(runtime["metadataEndpoints"])
         XCTAssertEqual(metadataEndpoints.count, 17)
@@ -2436,6 +2549,54 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(decoded.agentGuide.workflowGuides.map(\.workflowID), ["content.release"])
         XCTAssertEqual(decoded.hostGuide.workflowBindings.map(\.workflowID), ["content.release"])
         XCTAssertEqual(decoded.hostWiring.workflows.map(\.workflowID), ["content.release"])
+
+        var legacy22Object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: currentData) as? [String: Any]
+        )
+        legacy22Object["schemaVersion"] = 22
+        var legacy22ModelTools = try XCTUnwrap(
+            legacy22Object["modelTools"] as? [[String: Any]]
+        )
+        for index in legacy22ModelTools.indices {
+            legacy22ModelTools[index].removeValue(forKey: "workflowMetadata")
+        }
+        legacy22Object["modelTools"] = legacy22ModelTools
+        var legacy22ModelRouter = try XCTUnwrap(legacy22Object["modelRouter"] as? [String: Any])
+        legacy22ModelRouter.removeValue(forKey: "workflowMetadata")
+        legacy22Object["modelRouter"] = legacy22ModelRouter
+        var legacy22OpenAPI = try XCTUnwrap(legacy22Object["openAPI"] as? [String: Any])
+        var legacy22Runtime = try XCTUnwrap(legacy22OpenAPI["x-sml-runtime"] as? [String: Any])
+        legacy22Runtime.removeValue(forKey: "modelRouterWorkflowMetadata")
+        legacy22OpenAPI["x-sml-runtime"] = legacy22Runtime
+        var legacy22Paths = try XCTUnwrap(legacy22OpenAPI["paths"] as? [String: Any])
+        var legacy22StartPath = try XCTUnwrap(
+            legacy22Paths["/automation/workflows/content.release/tasks"] as? [String: Any]
+        )
+        var legacy22StartPost = try XCTUnwrap(legacy22StartPath["post"] as? [String: Any])
+        legacy22StartPost.removeValue(forKey: "x-sml-workflow-runtime-metadata")
+        legacy22StartPath["post"] = legacy22StartPost
+        legacy22Paths["/automation/workflows/content.release/tasks"] = legacy22StartPath
+        legacy22OpenAPI["paths"] = legacy22Paths
+        legacy22Object["openAPI"] = legacy22OpenAPI
+        let legacy22Data = try JSONSerialization.data(
+            withJSONObject: legacy22Object,
+            options: [.sortedKeys]
+        )
+        let legacy22Decoded = try JSONDecoder().decode(
+            SMLWorkflowRuntimeExport.self,
+            from: legacy22Data
+        )
+        XCTAssertEqual(legacy22Decoded.schemaVersion, 22)
+        XCTAssertEqual(legacy22Decoded.modelTools, legacy22Decoded.catalog.modelTools)
+        XCTAssertEqual(legacy22Decoded.modelRouter, legacy22Decoded.catalog.modelRouter)
+        let legacy22DecodedRuntime = try object(legacy22Decoded.openAPI["x-sml-runtime"])
+        XCTAssertNotNil(legacy22DecodedRuntime["modelRouterWorkflowMetadata"])
+        let legacy22DecodedPaths = try object(legacy22Decoded.openAPI["paths"])
+        let legacy22DecodedStartPath = try object(
+            legacy22DecodedPaths["/automation/workflows/content.release/tasks"]
+        )
+        let legacy22DecodedStartPost = try object(legacy22DecodedStartPath["post"])
+        XCTAssertNotNil(legacy22DecodedStartPost["x-sml-workflow-runtime-metadata"])
 
         var nestedLegacyObject = try XCTUnwrap(
             JSONSerialization.jsonObject(with: currentData) as? [String: Any]

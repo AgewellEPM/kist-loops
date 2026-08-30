@@ -619,19 +619,26 @@ public struct SMLWorkflowRuntimeModelToolExport: Sendable, Codable, Equatable {
     public let tool: SMLWorkflowModelToolDescriptor
     public let allowedActions: [SMLWorkflowControlAction]
     public let maximumCommandRounds: Int
+    public let workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks
 
     public init(
         workflowID: String,
         workflowVersion: String,
         tool: SMLWorkflowModelToolDescriptor,
         allowedActions: [SMLWorkflowControlAction],
-        maximumCommandRounds: Int
+        maximumCommandRounds: Int,
+        workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks? = nil
     ) {
         self.workflowID = workflowID
         self.workflowVersion = workflowVersion
         self.tool = tool
         self.allowedActions = allowedActions
         self.maximumCommandRounds = maximumCommandRounds
+        self.workflowMetadata = workflowMetadata ?? SMLWorkflowRuntimeWorkflowMetadataLinks(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            apiBasePath: "/v1"
+        )
     }
 
     public init(_ descriptor: SMLWorkflowRuntimeDescriptor) {
@@ -640,8 +647,113 @@ public struct SMLWorkflowRuntimeModelToolExport: Sendable, Codable, Equatable {
             workflowVersion: descriptor.workflowVersion,
             tool: descriptor.model.tool,
             allowedActions: descriptor.model.allowedActions,
-            maximumCommandRounds: descriptor.model.maximumCommandRounds
+            maximumCommandRounds: descriptor.model.maximumCommandRounds,
+            workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks(descriptor)
         )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case tool
+        case allowedActions
+        case maximumCommandRounds
+        case workflowMetadata
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
+        let workflowVersion = try container.decode(String.self, forKey: .workflowVersion)
+        self.init(
+            workflowID: workflowID,
+            workflowVersion: workflowVersion,
+            tool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .tool),
+            allowedActions: try container.decode(
+                [SMLWorkflowControlAction].self,
+                forKey: .allowedActions
+            ),
+            maximumCommandRounds: try container.decode(Int.self, forKey: .maximumCommandRounds),
+            workflowMetadata: try container.decodeIfPresent(
+                SMLWorkflowRuntimeWorkflowMetadataLinks.self,
+                forKey: .workflowMetadata
+            )
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(tool, forKey: .tool)
+        try container.encode(allowedActions, forKey: .allowedActions)
+        try container.encode(maximumCommandRounds, forKey: .maximumCommandRounds)
+        try container.encode(workflowMetadata, forKey: .workflowMetadata)
+    }
+}
+
+public struct SMLWorkflowRuntimeWorkflowMetadataLinks: Sendable, Codable, Equatable {
+    public let workflowID: String
+    public let workflowVersion: String
+    public let attachmentPath: String
+    public let onyxDriverPath: String
+    public let skillTreePath: String
+    public let toolBindingsPath: String
+    public let planningBundlePath: String
+
+    public init(
+        workflowID: String,
+        workflowVersion: String,
+        apiBasePath: String,
+        attachmentPath: String? = nil,
+        onyxDriverPath: String? = nil,
+        skillTreePath: String? = nil,
+        toolBindingsPath: String? = nil,
+        planningBundlePath: String? = nil
+    ) {
+        self.workflowID = workflowID
+        self.workflowVersion = workflowVersion
+        self.attachmentPath = attachmentPath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "attachments",
+            workflowID: workflowID
+        )
+        self.onyxDriverPath = onyxDriverPath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "onyx-drivers",
+            workflowID: workflowID
+        )
+        self.skillTreePath = skillTreePath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "skill-trees",
+            workflowID: workflowID
+        )
+        self.toolBindingsPath = toolBindingsPath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "tool-bindings",
+            workflowID: workflowID
+        )
+        self.planningBundlePath = planningBundlePath ?? Self.runtimeWorkflowPath(
+            apiBasePath: apiBasePath,
+            resourcePath: "planning",
+            workflowID: workflowID
+        )
+    }
+
+    public init(_ descriptor: SMLWorkflowRuntimeDescriptor) {
+        self.init(
+            workflowID: descriptor.workflowID,
+            workflowVersion: descriptor.workflowVersion,
+            apiBasePath: descriptor.api.basePath
+        )
+    }
+
+    private static func runtimeWorkflowPath(
+        apiBasePath: String,
+        resourcePath: String,
+        workflowID: String
+    ) -> String {
+        "\(apiBasePath)/runtime/\(resourcePath)/\(workflowID)"
     }
 }
 
@@ -649,6 +761,7 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
     public let requiresNativeTools: Bool
     public let tool: SMLWorkflowModelToolDescriptor
     public let workflowIDs: [String]
+    public let workflowMetadata: [SMLWorkflowRuntimeWorkflowMetadataLinks]
     public let maximumAdvisoryBytes: Int
     public let maximumCommandRounds: Int
     public let examples: [SMLWorkflowRuntimeModelToolCallExample]
@@ -657,6 +770,7 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
         requiresNativeTools: Bool = true,
         tool: SMLWorkflowModelToolDescriptor,
         workflowIDs: [String],
+        workflowMetadata: [SMLWorkflowRuntimeWorkflowMetadataLinks] = [],
         maximumAdvisoryBytes: Int,
         maximumCommandRounds: Int,
         examples: [SMLWorkflowRuntimeModelToolCallExample] = []
@@ -664,6 +778,10 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
         self.requiresNativeTools = requiresNativeTools
         self.tool = tool
         self.workflowIDs = workflowIDs.sorted()
+        self.workflowMetadata = workflowMetadata.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.workflowVersion < $1.workflowVersion
+        }
         self.maximumAdvisoryBytes = max(0, maximumAdvisoryBytes)
         self.maximumCommandRounds = min(max(1, maximumCommandRounds), 8)
         self.examples = examples.sorted {
@@ -680,6 +798,7 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
         case requiresNativeTools
         case tool
         case workflowIDs
+        case workflowMetadata
         case maximumAdvisoryBytes
         case maximumCommandRounds
         case examples
@@ -691,6 +810,10 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
             requiresNativeTools: try container.decode(Bool.self, forKey: .requiresNativeTools),
             tool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .tool),
             workflowIDs: try container.decode([String].self, forKey: .workflowIDs),
+            workflowMetadata: try container.decodeIfPresent(
+                [SMLWorkflowRuntimeWorkflowMetadataLinks].self,
+                forKey: .workflowMetadata
+            ) ?? [],
             maximumAdvisoryBytes: try container.decode(Int.self, forKey: .maximumAdvisoryBytes),
             maximumCommandRounds: try container.decode(Int.self, forKey: .maximumCommandRounds),
             examples: try container.decodeIfPresent(
@@ -705,6 +828,7 @@ public struct SMLWorkflowRuntimeModelRouterDescriptor: Sendable, Codable, Equata
         try container.encode(requiresNativeTools, forKey: .requiresNativeTools)
         try container.encode(tool, forKey: .tool)
         try container.encode(workflowIDs, forKey: .workflowIDs)
+        try container.encode(workflowMetadata, forKey: .workflowMetadata)
         try container.encode(maximumAdvisoryBytes, forKey: .maximumAdvisoryBytes)
         try container.encode(maximumCommandRounds, forKey: .maximumCommandRounds)
         try container.encode(examples, forKey: .examples)
@@ -2463,7 +2587,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 22
+    public static let currentSchemaVersion = 23
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -2523,9 +2647,12 @@ public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
         openAPI = decodedSchemaVersion < SMLWorkflowRuntimeExport.currentSchemaVersion
             ? Self.regeneratedOpenAPI(from: decodedOpenAPI, catalog: catalog)
             : decodedOpenAPI
-        modelTools = try container.decode(
+        let decodedModelTools = try container.decode(
             [SMLWorkflowRuntimeModelToolExport].self, forKey: .modelTools
         )
+        modelTools = decodedSchemaVersion < SMLWorkflowRuntimeExport.currentSchemaVersion
+            ? catalog.modelTools
+            : decodedModelTools
         let decodedModelRouter = try container.decodeIfPresent(
             SMLWorkflowRuntimeModelRouterDescriptor.self, forKey: .modelRouter
         )
@@ -2598,6 +2725,7 @@ public extension SMLWorkflowRuntimeCatalog {
                 SMLWorkflowRuntimeModelAdapter.modelCommandTool(catalog: self)
             ),
             workflowIDs: workflowIDs,
+            workflowMetadata: workflows.map(SMLWorkflowRuntimeWorkflowMetadataLinks.init),
             maximumAdvisoryBytes: SMLWorkflowModelAdapter.maximumAdvisoryBytes,
             maximumCommandRounds: workflows
                 .map(\.model.maximumCommandRounds)
@@ -4928,6 +5056,9 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 "modelRouterExamples": .array(
                     catalog.modelRouter.examples.map(modelToolCallExample)
                 ),
+                "modelRouterWorkflowMetadata": .array(
+                    catalog.modelRouter.workflowMetadata.map(workflowMetadataLink)
+                ),
                 "modelRouterMaximumCommandRounds": .number(
                     Decimal(catalog.modelRouter.maximumCommandRounds)
                 ),
@@ -5086,6 +5217,7 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "x-sml-model-tool": .string(workflow.model.tool.name),
             "x-sml-model-router-tool": .string(SMLWorkflowRuntimeModelAdapter.toolName),
             "x-sml-onyx-driver-id": .string(workflow.onyx.driverID),
+            "x-sml-workflow-runtime-metadata": .object(workflowRuntimeMetadata(workflow)),
             "x-sml-request-examples": .array(endpoint.examples.map(apiExample)),
         ]
 
@@ -5162,6 +5294,40 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
                 ])
             )
         })
+    }
+
+    private static func workflowRuntimeMetadata(
+        _ workflow: SMLWorkflowRuntimeDescriptor
+    ) -> SMLObject {
+        [
+            "attachment": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "attachments"
+            )),
+            "onyxDriver": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "onyx-drivers"
+            )),
+            "skillTree": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "skill-trees"
+            )),
+            "toolBindings": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "tool-bindings"
+            )),
+            "planningBundle": .string(runtimeWorkflowPath(
+                workflow,
+                resourcePath: "planning"
+            )),
+        ]
+    }
+
+    private static func runtimeWorkflowPath(
+        _ workflow: SMLWorkflowRuntimeDescriptor,
+        resourcePath: String
+    ) -> String {
+        "\(workflow.api.basePath)/runtime/\(resourcePath)/\(workflow.workflowID)"
     }
 
     private static func startBodySchema(_ workflow: SMLWorkflowRuntimeDescriptor) -> SMLObject {
@@ -5271,6 +5437,20 @@ private enum SMLWorkflowRuntimeOpenAPIGenerator {
             "operationID": .string(endpoint.operationID),
             "resource": .string(endpoint.resource.rawValue),
             "summary": .string(endpoint.summary),
+        ])
+    }
+
+    private static func workflowMetadataLink(
+        _ metadata: SMLWorkflowRuntimeWorkflowMetadataLinks
+    ) -> SMLValue {
+        .object([
+            "workflowID": .string(metadata.workflowID),
+            "workflowVersion": .string(metadata.workflowVersion),
+            "attachmentPath": .string(metadata.attachmentPath),
+            "onyxDriverPath": .string(metadata.onyxDriverPath),
+            "skillTreePath": .string(metadata.skillTreePath),
+            "toolBindingsPath": .string(metadata.toolBindingsPath),
+            "planningBundlePath": .string(metadata.planningBundlePath),
         ])
     }
 

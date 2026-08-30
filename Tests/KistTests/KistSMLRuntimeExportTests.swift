@@ -881,6 +881,28 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(modelRouter.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(modelRouter.modelRouter.tool.parameters.map(\.name), ["workflow_id", "line"])
         XCTAssertEqual(modelRouter.modelRouter.workflowIDs, ["langgraph.review"])
+        let routerMetadata = try XCTUnwrap(modelRouter.modelRouter.workflowMetadata.first)
+        XCTAssertEqual(routerMetadata.workflowID, "langgraph.review")
+        XCTAssertEqual(
+            routerMetadata.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            routerMetadata.onyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            routerMetadata.skillTreePath,
+            "/source/runtime/skill-trees/langgraph.review"
+        )
+        XCTAssertEqual(
+            routerMetadata.toolBindingsPath,
+            "/source/runtime/tool-bindings/langgraph.review"
+        )
+        XCTAssertEqual(
+            routerMetadata.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertEqual(modelRouter.modelRouter.maximumCommandRounds, 3)
         XCTAssertTrue(modelRouter.modelRouter.examples.contains {
             $0.toolName == SMLWorkflowRuntimeModelAdapter.toolName
@@ -1496,6 +1518,14 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(modelTools.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(modelTools.first?.tool.name, SMLWorkflowModelAdapter.toolName)
+        XCTAssertEqual(
+            modelTools.first?.workflowMetadata.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            modelTools.first?.workflowMetadata.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
 
         let modelRouter = try JSONDecoder().decode(
             SMLWorkflowRuntimeModelRouterDescriptor.self,
@@ -1503,6 +1533,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(modelRouter.workflowIDs, ["langgraph.review"])
+        XCTAssertEqual(
+            modelRouter.workflowMetadata.first?.onyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
         XCTAssertEqual(modelRouter.maximumCommandRounds, 3)
 
         let onyxDrivers = try JSONDecoder().decode(
@@ -2195,11 +2229,42 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(start["operationId"], .string("start_workflow_task_LanggraphReview"))
         XCTAssertEqual(start["x-sml-model-router-tool"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
         XCTAssertEqual(start["x-sml-action"], .string("start"))
+        let startMetadata = try object(start["x-sml-workflow-runtime-metadata"])
+        XCTAssertEqual(
+            startMetadata["attachment"],
+            .string("/source/runtime/attachments/langgraph.review")
+        )
+        XCTAssertEqual(
+            startMetadata["onyxDriver"],
+            .string("/source/runtime/onyx-drivers/langgraph.review")
+        )
+        XCTAssertEqual(
+            startMetadata["skillTree"],
+            .string("/source/runtime/skill-trees/langgraph.review")
+        )
+        XCTAssertEqual(
+            startMetadata["toolBindings"],
+            .string("/source/runtime/tool-bindings/langgraph.review")
+        )
+        XCTAssertEqual(
+            startMetadata["planningBundle"],
+            .string("/source/runtime/planning/langgraph.review")
+        )
         let runtime = try object(openAPI.openAPI["x-sml-runtime"])
         XCTAssertEqual(runtime["workflowIDs"], .array([.string("langgraph.review")]))
         XCTAssertEqual(runtime["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
         XCTAssertEqual(runtime["mountAPIRouteCount"], .number(Decimal(24)))
         XCTAssertEqual(runtime["planningSkillIndexCount"], .number(Decimal(3)))
+        let routerWorkflowMetadata = try object(try array(runtime["modelRouterWorkflowMetadata"]).first)
+        XCTAssertEqual(routerWorkflowMetadata["workflowID"], .string("langgraph.review"))
+        XCTAssertEqual(
+            routerWorkflowMetadata["attachmentPath"],
+            .string("/source/runtime/attachments/langgraph.review")
+        )
+        XCTAssertEqual(
+            routerWorkflowMetadata["planningBundlePath"],
+            .string("/source/runtime/planning/langgraph.review")
+        )
         XCTAssertEqual(openAPI.launchDescriptor.launchComplete, true)
         XCTAssertEqual(openAPI.launchDescriptor.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(openAPI.launchDescriptor.apiBasePaths, ["/source"])
