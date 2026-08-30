@@ -705,6 +705,33 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
                 .duplicateWorkflowID("content.release")
             )
         }
+        XCTAssertThrowsError(try SMLWorkflowRuntimeRegistry.compile(
+            mounts: [
+                SMLWorkflowRuntimeMount(
+                    admitted: makeAdmitted(),
+                    role: "release-manager",
+                    actor: "operator.luke",
+                    apiBasePath: "/automation",
+                    apiWorkflowPath: "/collide"
+                ),
+                SMLWorkflowRuntimeMount(
+                    admitted: makeAdmitted(
+                        id: "content.review",
+                        name: "Content review",
+                        sourceReference: "graphs/content_review.py"
+                    ),
+                    role: "release-manager",
+                    actor: "operator.luke",
+                    apiBasePath: "/automation",
+                    apiWorkflowPath: "/collide"
+                ),
+            ]
+        )) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeRegistryError,
+                .ambiguousAPIRoute(method: "GET", path: "/automation/collide")
+            )
+        }
     }
 
     func testRuntimeRegistryAdmitsCandidateWorkflowsIntoMountedSurfaces() throws {

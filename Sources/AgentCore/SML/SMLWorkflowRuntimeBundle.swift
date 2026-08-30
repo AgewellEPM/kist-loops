@@ -2633,9 +2633,39 @@ public struct SMLWorkflowRuntimeRegistry: Sendable {
             }
             byID[workflowID] = bundle
         }
+        let catalog = SMLWorkflowRuntimeCatalog(workflows: ordered.map(\.descriptor))
+        try Self.requireUniqueGeneratedAPIRoutes(catalog.mountContract.apiRoutes)
         self.bundles = ordered
         bundlesByWorkflowID = byID
-        catalog = SMLWorkflowRuntimeCatalog(workflows: ordered.map(\.descriptor))
+        self.catalog = catalog
+    }
+
+    private static func requireUniqueGeneratedAPIRoutes(
+        _ routes: [SMLWorkflowRuntimeAPIMount]
+    ) throws {
+        var seenRoutes: Set<String> = []
+        for route in routes.sorted(by: Self.routeSort) {
+            let key = "\(route.method.rawValue)\u{0}\(route.pathTemplate)"
+            guard seenRoutes.insert(key).inserted else {
+                throw SMLWorkflowRuntimeRegistryError.ambiguousAPIRoute(
+                    method: route.method.rawValue,
+                    path: route.pathTemplate
+                )
+            }
+        }
+    }
+
+    private static func routeSort(
+        lhs: SMLWorkflowRuntimeAPIMount,
+        rhs: SMLWorkflowRuntimeAPIMount
+    ) -> Bool {
+        if lhs.pathTemplate != rhs.pathTemplate {
+            return lhs.pathTemplate < rhs.pathTemplate
+        }
+        if lhs.method.rawValue != rhs.method.rawValue {
+            return lhs.method.rawValue < rhs.method.rawValue
+        }
+        return lhs.operationID < rhs.operationID
     }
 
     public static func compile(
@@ -4092,6 +4122,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         source: \(descriptor.sourceKind.rawValue) \(descriptor.sourceReference)
         entrypoint: \(descriptor.onyx.plan.entrypoint)
         api base path: \(descriptor.api.basePath)
+        api workflow path: \(descriptor.api.workflowPath)
         model tool: \(descriptor.model.tool.name) via \(toolName)
         onyx driver: \(descriptor.onyx.driverID)
 

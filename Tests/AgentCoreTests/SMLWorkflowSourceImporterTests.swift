@@ -423,6 +423,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
             authorityResolver: authority,
             roleOverride: "override-reviewer",
             apiBasePathOverride: "/override",
+            apiWorkflowPathOverrides: ["langgraph.review": "/retargeted-review"],
             modelMaximumCommandRoundsOverride: 2,
             commandID: { "package-override-command" },
             taskID: { "TASK-PACKAGE-OVERRIDE-GENERATED" },
@@ -436,26 +437,45 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertTrue(launchDescriptor.launchComplete)
         XCTAssertEqual(launchDescriptor.apiBasePaths, ["/override"])
         XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.apiBasePath), ["/override"])
+        XCTAssertEqual(launchDescriptor.sourceSummaries.map(\.apiWorkflowPath), ["/retargeted-review"])
         XCTAssertEqual(launchDescriptor.hostWiring, launch.hostWiring)
         XCTAssertEqual(launchDescriptor.hostWiring.apiBasePaths, ["/override"])
 
         let launchedWorkflow = try XCTUnwrap(launchDescriptor.workflows.first)
         XCTAssertEqual(launchedWorkflow.role, "override-reviewer")
         XCTAssertEqual(launchedWorkflow.apiBasePath, "/override")
+        XCTAssertEqual(launchedWorkflow.apiWorkflowPath, "/retargeted-review")
         XCTAssertEqual(launchedWorkflow.replMount.apiBasePath, "/override")
+        XCTAssertEqual(launchedWorkflow.replMount.apiWorkflowPath, "/retargeted-review")
         XCTAssertEqual(launchedWorkflow.installedInstructionCount, 3)
         XCTAssertEqual(launchDescriptor.modelRouter.maximumCommandRounds, 2)
         let hostWiringWorkflow = try XCTUnwrap(launchDescriptor.hostWiring.workflows.first)
         XCTAssertEqual(hostWiringWorkflow.role, "override-reviewer")
         XCTAssertEqual(hostWiringWorkflow.apiBasePath, "/override")
+        XCTAssertEqual(hostWiringWorkflow.apiWorkflowPath, "/retargeted-review")
+        XCTAssertEqual(hostWiringWorkflow.attachment.apiWorkflowPath, "/retargeted-review")
         XCTAssertEqual(hostWiringWorkflow.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
-        XCTAssertEqual(
-            try launch.app.resolveWorkflowMount(workflowID: "langgraph.review").apiBasePath,
-            "/override"
-        )
+        let mount = try launch.app.resolveWorkflowMount(workflowID: "langgraph.review")
+        XCTAssertEqual(mount.apiBasePath, "/override")
+        XCTAssertEqual(mount.apiWorkflowPath, "/retargeted-review")
         let openAPIPaths = try object(launch.export().openAPI["paths"])
-        XCTAssertNotNil(openAPIPaths["/override/workflows/langgraph.review/tasks"])
+        XCTAssertNotNil(openAPIPaths["/override/retargeted-review/tasks"])
+        XCTAssertNil(openAPIPaths["/override/workflows/langgraph.review/tasks"])
         XCTAssertNil(openAPIPaths["/source/workflows/langgraph.review/tasks"])
+
+        let started = try await launch.app.handleRuntimeAPI(
+            SMLWorkflowAPIRequest(
+                method: .post,
+                path: "/override/retargeted-review/tasks",
+                body: [
+                    "task_id": .string("TASK-PACKAGE-OVERRIDE"),
+                    "input": .object(["topic": .string("retargeted")]),
+                ]
+            )
+        )
+        XCTAssertEqual(started.statusCode, 201)
+        XCTAssertEqual(started.result?.task?.workflowID, "langgraph.review")
+        XCTAssertEqual(started.route?.pathTemplate, "/override/retargeted-review/tasks")
 
         let encodedLaunchDescriptor = String(
             decoding: try JSONEncoder().encode(launchDescriptor),
@@ -464,6 +484,20 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertFalse(encodedLaunchDescriptor.contains("operator.luke"))
         XCTAssertFalse(encodedLaunchDescriptor.contains("package-override-lease"))
         XCTAssertFalse(encodedLaunchDescriptor.contains("authenticatedActor"))
+
+        XCTAssertThrowsError(
+            try SMLWorkflowRuntimeRegistry.compile(
+                package: package,
+                admissionCatalog: reviewCatalog(),
+                actor: "operator.luke",
+                apiWorkflowPathOverrides: ["missing.workflow": "/missing"]
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SMLWorkflowRuntimeSourcePackageError,
+                .unknownAPIWorkflowPathOverride("missing.workflow")
+            )
+        }
     }
 
     func testRuntimePackageRelaunchFailsClosedWithoutFreshHostAdmissionCatalog() throws {

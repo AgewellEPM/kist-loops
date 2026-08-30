@@ -5,6 +5,7 @@ public enum SMLWorkflowRuntimeSourcePackageError: Error, Sendable, Equatable, Cu
     case emptyPackage
     case duplicateWorkflowID(String)
     case invalidWorkflow(workflowID: String, report: SMLValidationReport)
+    case unknownAPIWorkflowPathOverride(String)
     case runtimeWorkflowMismatch(workflowID: String, field: String, expected: String, actual: String)
     case runtimeExportMismatch(field: String, expected: [String], actual: [String])
     case runtimeDerivedPayloadMismatch(field: String)
@@ -20,6 +21,8 @@ public enum SMLWorkflowRuntimeSourcePackageError: Error, Sendable, Equatable, Cu
         case .invalidWorkflow(let workflowID, let report):
             let details = report.errors.map(\.description).joined(separator: "\n")
             return "SML workflow runtime source package contains invalid workflow \(workflowID): \(details)"
+        case .unknownAPIWorkflowPathOverride(let workflowID):
+            return "SML workflow runtime source package API workflow path override references unknown workflow id: \(workflowID)"
         case .runtimeWorkflowMismatch(let workflowID, let field, let expected, let actual):
             return "SML workflow runtime source package workflow \(workflowID) \(field) mismatch: expected \(expected), got \(actual)"
         case .runtimeExportMismatch(let field, let expected, let actual):
@@ -276,8 +279,16 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
         replActionsOverride: Set<SMLWorkflowControlAction>? = nil,
         modelActionsOverride: Set<SMLWorkflowControlAction>? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         modelMaximumCommandRoundsOverride: Int? = nil
     ) throws -> [SMLWorkflowRuntimeCandidateMount] {
+        let workflowIDSet = Set(workflowIDs)
+        if let unknown = apiWorkflowPathOverrides.keys
+            .filter({ !workflowIDSet.contains($0) })
+            .sorted()
+            .first {
+            throw SMLWorkflowRuntimeSourcePackageError.unknownAPIWorkflowPathOverride(unknown)
+        }
         let descriptorsByWorkflowID = Dictionary(
             uniqueKeysWithValues: runtime.catalog.workflows.map { ($0.workflowID, $0) }
         )
@@ -297,7 +308,7 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 replActions: replActionsOverride ?? Set(descriptor.repl.allowedActions),
                 modelActions: modelActionsOverride ?? Set(descriptor.model.allowedActions),
                 apiBasePath: apiBasePathOverride ?? descriptor.api.basePath,
-                apiWorkflowPath: descriptor.api.workflowPath,
+                apiWorkflowPath: apiWorkflowPathOverrides[workflow.id] ?? descriptor.api.workflowPath,
                 modelMaximumCommandRounds: modelMaximumCommandRoundsOverride
                     ?? descriptor.model.maximumCommandRounds
             )
@@ -541,6 +552,7 @@ public extension SMLWorkflowRuntimeRegistry {
         replActionsOverride: Set<SMLWorkflowControlAction>? = nil,
         modelActionsOverride: Set<SMLWorkflowControlAction>? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         modelMaximumCommandRoundsOverride: Int? = nil,
         commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() }
@@ -553,6 +565,7 @@ public extension SMLWorkflowRuntimeRegistry {
                 replActionsOverride: replActionsOverride,
                 modelActionsOverride: modelActionsOverride,
                 apiBasePathOverride: apiBasePathOverride,
+                apiWorkflowPathOverrides: apiWorkflowPathOverrides,
                 modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
             ),
             commandID: commandID,
@@ -591,6 +604,7 @@ public extension SMLWorkflowRuntimeApp {
         replActionsOverride: Set<SMLWorkflowControlAction>? = nil,
         modelActionsOverride: Set<SMLWorkflowControlAction>? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         modelMaximumCommandRoundsOverride: Int? = nil,
         commandID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         taskID: @escaping @Sendable () -> String = { "task-" + UUID().uuidString.lowercased() },
@@ -605,6 +619,7 @@ public extension SMLWorkflowRuntimeApp {
                 replActionsOverride: replActionsOverride,
                 modelActionsOverride: modelActionsOverride,
                 apiBasePathOverride: apiBasePathOverride,
+                apiWorkflowPathOverrides: apiWorkflowPathOverrides,
                 modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride,
                 commandID: commandID,
                 taskID: taskID

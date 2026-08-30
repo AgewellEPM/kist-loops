@@ -281,6 +281,8 @@ final class SMLWorkflowModelAdapterTests: XCTestCase {
                 "POST /model/workflows/model.review/tasks [host_command_gateway] -> start_workflow_task_ModelReview"
             )
         )
+        XCTAssertTrue(capture.systemPrompt.contains("api base path: /model"))
+        XCTAssertTrue(capture.systemPrompt.contains("api workflow path: /workflows/model.review"))
         XCTAssertTrue(capture.systemPrompt.contains("model tool: propose_sml_command via propose_sml_runtime_command"))
         XCTAssertTrue(capture.systemPrompt.contains("onyx driver: onyx.model.review."))
         XCTAssertTrue(
