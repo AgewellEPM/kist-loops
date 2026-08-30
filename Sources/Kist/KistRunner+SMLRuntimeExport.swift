@@ -410,15 +410,21 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostScaffold: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 2
+        static let currentSchemaVersion = 5
 
         let schemaVersion: Int
         let sourcePath: String
         let sourceFormat: SMLRuntimeHostExportSourceFormat
         let outputDirectory: String
         let indexPath: String
+        let runbookPath: String
         let workflowIDs: [String]
         let apiBasePaths: [String]
+        let workflowAPIMountPathsByWorkflowID: [String: String]
+        let workflowREPLMountPathsByWorkflowID: [String: String]
+        let workflowModelToolPathsByWorkflowID: [String: String]
+        let workflowRunbookPathsByWorkflowID: [String: String]
+        let runtimeWorkflowMetadataByWorkflowID: [String: SMLWorkflowRuntimeWorkflowMetadataLinks]
         let files: [SMLRuntimeHostScaffoldFile]
         let launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
 
@@ -428,8 +434,14 @@ extension KistRunner {
             sourceFormat: SMLRuntimeHostExportSourceFormat,
             outputDirectory: String,
             indexPath: String = "scaffold.json",
+            runbookPath: String = "runbook.json",
             workflowIDs: [String],
             apiBasePaths: [String],
+            workflowAPIMountPathsByWorkflowID: [String: String]? = nil,
+            workflowREPLMountPathsByWorkflowID: [String: String]? = nil,
+            workflowModelToolPathsByWorkflowID: [String: String]? = nil,
+            workflowRunbookPathsByWorkflowID: [String: String]? = nil,
+            runtimeWorkflowMetadataByWorkflowID: [String: SMLWorkflowRuntimeWorkflowMetadataLinks]? = nil,
             files: [SMLRuntimeHostScaffoldFile],
             launchDescriptor: SMLWorkflowRuntimeLaunchDescriptor
         ) {
@@ -438,13 +450,138 @@ extension KistRunner {
             self.sourceFormat = sourceFormat
             self.outputDirectory = outputDirectory
             self.indexPath = indexPath
+            self.runbookPath = runbookPath
             self.workflowIDs = workflowIDs.sorted()
             self.apiBasePaths = apiBasePaths.sorted()
+            let attachments = launchDescriptor.hostWiring.attachmentManifests.sorted {
+                if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+                return $0.workflowVersion < $1.workflowVersion
+            }
+            self.workflowAPIMountPathsByWorkflowID = workflowAPIMountPathsByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: attachments.map { attachment in
+                    let fileStem = KistRunner.smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+                    return (attachment.workflowID, "api-mounts/\(fileStem).json")
+                })
+            self.workflowREPLMountPathsByWorkflowID = workflowREPLMountPathsByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: attachments.map { attachment in
+                    let fileStem = KistRunner.smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+                    return (attachment.workflowID, "repl-mounts/\(fileStem).json")
+                })
+            self.workflowModelToolPathsByWorkflowID = workflowModelToolPathsByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: attachments.map { attachment in
+                    let fileStem = KistRunner.smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+                    return (attachment.workflowID, "model-tools/\(fileStem).json")
+                })
+            self.workflowRunbookPathsByWorkflowID = workflowRunbookPathsByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: attachments.map { attachment in
+                    let fileStem = KistRunner.smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+                    return (attachment.workflowID, "workflow-runbooks/\(fileStem).json")
+                })
+            self.runtimeWorkflowMetadataByWorkflowID = runtimeWorkflowMetadataByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: attachments.map {
+                    ($0.workflowID, KistRunner.smlRuntimeWorkflowMetadataLinks(for: $0))
+                })
             self.files = files.sorted {
                 if $0.relativePath != $1.relativePath { return $0.relativePath < $1.relativePath }
                 return $0.sha256 < $1.sha256
             }
             self.launchDescriptor = launchDescriptor
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion
+            case sourcePath
+            case sourceFormat
+            case outputDirectory
+            case indexPath
+            case runbookPath
+            case workflowIDs
+            case apiBasePaths
+            case workflowAPIMountPathsByWorkflowID
+            case workflowREPLMountPathsByWorkflowID
+            case workflowModelToolPathsByWorkflowID
+            case workflowRunbookPathsByWorkflowID
+            case runtimeWorkflowMetadataByWorkflowID
+            case files
+            case launchDescriptor
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+            let sourcePath = try container.decode(String.self, forKey: .sourcePath)
+            let sourceFormat = try container.decode(
+                SMLRuntimeHostExportSourceFormat.self,
+                forKey: .sourceFormat
+            )
+            let outputDirectory = try container.decode(String.self, forKey: .outputDirectory)
+            let indexPath = try container.decodeIfPresent(String.self, forKey: .indexPath)
+                ?? "scaffold.json"
+            let runbookPath = try container.decodeIfPresent(String.self, forKey: .runbookPath)
+                ?? "runbook.json"
+            let workflowIDs = try container.decode([String].self, forKey: .workflowIDs)
+            let apiBasePaths = try container.decode([String].self, forKey: .apiBasePaths)
+            let workflowAPIMountPathsByWorkflowID = try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .workflowAPIMountPathsByWorkflowID
+            )
+            let workflowREPLMountPathsByWorkflowID = try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .workflowREPLMountPathsByWorkflowID
+            )
+            let workflowModelToolPathsByWorkflowID = try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .workflowModelToolPathsByWorkflowID
+            )
+            let workflowRunbookPathsByWorkflowID = try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .workflowRunbookPathsByWorkflowID
+            )
+            let runtimeWorkflowMetadataByWorkflowID = try container.decodeIfPresent(
+                [String: SMLWorkflowRuntimeWorkflowMetadataLinks].self,
+                forKey: .runtimeWorkflowMetadataByWorkflowID
+            )
+            let files = try container.decode([SMLRuntimeHostScaffoldFile].self, forKey: .files)
+            let launchDescriptor = try container.decode(
+                SMLWorkflowRuntimeLaunchDescriptor.self,
+                forKey: .launchDescriptor
+            )
+            self.init(
+                schemaVersion: schemaVersion,
+                sourcePath: sourcePath,
+                sourceFormat: sourceFormat,
+                outputDirectory: outputDirectory,
+                indexPath: indexPath,
+                runbookPath: runbookPath,
+                workflowIDs: workflowIDs,
+                apiBasePaths: apiBasePaths,
+                workflowAPIMountPathsByWorkflowID: workflowAPIMountPathsByWorkflowID,
+                workflowREPLMountPathsByWorkflowID: workflowREPLMountPathsByWorkflowID,
+                workflowModelToolPathsByWorkflowID: workflowModelToolPathsByWorkflowID,
+                workflowRunbookPathsByWorkflowID: workflowRunbookPathsByWorkflowID,
+                runtimeWorkflowMetadataByWorkflowID: runtimeWorkflowMetadataByWorkflowID,
+                files: files,
+                launchDescriptor: launchDescriptor
+            )
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(schemaVersion, forKey: .schemaVersion)
+            try container.encode(sourcePath, forKey: .sourcePath)
+            try container.encode(sourceFormat, forKey: .sourceFormat)
+            try container.encode(outputDirectory, forKey: .outputDirectory)
+            try container.encode(indexPath, forKey: .indexPath)
+            try container.encode(runbookPath, forKey: .runbookPath)
+            try container.encode(workflowIDs, forKey: .workflowIDs)
+            try container.encode(apiBasePaths, forKey: .apiBasePaths)
+            try container.encode(workflowAPIMountPathsByWorkflowID, forKey: .workflowAPIMountPathsByWorkflowID)
+            try container.encode(workflowREPLMountPathsByWorkflowID, forKey: .workflowREPLMountPathsByWorkflowID)
+            try container.encode(workflowModelToolPathsByWorkflowID, forKey: .workflowModelToolPathsByWorkflowID)
+            try container.encode(workflowRunbookPathsByWorkflowID, forKey: .workflowRunbookPathsByWorkflowID)
+            try container.encode(runtimeWorkflowMetadataByWorkflowID, forKey: .runtimeWorkflowMetadataByWorkflowID)
+            try container.encode(files, forKey: .files)
+            try container.encode(launchDescriptor, forKey: .launchDescriptor)
         }
     }
 
@@ -461,6 +598,9 @@ extension KistRunner {
         let modelRouterPath: String
         let onyxDriversPath: String
         let planningPath: String
+        let workflowAPIMountsPath: String
+        let workflowREPLMountsPath: String
+        let workflowModelToolsPath: String
         let workflowOnyxDriversPath: String
         let workflowSkillTreesPath: String
         let workflowToolBindingsPath: String
@@ -484,6 +624,9 @@ extension KistRunner {
             modelRouterPath: String = "model-router.json",
             onyxDriversPath: String = "onyx-drivers.json",
             planningPath: String = "planning.json",
+            workflowAPIMountsPath: String = "api-mounts",
+            workflowREPLMountsPath: String = "repl-mounts",
+            workflowModelToolsPath: String = "model-tools",
             workflowOnyxDriversPath: String = "onyx-drivers",
             workflowSkillTreesPath: String = "skill-trees",
             workflowToolBindingsPath: String = "tool-bindings",
@@ -506,6 +649,9 @@ extension KistRunner {
             self.modelRouterPath = modelRouterPath
             self.onyxDriversPath = onyxDriversPath
             self.planningPath = planningPath
+            self.workflowAPIMountsPath = workflowAPIMountsPath
+            self.workflowREPLMountsPath = workflowREPLMountsPath
+            self.workflowModelToolsPath = workflowModelToolsPath
             self.workflowOnyxDriversPath = workflowOnyxDriversPath
             self.workflowSkillTreesPath = workflowSkillTreesPath
             self.workflowToolBindingsPath = workflowToolBindingsPath
@@ -515,6 +661,163 @@ extension KistRunner {
             self.hostGuidePath = hostGuidePath
             self.hostWiringPath = hostWiringPath
             self.attachmentsPath = attachmentsPath
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case scaffoldIndexPath
+            case readmePath
+            case runtimeSourcePackagePath
+            case runtimeExportPath
+            case catalogPath
+            case mountPath
+            case launchPath
+            case openAPIPath
+            case modelToolsPath
+            case modelRouterPath
+            case onyxDriversPath
+            case planningPath
+            case workflowAPIMountsPath
+            case workflowREPLMountsPath
+            case workflowModelToolsPath
+            case workflowOnyxDriversPath
+            case workflowSkillTreesPath
+            case workflowToolBindingsPath
+            case workflowPlanningPath
+            case workflowRunbooksPath
+            case agentGuidePath
+            case hostGuidePath
+            case hostWiringPath
+            case attachmentsPath
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                scaffoldIndexPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .scaffoldIndexPath
+                ) ?? "scaffold.json",
+                readmePath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .readmePath
+                ) ?? "README.md",
+                runtimeSourcePackagePath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .runtimeSourcePackagePath
+                ) ?? "runtime-source-package.json",
+                runtimeExportPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .runtimeExportPath
+                ) ?? "runtime-export.json",
+                catalogPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .catalogPath
+                ) ?? "catalog.json",
+                mountPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .mountPath
+                ) ?? "mount.json",
+                launchPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .launchPath
+                ) ?? "launch.json",
+                openAPIPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .openAPIPath
+                ) ?? "openapi.json",
+                modelToolsPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .modelToolsPath
+                ) ?? "model-tools.json",
+                modelRouterPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .modelRouterPath
+                ) ?? "model-router.json",
+                onyxDriversPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .onyxDriversPath
+                ) ?? "onyx-drivers.json",
+                planningPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .planningPath
+                ) ?? "planning.json",
+                workflowAPIMountsPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowAPIMountsPath
+                ) ?? "api-mounts",
+                workflowREPLMountsPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowREPLMountsPath
+                ) ?? "repl-mounts",
+                workflowModelToolsPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowModelToolsPath
+                ) ?? "model-tools",
+                workflowOnyxDriversPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowOnyxDriversPath
+                ) ?? "onyx-drivers",
+                workflowSkillTreesPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowSkillTreesPath
+                ) ?? "skill-trees",
+                workflowToolBindingsPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowToolBindingsPath
+                ) ?? "tool-bindings",
+                workflowPlanningPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowPlanningPath
+                ) ?? "planning",
+                workflowRunbooksPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .workflowRunbooksPath
+                ) ?? "workflow-runbooks",
+                agentGuidePath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .agentGuidePath
+                ) ?? "agent-guide.json",
+                hostGuidePath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .hostGuidePath
+                ) ?? "host-guide.json",
+                hostWiringPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .hostWiringPath
+                ) ?? "host-wiring.json",
+                attachmentsPath: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .attachmentsPath
+                ) ?? "attachments.json"
+            )
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(scaffoldIndexPath, forKey: .scaffoldIndexPath)
+            try container.encode(readmePath, forKey: .readmePath)
+            try container.encode(runtimeSourcePackagePath, forKey: .runtimeSourcePackagePath)
+            try container.encode(runtimeExportPath, forKey: .runtimeExportPath)
+            try container.encode(catalogPath, forKey: .catalogPath)
+            try container.encode(mountPath, forKey: .mountPath)
+            try container.encode(launchPath, forKey: .launchPath)
+            try container.encode(openAPIPath, forKey: .openAPIPath)
+            try container.encode(modelToolsPath, forKey: .modelToolsPath)
+            try container.encode(modelRouterPath, forKey: .modelRouterPath)
+            try container.encode(onyxDriversPath, forKey: .onyxDriversPath)
+            try container.encode(planningPath, forKey: .planningPath)
+            try container.encode(workflowAPIMountsPath, forKey: .workflowAPIMountsPath)
+            try container.encode(workflowREPLMountsPath, forKey: .workflowREPLMountsPath)
+            try container.encode(workflowModelToolsPath, forKey: .workflowModelToolsPath)
+            try container.encode(workflowOnyxDriversPath, forKey: .workflowOnyxDriversPath)
+            try container.encode(workflowSkillTreesPath, forKey: .workflowSkillTreesPath)
+            try container.encode(workflowToolBindingsPath, forKey: .workflowToolBindingsPath)
+            try container.encode(workflowPlanningPath, forKey: .workflowPlanningPath)
+            try container.encode(workflowRunbooksPath, forKey: .workflowRunbooksPath)
+            try container.encode(agentGuidePath, forKey: .agentGuidePath)
+            try container.encode(hostGuidePath, forKey: .hostGuidePath)
+            try container.encode(hostWiringPath, forKey: .hostWiringPath)
+            try container.encode(attachmentsPath, forKey: .attachmentsPath)
         }
     }
 
@@ -607,12 +910,27 @@ extension KistRunner {
         let attachmentPath: String
         let workflowRunbookPath: String
         let replScriptPath: String
+        let replMountPath: String
         let apiScriptPath: String
+        let apiMountPath: String
         let modelScriptPath: String
+        let modelToolPath: String
         let onyxDriverPath: String
         let skillTreePath: String
         let toolBindingsPath: String
         let planningBundlePath: String
+        let runtimeWorkflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks
+        let runtimeWorkflowAttachmentPath: String
+        let runtimeWorkflowOnyxDriverPath: String
+        let runtimeWorkflowSkillTreePath: String
+        let runtimeWorkflowToolBindingsPath: String
+        let runtimeWorkflowPlanningPath: String
+        let replMount: SMLWorkflowRuntimeREPLMount
+        let replGrammar: String
+        let replCommands: [SMLWorkflowREPLCommandDescriptor]
+        let replExamples: [SMLWorkflowREPLExample]
+        let apiMounts: [SMLWorkflowRuntimeAPIMount]
+        let modelTool: SMLWorkflowRuntimeModelToolExport
         let replScript: String
         let apiScript: [SMLRuntimeHostAPIRequestSpec]
         let modelScript: String
@@ -645,12 +963,28 @@ extension KistRunner {
             attachmentPath = "attachments/\(fileStem).json"
             workflowRunbookPath = "workflow-runbooks/\(fileStem).json"
             replScriptPath = "repl-scripts/\(fileStem).repl"
+            replMountPath = "repl-mounts/\(fileStem).json"
             apiScriptPath = "api-scripts/\(fileStem).json"
+            apiMountPath = "api-mounts/\(fileStem).json"
             modelScriptPath = "model-scripts/\(fileStem).prompts"
+            modelToolPath = "model-tools/\(fileStem).json"
             onyxDriverPath = "onyx-drivers/\(fileStem).json"
             skillTreePath = "skill-trees/\(fileStem).json"
             toolBindingsPath = "tool-bindings/\(fileStem).json"
             planningBundlePath = "planning/\(fileStem).json"
+            let metadata = KistRunner.smlRuntimeWorkflowMetadataLinks(for: attachment)
+            runtimeWorkflowMetadata = metadata
+            runtimeWorkflowAttachmentPath = metadata.attachmentPath
+            runtimeWorkflowOnyxDriverPath = metadata.onyxDriverPath
+            runtimeWorkflowSkillTreePath = metadata.skillTreePath
+            runtimeWorkflowToolBindingsPath = metadata.toolBindingsPath
+            runtimeWorkflowPlanningPath = metadata.planningBundlePath
+            replMount = attachment.replMount
+            replGrammar = attachment.replMount.grammar
+            replCommands = attachment.replMount.commands
+            replExamples = attachment.replMount.examples
+            apiMounts = attachment.apiRoutes
+            modelTool = KistRunner.smlRuntimeModelToolExport(for: attachment)
             replScript = KistRunner.smlRuntimeScaffoldREPLScript(for: attachment)
             apiScript = KistRunner.smlRuntimeScaffoldAPIScript(for: attachment)
             modelScript = KistRunner.smlRuntimeScaffoldModelScript(for: attachment)
@@ -700,10 +1034,258 @@ extension KistRunner {
             approvalGateIDs = Array(Set(attachment.approvalGates.map(\.instructionID))).sorted()
             commandActions = Array(Set(attachment.commandBindings.map { $0.action.rawValue })).sorted()
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case workflowID
+            case workflowVersion
+            case workflowName
+            case role
+            case apiBasePath
+            case apiWorkflowPath
+            case attachmentPath
+            case workflowRunbookPath
+            case replScriptPath
+            case replMountPath
+            case apiScriptPath
+            case apiMountPath
+            case modelScriptPath
+            case modelToolPath
+            case onyxDriverPath
+            case skillTreePath
+            case toolBindingsPath
+            case planningBundlePath
+            case runtimeWorkflowMetadata
+            case runtimeWorkflowAttachmentPath
+            case runtimeWorkflowOnyxDriverPath
+            case runtimeWorkflowSkillTreePath
+            case runtimeWorkflowToolBindingsPath
+            case runtimeWorkflowPlanningPath
+            case replMount
+            case replGrammar
+            case replCommands
+            case replExamples
+            case apiMounts
+            case modelTool
+            case replScript
+            case apiScript
+            case modelScript
+            case replTranscriptCommand
+            case apiTranscriptCommand
+            case modelTranscriptCommand
+            case apiEndpoints
+            case modelToolName
+            case modelRouterToolName
+            case onyxDriverID
+            case planningWorkflowID
+            case plannerEntrypoint
+            case skillIDs
+            case toolReferences
+            case decomposableUnitIDs
+            case approvalGateIDs
+            case commandActions
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            workflowID = try container.decode(String.self, forKey: .workflowID)
+            workflowVersion = try container.decode(String.self, forKey: .workflowVersion)
+            workflowName = try container.decode(String.self, forKey: .workflowName)
+            role = try container.decode(String.self, forKey: .role)
+            apiBasePath = try container.decode(String.self, forKey: .apiBasePath)
+            apiWorkflowPath = try container.decode(String.self, forKey: .apiWorkflowPath)
+            attachmentPath = try container.decode(String.self, forKey: .attachmentPath)
+            workflowRunbookPath = try container.decode(String.self, forKey: .workflowRunbookPath)
+            replScriptPath = try container.decode(String.self, forKey: .replScriptPath)
+            replMountPath = try container.decodeIfPresent(String.self, forKey: .replMountPath)
+                ?? "repl-mounts/\(KistRunner.smlRuntimeScaffoldSafeFileStem(workflowID)).json"
+            apiScriptPath = try container.decode(String.self, forKey: .apiScriptPath)
+            apiMountPath = try container.decodeIfPresent(String.self, forKey: .apiMountPath)
+                ?? "api-mounts/\(KistRunner.smlRuntimeScaffoldSafeFileStem(workflowID)).json"
+            modelScriptPath = try container.decode(String.self, forKey: .modelScriptPath)
+            modelToolPath = try container.decodeIfPresent(String.self, forKey: .modelToolPath)
+                ?? "model-tools/\(KistRunner.smlRuntimeScaffoldSafeFileStem(workflowID)).json"
+            onyxDriverPath = try container.decode(String.self, forKey: .onyxDriverPath)
+            skillTreePath = try container.decode(String.self, forKey: .skillTreePath)
+            toolBindingsPath = try container.decode(String.self, forKey: .toolBindingsPath)
+            planningBundlePath = try container.decode(String.self, forKey: .planningBundlePath)
+            let decodedModelToolName = try container.decode(String.self, forKey: .modelToolName)
+            let decodedModelRouterToolName = try container.decode(String.self, forKey: .modelRouterToolName)
+            let decodedOnyxDriverID = try container.decode(String.self, forKey: .onyxDriverID)
+            let decodedRuntimeWorkflowAttachmentPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowAttachmentPath
+            )
+            let decodedRuntimeWorkflowOnyxDriverPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowOnyxDriverPath
+            )
+            let decodedRuntimeWorkflowSkillTreePath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowSkillTreePath
+            )
+            let decodedRuntimeWorkflowToolBindingsPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowToolBindingsPath
+            )
+            let decodedRuntimeWorkflowPlanningPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeWorkflowPlanningPath
+            )
+            let metadata = try container.decodeIfPresent(
+                SMLWorkflowRuntimeWorkflowMetadataLinks.self,
+                forKey: .runtimeWorkflowMetadata
+            ) ?? SMLWorkflowRuntimeWorkflowMetadataLinks(
+                workflowID: workflowID,
+                workflowVersion: workflowVersion,
+                apiBasePath: apiBasePath,
+                attachmentPath: decodedRuntimeWorkflowAttachmentPath,
+                onyxDriverPath: decodedRuntimeWorkflowOnyxDriverPath,
+                skillTreePath: decodedRuntimeWorkflowSkillTreePath,
+                toolBindingsPath: decodedRuntimeWorkflowToolBindingsPath,
+                planningBundlePath: decodedRuntimeWorkflowPlanningPath
+            )
+            runtimeWorkflowMetadata = metadata
+            runtimeWorkflowAttachmentPath = decodedRuntimeWorkflowAttachmentPath ?? metadata.attachmentPath
+            runtimeWorkflowOnyxDriverPath = decodedRuntimeWorkflowOnyxDriverPath ?? metadata.onyxDriverPath
+            runtimeWorkflowSkillTreePath = decodedRuntimeWorkflowSkillTreePath ?? metadata.skillTreePath
+            runtimeWorkflowToolBindingsPath = decodedRuntimeWorkflowToolBindingsPath ?? metadata.toolBindingsPath
+            runtimeWorkflowPlanningPath = decodedRuntimeWorkflowPlanningPath ?? metadata.planningBundlePath
+            let decodedReplGrammar = try container.decodeIfPresent(String.self, forKey: .replGrammar)
+            let decodedReplCommands = try container.decodeIfPresent(
+                [SMLWorkflowREPLCommandDescriptor].self,
+                forKey: .replCommands
+            )
+            let decodedReplExamples = try container.decodeIfPresent(
+                [SMLWorkflowREPLExample].self,
+                forKey: .replExamples
+            )
+            let mount = try container.decodeIfPresent(
+                SMLWorkflowRuntimeREPLMount.self,
+                forKey: .replMount
+            ) ?? SMLWorkflowRuntimeREPLMount(
+                workflowID: workflowID,
+                workflowVersion: workflowVersion,
+                workflowName: workflowName,
+                role: role,
+                apiBasePath: apiBasePath,
+                apiWorkflowPath: apiWorkflowPath,
+                grammar: decodedReplGrammar ?? "",
+                helpText: "",
+                commands: decodedReplCommands ?? [],
+                examples: decodedReplExamples ?? [],
+                modelToolName: decodedModelToolName,
+                modelRouterToolName: decodedModelRouterToolName,
+                onyxDriverID: decodedOnyxDriverID,
+                commandBindings: []
+            )
+            replMount = mount
+            replGrammar = decodedReplGrammar ?? mount.grammar
+            replCommands = decodedReplCommands ?? mount.commands
+            replExamples = decodedReplExamples ?? mount.examples
+            apiMounts = try container.decodeIfPresent(
+                [SMLWorkflowRuntimeAPIMount].self,
+                forKey: .apiMounts
+            ) ?? []
+            modelTool = try container.decodeIfPresent(
+                SMLWorkflowRuntimeModelToolExport.self,
+                forKey: .modelTool
+            ) ?? SMLWorkflowRuntimeModelToolExport(
+                workflowID: workflowID,
+                workflowVersion: workflowVersion,
+                tool: SMLWorkflowModelToolDescriptor(
+                    name: decodedModelToolName,
+                    description: "Generated model command tool for \(workflowID).",
+                    parameters: []
+                ),
+                allowedActions: [],
+                maximumCommandRounds: 1,
+                workflowMetadata: metadata
+            )
+            replScript = try container.decode(String.self, forKey: .replScript)
+            apiScript = try container.decode([SMLRuntimeHostAPIRequestSpec].self, forKey: .apiScript)
+            modelScript = try container.decode(String.self, forKey: .modelScript)
+            replTranscriptCommand = try container.decode(
+                SMLRuntimeHostScaffoldCommandTemplate.self,
+                forKey: .replTranscriptCommand
+            )
+            apiTranscriptCommand = try container.decode(
+                SMLRuntimeHostScaffoldCommandTemplate.self,
+                forKey: .apiTranscriptCommand
+            )
+            modelTranscriptCommand = try container.decode(
+                SMLRuntimeHostScaffoldCommandTemplate.self,
+                forKey: .modelTranscriptCommand
+            )
+            apiEndpoints = try container.decode(
+                [SMLRuntimeHostScaffoldEndpointReference].self,
+                forKey: .apiEndpoints
+            )
+            modelToolName = decodedModelToolName
+            modelRouterToolName = decodedModelRouterToolName
+            onyxDriverID = decodedOnyxDriverID
+            planningWorkflowID = try container.decodeIfPresent(String.self, forKey: .planningWorkflowID)
+            plannerEntrypoint = try container.decodeIfPresent(String.self, forKey: .plannerEntrypoint)
+            skillIDs = try container.decode([String].self, forKey: .skillIDs)
+            toolReferences = try container.decode([String].self, forKey: .toolReferences)
+            decomposableUnitIDs = try container.decode([String].self, forKey: .decomposableUnitIDs)
+            approvalGateIDs = try container.decode([String].self, forKey: .approvalGateIDs)
+            commandActions = try container.decode([String].self, forKey: .commandActions)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(workflowID, forKey: .workflowID)
+            try container.encode(workflowVersion, forKey: .workflowVersion)
+            try container.encode(workflowName, forKey: .workflowName)
+            try container.encode(role, forKey: .role)
+            try container.encode(apiBasePath, forKey: .apiBasePath)
+            try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
+            try container.encode(attachmentPath, forKey: .attachmentPath)
+            try container.encode(workflowRunbookPath, forKey: .workflowRunbookPath)
+            try container.encode(replScriptPath, forKey: .replScriptPath)
+            try container.encode(replMountPath, forKey: .replMountPath)
+            try container.encode(apiScriptPath, forKey: .apiScriptPath)
+            try container.encode(apiMountPath, forKey: .apiMountPath)
+            try container.encode(modelScriptPath, forKey: .modelScriptPath)
+            try container.encode(modelToolPath, forKey: .modelToolPath)
+            try container.encode(onyxDriverPath, forKey: .onyxDriverPath)
+            try container.encode(skillTreePath, forKey: .skillTreePath)
+            try container.encode(toolBindingsPath, forKey: .toolBindingsPath)
+            try container.encode(planningBundlePath, forKey: .planningBundlePath)
+            try container.encode(runtimeWorkflowMetadata, forKey: .runtimeWorkflowMetadata)
+            try container.encode(runtimeWorkflowAttachmentPath, forKey: .runtimeWorkflowAttachmentPath)
+            try container.encode(runtimeWorkflowOnyxDriverPath, forKey: .runtimeWorkflowOnyxDriverPath)
+            try container.encode(runtimeWorkflowSkillTreePath, forKey: .runtimeWorkflowSkillTreePath)
+            try container.encode(runtimeWorkflowToolBindingsPath, forKey: .runtimeWorkflowToolBindingsPath)
+            try container.encode(runtimeWorkflowPlanningPath, forKey: .runtimeWorkflowPlanningPath)
+            try container.encode(replMount, forKey: .replMount)
+            try container.encode(replGrammar, forKey: .replGrammar)
+            try container.encode(replCommands, forKey: .replCommands)
+            try container.encode(replExamples, forKey: .replExamples)
+            try container.encode(apiMounts, forKey: .apiMounts)
+            try container.encode(modelTool, forKey: .modelTool)
+            try container.encode(replScript, forKey: .replScript)
+            try container.encode(apiScript, forKey: .apiScript)
+            try container.encode(modelScript, forKey: .modelScript)
+            try container.encode(replTranscriptCommand, forKey: .replTranscriptCommand)
+            try container.encode(apiTranscriptCommand, forKey: .apiTranscriptCommand)
+            try container.encode(modelTranscriptCommand, forKey: .modelTranscriptCommand)
+            try container.encode(apiEndpoints, forKey: .apiEndpoints)
+            try container.encode(modelToolName, forKey: .modelToolName)
+            try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
+            try container.encode(onyxDriverID, forKey: .onyxDriverID)
+            try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
+            try container.encodeIfPresent(plannerEntrypoint, forKey: .plannerEntrypoint)
+            try container.encode(skillIDs, forKey: .skillIDs)
+            try container.encode(toolReferences, forKey: .toolReferences)
+            try container.encode(decomposableUnitIDs, forKey: .decomposableUnitIDs)
+            try container.encode(approvalGateIDs, forKey: .approvalGateIDs)
+            try container.encode(commandActions, forKey: .commandActions)
+        }
     }
 
     struct SMLRuntimeHostScaffoldRunbook: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 5
+        static let currentSchemaVersion = 7
 
         let schemaVersion: Int
         let sourcePath: String
@@ -713,6 +1295,7 @@ extension KistRunner {
         let apiBasePaths: [String]
         let apiWorkflowPathsByWorkflowID: [String: String]
         let apiTaskPathsByWorkflowID: [String: String]
+        let runtimeWorkflowMetadataByWorkflowID: [String: SMLWorkflowRuntimeWorkflowMetadataLinks]
         let descriptorOnly: Bool
         let artifactsMaterialized: Bool
         let omittedRuntimeState: [String]
@@ -729,6 +1312,7 @@ extension KistRunner {
             apiBasePaths: [String],
             apiWorkflowPathsByWorkflowID: [String: String]? = nil,
             apiTaskPathsByWorkflowID: [String: String]? = nil,
+            runtimeWorkflowMetadataByWorkflowID: [String: SMLWorkflowRuntimeWorkflowMetadataLinks]? = nil,
             descriptorOnly: Bool = true,
             artifactsMaterialized: Bool = false,
             omittedRuntimeState: [String] = [
@@ -763,12 +1347,124 @@ extension KistRunner {
                         ?? "\(workflow.apiBasePath)\(workflow.apiWorkflowPath)/tasks"
                     return (workflow.workflowID, startPath)
                 })
+            self.runtimeWorkflowMetadataByWorkflowID = runtimeWorkflowMetadataByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: sortedWorkflows.map {
+                    ($0.workflowID, $0.runtimeWorkflowMetadata)
+                })
             self.descriptorOnly = descriptorOnly
             self.artifactsMaterialized = artifactsMaterialized
             self.omittedRuntimeState = Array(Set(omittedRuntimeState)).sorted()
             self.artifacts = artifacts
             self.workflows = sortedWorkflows
             self.launchDescriptor = launchDescriptor
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion
+            case sourcePath
+            case sourceFormat
+            case outputDirectory
+            case workflowIDs
+            case apiBasePaths
+            case apiWorkflowPathsByWorkflowID
+            case apiTaskPathsByWorkflowID
+            case runtimeWorkflowMetadataByWorkflowID
+            case descriptorOnly
+            case artifactsMaterialized
+            case omittedRuntimeState
+            case artifacts
+            case workflows
+            case launchDescriptor
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+            let sourcePath = try container.decode(String.self, forKey: .sourcePath)
+            let sourceFormat = try container.decode(
+                SMLRuntimeHostExportSourceFormat.self,
+                forKey: .sourceFormat
+            )
+            let outputDirectory = try container.decode(String.self, forKey: .outputDirectory)
+            let workflowIDs = try container.decode([String].self, forKey: .workflowIDs)
+            let apiBasePaths = try container.decode([String].self, forKey: .apiBasePaths)
+            let apiWorkflowPathsByWorkflowID = try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .apiWorkflowPathsByWorkflowID
+            )
+            let apiTaskPathsByWorkflowID = try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .apiTaskPathsByWorkflowID
+            )
+            let runtimeWorkflowMetadataByWorkflowID = try container.decodeIfPresent(
+                [String: SMLWorkflowRuntimeWorkflowMetadataLinks].self,
+                forKey: .runtimeWorkflowMetadataByWorkflowID
+            )
+            let descriptorOnly = try container.decodeIfPresent(Bool.self, forKey: .descriptorOnly)
+                ?? true
+            let artifactsMaterialized = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .artifactsMaterialized
+            ) ?? false
+            let omittedRuntimeState = try container.decodeIfPresent(
+                [String].self,
+                forKey: .omittedRuntimeState
+            ) ?? [
+                "actor_identity",
+                "completion_authority",
+                "credentials",
+                "leases",
+                "provider_registry",
+                "runtime_handles",
+            ]
+            let artifacts = try container.decodeIfPresent(
+                SMLRuntimeHostScaffoldRunbookArtifacts.self,
+                forKey: .artifacts
+            ) ?? SMLRuntimeHostScaffoldRunbookArtifacts()
+            let workflows = try container.decode(
+                [SMLRuntimeHostScaffoldWorkflowRunbook].self,
+                forKey: .workflows
+            )
+            let launchDescriptor = try container.decode(
+                SMLWorkflowRuntimeLaunchDescriptor.self,
+                forKey: .launchDescriptor
+            )
+            self.init(
+                schemaVersion: schemaVersion,
+                sourcePath: sourcePath,
+                sourceFormat: sourceFormat,
+                outputDirectory: outputDirectory,
+                workflowIDs: workflowIDs,
+                apiBasePaths: apiBasePaths,
+                apiWorkflowPathsByWorkflowID: apiWorkflowPathsByWorkflowID,
+                apiTaskPathsByWorkflowID: apiTaskPathsByWorkflowID,
+                runtimeWorkflowMetadataByWorkflowID: runtimeWorkflowMetadataByWorkflowID,
+                descriptorOnly: descriptorOnly,
+                artifactsMaterialized: artifactsMaterialized,
+                omittedRuntimeState: omittedRuntimeState,
+                artifacts: artifacts,
+                workflows: workflows,
+                launchDescriptor: launchDescriptor
+            )
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(schemaVersion, forKey: .schemaVersion)
+            try container.encode(sourcePath, forKey: .sourcePath)
+            try container.encode(sourceFormat, forKey: .sourceFormat)
+            try container.encode(outputDirectory, forKey: .outputDirectory)
+            try container.encode(workflowIDs, forKey: .workflowIDs)
+            try container.encode(apiBasePaths, forKey: .apiBasePaths)
+            try container.encode(apiWorkflowPathsByWorkflowID, forKey: .apiWorkflowPathsByWorkflowID)
+            try container.encode(apiTaskPathsByWorkflowID, forKey: .apiTaskPathsByWorkflowID)
+            try container.encode(runtimeWorkflowMetadataByWorkflowID, forKey: .runtimeWorkflowMetadataByWorkflowID)
+            try container.encode(descriptorOnly, forKey: .descriptorOnly)
+            try container.encode(artifactsMaterialized, forKey: .artifactsMaterialized)
+            try container.encode(omittedRuntimeState, forKey: .omittedRuntimeState)
+            try container.encode(artifacts, forKey: .artifacts)
+            try container.encode(workflows, forKey: .workflows)
+            try container.encode(launchDescriptor, forKey: .launchDescriptor)
         }
     }
 
@@ -2934,8 +3630,26 @@ extension KistRunner {
                 files.append(try writeSMLRuntimeScaffoldJSONFile(
                     relativePath: "workflow-runbooks/\(fileStem).json",
                     outputDirectory: outputURL,
-                    summary: "Per-workflow runbook card with artifact paths, commands, routes, model, Onyx, skill, tool, and planning IDs for \(attachment.workflowID).",
+                    summary: "Per-workflow runbook card with artifact paths, commands, REPL mount, routes, model, Onyx, skill, tool, and planning IDs for \(attachment.workflowID).",
                     payload: workflowRunbook
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "repl-mounts/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow custom REPL mount descriptor for \(attachment.workflowID).",
+                    payload: attachment.replMount
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "api-mounts/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow custom API mount descriptors for \(attachment.workflowID).",
+                    payload: attachment.apiRoutes
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "model-tools/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow native model tool descriptor for \(attachment.workflowID).",
+                    payload: smlRuntimeModelToolExport(for: attachment)
                 ))
                 files.append(try writeSMLRuntimeScaffoldJSONFile(
                     relativePath: "attachments/\(fileStem).json",
@@ -3001,7 +3715,7 @@ extension KistRunner {
             files.append(try writeSMLRuntimeScaffoldJSONFile(
                 relativePath: "runbook.json",
                 outputDirectory: outputURL,
-                summary: "Machine-readable host integration runbook tying artifacts, inline scripts, commands, API endpoints, model-router, Onyx, and planning IDs together.",
+                summary: "Machine-readable host integration runbook tying artifacts, REPL mounts, inline scripts, commands, API endpoints, model-router, Onyx, and planning IDs together.",
                 payload: smlRuntimeScaffoldRunbook(
                     sourcePath: host.sourcePath,
                     sourceFormat: host.sourceFormat,
@@ -3238,6 +3952,53 @@ extension KistRunner {
         return stem.isEmpty ? "workflow" : stem
     }
 
+    private static func smlRuntimeWorkflowMetadataLinks(
+        for attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
+    ) -> SMLWorkflowRuntimeWorkflowMetadataLinks {
+        SMLWorkflowRuntimeWorkflowMetadataLinks(
+            workflowID: attachment.workflowID,
+            workflowVersion: attachment.workflowVersion,
+            apiBasePath: attachment.apiBasePath,
+            attachmentPath: attachment.runtimeWorkflowAttachmentPath,
+            onyxDriverPath: attachment.runtimeWorkflowOnyxDriverPath,
+            skillTreePath: attachment.runtimeWorkflowSkillTreePath,
+            toolBindingsPath: attachment.runtimeWorkflowToolBindingsPath,
+            planningBundlePath: attachment.runtimeWorkflowPlanningPath
+        )
+    }
+
+    private static func smlRuntimeModelToolExport(
+        for attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
+    ) -> SMLWorkflowRuntimeModelToolExport {
+        if let model = attachment.model {
+            return SMLWorkflowRuntimeModelToolExport(
+                workflowID: attachment.workflowID,
+                workflowVersion: attachment.workflowVersion,
+                tool: model.tool,
+                allowedActions: model.allowedActions,
+                maximumCommandRounds: model.maximumCommandRounds,
+                workflowMetadata: smlRuntimeWorkflowMetadataLinks(for: attachment)
+            )
+        }
+        let allowedActions = Array(
+            Set(attachment.commandBindings.compactMap { binding in
+                binding.modelEligible ? binding.action : nil
+            })
+        ).sorted { $0.rawValue < $1.rawValue }
+        return SMLWorkflowRuntimeModelToolExport(
+            workflowID: attachment.workflowID,
+            workflowVersion: attachment.workflowVersion,
+            tool: SMLWorkflowModelToolDescriptor(
+                name: attachment.modelToolName,
+                description: "Generated model command tool for \(attachment.workflowID).",
+                parameters: []
+            ),
+            allowedActions: allowedActions,
+            maximumCommandRounds: 1,
+            workflowMetadata: smlRuntimeWorkflowMetadataLinks(for: attachment)
+        )
+    }
+
     private static func smlRuntimeScaffoldRunbook(
         sourcePath: String,
         sourceFormat: SMLRuntimeHostExportSourceFormat,
@@ -3314,15 +4075,19 @@ extension KistRunner {
 
             - Task endpoint: `\(taskEndpoint)`
             - REPL replay: `kist --sml-runtime-repl-script . --sml-script repl-scripts/\(fileStem).repl --sml-workflow \(attachment.workflowID)`
+            - REPL mount: `repl-mounts/\(fileStem).json`
             - API replay: `kist --sml-runtime-api-script . --sml-api-script api-scripts/\(fileStem).json`
+            - API mount: `api-mounts/\(fileStem).json`
             - Model-router replay: `kist --sml-runtime-model-script . --sml-model-script model-scripts/\(fileStem).prompts --provider <provider> --model <model>`
             - Model router tool: `\(attachment.modelRouterToolName)`; workflow model tool: `\(attachment.modelToolName)`
+            - Model tool descriptor: `model-tools/\(fileStem).json`
             - Workflow runbook: `workflow-runbooks/\(fileStem).json`
             - Onyx driver: `onyx-drivers/\(fileStem).json` (`\(attachment.onyxDriverID)`)
             - Skill tree: `skill-trees/\(fileStem).json` (\(skillList))
             - Tool bindings: `tool-bindings/\(fileStem).json` (\(toolList))
             - Planning bundle: `planning/\(fileStem).json` (planning workflow `\(planningID)`, entrypoint `\(plannerEntrypoint)`)
             - Attachment manifest: `attachments/\(fileStem).json`
+            - Runtime metadata APIs: attachment `GET \(attachment.runtimeWorkflowAttachmentPath)`; Onyx driver `GET \(attachment.runtimeWorkflowOnyxDriverPath)`; skill tree `GET \(attachment.runtimeWorkflowSkillTreePath)`; tool bindings `GET \(attachment.runtimeWorkflowToolBindingsPath)`; planning bundle `GET \(attachment.runtimeWorkflowPlanningPath)`
             """
         }.joined(separator: "\n\n")
         let fileList = files.sorted {
@@ -3361,13 +4126,13 @@ extension KistRunner {
 
         ## Host wiring order
 
-        1. Decode `runbook.json` for exact scaffold artifact paths, inline REPL/API/model scripts, command templates, API endpoints, model-router IDs, Onyx driver IDs, and planning IDs.
+        1. Decode `runbook.json` for exact scaffold artifact paths, inline REPL/API/model scripts, command templates, API endpoints, model-router IDs, Onyx driver IDs, planning IDs, and runtime metadata API paths.
         2. Decode `runtime-source-package.json` or inspect `runtime-export.json`.
         3. Mount routes from `mount.json` and `openapi.json`.
-        4. Attach `model-router.json` as the native tool exposed to the selected model.
+        4. Attach `model-router.json` plus `model-tools.json` or `model-tools/*.json` as the native tools exposed to the selected model.
         5. Load `onyx-drivers.json` or `onyx-drivers/*.json` for Onyx driver manifests.
         6. Use `planning.json`, `planning/*.json`, `skill-trees/*.json`, `tool-bindings/*.json`, `agent-guide.json`, and `host-guide.json` as the agent/host operating contract.
-        7. Use `workflow-runbooks/*.json`, `host-wiring.json`, or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
+        7. Use `workflow-runbooks/*.json`, `repl-mounts/*.json`, `api-mounts/*.json`, `model-tools/*.json`, `host-wiring.json`, or `attachments/*.json` when a dashboard, CLI adapter, custom REPL/API/model host, or Onyx bridge needs one workflow-specific map.
         8. Run `repl-scripts/*.repl` with `kist --sml-runtime-repl-script <this directory> --sml-script <script>` to produce a multi-turn workflow REPL transcript.
         9. Run `api-scripts/*.json` with `kist --sml-runtime-api-script <this directory> --sml-api-script <script>` to produce a multi-request generated API transcript.
         10. Run `model-scripts/*.prompts` with `kist --sml-runtime-model-script <this directory> --sml-model-script <script>` plus a native-tool provider/model to produce a multi-turn model-router transcript.
@@ -4658,10 +5423,13 @@ extension KistRunner {
             let fileStem = smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
             paths.formUnion([
                 "api-scripts/\(fileStem).json",
+                "api-mounts/\(fileStem).json",
                 "attachments/\(fileStem).json",
                 "model-scripts/\(fileStem).prompts",
+                "model-tools/\(fileStem).json",
                 "onyx-drivers/\(fileStem).json",
                 "planning/\(fileStem).json",
+                "repl-mounts/\(fileStem).json",
                 "repl-scripts/\(fileStem).repl",
                 "skill-trees/\(fileStem).json",
                 "tool-bindings/\(fileStem).json",

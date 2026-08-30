@@ -346,10 +346,34 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let scaffoldURL = directory.appendingPathComponent("cli-runtime-scaffold", isDirectory: true)
         XCTAssertEqual(scaffold.outputDirectory, scaffoldURL.path)
         XCTAssertEqual(scaffold.launchDescriptor.sourceSummaries.map(\.apiWorkflowPath), [customWorkflowPath])
+        XCTAssertEqual(scaffold.runbookPath, "runbook.json")
+        XCTAssertEqual(scaffold.workflowAPIMountPathsByWorkflowID, [
+            "langgraph.review": "api-mounts/langgraph.review.json",
+        ])
+        XCTAssertEqual(scaffold.workflowREPLMountPathsByWorkflowID, [
+            "langgraph.review": "repl-mounts/langgraph.review.json",
+        ])
+        XCTAssertEqual(scaffold.workflowModelToolPathsByWorkflowID, [
+            "langgraph.review": "model-tools/langgraph.review.json",
+        ])
+        XCTAssertEqual(scaffold.workflowRunbookPathsByWorkflowID, [
+            "langgraph.review": "workflow-runbooks/langgraph.review.json",
+        ])
+        XCTAssertEqual(
+            scaffold.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            scaffold.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.toolBindingsPath,
+            "/source/runtime/tool-bindings/langgraph.review"
+        )
         XCTAssertTrue(scaffold.files.contains { $0.relativePath == "onyx-drivers/langgraph.review.json" })
         XCTAssertTrue(scaffold.files.contains { $0.relativePath == "skill-trees/langgraph.review.json" })
         XCTAssertTrue(scaffold.files.contains { $0.relativePath == "tool-bindings/langgraph.review.json" })
         XCTAssertTrue(scaffold.files.contains { $0.relativePath == "planning/langgraph.review.json" })
+        XCTAssertTrue(scaffold.files.contains { $0.relativePath == "api-mounts/langgraph.review.json" })
+        XCTAssertTrue(scaffold.files.contains { $0.relativePath == "repl-mounts/langgraph.review.json" })
+        XCTAssertTrue(scaffold.files.contains { $0.relativePath == "model-tools/langgraph.review.json" })
         XCTAssertTrue(scaffold.files.contains { $0.relativePath == "workflow-runbooks/langgraph.review.json" })
 
         let runbook = try JSONDecoder().decode(
@@ -362,12 +386,52 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(runbook.apiTaskPathsByWorkflowID, [
             "langgraph.review": customTaskPath,
         ])
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.onyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertEqual(runbook.workflows.first?.apiWorkflowPath, customWorkflowPath)
+        XCTAssertEqual(runbook.workflows.first?.replMountPath, "repl-mounts/langgraph.review.json")
+        XCTAssertEqual(runbook.workflows.first?.replMount.apiWorkflowPath, customWorkflowPath)
+        XCTAssertEqual(runbook.workflows.first?.replCommands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        XCTAssertEqual(runbook.workflows.first?.apiMountPath, "api-mounts/langgraph.review.json")
+        XCTAssertEqual(runbook.workflows.first?.apiMounts.first { $0.action == .start }?.pathTemplate, customTaskPath)
+        XCTAssertEqual(runbook.workflows.first?.modelToolPath, "model-tools/langgraph.review.json")
+        XCTAssertEqual(runbook.workflows.first?.modelTool.workflowID, "langgraph.review")
+        XCTAssertEqual(runbook.workflows.first?.modelTool.tool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(runbook.workflows.first?.onyxDriverPath, "onyx-drivers/langgraph.review.json")
         XCTAssertEqual(runbook.workflows.first?.skillTreePath, "skill-trees/langgraph.review.json")
         XCTAssertEqual(runbook.workflows.first?.toolBindingsPath, "tool-bindings/langgraph.review.json")
         XCTAssertEqual(runbook.workflows.first?.planningBundlePath, "planning/langgraph.review.json")
         XCTAssertEqual(runbook.workflows.first?.workflowRunbookPath, "workflow-runbooks/langgraph.review.json")
+        XCTAssertEqual(
+            runbook.workflows.first?.runtimeWorkflowAttachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            runbook.workflows.first?.runtimeWorkflowOnyxDriverPath,
+            "/source/runtime/onyx-drivers/langgraph.review"
+        )
+        XCTAssertEqual(
+            runbook.workflows.first?.runtimeWorkflowSkillTreePath,
+            "/source/runtime/skill-trees/langgraph.review"
+        )
+        XCTAssertEqual(
+            runbook.workflows.first?.runtimeWorkflowToolBindingsPath,
+            "/source/runtime/tool-bindings/langgraph.review"
+        )
+        XCTAssertEqual(
+            runbook.workflows.first?.runtimeWorkflowPlanningPath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertTrue(runbook.workflows.first?.apiEndpoints.contains {
             $0.action == .start && $0.pathTemplate == customTaskPath
         } == true)
@@ -400,15 +464,39 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             from: Data(contentsOf: scaffoldURL.appendingPathComponent("tool-bindings/langgraph.review.json"))
         )
         XCTAssertEqual(workflowToolBindings.map(\.reference), ["review.plan", "repository.write"])
+        let workflowREPLMount = try JSONDecoder().decode(
+            SMLWorkflowRuntimeREPLMount.self,
+            from: Data(contentsOf: scaffoldURL.appendingPathComponent("repl-mounts/langgraph.review.json"))
+        )
+        XCTAssertEqual(workflowREPLMount.apiWorkflowPath, customWorkflowPath)
+        XCTAssertEqual(workflowREPLMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        let workflowAPIMounts = try JSONDecoder().decode(
+            [SMLWorkflowRuntimeAPIMount].self,
+            from: Data(contentsOf: scaffoldURL.appendingPathComponent("api-mounts/langgraph.review.json"))
+        )
+        XCTAssertTrue(workflowAPIMounts.contains {
+            $0.action == .start && $0.pathTemplate == customTaskPath
+        })
+        let workflowModelTool = try JSONDecoder().decode(
+            SMLWorkflowRuntimeModelToolExport.self,
+            from: Data(contentsOf: scaffoldURL.appendingPathComponent("model-tools/langgraph.review.json"))
+        )
+        XCTAssertEqual(workflowModelTool.workflowID, "langgraph.review")
+        XCTAssertEqual(workflowModelTool.workflowMetadata.attachmentPath, "/source/runtime/attachments/langgraph.review")
 
         let readme = try String(contentsOf: scaffoldURL.appendingPathComponent("README.md"))
         XCTAssertTrue(readme.contains("Per-workflow wiring cards"))
         XCTAssertTrue(readme.contains("Task endpoint: `\(customTaskPath)`"))
+        XCTAssertTrue(readme.contains("REPL mount: `repl-mounts/langgraph.review.json`"))
+        XCTAssertTrue(readme.contains("API mount: `api-mounts/langgraph.review.json`"))
+        XCTAssertTrue(readme.contains("Model tool descriptor: `model-tools/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Onyx driver: `onyx-drivers/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Skill tree: `skill-trees/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Tool bindings: `tool-bindings/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Planning bundle: `planning/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Workflow runbook: `workflow-runbooks/langgraph.review.json`"))
+        XCTAssertTrue(readme.contains("Runtime metadata APIs: attachment `GET /source/runtime/attachments/langgraph.review`"))
+        XCTAssertTrue(readme.contains("planning bundle `GET /source/runtime/planning/langgraph.review`"))
         XCTAssertFalse(readme.contains(defaultTaskPath))
     }
 
@@ -1422,10 +1510,32 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(scaffold.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(scaffold.apiBasePaths, ["/source"])
         XCTAssertTrue(scaffold.launchDescriptor.launchComplete)
+        XCTAssertEqual(scaffold.runbookPath, "runbook.json")
+        XCTAssertEqual(scaffold.workflowAPIMountPathsByWorkflowID, [
+            "langgraph.review": "api-mounts/langgraph.review.json",
+        ])
+        XCTAssertEqual(scaffold.workflowREPLMountPathsByWorkflowID, [
+            "langgraph.review": "repl-mounts/langgraph.review.json",
+        ])
+        XCTAssertEqual(scaffold.workflowModelToolPathsByWorkflowID, [
+            "langgraph.review": "model-tools/langgraph.review.json",
+        ])
+        XCTAssertEqual(scaffold.workflowRunbookPathsByWorkflowID, [
+            "langgraph.review": "workflow-runbooks/langgraph.review.json",
+        ])
+        XCTAssertEqual(
+            scaffold.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            scaffold.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
 
         let expectedPaths: Set<String> = [
             "README.md",
             "agent-guide.json",
+            "api-mounts/langgraph.review.json",
             "api-scripts/langgraph.review.json",
             "attachments.json",
             "attachments/langgraph.review.json",
@@ -1435,6 +1545,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "launch.json",
             "model-scripts/langgraph.review.prompts",
             "model-router.json",
+            "model-tools/langgraph.review.json",
             "model-tools.json",
             "mount.json",
             "onyx-drivers.json",
@@ -1442,6 +1553,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "openapi.json",
             "planning/langgraph.review.json",
             "planning.json",
+            "repl-mounts/langgraph.review.json",
             "repl-scripts/langgraph.review.repl",
             "runbook.json",
             "runtime-export.json",
@@ -1458,6 +1570,42 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             from: Data(contentsOf: indexURL)
         )
         XCTAssertEqual(index, scaffold)
+        var legacyScaffoldObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any]
+        )
+        legacyScaffoldObject["schemaVersion"] = 2
+        legacyScaffoldObject.removeValue(forKey: "runbookPath")
+        legacyScaffoldObject.removeValue(forKey: "workflowAPIMountPathsByWorkflowID")
+        legacyScaffoldObject.removeValue(forKey: "workflowREPLMountPathsByWorkflowID")
+        legacyScaffoldObject.removeValue(forKey: "workflowModelToolPathsByWorkflowID")
+        legacyScaffoldObject.removeValue(forKey: "workflowRunbookPathsByWorkflowID")
+        legacyScaffoldObject.removeValue(forKey: "runtimeWorkflowMetadataByWorkflowID")
+        let legacyScaffold = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostScaffold.self,
+            from: JSONSerialization.data(withJSONObject: legacyScaffoldObject, options: [.sortedKeys])
+        )
+        XCTAssertEqual(legacyScaffold.schemaVersion, 2)
+        XCTAssertEqual(legacyScaffold.runbookPath, "runbook.json")
+        XCTAssertEqual(legacyScaffold.workflowAPIMountPathsByWorkflowID, [
+            "langgraph.review": "api-mounts/langgraph.review.json",
+        ])
+        XCTAssertEqual(legacyScaffold.workflowREPLMountPathsByWorkflowID, [
+            "langgraph.review": "repl-mounts/langgraph.review.json",
+        ])
+        XCTAssertEqual(legacyScaffold.workflowModelToolPathsByWorkflowID, [
+            "langgraph.review": "model-tools/langgraph.review.json",
+        ])
+        XCTAssertEqual(legacyScaffold.workflowRunbookPathsByWorkflowID, [
+            "langgraph.review": "workflow-runbooks/langgraph.review.json",
+        ])
+        XCTAssertEqual(
+            legacyScaffold.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            legacyScaffold.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
 
         for file in scaffold.files {
             let fileURL = outputURL.appendingPathComponent(file.relativePath)
@@ -1517,15 +1665,21 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             from: Data(contentsOf: outputURL.appendingPathComponent("model-tools.json"))
         )
         XCTAssertEqual(modelTools.map(\.workflowID), ["langgraph.review"])
-        XCTAssertEqual(modelTools.first?.tool.name, SMLWorkflowModelAdapter.toolName)
+        let aggregateModelTool = try XCTUnwrap(modelTools.first)
+        XCTAssertEqual(aggregateModelTool.tool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(
-            modelTools.first?.workflowMetadata.attachmentPath,
+            aggregateModelTool.workflowMetadata.attachmentPath,
             "/source/runtime/attachments/langgraph.review"
         )
         XCTAssertEqual(
-            modelTools.first?.workflowMetadata.planningBundlePath,
+            aggregateModelTool.workflowMetadata.planningBundlePath,
             "/source/runtime/planning/langgraph.review"
         )
+        let workflowModelTool = try JSONDecoder().decode(
+            SMLWorkflowRuntimeModelToolExport.self,
+            from: Data(contentsOf: outputURL.appendingPathComponent("model-tools/langgraph.review.json"))
+        )
+        XCTAssertEqual(workflowModelTool, aggregateModelTool)
 
         let modelRouter = try JSONDecoder().decode(
             SMLWorkflowRuntimeModelRouterDescriptor.self,
@@ -1624,6 +1778,16 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(workflowPlanning.decomposableUnits, attachment.decomposableUnits)
         XCTAssertEqual(workflowPlanning.approvalGates, attachment.approvalGates)
         XCTAssertEqual(workflowPlanning.commandBindings, attachment.commandBindings)
+        let workflowREPLMount = try JSONDecoder().decode(
+            SMLWorkflowRuntimeREPLMount.self,
+            from: Data(contentsOf: outputURL.appendingPathComponent("repl-mounts/langgraph.review.json"))
+        )
+        XCTAssertEqual(workflowREPLMount, attachment.replMount)
+        let workflowAPIMounts = try JSONDecoder().decode(
+            [SMLWorkflowRuntimeAPIMount].self,
+            from: Data(contentsOf: outputURL.appendingPathComponent("api-mounts/langgraph.review.json"))
+        )
+        XCTAssertEqual(workflowAPIMounts, attachment.apiRoutes)
 
         let runbook = try JSONDecoder().decode(
             KistRunner.SMLRuntimeHostScaffoldRunbook.self,
@@ -1641,6 +1805,14 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(runbook.apiTaskPathsByWorkflowID, [
             "langgraph.review": "/source/workflows/langgraph.review/tasks",
         ])
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["langgraph.review"],
+            SMLWorkflowRuntimeWorkflowMetadataLinks(
+                workflowID: "langgraph.review",
+                workflowVersion: attachment.workflowVersion,
+                apiBasePath: "/source"
+            )
+        )
         XCTAssertTrue(runbook.descriptorOnly)
         XCTAssertTrue(runbook.artifactsMaterialized)
         XCTAssertEqual(runbook.omittedRuntimeState, [
@@ -1658,6 +1830,9 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(runbook.artifacts.modelRouterPath, "model-router.json")
         XCTAssertEqual(runbook.artifacts.onyxDriversPath, "onyx-drivers.json")
         XCTAssertEqual(runbook.artifacts.planningPath, "planning.json")
+        XCTAssertEqual(runbook.artifacts.workflowAPIMountsPath, "api-mounts")
+        XCTAssertEqual(runbook.artifacts.workflowREPLMountsPath, "repl-mounts")
+        XCTAssertEqual(runbook.artifacts.workflowModelToolsPath, "model-tools")
         XCTAssertEqual(runbook.artifacts.workflowOnyxDriversPath, "onyx-drivers")
         XCTAssertEqual(runbook.artifacts.workflowSkillTreesPath, "skill-trees")
         XCTAssertEqual(runbook.artifacts.workflowToolBindingsPath, "tool-bindings")
@@ -1675,13 +1850,35 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(workflowRunbook.apiWorkflowPath, "/workflows/langgraph.review")
         XCTAssertEqual(workflowRunbook.attachmentPath, "attachments/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.replScriptPath, "repl-scripts/langgraph.review.repl")
+        XCTAssertEqual(workflowRunbook.replMountPath, "repl-mounts/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.apiScriptPath, "api-scripts/langgraph.review.json")
+        XCTAssertEqual(workflowRunbook.apiMountPath, "api-mounts/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.modelScriptPath, "model-scripts/langgraph.review.prompts")
+        XCTAssertEqual(workflowRunbook.modelToolPath, "model-tools/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.workflowRunbookPath, "workflow-runbooks/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.onyxDriverPath, "onyx-drivers/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.skillTreePath, "skill-trees/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.toolBindingsPath, "tool-bindings/langgraph.review.json")
         XCTAssertEqual(workflowRunbook.planningBundlePath, "planning/langgraph.review.json")
+        XCTAssertEqual(
+            workflowRunbook.runtimeWorkflowMetadata,
+            SMLWorkflowRuntimeWorkflowMetadataLinks(
+                workflowID: "langgraph.review",
+                workflowVersion: attachment.workflowVersion,
+                apiBasePath: "/source"
+            )
+        )
+        XCTAssertEqual(workflowRunbook.runtimeWorkflowAttachmentPath, "/source/runtime/attachments/langgraph.review")
+        XCTAssertEqual(workflowRunbook.runtimeWorkflowOnyxDriverPath, "/source/runtime/onyx-drivers/langgraph.review")
+        XCTAssertEqual(workflowRunbook.runtimeWorkflowSkillTreePath, "/source/runtime/skill-trees/langgraph.review")
+        XCTAssertEqual(workflowRunbook.runtimeWorkflowToolBindingsPath, "/source/runtime/tool-bindings/langgraph.review")
+        XCTAssertEqual(workflowRunbook.runtimeWorkflowPlanningPath, "/source/runtime/planning/langgraph.review")
+        XCTAssertEqual(workflowRunbook.replMount, attachment.replMount)
+        XCTAssertEqual(workflowRunbook.replGrammar, attachment.replMount.grammar)
+        XCTAssertEqual(workflowRunbook.replCommands, attachment.replMount.commands)
+        XCTAssertEqual(workflowRunbook.replExamples, attachment.replMount.examples)
+        XCTAssertEqual(workflowRunbook.apiMounts, attachment.apiRoutes)
+        XCTAssertEqual(workflowRunbook.modelTool, workflowModelTool)
         XCTAssertTrue(workflowRunbook.replScript.contains("kist --sml-runtime-repl-script ."))
         XCTAssertTrue(workflowRunbook.replScript.contains("start TASK-SCAFFOLD"))
         XCTAssertEqual(workflowRunbook.apiScript.count, 4)
@@ -1746,6 +1943,80 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(perWorkflowRunbook, workflowRunbook)
 
+        var legacyRunbookObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: outputURL.appendingPathComponent("runbook.json"))
+            ) as? [String: Any]
+        )
+        legacyRunbookObject["schemaVersion"] = 5
+        legacyRunbookObject.removeValue(forKey: "runtimeWorkflowMetadataByWorkflowID")
+        var legacyWorkflowObjects = try XCTUnwrap(
+            legacyRunbookObject["workflows"] as? [[String: Any]]
+        )
+        legacyWorkflowObjects[0].removeValue(forKey: "runtimeWorkflowMetadata")
+        legacyWorkflowObjects[0].removeValue(forKey: "runtimeWorkflowAttachmentPath")
+        legacyWorkflowObjects[0].removeValue(forKey: "runtimeWorkflowOnyxDriverPath")
+        legacyWorkflowObjects[0].removeValue(forKey: "runtimeWorkflowSkillTreePath")
+        legacyWorkflowObjects[0].removeValue(forKey: "runtimeWorkflowToolBindingsPath")
+        legacyWorkflowObjects[0].removeValue(forKey: "runtimeWorkflowPlanningPath")
+        legacyWorkflowObjects[0].removeValue(forKey: "replMountPath")
+        legacyWorkflowObjects[0].removeValue(forKey: "replMount")
+        legacyWorkflowObjects[0].removeValue(forKey: "replGrammar")
+        legacyWorkflowObjects[0].removeValue(forKey: "replCommands")
+        legacyWorkflowObjects[0].removeValue(forKey: "replExamples")
+        legacyWorkflowObjects[0].removeValue(forKey: "apiMountPath")
+        legacyWorkflowObjects[0].removeValue(forKey: "apiMounts")
+        legacyWorkflowObjects[0].removeValue(forKey: "modelToolPath")
+        legacyWorkflowObjects[0].removeValue(forKey: "modelTool")
+        if var legacyArtifacts = legacyRunbookObject["artifacts"] as? [String: Any] {
+            legacyArtifacts.removeValue(forKey: "workflowAPIMountsPath")
+            legacyArtifacts.removeValue(forKey: "workflowREPLMountsPath")
+            legacyArtifacts.removeValue(forKey: "workflowModelToolsPath")
+            legacyRunbookObject["artifacts"] = legacyArtifacts
+        }
+        legacyRunbookObject["workflows"] = legacyWorkflowObjects
+        let legacyRunbook = try JSONDecoder().decode(
+            KistRunner.SMLRuntimeHostScaffoldRunbook.self,
+            from: JSONSerialization.data(withJSONObject: legacyRunbookObject, options: [.sortedKeys])
+        )
+        XCTAssertEqual(legacyRunbook.schemaVersion, 5)
+        XCTAssertEqual(
+            legacyRunbook.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            legacyRunbook.runtimeWorkflowMetadataByWorkflowID["langgraph.review"]?.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
+        XCTAssertEqual(
+            legacyRunbook.workflows.first?.runtimeWorkflowAttachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
+        XCTAssertEqual(
+            legacyRunbook.workflows.first?.runtimeWorkflowPlanningPath,
+            "/source/runtime/planning/langgraph.review"
+        )
+        XCTAssertEqual(
+            legacyRunbook.workflows.first?.replMountPath,
+            "repl-mounts/langgraph.review.json"
+        )
+        XCTAssertEqual(legacyRunbook.workflows.first?.replMount.workflowID, "langgraph.review")
+        XCTAssertEqual(legacyRunbook.workflows.first?.replCommands, [])
+        XCTAssertEqual(
+            legacyRunbook.workflows.first?.apiMountPath,
+            "api-mounts/langgraph.review.json"
+        )
+        XCTAssertEqual(legacyRunbook.workflows.first?.apiMounts, [])
+        XCTAssertEqual(
+            legacyRunbook.workflows.first?.modelToolPath,
+            "model-tools/langgraph.review.json"
+        )
+        XCTAssertEqual(legacyRunbook.workflows.first?.modelTool.workflowID, "langgraph.review")
+        XCTAssertEqual(legacyRunbook.workflows.first?.modelTool.allowedActions, [])
+        XCTAssertEqual(legacyRunbook.artifacts.workflowAPIMountsPath, "api-mounts")
+        XCTAssertEqual(legacyRunbook.artifacts.workflowREPLMountsPath, "repl-mounts")
+        XCTAssertEqual(legacyRunbook.artifacts.workflowModelToolsPath, "model-tools")
+
         let directManifestRunbookJSON = try await KistRunner.renderSMLRuntimeHostRunbook(
             sourcePath: "review.langgraph.json",
             projectRoot: directory.path,
@@ -1766,6 +2037,13 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertFalse(directManifestRunbook.artifactsMaterialized)
         XCTAssertEqual(directManifestRunbook.apiWorkflowPathsByWorkflowID, runbook.apiWorkflowPathsByWorkflowID)
         XCTAssertEqual(directManifestRunbook.apiTaskPathsByWorkflowID, runbook.apiTaskPathsByWorkflowID)
+        XCTAssertEqual(directManifestRunbook.workflows.first?.replMountPath, "repl-mounts/langgraph.review.json")
+        XCTAssertEqual(directManifestRunbook.workflows.first?.replMount.apiWorkflowPath, "/workflows/langgraph.review")
+        XCTAssertEqual(directManifestRunbook.workflows.first?.replCommands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
+        XCTAssertEqual(directManifestRunbook.workflows.first?.apiMountPath, "api-mounts/langgraph.review.json")
+        XCTAssertEqual(directManifestRunbook.workflows.first?.apiMounts.first { $0.action == .start }?.pathTemplate, "/source/workflows/langgraph.review/tasks")
+        XCTAssertEqual(directManifestRunbook.workflows.first?.modelToolPath, "model-tools/langgraph.review.json")
+        XCTAssertEqual(directManifestRunbook.workflows.first?.modelTool.tool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(directManifestRunbook.workflows.first?.modelScriptPath, "model-scripts/langgraph.review.prompts")
         XCTAssertEqual(directManifestRunbook.workflows.first?.apiScript.count, 4)
         XCTAssertTrue(directManifestRunbook.workflows.first?.replScript.contains("start TASK-SCAFFOLD") == true)
@@ -1817,13 +2095,21 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(readme.contains("langgraph.review: `/workflows/langgraph.review` mounted at `/source/workflows/langgraph.review/tasks`"))
         XCTAssertTrue(readme.contains("Task endpoint: `/source/workflows/langgraph.review/tasks`"))
         XCTAssertTrue(readme.contains("Workflow runbook: `workflow-runbooks/langgraph.review.json`"))
+        XCTAssertTrue(readme.contains("REPL mount: `repl-mounts/langgraph.review.json`"))
+        XCTAssertTrue(readme.contains("API mount: `api-mounts/langgraph.review.json`"))
+        XCTAssertTrue(readme.contains("Model tool descriptor: `model-tools/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Onyx driver: `onyx-drivers/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Skill tree: `skill-trees/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Tool bindings: `tool-bindings/langgraph.review.json`"))
         XCTAssertTrue(readme.contains("Planning bundle: `planning/langgraph.review.json`"))
+        XCTAssertTrue(readme.contains("Runtime metadata APIs: attachment `GET /source/runtime/attachments/langgraph.review`"))
+        XCTAssertTrue(readme.contains("tool bindings `GET /source/runtime/tool-bindings/langgraph.review`"))
         XCTAssertTrue(readme.contains("runbook.json"))
+        XCTAssertTrue(readme.contains("api-mounts/*.json"))
         XCTAssertTrue(readme.contains("api-scripts/*.json"))
+        XCTAssertTrue(readme.contains("model-tools/*.json"))
         XCTAssertTrue(readme.contains("model-scripts/*.prompts"))
+        XCTAssertTrue(readme.contains("repl-mounts/*.json"))
         XCTAssertTrue(readme.contains("repl-scripts/*.repl"))
         XCTAssertTrue(readme.contains("--sml-runtime-api-script"))
         XCTAssertTrue(readme.contains("--sml-runtime-model-script"))
@@ -3496,12 +3782,31 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertFalse(runbook.artifactsMaterialized)
         XCTAssertEqual(runbook.launchDescriptor.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(runbook.workflows.map(\.workflowID), ["content.review"])
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["content.review"]?.attachmentPath,
+            "/source/runtime/attachments/content.review"
+        )
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["content.review"]?.planningBundlePath,
+            "/source/runtime/planning/content.review"
+        )
         let workflow = try XCTUnwrap(runbook.workflows.first)
         XCTAssertEqual(workflow.workflowName, "Content review")
         XCTAssertEqual(workflow.attachmentPath, "attachments/content.review.json")
+        XCTAssertEqual(workflow.runtimeWorkflowAttachmentPath, "/source/runtime/attachments/content.review")
+        XCTAssertEqual(workflow.runtimeWorkflowPlanningPath, "/source/runtime/planning/content.review")
         XCTAssertEqual(workflow.replScriptPath, "repl-scripts/content.review.repl")
+        XCTAssertEqual(workflow.replMountPath, "repl-mounts/content.review.json")
+        XCTAssertEqual(workflow.replMount.apiBasePath, "/source")
+        XCTAssertEqual(workflow.replMount.apiWorkflowPath, "/workflows/content.review")
+        XCTAssertEqual(workflow.replCommands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
         XCTAssertEqual(workflow.apiScriptPath, "api-scripts/content.review.json")
+        XCTAssertEqual(workflow.apiMountPath, "api-mounts/content.review.json")
+        XCTAssertEqual(workflow.apiMounts.first { $0.action == .start }?.pathTemplate, "/source/workflows/content.review/tasks")
         XCTAssertEqual(workflow.modelScriptPath, "model-scripts/content.review.prompts")
+        XCTAssertEqual(workflow.modelToolPath, "model-tools/content.review.json")
+        XCTAssertEqual(workflow.modelTool.workflowID, "content.review")
+        XCTAssertEqual(workflow.modelTool.tool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(workflow.apiScript.count, 4)
         XCTAssertTrue(workflow.replScript.contains("start TASK-SCAFFOLD"))
         XCTAssertTrue(workflow.modelScript.contains("Start content.review as task TASK-SCAFFOLD"))
@@ -3663,14 +3968,33 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertFalse(runbook.artifactsMaterialized)
         XCTAssertEqual(runbook.launchDescriptor.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(runbook.workflows.map(\.workflowID), ["content.review"])
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["content.review"]?.attachmentPath,
+            "/review/runtime/attachments/content.review"
+        )
+        XCTAssertEqual(
+            runbook.runtimeWorkflowMetadataByWorkflowID["content.review"]?.skillTreePath,
+            "/review/runtime/skill-trees/content.review"
+        )
         let workflow = try XCTUnwrap(runbook.workflows.first)
         XCTAssertEqual(workflow.workflowName, "Content review")
         XCTAssertEqual(workflow.role, "review-agent")
         XCTAssertEqual(workflow.apiBasePath, "/review")
         XCTAssertEqual(workflow.apiWorkflowPath, "/review-flow")
+        XCTAssertEqual(workflow.runtimeWorkflowAttachmentPath, "/review/runtime/attachments/content.review")
+        XCTAssertEqual(workflow.runtimeWorkflowSkillTreePath, "/review/runtime/skill-trees/content.review")
         XCTAssertEqual(workflow.replScriptPath, "repl-scripts/content.review.repl")
+        XCTAssertEqual(workflow.replMountPath, "repl-mounts/content.review.json")
+        XCTAssertEqual(workflow.replMount.apiBasePath, "/review")
+        XCTAssertEqual(workflow.replMount.apiWorkflowPath, "/review-flow")
+        XCTAssertEqual(workflow.replCommands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
         XCTAssertEqual(workflow.apiScriptPath, "api-scripts/content.review.json")
+        XCTAssertEqual(workflow.apiMountPath, "api-mounts/content.review.json")
+        XCTAssertEqual(workflow.apiMounts.first { $0.action == .start }?.pathTemplate, "/review/review-flow/tasks")
         XCTAssertEqual(workflow.modelScriptPath, "model-scripts/content.review.prompts")
+        XCTAssertEqual(workflow.modelToolPath, "model-tools/content.review.json")
+        XCTAssertEqual(workflow.modelTool.workflowID, "content.review")
+        XCTAssertEqual(workflow.modelTool.maximumCommandRounds, 5)
         XCTAssertTrue(workflow.replScript.contains("start TASK-SCAFFOLD"))
         XCTAssertTrue(workflow.modelScript.contains("Start content.review as task TASK-SCAFFOLD"))
         XCTAssertTrue(workflow.apiEndpoints.contains {
