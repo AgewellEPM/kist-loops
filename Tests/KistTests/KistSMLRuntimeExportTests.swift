@@ -788,6 +788,18 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(launched.replMount.workflowID, "langgraph.review")
         XCTAssertEqual(launched.replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
         XCTAssertEqual(launched.replMount.commandBindings.count, 7)
+        XCTAssertEqual(
+            launched.replMount.workflowMetadata.replMountPath,
+            "/source/runtime/repl-mounts/langgraph.review"
+        )
+        XCTAssertEqual(
+            launched.replMount.workflowMetadata.modelToolPath,
+            "/source/runtime/model-tools/langgraph.review"
+        )
+        XCTAssertEqual(
+            launched.replMount.workflowMetadata.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertEqual(launched.commandBindings, launched.replMount.commandBindings)
         XCTAssertEqual(launched.skillIndex.count, 3)
         XCTAssertEqual(launched.skillIndex.first { $0.instructionID == "plan" }?.reference, "review.plan")
@@ -846,6 +858,11 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(wiring.replMount.examples.contains {
             $0.line == #"start TASK-ID {"topic":"topic"}"#
         })
+        XCTAssertEqual(wiring.workflowMetadata, wiring.replMount.workflowMetadata)
+        XCTAssertEqual(
+            wiring.replMount.workflowMetadata.attachmentPath,
+            "/source/runtime/attachments/langgraph.review"
+        )
         XCTAssertEqual(wiring.replMount.commandBindings.count, 7)
         XCTAssertEqual(wiring.apiRoutes.count, 7)
         XCTAssertEqual(
@@ -1117,6 +1134,15 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(planning.planning.schemaVersion, SMLWorkflowRuntimePlanningManifest.currentSchemaVersion)
         XCTAssertEqual(planning.planning.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(planning.planning.workflows.map(\.entrypoint), ["plan"])
+        let planningWorkflow = try XCTUnwrap(planning.planning.workflows.first)
+        XCTAssertEqual(
+            planningWorkflow.workflowMetadata.modelToolPath,
+            "/source/runtime/model-tools/langgraph.review"
+        )
+        XCTAssertEqual(
+            planningWorkflow.workflowMetadata.planningBundlePath,
+            "/source/runtime/planning/langgraph.review"
+        )
         XCTAssertEqual(planning.planning.skillIndex.count, 3)
         XCTAssertEqual(planning.planning.toolIndex.map(\.reference), ["review.plan", "repository.write"])
         XCTAssertTrue(planning.planning.decomposableUnits.isEmpty)
@@ -2917,6 +2943,23 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(api.route?.authority, .descriptorOnly)
         let planning = try object(api.responseBody)
         XCTAssertEqual(planning["workflowIDs"], .array([.string("langgraph.review")]))
+        let planningWorkflows = try array(planning["workflows"])
+        let planningWorkflow = try XCTUnwrap(planningWorkflows.first)
+        let planningWorkflowMetadata = try object(
+            try object(planningWorkflow)["workflowMetadata"]
+        )
+        XCTAssertEqual(
+            planningWorkflowMetadata["replMountPath"],
+            .string("/source/runtime/repl-mounts/langgraph.review")
+        )
+        XCTAssertEqual(
+            planningWorkflowMetadata["modelToolPath"],
+            .string("/source/runtime/model-tools/langgraph.review")
+        )
+        XCTAssertEqual(
+            planningWorkflowMetadata["planningBundlePath"],
+            .string("/source/runtime/planning/langgraph.review")
+        )
         let skillIndex = try array(planning["skillIndex"])
         XCTAssertEqual(skillIndex.count, 3)
         let metadataPlanningSkill = try XCTUnwrap(

@@ -221,12 +221,28 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let apiInfo = try await replSession.submit("api")
         XCTAssertNil(apiInfo.command)
         XCTAssertTrue(apiInfo.output.contains("base path: /automation"))
+        XCTAssertTrue(apiInfo.output.contains("workflow path: /workflows/content.release"))
         XCTAssertTrue(apiInfo.output.contains("POST /automation/workflows/content.release/tasks"))
         XCTAssertTrue(apiInfo.output.contains(#"{"input":{"target":"target"},"task_id":"TASK-ID"}"#))
+        XCTAssertTrue(apiInfo.output.contains("workflow metadata:"))
+        XCTAssertTrue(apiInfo.output.contains("attachment: GET /automation/runtime/attachments/content.release"))
+        XCTAssertTrue(apiInfo.output.contains("repl mount: GET /automation/runtime/repl-mounts/content.release"))
+        XCTAssertTrue(apiInfo.output.contains("api mount: GET /automation/runtime/api-mounts/content.release"))
+        XCTAssertTrue(apiInfo.output.contains("model tool: GET /automation/runtime/model-tools/content.release"))
+        XCTAssertTrue(apiInfo.output.contains("onyx driver: GET /automation/runtime/onyx-drivers/content.release"))
+        XCTAssertTrue(apiInfo.output.contains("skill tree: GET /automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(apiInfo.output.contains("tool bindings: GET /automation/runtime/tool-bindings/content.release"))
+        XCTAssertTrue(apiInfo.output.contains("planning bundle: GET /automation/runtime/planning/content.release"))
         let modelInfo = try await replSession.submit("model")
         XCTAssertNil(modelInfo.command)
         XCTAssertTrue(modelInfo.output.contains(SMLWorkflowModelAdapter.toolName))
         XCTAssertTrue(modelInfo.output.contains(SMLWorkflowRuntimeModelAdapter.toolName))
+        XCTAssertTrue(modelInfo.output.contains("model metadata:"))
+        XCTAssertTrue(modelInfo.output.contains("model tool: GET /automation/runtime/model-tools/content.release"))
+        XCTAssertTrue(modelInfo.output.contains("planning bundle: GET /automation/runtime/planning/content.release"))
+        XCTAssertTrue(modelInfo.output.contains("onyx driver: GET /automation/runtime/onyx-drivers/content.release"))
+        XCTAssertTrue(modelInfo.output.contains("skill tree: GET /automation/runtime/skill-trees/content.release"))
+        XCTAssertTrue(modelInfo.output.contains("tool bindings: GET /automation/runtime/tool-bindings/content.release"))
         let onyxInfo = try await replSession.submit("onyx")
         XCTAssertNil(onyxInfo.command)
         XCTAssertTrue(onyxInfo.output.contains(bundle.onyxDriver.driverID))
@@ -408,6 +424,16 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(startEndpoint.pathTemplate, "/automation/review/tasks")
         XCTAssertEqual(startEndpoint.examples.first?.path, "/automation/review/tasks")
 
+        guard case .local(let apiInfo) = try bundle.replCompiler.compile(
+            "api",
+            issuedAtEpoch: 3_049
+        ) else { return XCTFail("expected local API REPL output") }
+        XCTAssertTrue(apiInfo.contains("base path: /automation"))
+        XCTAssertTrue(apiInfo.contains("workflow path: /review"))
+        XCTAssertTrue(apiInfo.contains("POST /automation/review/tasks"))
+        XCTAssertFalse(apiInfo.contains("POST /automation/workflows/content.release/tasks"))
+        XCTAssertTrue(apiInfo.contains("api mount: GET /automation/runtime/api-mounts/content.release"))
+
         let command = try bundle.apiCompiler.compile(
             SMLWorkflowAPIRequest(
                 method: .post,
@@ -451,8 +477,21 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         let registry = try SMLWorkflowRuntimeRegistry(bundles: [bundle])
         let replMount = try XCTUnwrap(registry.mountContract.replMounts.first)
         XCTAssertEqual(replMount.apiWorkflowPath, "/review")
+        XCTAssertEqual(
+            replMount.workflowMetadata.replMountPath,
+            "/automation/runtime/repl-mounts/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.modelToolPath,
+            "/automation/runtime/model-tools/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.planningBundlePath,
+            "/automation/runtime/planning/content.release"
+        )
         let workflowMount = try XCTUnwrap(registry.mountContract.workflowMounts.first)
         XCTAssertEqual(workflowMount.apiWorkflowPath, "/review")
+        XCTAssertEqual(workflowMount.workflowMetadata, replMount.workflowMetadata)
         XCTAssertEqual(workflowMount.repl.apiWorkflowPath, "/review")
         XCTAssertEqual(registry.catalog.planningManifest.workflows.first?.apiWorkflowPath, "/review")
         XCTAssertEqual(registry.catalog.agentGuide.workflowGuides.first?.apiWorkflowPath, "/review")
@@ -1138,6 +1177,23 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(legacyRouter.workflowMetadata, [])
         XCTAssertEqual(decoded.planningManifest.workflowIDs, ["content.release"])
         XCTAssertEqual(decoded.planningManifest.workflows.map(\.entrypoint), ["plan"])
+        let planningWorkflow = try XCTUnwrap(decoded.planningManifest.workflows.first)
+        XCTAssertEqual(
+            planningWorkflow.workflowMetadata.attachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            planningWorkflow.workflowMetadata.replMountPath,
+            "/automation/runtime/repl-mounts/content.release"
+        )
+        XCTAssertEqual(
+            planningWorkflow.workflowMetadata.modelToolPath,
+            "/automation/runtime/model-tools/content.release"
+        )
+        XCTAssertEqual(
+            planningWorkflow.workflowMetadata.planningBundlePath,
+            "/automation/runtime/planning/content.release"
+        )
         XCTAssertEqual(
             decoded.planningManifest.toolIndex.map(\.reference),
             ["content.plan", "artifact_verified", "repository.write"]
@@ -1166,6 +1222,38 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertTrue(replMount.examples.contains {
             $0.line == #"start TASK-ID {"target":"target"}"#
         })
+        XCTAssertEqual(
+            replMount.workflowMetadata.attachmentPath,
+            "/automation/runtime/attachments/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.replMountPath,
+            "/automation/runtime/repl-mounts/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.apiMountPath,
+            "/automation/runtime/api-mounts/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.modelToolPath,
+            "/automation/runtime/model-tools/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.onyxDriverPath,
+            "/automation/runtime/onyx-drivers/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.skillTreePath,
+            "/automation/runtime/skill-trees/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.toolBindingsPath,
+            "/automation/runtime/tool-bindings/content.release"
+        )
+        XCTAssertEqual(
+            replMount.workflowMetadata.planningBundlePath,
+            "/automation/runtime/planning/content.release"
+        )
         XCTAssertEqual(replMount.commandBindings.count, 7)
         let replStartBinding = try XCTUnwrap(replMount.commandBindings.first {
             $0.action == .start
@@ -1189,6 +1277,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(mount.workflowMounts.map(\.workflowID), ["content.release"])
         XCTAssertEqual(mount.workflowMounts.first?.apiRoutes.count, 7)
+        XCTAssertEqual(mount.workflowMounts.first?.workflowMetadata, replMount.workflowMetadata)
         XCTAssertEqual(
             mount.workflowMounts.first?.repl.commands.first {
                 $0.verb == "start"
@@ -1245,6 +1334,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         legacyMountObject.removeValue(forKey: "commands")
         legacyMountObject.removeValue(forKey: "examples")
         legacyMountObject.removeValue(forKey: "commandBindings")
+        legacyMountObject.removeValue(forKey: "workflowMetadata")
         let legacyMountData = try JSONSerialization.data(
             withJSONObject: legacyMountObject,
             options: [.sortedKeys]
@@ -1256,6 +1346,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(legacyMount.commands, [])
         XCTAssertEqual(legacyMount.examples, [])
         XCTAssertEqual(legacyMount.commandBindings, [])
+        XCTAssertEqual(legacyMount.workflowMetadata, replMount.workflowMetadata)
 
         var legacyWorkflowMountObject = try XCTUnwrap(
             JSONSerialization.jsonObject(
@@ -1263,6 +1354,7 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             ) as? [String: Any]
         )
         legacyWorkflowMountObject.removeValue(forKey: "commandBindings")
+        legacyWorkflowMountObject.removeValue(forKey: "workflowMetadata")
         let legacyWorkflowMountData = try JSONSerialization.data(
             withJSONObject: legacyWorkflowMountObject,
             options: [.sortedKeys]
@@ -1272,6 +1364,21 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             from: legacyWorkflowMountData
         )
         XCTAssertEqual(legacyWorkflowMount.commandBindings, replMount.commandBindings)
+        XCTAssertEqual(legacyWorkflowMount.workflowMetadata, replMount.workflowMetadata)
+
+        var legacyPlanningWorkflowObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(planningWorkflow)) as? [String: Any]
+        )
+        legacyPlanningWorkflowObject.removeValue(forKey: "workflowMetadata")
+        let legacyPlanningWorkflowData = try JSONSerialization.data(
+            withJSONObject: legacyPlanningWorkflowObject,
+            options: [.sortedKeys]
+        )
+        let legacyPlanningWorkflow = try JSONDecoder().decode(
+            SMLWorkflowRuntimePlanningWorkflow.self,
+            from: legacyPlanningWorkflowData
+        )
+        XCTAssertEqual(legacyPlanningWorkflow.workflowMetadata, planningWorkflow.workflowMetadata)
 
         var legacyRouteObject = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(startRoute)) as? [String: Any]
@@ -2023,6 +2130,11 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(
             releaseWiring.skillIndex.first { $0.instructionID == "plan" }?.reference,
             "content.plan"
+        )
+        XCTAssertEqual(releaseWiring.workflowMetadata, releaseWiring.replMount.workflowMetadata)
+        XCTAssertEqual(
+            releaseWiring.workflowMetadata.planningBundlePath,
+            "/automation/runtime/planning/content.release"
         )
         let releaseStartBinding = try XCTUnwrap(releaseWiring.commandBindings.first {
             $0.action == .start
@@ -3317,6 +3429,26 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
             workflowPlanningBody["apiWorkflowPath"],
             .string("/workflows/content.release")
         )
+        let workflowPlanningLinks = try object(workflowPlanningBody["workflowMetadata"])
+        XCTAssertEqual(
+            workflowPlanningLinks["attachmentPath"],
+            .string("/automation/runtime/attachments/content.release")
+        )
+        XCTAssertEqual(
+            workflowPlanningLinks["modelToolPath"],
+            .string("/automation/runtime/model-tools/content.release")
+        )
+        XCTAssertEqual(
+            workflowPlanningLinks["planningBundlePath"],
+            .string("/automation/runtime/planning/content.release")
+        )
+        let nestedWorkflowPlanningLinks = try object(
+            try object(workflowPlanningBody["workflow"])["workflowMetadata"]
+        )
+        XCTAssertEqual(
+            nestedWorkflowPlanningLinks["toolBindingsPath"],
+            .string("/automation/runtime/tool-bindings/content.release")
+        )
         XCTAssertEqual(try array(workflowPlanningBody["skillIndex"]).count, 7)
         XCTAssertEqual(try array(workflowPlanningBody["toolIndex"]).count, 3)
         XCTAssertEqual(try array(workflowPlanningBody["toolBindings"]).count, 3)
@@ -3332,6 +3464,10 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(
             workflowREPLMountBody["apiWorkflowPath"],
             .string("/workflows/content.release")
+        )
+        XCTAssertEqual(
+            try object(workflowREPLMountBody["workflowMetadata"])["modelToolPath"],
+            .string("/automation/runtime/model-tools/content.release")
         )
         XCTAssertTrue(try array(workflowREPLMountBody["commands"]).contains {
             guard case .object(let command) = $0 else { return false }

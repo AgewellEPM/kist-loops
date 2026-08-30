@@ -102,18 +102,24 @@ public struct SMLWorkflowModelAdapter: Sendable {
         self.allowedActions = allowedActions
         self.authorityResolver = authorityResolver
         self.clock = clock
-        self.apiCatalog = SMLWorkflowAPICatalog(
+        let resolvedAPICatalog = SMLWorkflowAPICatalog(
             surface: surface,
             basePath: apiBasePath,
             workflowPath: apiWorkflowPath ?? SMLWorkflowAPICatalog.defaultWorkflowPath(
                 workflowID: surface.workflowID
             )
         )
+        self.apiCatalog = resolvedAPICatalog
+        let modelTool = SMLWorkflowModelToolDescriptor(
+            surface.modelCommandTool(allowedActions: allowedActions)
+        )
         baseSettings = settings
         repl = SMLWorkflowREPLCompiler(
             surface: surface,
             actor: actor,
             allowedActions: allowedActions,
+            apiCatalog: resolvedAPICatalog,
+            modelTool: modelTool,
             commandID: commandID,
             taskID: taskID
         )

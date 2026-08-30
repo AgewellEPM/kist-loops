@@ -507,7 +507,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "api:",
             "\(apiCatalog.workflowID)@\(apiCatalog.workflowVersion)",
             "base path: \(apiCatalog.basePath)",
-        ] + endpoints).joined(separator: "\n")
+            "workflow path: \(apiCatalog.workflowPath)",
+        ] + endpoints + runtimeMetadataLines).joined(separator: "\n")
     }
 
     private var modelText: String {
@@ -522,7 +523,32 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "router: \(modelRouterToolName ?? "none")",
             "description: \(modelTool.description)",
             "parameters:",
-        ] + parameters).joined(separator: "\n")
+        ] + parameters + [
+            "model metadata:",
+            "model tool: GET \(runtimeWorkflowPath(resourcePath: "model-tools"))",
+            "planning bundle: GET \(runtimeWorkflowPath(resourcePath: "planning"))",
+            "onyx driver: GET \(runtimeWorkflowPath(resourcePath: "onyx-drivers"))",
+            "skill tree: GET \(runtimeWorkflowPath(resourcePath: "skill-trees"))",
+            "tool bindings: GET \(runtimeWorkflowPath(resourcePath: "tool-bindings"))",
+        ]).joined(separator: "\n")
+    }
+
+    private var runtimeMetadataLines: [String] {
+        [
+            "workflow metadata:",
+            "attachment: GET \(runtimeWorkflowPath(resourcePath: "attachments"))",
+            "repl mount: GET \(runtimeWorkflowPath(resourcePath: "repl-mounts"))",
+            "api mount: GET \(runtimeWorkflowPath(resourcePath: "api-mounts"))",
+            "model tool: GET \(runtimeWorkflowPath(resourcePath: "model-tools"))",
+            "onyx driver: GET \(runtimeWorkflowPath(resourcePath: "onyx-drivers"))",
+            "skill tree: GET \(runtimeWorkflowPath(resourcePath: "skill-trees"))",
+            "tool bindings: GET \(runtimeWorkflowPath(resourcePath: "tool-bindings"))",
+            "planning bundle: GET \(runtimeWorkflowPath(resourcePath: "planning"))",
+        ]
+    }
+
+    private func runtimeWorkflowPath(resourcePath: String) -> String {
+        "\(apiCatalog.basePath)/runtime/\(resourcePath)/\(surface.workflowID)"
     }
 
     private var onyxText: String {

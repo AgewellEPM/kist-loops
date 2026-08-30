@@ -442,6 +442,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
     public let sourceDigest: String?
     public let apiBasePath: String
     public let apiWorkflowPath: String
+    public let workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let modelToolName: String
@@ -468,6 +469,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         sourceDigest: String?,
         apiBasePath: String,
         apiWorkflowPath: String? = nil,
+        workflowMetadata: SMLWorkflowRuntimeWorkflowMetadataLinks? = nil,
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
@@ -520,6 +522,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
         self.apiWorkflowPath = apiWorkflowPath ?? replMount.apiWorkflowPath
+        self.workflowMetadata = workflowMetadata ?? replMount.workflowMetadata
         self.replMount = replMount
         self.apiRoutes = sortedAPIRoutes
         self.modelToolName = modelToolName
@@ -579,6 +582,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             sourceDigest: descriptor.sourceDigest,
             apiBasePath: mount.apiBasePath,
             apiWorkflowPath: mount.apiWorkflowPath,
+            workflowMetadata: mount.workflowMetadata,
             replMount: mount.repl,
             apiRoutes: mount.apiRoutes,
             modelToolName: mount.modelToolName,
@@ -609,6 +613,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         case sourceDigest
         case apiBasePath
         case apiWorkflowPath
+        case workflowMetadata
         case replMount
         case apiRoutes
         case modelToolName
@@ -686,6 +691,10 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
                     apiBasePath: apiBasePath,
                     apiRoutes: apiRoutes
                 ),
+            workflowMetadata: try container.decodeIfPresent(
+                SMLWorkflowRuntimeWorkflowMetadataLinks.self,
+                forKey: .workflowMetadata
+            ),
             replMount: replMount,
             apiRoutes: apiRoutes,
             modelToolName: modelToolName,
@@ -718,6 +727,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
         try container.encode(apiBasePath, forKey: .apiBasePath)
         try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
+        try container.encode(workflowMetadata, forKey: .workflowMetadata)
         try container.encode(replMount, forKey: .replMount)
         try container.encode(apiRoutes, forKey: .apiRoutes)
         try container.encode(modelToolName, forKey: .modelToolName)
@@ -761,7 +771,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 16
+    public static let currentSchemaVersion = 17
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]
