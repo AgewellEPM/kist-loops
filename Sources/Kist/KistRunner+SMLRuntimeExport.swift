@@ -410,7 +410,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostScaffold: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 1
+        static let currentSchemaVersion = 2
 
         let schemaVersion: Int
         let sourcePath: String
@@ -461,6 +461,11 @@ extension KistRunner {
         let modelRouterPath: String
         let onyxDriversPath: String
         let planningPath: String
+        let workflowOnyxDriversPath: String
+        let workflowSkillTreesPath: String
+        let workflowToolBindingsPath: String
+        let workflowPlanningPath: String
+        let workflowRunbooksPath: String
         let agentGuidePath: String
         let hostGuidePath: String
         let hostWiringPath: String
@@ -479,6 +484,11 @@ extension KistRunner {
             modelRouterPath: String = "model-router.json",
             onyxDriversPath: String = "onyx-drivers.json",
             planningPath: String = "planning.json",
+            workflowOnyxDriversPath: String = "onyx-drivers",
+            workflowSkillTreesPath: String = "skill-trees",
+            workflowToolBindingsPath: String = "tool-bindings",
+            workflowPlanningPath: String = "planning",
+            workflowRunbooksPath: String = "workflow-runbooks",
             agentGuidePath: String = "agent-guide.json",
             hostGuidePath: String = "host-guide.json",
             hostWiringPath: String = "host-wiring.json",
@@ -496,10 +506,58 @@ extension KistRunner {
             self.modelRouterPath = modelRouterPath
             self.onyxDriversPath = onyxDriversPath
             self.planningPath = planningPath
+            self.workflowOnyxDriversPath = workflowOnyxDriversPath
+            self.workflowSkillTreesPath = workflowSkillTreesPath
+            self.workflowToolBindingsPath = workflowToolBindingsPath
+            self.workflowPlanningPath = workflowPlanningPath
+            self.workflowRunbooksPath = workflowRunbooksPath
             self.agentGuidePath = agentGuidePath
             self.hostGuidePath = hostGuidePath
             self.hostWiringPath = hostWiringPath
             self.attachmentsPath = attachmentsPath
+        }
+    }
+
+    struct SMLRuntimeHostScaffoldWorkflowPlanningBundle: Sendable, Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let workflowID: String
+        let workflowVersion: String
+        let workflowName: String
+        let role: String
+        let apiBasePath: String
+        let apiWorkflowPath: String
+        let planningWorkflowID: String?
+        let plannerEntrypoint: String?
+        let plan: SMLOnyxPlan?
+        let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
+        let toolReferences: [String]
+        let toolBindings: [SMLOnyxToolBinding]
+        let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
+        let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+        let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
+
+        init(
+            schemaVersion: Int = SMLRuntimeHostScaffoldWorkflowPlanningBundle.currentSchemaVersion,
+            attachment: SMLWorkflowRuntimeWorkflowAttachmentManifest
+        ) {
+            self.schemaVersion = schemaVersion
+            workflowID = attachment.workflowID
+            workflowVersion = attachment.workflowVersion
+            workflowName = attachment.workflowName
+            role = attachment.role
+            apiBasePath = attachment.apiBasePath
+            apiWorkflowPath = attachment.apiWorkflowPath
+            planningWorkflowID = attachment.planningWorkflowID
+            plannerEntrypoint = attachment.plannerEntrypoint
+            plan = attachment.plan
+            skillIndex = attachment.skillIndex
+            toolReferences = attachment.toolReferences
+            toolBindings = attachment.toolBindings
+            decomposableUnits = attachment.decomposableUnits
+            approvalGates = attachment.approvalGates
+            commandBindings = attachment.commandBindings
         }
     }
 
@@ -547,9 +605,14 @@ extension KistRunner {
         let apiBasePath: String
         let apiWorkflowPath: String
         let attachmentPath: String
+        let workflowRunbookPath: String
         let replScriptPath: String
         let apiScriptPath: String
         let modelScriptPath: String
+        let onyxDriverPath: String
+        let skillTreePath: String
+        let toolBindingsPath: String
+        let planningBundlePath: String
         let replScript: String
         let apiScript: [SMLRuntimeHostAPIRequestSpec]
         let modelScript: String
@@ -580,9 +643,14 @@ extension KistRunner {
             apiBasePath = attachment.apiBasePath
             apiWorkflowPath = attachment.apiWorkflowPath
             attachmentPath = "attachments/\(fileStem).json"
+            workflowRunbookPath = "workflow-runbooks/\(fileStem).json"
             replScriptPath = "repl-scripts/\(fileStem).repl"
             apiScriptPath = "api-scripts/\(fileStem).json"
             modelScriptPath = "model-scripts/\(fileStem).prompts"
+            onyxDriverPath = "onyx-drivers/\(fileStem).json"
+            skillTreePath = "skill-trees/\(fileStem).json"
+            toolBindingsPath = "tool-bindings/\(fileStem).json"
+            planningBundlePath = "planning/\(fileStem).json"
             replScript = KistRunner.smlRuntimeScaffoldREPLScript(for: attachment)
             apiScript = KistRunner.smlRuntimeScaffoldAPIScript(for: attachment)
             modelScript = KistRunner.smlRuntimeScaffoldModelScript(for: attachment)
@@ -635,7 +703,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostScaffoldRunbook: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 4
+        static let currentSchemaVersion = 5
 
         let schemaVersion: Int
         let sourcePath: String
@@ -2856,28 +2924,75 @@ extension KistRunner {
                 summary: "All per-workflow attachment manifests.",
                 payload: attachments
             ))
+            let onyxDriversByWorkflowID = Dictionary(grouping: runtime.onyxDrivers, by: \.workflowID)
             for attachment in attachments {
+                let fileStem = smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+                let workflowRunbook = SMLRuntimeHostScaffoldWorkflowRunbook(
+                    attachment: attachment,
+                    outputDirectory: outputURL.standardizedFileURL.path
+                )
                 files.append(try writeSMLRuntimeScaffoldJSONFile(
-                    relativePath: "attachments/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).json",
+                    relativePath: "workflow-runbooks/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow runbook card with artifact paths, commands, routes, model, Onyx, skill, tool, and planning IDs for \(attachment.workflowID).",
+                    payload: workflowRunbook
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "attachments/\(fileStem).json",
                     outputDirectory: outputURL,
                     resource: .workflowAttachment,
                     summary: "Attachment manifest for \(attachment.workflowID).",
                     payload: attachment
                 ))
+                guard let onyxDriver = onyxDriversByWorkflowID[attachment.workflowID]?.first(where: {
+                    $0.driverID == attachment.onyxDriverID
+                }) else {
+                    throw SMLRuntimeHostExportError.writeFailed(
+                        path: outputURL
+                            .appendingPathComponent("onyx-drivers/\(fileStem).json")
+                            .standardizedFileURL
+                            .path,
+                        reason: "missing generated Onyx driver '\(attachment.onyxDriverID)' for \(attachment.workflowID)"
+                    )
+                }
                 files.append(try writeSMLRuntimeScaffoldJSONFile(
-                    relativePath: "api-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).json",
+                    relativePath: "onyx-drivers/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow Onyx driver manifest for \(attachment.workflowID).",
+                    payload: onyxDriver
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "skill-trees/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow skill tree for \(attachment.workflowID).",
+                    payload: attachment.skillTree
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "tool-bindings/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow tool bindings for \(attachment.workflowID).",
+                    payload: attachment.toolBindings
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "planning/\(fileStem).json",
+                    outputDirectory: outputURL,
+                    summary: "Per-workflow planning bundle for \(attachment.workflowID).",
+                    payload: SMLRuntimeHostScaffoldWorkflowPlanningBundle(attachment: attachment)
+                ))
+                files.append(try writeSMLRuntimeScaffoldJSONFile(
+                    relativePath: "api-scripts/\(fileStem).json",
                     outputDirectory: outputURL,
                     summary: "Runnable generated API request script template for \(attachment.workflowID).",
                     payload: smlRuntimeScaffoldAPIScript(for: attachment)
                 ))
                 files.append(try writeSMLRuntimeScaffoldTextFile(
-                    relativePath: "repl-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).repl",
+                    relativePath: "repl-scripts/\(fileStem).repl",
                     outputDirectory: outputURL,
                     summary: "Runnable generated REPL script template for \(attachment.workflowID).",
                     text: smlRuntimeScaffoldREPLScript(for: attachment)
                 ))
                 files.append(try writeSMLRuntimeScaffoldTextFile(
-                    relativePath: "model-scripts/\(smlRuntimeScaffoldSafeFileStem(attachment.workflowID)).prompts",
+                    relativePath: "model-scripts/\(fileStem).prompts",
                     outputDirectory: outputURL,
                     summary: "Runnable generated model-router prompt script template for \(attachment.workflowID).",
                     text: smlRuntimeScaffoldModelScript(for: attachment)
@@ -3178,6 +3293,38 @@ extension KistRunner {
         }.map {
             "- \($0.workflowID): `\($0.apiWorkflowPath)` mounted at `\($0.apiBasePath)\($0.apiWorkflowPath)/tasks`"
         }.joined(separator: "\n")
+        let workflowCards = launchDescriptor.hostWiring.attachmentManifests.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.workflowVersion < $1.workflowVersion
+        }.map { attachment in
+            let fileStem = smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+            let taskEndpoint = attachment.apiRoutes.first { $0.action == .start }?.pathTemplate
+                ?? "\(attachment.apiBasePath)\(attachment.apiWorkflowPath)/tasks"
+            let skillIDs = Array(Set(attachment.skillTree.map(\.id))).sorted()
+            let skillList = skillIDs.isEmpty
+                ? "none"
+                : skillIDs.map { "`\($0)`" }.joined(separator: ", ")
+            let toolList = attachment.toolReferences.isEmpty
+                ? "none"
+                : attachment.toolReferences.map { "`\($0)`" }.joined(separator: ", ")
+            let planningID = attachment.planningWorkflowID ?? "none"
+            let plannerEntrypoint = attachment.plannerEntrypoint ?? "none"
+            return """
+            ### \(attachment.workflowID)
+
+            - Task endpoint: `\(taskEndpoint)`
+            - REPL replay: `kist --sml-runtime-repl-script . --sml-script repl-scripts/\(fileStem).repl --sml-workflow \(attachment.workflowID)`
+            - API replay: `kist --sml-runtime-api-script . --sml-api-script api-scripts/\(fileStem).json`
+            - Model-router replay: `kist --sml-runtime-model-script . --sml-model-script model-scripts/\(fileStem).prompts --provider <provider> --model <model>`
+            - Model router tool: `\(attachment.modelRouterToolName)`; workflow model tool: `\(attachment.modelToolName)`
+            - Workflow runbook: `workflow-runbooks/\(fileStem).json`
+            - Onyx driver: `onyx-drivers/\(fileStem).json` (`\(attachment.onyxDriverID)`)
+            - Skill tree: `skill-trees/\(fileStem).json` (\(skillList))
+            - Tool bindings: `tool-bindings/\(fileStem).json` (\(toolList))
+            - Planning bundle: `planning/\(fileStem).json` (planning workflow `\(planningID)`, entrypoint `\(plannerEntrypoint)`)
+            - Attachment manifest: `attachments/\(fileStem).json`
+            """
+        }.joined(separator: "\n\n")
         let fileList = files.sorted {
             if $0.relativePath != $1.relativePath { return $0.relativePath < $1.relativePath }
             return $0.sha256 < $1.sha256
@@ -3204,6 +3351,10 @@ extension KistRunner {
 
         \(apiWorkflowList.isEmpty ? "- none" : apiWorkflowList)
 
+        ## Per-workflow wiring cards
+
+        \(workflowCards.isEmpty ? "- none" : workflowCards)
+
         ## Files
 
         \(fileList)
@@ -3214,9 +3365,9 @@ extension KistRunner {
         2. Decode `runtime-source-package.json` or inspect `runtime-export.json`.
         3. Mount routes from `mount.json` and `openapi.json`.
         4. Attach `model-router.json` as the native tool exposed to the selected model.
-        5. Load `onyx-drivers.json` for skill trees, tool bindings, and plans.
-        6. Use `planning.json`, `agent-guide.json`, and `host-guide.json` as the agent/host operating contract.
-        7. Use `host-wiring.json` or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
+        5. Load `onyx-drivers.json` or `onyx-drivers/*.json` for Onyx driver manifests.
+        6. Use `planning.json`, `planning/*.json`, `skill-trees/*.json`, `tool-bindings/*.json`, `agent-guide.json`, and `host-guide.json` as the agent/host operating contract.
+        7. Use `workflow-runbooks/*.json`, `host-wiring.json`, or `attachments/*.json` when a dashboard, CLI adapter, or Onyx bridge needs one workflow-specific map.
         8. Run `repl-scripts/*.repl` with `kist --sml-runtime-repl-script <this directory> --sml-script <script>` to produce a multi-turn workflow REPL transcript.
         9. Run `api-scripts/*.json` with `kist --sml-runtime-api-script <this directory> --sml-api-script <script>` to produce a multi-request generated API transcript.
         10. Run `model-scripts/*.prompts` with `kist --sml-runtime-model-script <this directory> --sml-model-script <script>` plus a native-tool provider/model to produce a multi-turn model-router transcript.
@@ -4372,42 +4523,152 @@ extension KistRunner {
         from scaffold: SMLRuntimeHostScaffold,
         indexPath: String
     ) throws -> SMLWorkflowRuntimeSourcePackage {
-        guard let packageFile = scaffold.files.first(where: {
-            $0.relativePath == "runtime-source-package.json"
-        }) else {
+        let files = try validatedSMLRuntimeScaffoldFiles(scaffold, indexPath: indexPath)
+        guard let packageData = files["runtime-source-package.json"] else {
             throw SMLRuntimeHostExportError.invalidScaffold(
                 path: indexPath,
                 reason: "missing runtime-source-package.json file record"
             )
         }
-        let indexURL = URL(fileURLWithPath: indexPath)
-        let packageURL = indexURL
-            .deletingLastPathComponent()
-            .appendingPathComponent(packageFile.relativePath, isDirectory: false)
-            .standardizedFileURL
-        let packageData: Data
-        do {
-            packageData = try Data(contentsOf: packageURL)
-        } catch {
-            throw SMLRuntimeHostExportError.readFailed(
-                path: packageURL.path,
-                reason: String(describing: error)
-            )
-        }
-        guard packageData.count == packageFile.byteCount else {
-            throw SMLRuntimeHostExportError.invalidScaffold(
-                path: indexPath,
-                reason: "runtime-source-package.json byte count changed"
-            )
-        }
-        let packageText = String(decoding: packageData, as: UTF8.self)
-        guard BuilderEvidenceDigest.sha256(packageText) == packageFile.sha256 else {
-            throw SMLRuntimeHostExportError.invalidScaffold(
-                path: indexPath,
-                reason: "runtime-source-package.json digest changed"
-            )
-        }
         return try JSONDecoder().decode(SMLWorkflowRuntimeSourcePackage.self, from: packageData)
+    }
+
+    private static func validatedSMLRuntimeScaffoldFiles(
+        _ scaffold: SMLRuntimeHostScaffold,
+        indexPath: String
+    ) throws -> [String: Data] {
+        guard (1...SMLRuntimeHostScaffold.currentSchemaVersion).contains(scaffold.schemaVersion) else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath,
+                reason: "unsupported schemaVersion \(scaffold.schemaVersion)"
+            )
+        }
+        guard !scaffold.files.isEmpty else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath,
+                reason: "files must contain at least runtime-source-package.json"
+            )
+        }
+
+        let indexURL = URL(fileURLWithPath: indexPath).standardizedFileURL
+        let baseURL = indexURL.deletingLastPathComponent().standardizedFileURL
+        var seen = Set<String>()
+        var files: [String: Data] = [:]
+        for file in scaffold.files {
+            let relativePath = try validatedSMLRuntimeScaffoldRelativePath(
+                file.relativePath,
+                indexPath: indexPath
+            )
+            guard seen.insert(relativePath).inserted else {
+                throw SMLRuntimeHostExportError.invalidScaffold(
+                    path: indexPath,
+                    reason: "duplicate file record '\(relativePath)'"
+                )
+            }
+            let fileURL = baseURL
+                .appendingPathComponent(relativePath, isDirectory: false)
+                .standardizedFileURL
+            let data: Data
+            do {
+                data = try Data(contentsOf: fileURL)
+            } catch {
+                throw SMLRuntimeHostExportError.readFailed(
+                    path: fileURL.path,
+                    reason: String(describing: error)
+                )
+            }
+            guard data.count == file.byteCount else {
+                throw SMLRuntimeHostExportError.invalidScaffold(
+                    path: indexPath,
+                    reason: "\(relativePath) byte count changed"
+                )
+            }
+            let text = String(decoding: data, as: UTF8.self)
+            guard BuilderEvidenceDigest.sha256(text) == file.sha256 else {
+                throw SMLRuntimeHostExportError.invalidScaffold(
+                    path: indexPath,
+                    reason: "\(relativePath) digest changed"
+                )
+            }
+            files[relativePath] = data
+        }
+        if scaffold.schemaVersion >= 2 {
+            let missingRequiredPaths = requiredSMLRuntimeScaffoldFilePaths(for: scaffold)
+                .subtracting(Set(files.keys))
+                .sorted()
+            guard missingRequiredPaths.isEmpty else {
+                throw SMLRuntimeHostExportError.invalidScaffold(
+                    path: indexPath,
+                    reason: "missing required file record '\(missingRequiredPaths[0])'"
+                )
+            }
+        }
+        guard files["runtime-source-package.json"] != nil else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath,
+                reason: "missing runtime-source-package.json file record"
+            )
+        }
+        return files
+    }
+
+    private static func validatedSMLRuntimeScaffoldRelativePath(
+        _ path: String,
+        indexPath: String
+    ) throws -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let components = trimmed.split(separator: "/", omittingEmptySubsequences: false)
+        guard !trimmed.isEmpty,
+              trimmed == path,
+              !trimmed.hasPrefix("/"),
+              !trimmed.contains("\\"),
+              components.allSatisfy({ component in
+                  !component.isEmpty && component != "." && component != ".."
+              }) else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath,
+                reason: "invalid relative file path '\(path)'"
+            )
+        }
+        return trimmed
+    }
+
+    private static func requiredSMLRuntimeScaffoldFilePaths(
+        for scaffold: SMLRuntimeHostScaffold
+    ) -> Set<String> {
+        var paths = Set([
+            "README.md",
+            "agent-guide.json",
+            "attachments.json",
+            "catalog.json",
+            "host-guide.json",
+            "host-wiring.json",
+            "launch.json",
+            "model-router.json",
+            "model-tools.json",
+            "mount.json",
+            "onyx-drivers.json",
+            "openapi.json",
+            "planning.json",
+            "runbook.json",
+            "runtime-export.json",
+            "runtime-source-package.json",
+        ])
+        for attachment in scaffold.launchDescriptor.hostWiring.attachmentManifests {
+            let fileStem = smlRuntimeScaffoldSafeFileStem(attachment.workflowID)
+            paths.formUnion([
+                "api-scripts/\(fileStem).json",
+                "attachments/\(fileStem).json",
+                "model-scripts/\(fileStem).prompts",
+                "onyx-drivers/\(fileStem).json",
+                "planning/\(fileStem).json",
+                "repl-scripts/\(fileStem).repl",
+                "skill-trees/\(fileStem).json",
+                "tool-bindings/\(fileStem).json",
+                "workflow-runbooks/\(fileStem).json",
+            ])
+        }
+        return paths
     }
 
     /// Offline export needs an admission catalog only to prove the generated surfaces are structurally

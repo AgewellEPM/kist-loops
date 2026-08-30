@@ -722,6 +722,10 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
     case hostWiring = "host-wiring"
     case attachments
     case workflowAttachment = "workflow-attachment"
+    case workflowOnyxDriver = "workflow-onyx-driver"
+    case workflowSkillTree = "workflow-skill-tree"
+    case workflowToolBindings = "workflow-tool-bindings"
+    case workflowPlanning = "workflow-planning"
     case modelRouter = "model-router"
     case onyxDrivers = "onyx-drivers"
 
@@ -736,6 +740,14 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
         switch self {
         case .workflowAttachment:
             return "attachments/{workflow_id}"
+        case .workflowOnyxDriver:
+            return "onyx-drivers/{workflow_id}"
+        case .workflowSkillTree:
+            return "skill-trees/{workflow_id}"
+        case .workflowToolBindings:
+            return "tool-bindings/{workflow_id}"
+        case .workflowPlanning:
+            return "planning/{workflow_id}"
         case .catalog, .mount, .launch, .export, .openAPI, .planning, .agentGuide,
              .hostGuide, .hostWiring, .attachments, .modelRouter, .onyxDrivers:
             return rawValue
@@ -766,6 +778,14 @@ public enum SMLWorkflowRuntimeMetadataResource: String, Sendable, Codable, Equat
             return "Return per-workflow attachment manifests for REPL/API/model/Onyx/planning adapters"
         case .workflowAttachment:
             return "Return one workflow attachment manifest for REPL/API/model/Onyx/planning adapters"
+        case .workflowOnyxDriver:
+            return "Return one provider-neutral Onyx driver manifest for a mounted SML workflow"
+        case .workflowSkillTree:
+            return "Return one workflow skill tree for model, Onyx, and planner adapters"
+        case .workflowToolBindings:
+            return "Return one workflow tool binding list for model, Onyx, and planner adapters"
+        case .workflowPlanning:
+            return "Return one workflow planning bundle with skill, tool, decomposition, gate, and command indexes"
         case .modelRouter:
             return "Return the native model-router tool descriptor for mounted SML workflows"
         case .onyxDrivers:
@@ -1342,7 +1362,7 @@ public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
 /// to expose and which handler to call, but it carries no actor identity, authority lease,
 /// credential, runtime handle, provider registry, or executable closure.
 public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 11
+    public static let currentSchemaVersion = 12
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -2060,6 +2080,79 @@ public struct SMLWorkflowRuntimePlanningCommandBinding: Sendable, Codable, Equat
         self.exampleAPIPath = exampleAPIPath
         self.exampleAPIBody = exampleAPIBody
         self.exampleModelRouterArguments = exampleModelRouterArguments
+    }
+}
+
+public struct SMLWorkflowRuntimePlanningWorkflowBundle: Sendable, Codable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let workflowID: String
+    public let workflowVersion: String
+    public let workflowName: String
+    public let role: String
+    public let apiBasePath: String
+    public let apiWorkflowPath: String
+    public let workflow: SMLWorkflowRuntimePlanningWorkflow
+    public let skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry]
+    public let toolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry]
+    public let toolBindings: [SMLOnyxToolBinding]
+    public let decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit]
+    public let approvalGates: [SMLWorkflowRuntimePlanningApprovalGate]
+    public let commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
+
+    public init(
+        schemaVersion: Int = SMLWorkflowRuntimePlanningWorkflowBundle.currentSchemaVersion,
+        workflow: SMLWorkflowRuntimePlanningWorkflow,
+        skillIndex: [SMLWorkflowRuntimePlanningSkillIndexEntry],
+        toolIndex: [SMLWorkflowRuntimePlanningToolIndexEntry],
+        decomposableUnits: [SMLWorkflowRuntimePlanningDecompositionUnit],
+        approvalGates: [SMLWorkflowRuntimePlanningApprovalGate],
+        commandBindings: [SMLWorkflowRuntimePlanningCommandBinding]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.workflowID = workflow.workflowID
+        self.workflowVersion = workflow.workflowVersion
+        self.workflowName = workflow.workflowName
+        self.role = workflow.role
+        self.apiBasePath = workflow.apiBasePath
+        self.apiWorkflowPath = workflow.apiWorkflowPath
+        self.workflow = workflow
+        self.skillIndex = skillIndex.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.operation.rawValue < $1.operation.rawValue
+        }
+        self.toolIndex = toolIndex.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.reference < $1.reference
+        }
+        self.toolBindings = workflow.tools.sorted {
+            if $0.instructionID != $1.instructionID {
+                return $0.instructionID < $1.instructionID
+            }
+            return $0.reference < $1.reference
+        }
+        self.decomposableUnits = decomposableUnits.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.instructionID < $1.instructionID
+        }
+        self.approvalGates = approvalGates.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.instructionID < $1.instructionID
+        }
+        self.commandBindings = commandBindings.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            if $0.action.rawValue != $1.action.rawValue {
+                return $0.action.rawValue < $1.action.rawValue
+            }
+            return $0.replVerb < $1.replVerb
+        }
     }
 }
 
@@ -3214,25 +3307,85 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
         case .attachments:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.hostWiring.attachmentManifests)
         case .workflowAttachment:
-            guard let workflowID = pathParameters["workflow_id"] else {
-                throw SMLWorkflowRuntimeRegistryError.routeNotFound(
-                    method: "GET",
-                    path: registry.catalog.apiBasePaths.first.map {
-                        "\($0)/runtime/\(resource.pathSuffix)"
-                    } ?? resource.pathSuffix
-                )
-            }
-            guard let attachment = registry.catalog.hostWiring.attachmentManifests.first(where: {
+            let attachment = try workflowAttachment(
+                from: pathParameters,
+                resource: resource
+            )
+            return try SMLWorkflowRuntimePayloadCodec.encode(attachment)
+        case .workflowOnyxDriver:
+            let workflowID = try workflowID(from: pathParameters, resource: resource)
+            guard let driver = registry.catalog.onyxDrivers.first(where: {
                 $0.workflowID == workflowID
             }) else {
                 throw SMLWorkflowRuntimeRegistryError.unknownWorkflow(workflowID)
             }
-            return try SMLWorkflowRuntimePayloadCodec.encode(attachment)
+            return try SMLWorkflowRuntimePayloadCodec.encode(driver)
+        case .workflowSkillTree:
+            let attachment = try workflowAttachment(
+                from: pathParameters,
+                resource: resource
+            )
+            return try SMLWorkflowRuntimePayloadCodec.encode(attachment.skillTree)
+        case .workflowToolBindings:
+            let attachment = try workflowAttachment(
+                from: pathParameters,
+                resource: resource
+            )
+            return try SMLWorkflowRuntimePayloadCodec.encode(attachment.toolBindings)
+        case .workflowPlanning:
+            let workflowID = try workflowID(from: pathParameters, resource: resource)
+            let planning = registry.planningManifest
+            guard let workflow = planning.workflows.first(where: {
+                $0.workflowID == workflowID
+            }) else {
+                throw SMLWorkflowRuntimeRegistryError.unknownWorkflow(workflowID)
+            }
+            let bundle = SMLWorkflowRuntimePlanningWorkflowBundle(
+                workflow: workflow,
+                skillIndex: planning.skillIndex.filter { $0.workflowID == workflowID },
+                toolIndex: planning.toolIndex.filter { $0.workflowID == workflowID },
+                decomposableUnits: planning.decomposableUnits.filter {
+                    $0.workflowID == workflowID
+                },
+                approvalGates: planning.approvalGates.filter { $0.workflowID == workflowID },
+                commandBindings: planning.commandBindings.filter {
+                    $0.workflowID == workflowID
+                }
+            )
+            return try SMLWorkflowRuntimePayloadCodec.encode(bundle)
         case .modelRouter:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.modelRouter)
         case .onyxDrivers:
             return try SMLWorkflowRuntimePayloadCodec.encode(registry.catalog.onyxDrivers)
         }
+    }
+
+    private func workflowAttachment(
+        from pathParameters: [String: String],
+        resource: SMLWorkflowRuntimeMetadataResource
+    ) throws -> SMLWorkflowRuntimeWorkflowAttachmentManifest {
+        let workflowID = try workflowID(from: pathParameters, resource: resource)
+        guard let attachment = registry.catalog.hostWiring.attachmentManifests.first(where: {
+            $0.workflowID == workflowID
+        }) else {
+            throw SMLWorkflowRuntimeRegistryError.unknownWorkflow(workflowID)
+        }
+        return attachment
+    }
+
+    private func workflowID(
+        from pathParameters: [String: String],
+        resource: SMLWorkflowRuntimeMetadataResource
+    ) throws -> String {
+        guard let workflowID = pathParameters["workflow_id"] else {
+            throw SMLWorkflowRuntimeRegistryError.routeNotFound(
+                method: "GET",
+                path: registry.catalog.apiBasePaths.first.map {
+                    "\($0)/runtime/\(resource.pathSuffix)"
+                } ?? resource.pathSuffix
+            )
+        }
+        return workflowID
     }
 }
 
