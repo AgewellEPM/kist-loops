@@ -817,6 +817,7 @@ public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
     public let workflowName: String
     public let role: String
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let grammar: String
     public let helpText: String
     public let commands: [SMLWorkflowREPLCommandDescriptor]
@@ -832,6 +833,7 @@ public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
         workflowName: String,
         role: String,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         grammar: String,
         helpText: String,
         commands: [SMLWorkflowREPLCommandDescriptor] = [],
@@ -846,6 +848,8 @@ public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
         self.workflowName = workflowName
         self.role = role
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
+            ?? SMLWorkflowRuntimeAPIWorkflowPath.defaultWorkflowPath(workflowID: workflowID)
         self.grammar = grammar
         self.helpText = helpText
         self.commands = commands.sorted {
@@ -869,6 +873,7 @@ public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
             workflowName: descriptor.workflowName,
             role: descriptor.role,
             apiBasePath: descriptor.api.basePath,
+            apiWorkflowPath: descriptor.api.workflowPath,
             grammar: descriptor.repl.grammar,
             helpText: descriptor.repl.helpText,
             commands: descriptor.repl.commands,
@@ -886,6 +891,7 @@ public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
         case workflowName
         case role
         case apiBasePath
+        case apiWorkflowPath
         case grammar
         case helpText
         case commands
@@ -904,6 +910,7 @@ public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
             workflowName: try container.decode(String.self, forKey: .workflowName),
             role: try container.decode(String.self, forKey: .role),
             apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath),
             grammar: try container.decode(String.self, forKey: .grammar),
             helpText: try container.decode(String.self, forKey: .helpText),
             commands: try container.decodeIfPresent(
@@ -931,6 +938,7 @@ public struct SMLWorkflowRuntimeREPLMount: Sendable, Codable, Equatable {
         try container.encode(workflowName, forKey: .workflowName)
         try container.encode(role, forKey: .role)
         try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(grammar, forKey: .grammar)
         try container.encode(helpText, forKey: .helpText)
         try container.encode(commands, forKey: .commands)
@@ -1070,12 +1078,79 @@ public struct SMLWorkflowRuntimeAPIMount: Sendable, Codable, Equatable {
     }
 }
 
+enum SMLWorkflowRuntimeAPIWorkflowPath {
+    static func defaultWorkflowPath(workflowID: String) -> String {
+        SMLWorkflowAPICatalog.defaultWorkflowPath(workflowID: workflowID)
+    }
+
+    static func inferredWorkflowPath(
+        workflowID: String,
+        apiBasePath: String,
+        apiRoutes: [SMLWorkflowRuntimeAPIMount]
+    ) -> String {
+        inferredWorkflowPathIfAvailable(
+            workflowID: workflowID,
+            apiBasePath: apiBasePath,
+            apiRoutes: apiRoutes
+        ) ?? defaultWorkflowPath(workflowID: workflowID)
+    }
+
+    private static func inferredWorkflowPathIfAvailable(
+        workflowID: String,
+        apiBasePath: String,
+        apiRoutes: [SMLWorkflowRuntimeAPIMount]
+    ) -> String? {
+        let normalizedBasePath = normalizePath(apiBasePath)
+        let candidateRoutes = apiRoutes.sorted {
+            let lhsStart = $0.action == .start ? 0 : 1
+            let rhsStart = $1.action == .start ? 0 : 1
+            if lhsStart != rhsStart { return lhsStart < rhsStart }
+            if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
+            return $0.operationID < $1.operationID
+        }
+        for route in candidateRoutes {
+            guard route.handlerKind == .workflow,
+                  route.workflowID == nil || route.workflowID == workflowID else {
+                continue
+            }
+            guard let suffix = routeSuffix(
+                pathTemplate: route.pathTemplate,
+                apiBasePath: normalizedBasePath
+            ), let taskRange = suffix.range(of: "/tasks") else {
+                continue
+            }
+            let workflowPath = String(suffix[..<taskRange.lowerBound])
+            guard workflowPath.hasPrefix("/"), workflowPath.count > 1 else {
+                continue
+            }
+            return workflowPath
+        }
+        return nil
+    }
+
+    private static func normalizePath(_ path: String) -> String {
+        guard path.count > 1, path.hasSuffix("/") else { return path }
+        return String(path.dropLast())
+    }
+
+    private static func routeSuffix(pathTemplate: String, apiBasePath: String) -> String? {
+        if apiBasePath == "/" {
+            return pathTemplate.hasPrefix("/") ? pathTemplate : nil
+        }
+        guard pathTemplate.hasPrefix(apiBasePath) else { return nil }
+        let suffix = String(pathTemplate.dropFirst(apiBasePath.count))
+        guard suffix.hasPrefix("/") else { return nil }
+        return suffix
+    }
+}
+
 public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
     public let workflowID: String
     public let workflowVersion: String
     public let workflowName: String
     public let role: String
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let repl: SMLWorkflowRuntimeREPLMount
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let modelToolName: String
@@ -1090,6 +1165,7 @@ public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
         workflowName: String,
         role: String,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         repl: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
@@ -1103,6 +1179,7 @@ public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
         self.workflowName = workflowName
         self.role = role
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath ?? repl.apiWorkflowPath
         self.repl = repl
         self.apiRoutes = apiRoutes.sorted {
             if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
@@ -1129,6 +1206,7 @@ public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
             workflowName: repl.workflowName,
             role: repl.role,
             apiBasePath: repl.apiBasePath,
+            apiWorkflowPath: repl.apiWorkflowPath,
             repl: repl,
             apiRoutes: apiRoutes,
             modelToolName: repl.modelToolName,
@@ -1145,6 +1223,7 @@ public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
         case workflowName
         case role
         case apiBasePath
+        case apiWorkflowPath
         case repl
         case apiRoutes
         case modelToolName
@@ -1157,14 +1236,23 @@ public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let repl = try container.decode(SMLWorkflowRuntimeREPLMount.self, forKey: .repl)
+        let apiBasePath = try container.decode(String.self, forKey: .apiBasePath)
+        let apiRoutes = try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
         self.init(
-            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowID: workflowID,
             workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
             workflowName: try container.decode(String.self, forKey: .workflowName),
             role: try container.decode(String.self, forKey: .role),
-            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiBasePath: apiBasePath,
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath)
+                ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                    workflowID: workflowID,
+                    apiBasePath: apiBasePath,
+                    apiRoutes: apiRoutes
+                ),
             repl: repl,
-            apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
+            apiRoutes: apiRoutes,
             modelToolName: try container.decode(String.self, forKey: .modelToolName),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
             onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
@@ -1186,6 +1274,7 @@ public struct SMLWorkflowRuntimeWorkflowMount: Sendable, Codable, Equatable {
         try container.encode(workflowName, forKey: .workflowName)
         try container.encode(role, forKey: .role)
         try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(repl, forKey: .repl)
         try container.encode(apiRoutes, forKey: .apiRoutes)
         try container.encode(modelToolName, forKey: .modelToolName)
@@ -1253,7 +1342,7 @@ public struct SMLWorkflowRuntimeResolvedAPIRoute: Sendable, Codable, Equatable {
 /// to expose and which handler to call, but it carries no actor identity, authority lease,
 /// credential, runtime handle, provider registry, or executable closure.
 public struct SMLWorkflowRuntimeMountContract: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 10
+    public static let currentSchemaVersion = 11
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -1596,6 +1685,7 @@ public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
     public let sourceDigest: String?
     public let entrypoint: String
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let replGrammar: String
     public let modelToolName: String
     public let modelRouterToolName: String
@@ -1613,6 +1703,7 @@ public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
         sourceDigest: String?,
         entrypoint: String,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         replGrammar: String,
         modelToolName: String,
         modelRouterToolName: String,
@@ -1629,6 +1720,8 @@ public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
         self.sourceDigest = sourceDigest
         self.entrypoint = entrypoint
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
+            ?? SMLWorkflowRuntimeAPIWorkflowPath.defaultWorkflowPath(workflowID: workflowID)
         self.replGrammar = replGrammar
         self.modelToolName = modelToolName
         self.modelRouterToolName = modelRouterToolName
@@ -1648,6 +1741,7 @@ public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
             sourceDigest: descriptor.sourceDigest,
             entrypoint: descriptor.onyx.plan.entrypoint,
             apiBasePath: descriptor.api.basePath,
+            apiWorkflowPath: descriptor.api.workflowPath,
             replGrammar: descriptor.repl.grammar,
             modelToolName: descriptor.model.tool.name,
             modelRouterToolName: SMLWorkflowRuntimeModelAdapter.toolName,
@@ -1655,6 +1749,68 @@ public struct SMLWorkflowRuntimePlanningWorkflow: Sendable, Codable, Equatable {
             tools: descriptor.onyx.tools,
             plan: descriptor.onyx.plan
         )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case workflowName
+        case role
+        case sourceKind
+        case sourceReference
+        case sourceDigest
+        case entrypoint
+        case apiBasePath
+        case apiWorkflowPath
+        case replGrammar
+        case modelToolName
+        case modelRouterToolName
+        case skillTree
+        case tools
+        case plan
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
+        self.init(
+            workflowID: workflowID,
+            workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
+            workflowName: try container.decode(String.self, forKey: .workflowName),
+            role: try container.decode(String.self, forKey: .role),
+            sourceKind: try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind),
+            sourceReference: try container.decode(String.self, forKey: .sourceReference),
+            sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
+            entrypoint: try container.decode(String.self, forKey: .entrypoint),
+            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath),
+            replGrammar: try container.decode(String.self, forKey: .replGrammar),
+            modelToolName: try container.decode(String.self, forKey: .modelToolName),
+            modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
+            skillTree: try container.decode([SMLOnyxSkillNode].self, forKey: .skillTree),
+            tools: try container.decode([SMLOnyxToolBinding].self, forKey: .tools),
+            plan: try container.decode(SMLOnyxPlan.self, forKey: .plan)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(workflowName, forKey: .workflowName)
+        try container.encode(role, forKey: .role)
+        try container.encode(sourceKind, forKey: .sourceKind)
+        try container.encode(sourceReference, forKey: .sourceReference)
+        try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
+        try container.encode(entrypoint, forKey: .entrypoint)
+        try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
+        try container.encode(replGrammar, forKey: .replGrammar)
+        try container.encode(modelToolName, forKey: .modelToolName)
+        try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
+        try container.encode(skillTree, forKey: .skillTree)
+        try container.encode(tools, forKey: .tools)
+        try container.encode(plan, forKey: .plan)
     }
 }
 
@@ -1914,7 +2070,7 @@ public struct SMLWorkflowRuntimePlanningCommandBinding: Sendable, Codable, Equat
 /// intentionally descriptor-only: no actor, lease, credential, runtime handle, provider registry, or
 /// executable closure is present.
 public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let workflowIDs: [String]
@@ -2213,7 +2369,7 @@ public struct SMLWorkflowRuntimePlanningManifest: Sendable, Codable, Equatable {
 /// The OpenAPI document is emitted as closed `SMLValue` JSON rather than `[String: Any]`, so callers
 /// can persist, diff, and sign the exact API shape without gaining runtime authority.
 public struct SMLWorkflowRuntimeExport: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 21
+    public static let currentSchemaVersion = 22
 
     public let schemaVersion: Int
     public let catalog: SMLWorkflowRuntimeCatalog
@@ -3149,6 +3305,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
     public let role: String
     public let sourceKind: SMLWorkflowSourceKind
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let installed: Bool
     public let installedInstructionCount: Int?
     public let replMount: SMLWorkflowRuntimeREPLMount
@@ -3169,6 +3326,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
         role: String,
         sourceKind: SMLWorkflowSourceKind,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         installed: Bool,
         installedInstructionCount: Int?,
         replMount: SMLWorkflowRuntimeREPLMount,
@@ -3188,6 +3346,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
         self.role = role
         self.sourceKind = sourceKind
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath ?? replMount.apiWorkflowPath
         self.installed = installed
         self.installedInstructionCount = installedInstructionCount
         self.replMount = replMount
@@ -3223,6 +3382,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
             role: mount.role,
             sourceKind: descriptor.sourceKind,
             apiBasePath: mount.apiBasePath,
+            apiWorkflowPath: mount.apiWorkflowPath,
             installed: installedWorkflow != nil,
             installedInstructionCount: installedWorkflow?.instructionCount,
             replMount: mount.repl,
@@ -3273,6 +3433,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
         case role
         case sourceKind
         case apiBasePath
+        case apiWorkflowPath
         case installed
         case installedInstructionCount
         case replMount
@@ -3290,20 +3451,29 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let replMount = try container.decode(SMLWorkflowRuntimeREPLMount.self, forKey: .replMount)
+        let apiBasePath = try container.decode(String.self, forKey: .apiBasePath)
+        let apiRoutes = try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
         self.init(
-            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowID: workflowID,
             workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
             workflowName: try container.decode(String.self, forKey: .workflowName),
             role: try container.decode(String.self, forKey: .role),
             sourceKind: try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind),
-            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiBasePath: apiBasePath,
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath)
+                ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                    workflowID: workflowID,
+                    apiBasePath: apiBasePath,
+                    apiRoutes: apiRoutes
+                ),
             installed: try container.decode(Bool.self, forKey: .installed),
             installedInstructionCount: try container.decodeIfPresent(
                 Int.self,
                 forKey: .installedInstructionCount
             ),
             replMount: replMount,
-            apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
+            apiRoutes: apiRoutes,
             modelToolName: try container.decode(String.self, forKey: .modelToolName),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
             onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
@@ -3335,6 +3505,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
         try container.encode(role, forKey: .role)
         try container.encode(sourceKind, forKey: .sourceKind)
         try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(installed, forKey: .installed)
         try container.encodeIfPresent(installedInstructionCount, forKey: .installedInstructionCount)
         try container.encode(replMount, forKey: .replMount)
@@ -3382,7 +3553,7 @@ public struct SMLWorkflowRuntimeLaunchWorkflow: Sendable, Codable, Equatable {
 /// It intentionally carries no actor, lease, credentials, provider registry, gateway, replay guard,
 /// runtime handle, or executable closure.
 public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 14
+    public static let currentSchemaVersion = 15
 
     public let schemaVersion: Int
     public let sourcePackageSchemaVersion: Int?
@@ -3532,6 +3703,7 @@ public struct SMLWorkflowRuntimeLaunchDescriptor: Sendable, Codable, Equatable {
                 sourceReference: workflow.source.reference,
                 sourceDigest: workflow.source.digest,
                 apiBasePath: mount?.apiBasePath ?? "",
+                apiWorkflowPath: mount?.apiWorkflowPath,
                 replGrammar: mount?.repl.grammar ?? "",
                 modelToolName: mount?.modelToolName ?? "",
                 modelRouterToolName: mount?.modelRouterToolName

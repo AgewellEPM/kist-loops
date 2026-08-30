@@ -25,7 +25,7 @@ public enum SMLWorkflowREPLCompilation: Sendable, Equatable {
 }
 
 public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public let workflowID: String
@@ -36,6 +36,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
     public let sourceReference: String
     public let sourceDigest: String?
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let runtimeAttachmentsPath: String
     public let runtimeWorkflowAttachmentPath: String
     public let replGrammar: String
@@ -60,6 +61,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         sourceReference: String,
         sourceDigest: String?,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         runtimeAttachmentsPath: String,
         runtimeWorkflowAttachmentPath: String,
         replGrammar: String,
@@ -83,6 +85,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         self.sourceReference = sourceReference
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath ?? apiCatalog.workflowPath
         self.runtimeAttachmentsPath = runtimeAttachmentsPath
         self.runtimeWorkflowAttachmentPath = runtimeWorkflowAttachmentPath
         self.replGrammar = replGrammar
@@ -119,6 +122,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         case sourceReference
         case sourceDigest
         case apiBasePath
+        case apiWorkflowPath
         case runtimeAttachmentsPath
         case runtimeWorkflowAttachmentPath
         case replGrammar
@@ -136,6 +140,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let apiCatalog = try container.decode(SMLWorkflowAPICatalog.self, forKey: .apiCatalog)
         self.init(
             schemaVersion: try container.decode(Int.self, forKey: .schemaVersion),
             workflowID: try container.decode(String.self, forKey: .workflowID),
@@ -146,6 +151,8 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
             sourceReference: try container.decode(String.self, forKey: .sourceReference),
             sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
             apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath)
+                ?? apiCatalog.workflowPath,
             runtimeAttachmentsPath: try container.decode(
                 String.self,
                 forKey: .runtimeAttachmentsPath
@@ -163,7 +170,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
                 [SMLWorkflowREPLExample].self,
                 forKey: .replExamples
             ),
-            apiCatalog: try container.decode(SMLWorkflowAPICatalog.self, forKey: .apiCatalog),
+            apiCatalog: apiCatalog,
             modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
             modelRouterToolName: try container.decodeIfPresent(
                 String.self,
@@ -191,6 +198,7 @@ public struct SMLWorkflowREPLAttachmentDescriptor: Sendable, Codable, Equatable 
         try container.encode(sourceReference, forKey: .sourceReference)
         try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
         try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(runtimeAttachmentsPath, forKey: .runtimeAttachmentsPath)
         try container.encode(runtimeWorkflowAttachmentPath, forKey: .runtimeWorkflowAttachmentPath)
         try container.encode(replGrammar, forKey: .replGrammar)

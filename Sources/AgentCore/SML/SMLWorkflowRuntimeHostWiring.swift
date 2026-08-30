@@ -16,6 +16,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
     public let sourceReference: String
     public let sourceDigest: String?
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let channels: [SMLWorkflowRuntimeHostBindingChannel]
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let replExamples: [SMLWorkflowREPLExample]
@@ -47,6 +48,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         sourceReference: String,
         sourceDigest: String?,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
@@ -80,6 +82,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         self.sourceReference = sourceReference
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath ?? replMount.apiWorkflowPath
         self.channels = Array(Set(hostBindings.map(\.channel))).sorted {
             $0.rawValue < $1.rawValue
         }
@@ -131,6 +134,7 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
         case sourceReference
         case sourceDigest
         case apiBasePath
+        case apiWorkflowPath
         case channels
         case replMount
         case replExamples
@@ -176,6 +180,12 @@ public struct SMLWorkflowRuntimeWorkflowAttachmentManifest: Sendable, Codable, E
             }
             return $0.operationID < $1.operationID
         }
+        apiWorkflowPath = try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath)
+            ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                workflowID: workflowID,
+                apiBasePath: apiBasePath,
+                apiRoutes: apiRoutes
+            )
         apiExamples = try container.decode([SMLWorkflowAPIRequestExample].self, forKey: .apiExamples).sorted {
             if $0.path != $1.path { return $0.path < $1.path }
             if $0.method.rawValue != $1.method.rawValue {
@@ -274,6 +284,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
     public let sourceReference: String
     public let sourceDigest: String?
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let modelToolName: String
@@ -299,6 +310,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         sourceReference: String,
         sourceDigest: String?,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelToolName: String,
@@ -350,6 +362,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         self.sourceReference = sourceReference
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath ?? replMount.apiWorkflowPath
         self.replMount = replMount
         self.apiRoutes = sortedAPIRoutes
         self.modelToolName = modelToolName
@@ -373,6 +386,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             sourceReference: sourceReference,
             sourceDigest: sourceDigest,
             apiBasePath: apiBasePath,
+            apiWorkflowPath: self.apiWorkflowPath,
             replMount: replMount,
             apiRoutes: sortedAPIRoutes,
             modelToolName: modelToolName,
@@ -407,6 +421,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             sourceReference: descriptor.sourceReference,
             sourceDigest: descriptor.sourceDigest,
             apiBasePath: mount.apiBasePath,
+            apiWorkflowPath: mount.apiWorkflowPath,
             replMount: mount.repl,
             apiRoutes: mount.apiRoutes,
             modelToolName: mount.modelToolName,
@@ -436,6 +451,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         case sourceReference
         case sourceDigest
         case apiBasePath
+        case apiWorkflowPath
         case replMount
         case apiRoutes
         case modelToolName
@@ -507,6 +523,12 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
             sourceReference: sourceReference,
             sourceDigest: sourceDigest,
             apiBasePath: apiBasePath,
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath)
+                ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                    workflowID: workflowID,
+                    apiBasePath: apiBasePath,
+                    apiRoutes: apiRoutes
+                ),
             replMount: replMount,
             apiRoutes: apiRoutes,
             modelToolName: modelToolName,
@@ -538,6 +560,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
         try container.encode(sourceReference, forKey: .sourceReference)
         try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
         try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(replMount, forKey: .replMount)
         try container.encode(apiRoutes, forKey: .apiRoutes)
         try container.encode(modelToolName, forKey: .modelToolName)
@@ -581,7 +604,7 @@ public struct SMLWorkflowRuntimeHostWorkflowWiring: Sendable, Codable, Equatable
 }
 
 public struct SMLWorkflowRuntimeHostWiring: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 13
+    public static let currentSchemaVersion = 14
 
     public let schemaVersion: Int
     public let apiBasePaths: [String]

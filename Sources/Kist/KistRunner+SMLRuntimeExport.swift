@@ -52,7 +52,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostExport: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 10
+        static let currentSchemaVersion = 11
 
         let schemaVersion: Int
         let sourcePath: String
@@ -545,6 +545,7 @@ extension KistRunner {
         let workflowName: String
         let role: String
         let apiBasePath: String
+        let apiWorkflowPath: String
         let attachmentPath: String
         let replScriptPath: String
         let apiScriptPath: String
@@ -577,6 +578,7 @@ extension KistRunner {
             workflowName = attachment.workflowName
             role = attachment.role
             apiBasePath = attachment.apiBasePath
+            apiWorkflowPath = attachment.apiWorkflowPath
             attachmentPath = "attachments/\(fileStem).json"
             replScriptPath = "repl-scripts/\(fileStem).repl"
             apiScriptPath = "api-scripts/\(fileStem).json"
@@ -633,7 +635,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostScaffoldRunbook: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 2
+        static let currentSchemaVersion = 3
 
         let schemaVersion: Int
         let sourcePath: String
@@ -688,7 +690,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostAttachments: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 4
+        static let currentSchemaVersion = 5
 
         let schemaVersion: Int
         let sourcePath: String

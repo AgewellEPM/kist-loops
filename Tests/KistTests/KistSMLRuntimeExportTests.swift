@@ -2690,12 +2690,36 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(export.runtimePackage.runtime.planning.workflowIDs, ["content.release", "content.review"])
         XCTAssertEqual(
+            export.runtimePackage.runtime.planning.workflows.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
+        )
+        XCTAssertEqual(
             export.runtimePackage.runtime.hostWiring.attachmentManifests.map(\.workflowID),
             ["content.release", "content.review"]
         )
         XCTAssertEqual(
             export.runtimePackage.runtime.hostWiring.attachmentManifests.map(\.apiBasePath),
             ["/release", "/review"]
+        )
+        XCTAssertEqual(
+            export.runtimePackage.runtime.hostWiring.attachmentManifests.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
+        )
+        XCTAssertEqual(
+            export.runtimePackage.sourceSummaries.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
+        )
+        XCTAssertEqual(
+            export.launchDescriptor.sourceSummaries.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
+        )
+        XCTAssertEqual(
+            export.launchDescriptor.workflows.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
+        )
+        XCTAssertEqual(
+            export.hostWiring.workflows.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
         )
         XCTAssertEqual(
             export.runtimePackage.runtime.onyxDrivers.map(\.driverID),
@@ -2733,6 +2757,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(workflow.workflowName, "Content review")
         XCTAssertEqual(workflow.role, "review-agent")
         XCTAssertEqual(workflow.apiBasePath, "/review")
+        XCTAssertEqual(workflow.apiWorkflowPath, "/review-flow")
         XCTAssertEqual(workflow.replScriptPath, "repl-scripts/content.review.repl")
         XCTAssertEqual(workflow.apiScriptPath, "api-scripts/content.review.json")
         XCTAssertEqual(workflow.modelScriptPath, "model-scripts/content.review.prompts")
@@ -2758,6 +2783,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(overriddenExport.runtimePackage.runtime.mountContract.apiBasePaths, ["/global"])
         XCTAssertEqual(
+            overriddenExport.launchDescriptor.sourceSummaries.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
+        )
+        XCTAssertEqual(
             overriddenExport.runtimePackage.runtime.mountContract.replMounts.map(\.role),
             ["global-agent", "global-agent"]
         )
@@ -2780,6 +2809,10 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(packageExport.sourceFormat, .runtimeSourcePackage)
         XCTAssertEqual(packageExport.runtimePackage.runtime.mountContract.apiBasePaths, ["/package"])
+        XCTAssertEqual(
+            packageExport.launchDescriptor.sourceSummaries.map(\.apiWorkflowPath),
+            ["/publish", "/review-flow"]
+        )
         let packagePaths = try object(packageExport.runtimePackage.runtime.openAPI["paths"])
         XCTAssertNotNil(packagePaths["/package/publish/tasks"])
         XCTAssertNotNil(packagePaths["/package/review-flow/tasks"])

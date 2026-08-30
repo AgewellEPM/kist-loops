@@ -38,6 +38,7 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
     public let sourceReference: String
     public let sourceDigest: String?
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let replGrammar: String
     public let modelToolName: String
     public let modelRouterToolName: String
@@ -52,6 +53,7 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         sourceReference: String,
         sourceDigest: String?,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         replGrammar: String,
         modelToolName: String,
         modelRouterToolName: String,
@@ -65,11 +67,66 @@ public struct SMLWorkflowRuntimeSourceSummary: Sendable, Codable, Equatable {
         self.sourceReference = sourceReference
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
+            ?? SMLWorkflowRuntimeAPIWorkflowPath.defaultWorkflowPath(workflowID: workflowID)
         self.replGrammar = replGrammar
         self.modelToolName = modelToolName
         self.modelRouterToolName = modelRouterToolName
         self.onyxDriverID = onyxDriverID
         self.planningWorkflowID = planningWorkflowID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case workflowID
+        case workflowVersion
+        case workflowName
+        case sourceKind
+        case sourceReference
+        case sourceDigest
+        case apiBasePath
+        case apiWorkflowPath
+        case replGrammar
+        case modelToolName
+        case modelRouterToolName
+        case onyxDriverID
+        case planningWorkflowID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
+        self.init(
+            workflowID: workflowID,
+            workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
+            workflowName: try container.decode(String.self, forKey: .workflowName),
+            sourceKind: try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind),
+            sourceReference: try container.decode(String.self, forKey: .sourceReference),
+            sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
+            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath),
+            replGrammar: try container.decode(String.self, forKey: .replGrammar),
+            modelToolName: try container.decode(String.self, forKey: .modelToolName),
+            modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
+            onyxDriverID: try container.decode(String.self, forKey: .onyxDriverID),
+            planningWorkflowID: try container.decodeIfPresent(String.self, forKey: .planningWorkflowID)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(workflowID, forKey: .workflowID)
+        try container.encode(workflowVersion, forKey: .workflowVersion)
+        try container.encode(workflowName, forKey: .workflowName)
+        try container.encode(sourceKind, forKey: .sourceKind)
+        try container.encode(sourceReference, forKey: .sourceReference)
+        try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
+        try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
+        try container.encode(replGrammar, forKey: .replGrammar)
+        try container.encode(modelToolName, forKey: .modelToolName)
+        try container.encode(modelRouterToolName, forKey: .modelRouterToolName)
+        try container.encode(onyxDriverID, forKey: .onyxDriverID)
+        try container.encodeIfPresent(planningWorkflowID, forKey: .planningWorkflowID)
     }
 }
 
@@ -202,6 +259,7 @@ public struct SMLWorkflowRuntimeSourcePackage: Sendable, Codable, Equatable {
                 sourceReference: workflow.source.reference,
                 sourceDigest: workflow.source.digest,
                 apiBasePath: mount?.apiBasePath ?? "",
+                apiWorkflowPath: mount?.apiWorkflowPath,
                 replGrammar: mount?.repl.grammar ?? "",
                 modelToolName: mount?.modelToolName ?? "",
                 modelRouterToolName: mount?.modelRouterToolName ?? runtime.modelRouter.tool.name,

@@ -205,6 +205,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
     public let sourceReference: String
     public let sourceDigest: String?
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let replMount: SMLWorkflowRuntimeREPLMount
     public let apiRoutes: [SMLWorkflowRuntimeAPIMount]
     public let modelTool: SMLWorkflowModelToolDescriptor
@@ -229,6 +230,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         sourceReference: String,
         sourceDigest: String?,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         replMount: SMLWorkflowRuntimeREPLMount,
         apiRoutes: [SMLWorkflowRuntimeAPIMount],
         modelTool: SMLWorkflowModelToolDescriptor,
@@ -252,6 +254,12 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         self.sourceReference = sourceReference
         self.sourceDigest = sourceDigest
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
+            ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                workflowID: workflowID,
+                apiBasePath: apiBasePath,
+                apiRoutes: apiRoutes
+            )
         self.replMount = replMount
         self.apiRoutes = apiRoutes.sorted {
             if $0.pathTemplate != $1.pathTemplate { return $0.pathTemplate < $1.pathTemplate }
@@ -317,6 +325,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
             sourceReference: descriptor.sourceReference,
             sourceDigest: descriptor.sourceDigest,
             apiBasePath: descriptor.api.basePath,
+            apiWorkflowPath: descriptor.api.workflowPath,
             replMount: replMount,
             apiRoutes: apiRoutes,
             modelTool: descriptor.model.tool,
@@ -353,6 +362,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         case sourceReference
         case sourceDigest
         case apiBasePath
+        case apiWorkflowPath
         case replMount
         case apiRoutes
         case modelTool
@@ -371,17 +381,26 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
+        let apiBasePath = try container.decode(String.self, forKey: .apiBasePath)
+        let apiRoutes = try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes)
         self.init(
-            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowID: workflowID,
             workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
             workflowName: try container.decode(String.self, forKey: .workflowName),
             role: try container.decode(String.self, forKey: .role),
             sourceKind: try container.decode(SMLWorkflowSourceKind.self, forKey: .sourceKind),
             sourceReference: try container.decode(String.self, forKey: .sourceReference),
             sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
-            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiBasePath: apiBasePath,
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath)
+                ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                    workflowID: workflowID,
+                    apiBasePath: apiBasePath,
+                    apiRoutes: apiRoutes
+                ),
             replMount: try container.decode(SMLWorkflowRuntimeREPLMount.self, forKey: .replMount),
-            apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
+            apiRoutes: apiRoutes,
             modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
             model: try container.decodeIfPresent(SMLWorkflowModelDescriptor.self, forKey: .model),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
@@ -425,6 +444,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
         try container.encode(sourceReference, forKey: .sourceReference)
         try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
         try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(replMount, forKey: .replMount)
         try container.encode(apiRoutes, forKey: .apiRoutes)
         try container.encode(modelTool, forKey: .modelTool)
@@ -594,7 +614,7 @@ public struct SMLWorkflowRuntimeWorkflowHostGuide: Sendable, Codable, Equatable 
 /// driver loading, and planning graph exposure. It carries no actor, lease, credential, runtime
 /// handle, provider registry, executable closure, or replay authority.
 public struct SMLWorkflowRuntimeHostGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 11
+    public static let currentSchemaVersion = 12
 
     public let schemaVersion: Int
     public let requiredHostServices: [String]

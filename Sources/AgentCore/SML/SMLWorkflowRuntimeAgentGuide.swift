@@ -7,7 +7,7 @@ import Foundation
 /// model router, and Onyx exports. It carries no actor, lease, credentials, runtime handle, replay
 /// state, or host authority; mutations still have to cross the runtime command gateway.
 public struct SMLWorkflowRuntimeAgentGuide: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 9
+    public static let currentSchemaVersion = 10
 
     public let schemaVersion: Int
     public let systemPrompt: String
@@ -101,6 +101,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
     public let sourceDigest: String?
     public let entrypoint: String
     public let apiBasePath: String
+    public let apiWorkflowPath: String
     public let replGrammar: String
     public let replCommands: [SMLWorkflowREPLCommandDescriptor]
     public let replExamples: [SMLWorkflowREPLExample]
@@ -127,6 +128,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         sourceDigest: String?,
         entrypoint: String,
         apiBasePath: String,
+        apiWorkflowPath: String? = nil,
         replGrammar: String,
         replCommands: [SMLWorkflowREPLCommandDescriptor] = [],
         replExamples: [SMLWorkflowREPLExample] = [],
@@ -152,6 +154,12 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         self.sourceDigest = sourceDigest
         self.entrypoint = entrypoint
         self.apiBasePath = apiBasePath
+        self.apiWorkflowPath = apiWorkflowPath
+            ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                workflowID: workflowID,
+                apiBasePath: apiBasePath,
+                apiRoutes: apiRoutes
+            )
         self.replGrammar = replGrammar
         self.replCommands = replCommands.sorted {
             if $0.kind.rawValue != $1.kind.rawValue { return $0.kind.rawValue < $1.kind.rawValue }
@@ -212,6 +220,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             sourceDigest: descriptor.sourceDigest,
             entrypoint: descriptor.onyx.plan.entrypoint,
             apiBasePath: descriptor.api.basePath,
+            apiWorkflowPath: descriptor.api.workflowPath,
             replGrammar: descriptor.repl.grammar,
             replCommands: descriptor.repl.commands,
             replExamples: descriptor.repl.examples,
@@ -293,6 +302,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         source: \(sourceKind.rawValue) \(sourceReference)
         entrypoint: \(entrypoint)
         api base path: \(apiBasePath)
+        api workflow path: \(apiWorkflowPath)
         model tool: \(modelTool.name) via \(modelRouterToolName)
         onyx driver: \(onyxDriverID)
 
@@ -339,6 +349,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         case sourceDigest
         case entrypoint
         case apiBasePath
+        case apiWorkflowPath
         case replGrammar
         case replCommands
         case replExamples
@@ -358,8 +369,11 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let workflowID = try container.decode(String.self, forKey: .workflowID)
+        let apiBasePath = try container.decode(String.self, forKey: .apiBasePath)
+        let apiRoutes = try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes)
         self.init(
-            workflowID: try container.decode(String.self, forKey: .workflowID),
+            workflowID: workflowID,
             workflowVersion: try container.decode(String.self, forKey: .workflowVersion),
             workflowName: try container.decode(String.self, forKey: .workflowName),
             role: try container.decode(String.self, forKey: .role),
@@ -367,7 +381,13 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             sourceReference: try container.decode(String.self, forKey: .sourceReference),
             sourceDigest: try container.decodeIfPresent(String.self, forKey: .sourceDigest),
             entrypoint: try container.decode(String.self, forKey: .entrypoint),
-            apiBasePath: try container.decode(String.self, forKey: .apiBasePath),
+            apiBasePath: apiBasePath,
+            apiWorkflowPath: try container.decodeIfPresent(String.self, forKey: .apiWorkflowPath)
+                ?? SMLWorkflowRuntimeAPIWorkflowPath.inferredWorkflowPath(
+                    workflowID: workflowID,
+                    apiBasePath: apiBasePath,
+                    apiRoutes: apiRoutes
+                ),
             replGrammar: try container.decode(String.self, forKey: .replGrammar),
             replCommands: try container.decodeIfPresent(
                 [SMLWorkflowREPLCommandDescriptor].self,
@@ -379,7 +399,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
             ) ?? [],
             schemaSummary: try container.decode(String.self, forKey: .schemaSummary),
             graphSummary: try container.decode(String.self, forKey: .graphSummary),
-            apiRoutes: try container.decode([SMLWorkflowRuntimeAPIMount].self, forKey: .apiRoutes),
+            apiRoutes: apiRoutes,
             modelTool: try container.decode(SMLWorkflowModelToolDescriptor.self, forKey: .modelTool),
             model: try container.decodeIfPresent(SMLWorkflowModelDescriptor.self, forKey: .model),
             modelRouterToolName: try container.decode(String.self, forKey: .modelRouterToolName),
@@ -418,6 +438,7 @@ public struct SMLWorkflowRuntimeWorkflowAgentGuide: Sendable, Codable, Equatable
         try container.encodeIfPresent(sourceDigest, forKey: .sourceDigest)
         try container.encode(entrypoint, forKey: .entrypoint)
         try container.encode(apiBasePath, forKey: .apiBasePath)
+        try container.encode(apiWorkflowPath, forKey: .apiWorkflowPath)
         try container.encode(replGrammar, forKey: .replGrammar)
         try container.encode(replCommands, forKey: .replCommands)
         try container.encode(replExamples, forKey: .replExamples)

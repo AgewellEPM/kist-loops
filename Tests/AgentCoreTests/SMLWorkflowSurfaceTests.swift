@@ -378,6 +378,37 @@ final class SMLWorkflowSurfaceTests: XCTestCase {
         XCTAssertEqual(onyxStartBinding.exampleAPIPath, "/automation/review/tasks")
 
         let registry = try SMLWorkflowRuntimeRegistry(bundles: [bundle])
+        let replMount = try XCTUnwrap(registry.mountContract.replMounts.first)
+        XCTAssertEqual(replMount.apiWorkflowPath, "/review")
+        let workflowMount = try XCTUnwrap(registry.mountContract.workflowMounts.first)
+        XCTAssertEqual(workflowMount.apiWorkflowPath, "/review")
+        XCTAssertEqual(workflowMount.repl.apiWorkflowPath, "/review")
+        XCTAssertEqual(registry.catalog.planningManifest.workflows.first?.apiWorkflowPath, "/review")
+        XCTAssertEqual(registry.catalog.agentGuide.workflowGuides.first?.apiWorkflowPath, "/review")
+        XCTAssertEqual(registry.catalog.hostGuide.workflowBindings.first?.apiWorkflowPath, "/review")
+        XCTAssertEqual(registry.hostWiring.workflows.first?.apiWorkflowPath, "/review")
+        XCTAssertEqual(registry.hostWiring.attachmentManifests.first?.apiWorkflowPath, "/review")
+        let launchDescriptor = SMLWorkflowRuntimeLaunchDescriptor(
+            registry: registry,
+            installedWorkflows: [],
+            sourcePackage: try SMLWorkflowRuntimeSourcePackage(
+                normalizedWorkflows: [workflow()],
+                runtime: registry.export()
+            )
+        )
+        XCTAssertEqual(launchDescriptor.workflows.first?.apiWorkflowPath, "/review")
+        XCTAssertEqual(launchDescriptor.sourceSummaries.first?.apiWorkflowPath, "/review")
+        let legacyMountData = try JSONEncoder().encode(workflowMount)
+        var legacyMountObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: legacyMountData) as? [String: Any]
+        )
+        legacyMountObject.removeValue(forKey: "apiWorkflowPath")
+        let decodedLegacyMount = try JSONDecoder().decode(
+            SMLWorkflowRuntimeWorkflowMount.self,
+            from: JSONSerialization.data(withJSONObject: legacyMountObject, options: [.sortedKeys])
+        )
+        XCTAssertEqual(decodedLegacyMount.apiWorkflowPath, "/review")
+
         let start = try registry.mountContract.resolveAPI(
             SMLWorkflowAPIRequest(
                 method: .post,
