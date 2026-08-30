@@ -174,6 +174,7 @@ struct KistOptions {
     var smlRuntimeRole: String?     // --sml-role <role>: override mounted workflow role
     var smlRuntimeActor: String?    // --sml-actor <actor>: synthetic host actor for offline install proof
     var smlRuntimeAPIBasePath: String? // --sml-api-base <path>: override generated API base path
+    var smlRuntimeAPIWorkflowPathOverrides: [String: String] = [:] // --sml-api-workflow-path <workflow-id>=<path>
     var smlRuntimeOutputDirectory: String? // --sml-out <dir>: output directory for --sml-runtime-scaffold
     var smlRuntimeTitle: String?    // --sml-title <title>: OpenAPI/runtime export title
     var smlRuntimeVersion: String?  // --sml-version <version>: OpenAPI/runtime export version
@@ -322,6 +323,31 @@ struct KistOptions {
                                             else { o.optionErrors.append("--sml-actor requires <actor>") }
             case "--sml-api-base":          if let v = next() { o.smlRuntimeAPIBasePath = v }
                                             else { o.optionErrors.append("--sml-api-base requires <path>") }
+            case "--sml-api-workflow-path":
+                                            if let v = next() {
+                                                let parts = v.split(
+                                                    separator: "=",
+                                                    maxSplits: 1,
+                                                    omittingEmptySubsequences: false
+                                                )
+                                                guard parts.count == 2 else {
+                                                    o.optionErrors.append("--sml-api-workflow-path requires <workflow-id>=<path>")
+                                                    break
+                                                }
+                                                let workflowID = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+                                                let path = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+                                                guard !workflowID.isEmpty, !path.isEmpty else {
+                                                    o.optionErrors.append("--sml-api-workflow-path requires <workflow-id>=<path>")
+                                                    break
+                                                }
+                                                guard o.smlRuntimeAPIWorkflowPathOverrides[workflowID] == nil else {
+                                                    o.optionErrors.append("--sml-api-workflow-path repeats workflow id '\(workflowID)'")
+                                                    break
+                                                }
+                                                o.smlRuntimeAPIWorkflowPathOverrides[workflowID] = path
+                                            } else {
+                                                o.optionErrors.append("--sml-api-workflow-path requires <workflow-id>=<path>")
+                                            }
             case let flag where ["--sml-out", "--sml-output-dir"].contains(flag):
                                             if let v = next() { o.smlRuntimeOutputDirectory = v }
                                             else { o.optionErrors.append("\(flag) requires <dir>") }
@@ -916,6 +942,8 @@ struct KistOptions {
                                     through one generated model-router session.
               --sml-role <role>         Override workflow role for the generated mount.
               --sml-api-base <path>     Override API base path for generated endpoints.
+              --sml-api-workflow-path <id>=<path>
+                                        Override one generated workflow API path; repeat per workflow.
               --sml-out <dir>           Output directory for --sml-runtime-scaffold.
               --sml-script <path>       Script file for --sml-runtime-repl-script; blank lines and
                                         leading # comments are ignored.

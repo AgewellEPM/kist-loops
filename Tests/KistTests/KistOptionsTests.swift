@@ -98,6 +98,8 @@ final class KistOptionsTests: XCTestCase {
             "--sml-role", "reviewer",
             "--sml-actor", "operator.test",
             "--sml-api-base", "/source",
+            "--sml-api-workflow-path", "langgraph.review=/retargeted-review",
+            "--sml-api-workflow-path", "langgraph.audit=/retargeted-audit",
             "--sml-title", "Source Runtime",
             "--sml-version", "2026.08",
             "--sml-model-rounds", "3",
@@ -106,6 +108,10 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertEqual(o.smlRuntimeRole, "reviewer")
         XCTAssertEqual(o.smlRuntimeActor, "operator.test")
         XCTAssertEqual(o.smlRuntimeAPIBasePath, "/source")
+        XCTAssertEqual(o.smlRuntimeAPIWorkflowPathOverrides, [
+            "langgraph.audit": "/retargeted-audit",
+            "langgraph.review": "/retargeted-review",
+        ])
         XCTAssertEqual(o.smlRuntimeTitle, "Source Runtime")
         XCTAssertEqual(o.smlRuntimeVersion, "2026.08")
         XCTAssertEqual(o.smlRuntimeModelRounds, 3)
@@ -113,6 +119,7 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(KistOptions.helpText.contains("--sml-runtime-export <json>"))
         XCTAssertTrue(KistOptions.helpText.contains("runtime source set"))
         XCTAssertTrue(KistOptions.helpText.contains("--sml-api-base <path>"))
+        XCTAssertTrue(KistOptions.helpText.contains("--sml-api-workflow-path <id>=<path>"))
     }
 
     func testSMLRuntimeLaunchFlags() {
@@ -617,6 +624,47 @@ final class KistOptionsTests: XCTestCase {
 
         let apiBase = KistOptions.parse(["--sml-api-base"])
         XCTAssertTrue(apiBase.optionErrors.contains { $0.contains("--sml-api-base requires") })
+
+        let apiWorkflowPathMissing = KistOptions.parse(["--sml-api-workflow-path"])
+        XCTAssertTrue(apiWorkflowPathMissing.optionErrors.contains {
+            $0.contains("--sml-api-workflow-path requires <workflow-id>=<path>")
+        })
+        XCTAssertTrue(apiWorkflowPathMissing.smlRuntimeAPIWorkflowPathOverrides.isEmpty)
+
+        let apiWorkflowPathMalformed = KistOptions.parse([
+            "--sml-api-workflow-path", "langgraph.review",
+        ])
+        XCTAssertTrue(apiWorkflowPathMalformed.optionErrors.contains {
+            $0.contains("--sml-api-workflow-path requires <workflow-id>=<path>")
+        })
+        XCTAssertTrue(apiWorkflowPathMalformed.smlRuntimeAPIWorkflowPathOverrides.isEmpty)
+
+        let apiWorkflowPathEmptyWorkflow = KistOptions.parse([
+            "--sml-api-workflow-path", "=/review",
+        ])
+        XCTAssertTrue(apiWorkflowPathEmptyWorkflow.optionErrors.contains {
+            $0.contains("--sml-api-workflow-path requires <workflow-id>=<path>")
+        })
+        XCTAssertTrue(apiWorkflowPathEmptyWorkflow.smlRuntimeAPIWorkflowPathOverrides.isEmpty)
+
+        let apiWorkflowPathEmptyPath = KistOptions.parse([
+            "--sml-api-workflow-path", "langgraph.review=",
+        ])
+        XCTAssertTrue(apiWorkflowPathEmptyPath.optionErrors.contains {
+            $0.contains("--sml-api-workflow-path requires <workflow-id>=<path>")
+        })
+        XCTAssertTrue(apiWorkflowPathEmptyPath.smlRuntimeAPIWorkflowPathOverrides.isEmpty)
+
+        let duplicateAPIWorkflowPath = KistOptions.parse([
+            "--sml-api-workflow-path", "langgraph.review=/review",
+            "--sml-api-workflow-path", "langgraph.review=/other",
+        ])
+        XCTAssertTrue(duplicateAPIWorkflowPath.optionErrors.contains {
+            $0.contains("--sml-api-workflow-path repeats workflow id 'langgraph.review'")
+        })
+        XCTAssertEqual(duplicateAPIWorkflowPath.smlRuntimeAPIWorkflowPathOverrides, [
+            "langgraph.review": "/review",
+        ])
 
         let rounds = KistOptions.parse(["--sml-model-rounds", "9"])
         XCTAssertTrue(rounds.optionErrors.contains { $0.contains("--sml-model-rounds requires") })

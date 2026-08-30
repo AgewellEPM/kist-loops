@@ -635,7 +635,7 @@ extension KistRunner {
     }
 
     struct SMLRuntimeHostScaffoldRunbook: Sendable, Codable, Equatable {
-        static let currentSchemaVersion = 3
+        static let currentSchemaVersion = 4
 
         let schemaVersion: Int
         let sourcePath: String
@@ -643,6 +643,8 @@ extension KistRunner {
         let outputDirectory: String
         let workflowIDs: [String]
         let apiBasePaths: [String]
+        let apiWorkflowPathsByWorkflowID: [String: String]
+        let apiTaskPathsByWorkflowID: [String: String]
         let descriptorOnly: Bool
         let artifactsMaterialized: Bool
         let omittedRuntimeState: [String]
@@ -657,6 +659,8 @@ extension KistRunner {
             outputDirectory: String,
             workflowIDs: [String],
             apiBasePaths: [String],
+            apiWorkflowPathsByWorkflowID: [String: String]? = nil,
+            apiTaskPathsByWorkflowID: [String: String]? = nil,
             descriptorOnly: Bool = true,
             artifactsMaterialized: Bool = false,
             omittedRuntimeState: [String] = [
@@ -677,14 +681,25 @@ extension KistRunner {
             self.outputDirectory = outputDirectory
             self.workflowIDs = Array(Set(workflowIDs)).sorted()
             self.apiBasePaths = Array(Set(apiBasePaths)).sorted()
+            let sortedWorkflows = workflows.sorted {
+                if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+                return $0.workflowVersion < $1.workflowVersion
+            }
+            self.apiWorkflowPathsByWorkflowID = apiWorkflowPathsByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: sortedWorkflows.map {
+                    ($0.workflowID, $0.apiWorkflowPath)
+                })
+            self.apiTaskPathsByWorkflowID = apiTaskPathsByWorkflowID
+                ?? Dictionary(uniqueKeysWithValues: sortedWorkflows.map { workflow in
+                    let startPath = workflow.apiEndpoints.first { $0.action == .start }?.pathTemplate
+                        ?? "\(workflow.apiBasePath)\(workflow.apiWorkflowPath)/tasks"
+                    return (workflow.workflowID, startPath)
+                })
             self.descriptorOnly = descriptorOnly
             self.artifactsMaterialized = artifactsMaterialized
             self.omittedRuntimeState = Array(Set(omittedRuntimeState)).sorted()
             self.artifacts = artifacts
-            self.workflows = workflows.sorted {
-                if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
-                return $0.workflowVersion < $1.workflowVersion
-            }
+            self.workflows = sortedWorkflows
             self.launchDescriptor = launchDescriptor
         }
     }
@@ -1150,6 +1165,9 @@ extension KistRunner {
         case readModelScriptFailed(path: String, reason: String)
         case invalidJSONObject(flag: String, reason: String)
         case invalidSourceSet(path: String, reason: String)
+        case invalidAPIWorkflowPathOverride(workflowID: String, path: String)
+        case duplicateAPIWorkflowPathOverride(String)
+        case unknownAPIWorkflowPathOverride(requested: String, available: [String])
         case invalidScaffold(path: String, reason: String)
         case readFailed(path: String, reason: String)
         case unsupportedSource(path: String, diagnostics: [String])
@@ -1197,6 +1215,12 @@ extension KistRunner {
                 return "\(flag) must be a valid SML JSON object: \(reason)"
             case .invalidSourceSet(let path, let reason):
                 return "invalid SML runtime source set '\(path)': \(reason)"
+            case .invalidAPIWorkflowPathOverride(let workflowID, let path):
+                return "--sml-api-workflow-path for workflow '\(workflowID)' must be an absolute literal path, got '\(path)'"
+            case .duplicateAPIWorkflowPathOverride(let workflowID):
+                return "--sml-api-workflow-path repeats workflow id '\(workflowID)'"
+            case .unknownAPIWorkflowPathOverride(let requested, let available):
+                return "unknown --sml-api-workflow-path workflow id '\(requested)'. Available workflows: \(available.joined(separator: ", "))"
             case .invalidScaffold(let path, let reason):
                 return "invalid SML runtime scaffold '\(path)': \(reason)"
             case .readFailed(let path, let reason):
@@ -1232,6 +1256,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1252,6 +1277,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1272,6 +1298,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1292,6 +1319,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1313,6 +1341,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1333,6 +1362,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1353,6 +1383,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1373,6 +1404,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1393,6 +1425,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1413,6 +1446,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1433,6 +1467,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1454,6 +1489,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1475,6 +1511,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1496,6 +1533,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1518,6 +1556,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1540,6 +1579,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1563,6 +1603,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1584,6 +1625,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1613,6 +1655,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1642,6 +1685,7 @@ extension KistRunner {
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,
                 apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
                 title: opts.smlRuntimeTitle,
                 version: opts.smlRuntimeVersion,
                 modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
@@ -1660,6 +1704,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1670,6 +1715,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1685,6 +1731,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1695,6 +1742,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1710,6 +1758,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1720,6 +1769,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1735,6 +1785,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1745,6 +1796,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1761,6 +1813,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1772,6 +1825,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1787,6 +1841,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1797,6 +1852,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1812,6 +1868,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1822,6 +1879,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1837,6 +1895,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1847,6 +1906,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1862,6 +1922,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1872,6 +1933,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1887,6 +1949,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1897,6 +1960,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1912,6 +1976,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1922,6 +1987,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1938,6 +2004,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1949,6 +2016,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1965,6 +2033,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -1976,6 +2045,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -1993,6 +2063,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2005,6 +2076,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2022,6 +2094,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2034,6 +2107,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2050,6 +2124,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2061,6 +2136,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2079,6 +2155,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2092,6 +2169,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2108,6 +2186,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2119,6 +2198,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2137,6 +2217,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2150,6 +2231,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2168,6 +2250,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2181,6 +2264,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2196,6 +2280,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2206,6 +2291,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2227,6 +2313,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2237,6 +2324,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2260,6 +2348,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2270,6 +2359,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2294,6 +2384,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2304,6 +2395,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2329,6 +2421,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2339,6 +2432,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2372,6 +2466,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2382,6 +2477,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2406,6 +2502,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2416,6 +2513,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2440,6 +2538,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2450,6 +2549,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2474,6 +2574,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2484,6 +2585,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2508,6 +2610,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2518,6 +2621,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2542,6 +2646,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2552,6 +2657,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2577,6 +2683,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2587,6 +2694,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -2620,6 +2728,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -2638,6 +2747,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -3062,6 +3172,12 @@ extension KistRunner {
     ) -> String {
         let workflowList = launchDescriptor.workflowIDs.map { "- \($0)" }.joined(separator: "\n")
         let apiBaseList = launchDescriptor.apiBasePaths.map { "- \($0)" }.joined(separator: "\n")
+        let apiWorkflowList = launchDescriptor.sourceSummaries.sorted {
+            if $0.workflowID != $1.workflowID { return $0.workflowID < $1.workflowID }
+            return $0.workflowVersion < $1.workflowVersion
+        }.map {
+            "- \($0.workflowID): `\($0.apiWorkflowPath)` mounted at `\($0.apiBasePath)\($0.apiWorkflowPath)/tasks`"
+        }.joined(separator: "\n")
         let fileList = files.sorted {
             if $0.relativePath != $1.relativePath { return $0.relativePath < $1.relativePath }
             return $0.sha256 < $1.sha256
@@ -3083,6 +3199,10 @@ extension KistRunner {
         ## API base paths
 
         \(apiBaseList.isEmpty ? "- none" : apiBaseList)
+
+        ## Workflow API paths
+
+        \(apiWorkflowList.isEmpty ? "- none" : apiWorkflowList)
 
         ## Files
 
@@ -3199,6 +3319,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -3217,6 +3338,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -3253,6 +3375,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -3267,6 +3390,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -3312,6 +3436,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -3322,6 +3447,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -3359,6 +3485,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -3377,6 +3504,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: maximumCommandRounds
@@ -3416,6 +3544,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -3435,6 +3564,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: maximumCommandRounds
@@ -3487,6 +3617,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -3501,6 +3632,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -3535,6 +3667,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil
@@ -3549,6 +3682,7 @@ extension KistRunner {
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
+            apiWorkflowPathOverrides: apiWorkflowPathOverrides,
             title: title,
             version: version,
             modelMaximumCommandRoundsOverride: modelMaximumCommandRoundsOverride
@@ -3620,6 +3754,7 @@ extension KistRunner {
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
+        apiWorkflowPathOverrides: [String: String] = [:],
         title: String? = nil,
         version: String? = nil,
         modelMaximumCommandRoundsOverride: Int? = nil,
@@ -3646,6 +3781,10 @@ extension KistRunner {
         let title = title ?? "SML Workflow Runtime API"
         let version = version ?? "1.0.0"
         let modelRounds = modelMaximumCommandRoundsOverride.map { min(max(1, $0), 8) }
+        let apiWorkflowPathOverrides = try normalizedSMLRuntimeAPIWorkflowPathOverrides(
+            apiWorkflowPathOverrides,
+            workflows: loaded.workflows
+        )
         let admissionCatalog = derivedSMLAdmissionCatalog(for: loaded.workflows)
         let commandIDSource = SMLRuntimeSequentialIDSource(prefix: "sml-runtime-export-command")
         let taskIDSource = SMLRuntimeSequentialIDSource(prefix: "TASK-SML-RUNTIME-EXPORT")
@@ -3657,6 +3796,7 @@ extension KistRunner {
                 actor: actor,
                 roleOverride: roleOverride,
                 apiBasePathOverride: apiBasePathOverride,
+                apiWorkflowPathOverrides: apiWorkflowPathOverrides,
                 modelMaximumCommandRoundsOverride: modelRounds,
                 commandID: { commandIDSource.nextID() },
                 taskID: { taskIDSource.nextID() }
@@ -3670,7 +3810,7 @@ extension KistRunner {
                         role: roleOverride ?? mount.role ?? "workflow-agent",
                         actor: actor,
                         apiBasePath: apiBasePathOverride ?? mount.apiBasePath ?? "/sml",
-                        apiWorkflowPath: mount.apiWorkflowPath,
+                        apiWorkflowPath: apiWorkflowPathOverrides[mount.workflow.id] ?? mount.apiWorkflowPath,
                         modelMaximumCommandRounds: modelRounds
                             ?? mount.modelMaximumCommandRounds
                             ?? 4
@@ -3681,12 +3821,17 @@ extension KistRunner {
             )
         } else {
             registry = try SMLWorkflowRuntimeRegistry.compile(
-                workflows: loaded.workflows,
-                admissionCatalog: admissionCatalog,
-                role: roleOverride ?? "workflow-agent",
-                actor: actor,
-                apiBasePath: apiBasePathOverride ?? "/sml",
-                modelMaximumCommandRounds: modelRounds ?? 4,
+                candidateMounts: loaded.workflows.map { workflow in
+                    SMLWorkflowRuntimeCandidateMount(
+                        workflow: workflow,
+                        admissionCatalog: admissionCatalog,
+                        role: roleOverride ?? "workflow-agent",
+                        actor: actor,
+                        apiBasePath: apiBasePathOverride ?? "/sml",
+                        apiWorkflowPath: apiWorkflowPathOverrides[workflow.id],
+                        modelMaximumCommandRounds: modelRounds ?? 4
+                    )
+                },
                 commandID: { commandIDSource.nextID() },
                 taskID: { taskIDSource.nextID() }
             )
@@ -3734,6 +3879,39 @@ extension KistRunner {
             launch: launch
         )
         return try await body(host)
+    }
+
+    private static func normalizedSMLRuntimeAPIWorkflowPathOverrides(
+        _ overrides: [String: String],
+        workflows: [SMLWorkflow]
+    ) throws -> [String: String] {
+        guard !overrides.isEmpty else { return [:] }
+        let workflowIDs = Set(workflows.map(\.id))
+        let available = workflows.map(\.id).sorted()
+        var normalized: [String: String] = [:]
+        for (workflowID, path) in overrides.sorted(by: { $0.key < $1.key }) {
+            let workflowID = workflowID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !workflowID.isEmpty,
+                  !path.isEmpty,
+                  smlRuntimeSourceSetAPIWorkflowPathIsValid(path) else {
+                throw SMLRuntimeHostExportError.invalidAPIWorkflowPathOverride(
+                    workflowID: workflowID,
+                    path: path
+                )
+            }
+            guard normalized[workflowID] == nil else {
+                throw SMLRuntimeHostExportError.duplicateAPIWorkflowPathOverride(workflowID)
+            }
+            guard workflowIDs.contains(workflowID) else {
+                throw SMLRuntimeHostExportError.unknownAPIWorkflowPathOverride(
+                    requested: workflowID,
+                    available: available
+                )
+            }
+            normalized[workflowID] = path
+        }
+        return normalized
     }
 
     private static func selectSMLRuntimeREPLWorkflowID(
