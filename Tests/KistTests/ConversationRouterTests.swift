@@ -48,6 +48,62 @@ final class ConversationRouterTests: XCTestCase {
         XCTAssertNil(ConversationRouter.parseRoute("build", defaultFleetAgents: 4))
     }
 
+    func testSemanticResolverParsesOutcomeContractFields() throws {
+        let raw = #"{"desired_result":"Typing kist shows the repaired REPL.","intent":"build","continuation":true,"route":"inline"}"#
+        let resolution = try XCTUnwrap(
+            ConversationRouter.parseSemanticResolution(raw, defaultFleetAgents: 3))
+
+        XCTAssertEqual(resolution.desiredResult, "Typing kist shows the repaired REPL.")
+        XCTAssertEqual(resolution.suggestedIntent, .build)
+        XCTAssertEqual(resolution.isContinuation, true)
+        XCTAssertNil(resolution.route)
+    }
+
+    func testFailedResultFollowUpCarriesPriorBuildThroughSemanticResolution() async {
+        let reply = #"{"desired_result":"Typing kist shows the newly repaired REPL behavior.","intent":"build","continuation":true,"route":"inline"}"#
+        let registry = ProviderRegistry(
+            providers: [RouterReplyProvider(reply: reply)],
+            keyStore: RouterNullKeys())
+        let router = ConversationRouter(
+            providers: registry,
+            binding: ProviderBinding(providerId: "router-test"))
+        let previous = OutcomeContract(
+            desiredResult: "Typing kist opens the repaired REPL.",
+            intent: .build,
+            mode: .inline,
+            authority: .explicitRequest,
+            isContinuation: false)
+
+        let resolution = await router.resolve(
+            "the changes still aren't showing up in the repl",
+            conversationContext: "user: fix the REPL\nassistant: completed",
+            previous: previous)
+
+        XCTAssertEqual(resolution.contract.intent, .build)
+        XCTAssertEqual(resolution.contract.authority, .continuedGoal)
+        XCTAssertEqual(resolution.contract.desiredResult, previous.desiredResult)
+        XCTAssertNil(resolution.contract.interpretedResult,
+                     "classifier prose cannot enter a carried mutation contract")
+        XCTAssertNil(resolution.proposal)
+    }
+
+    func testSemanticSuggestionCannotCreateFreshWriteAuthority() async {
+        let reply = #"{"desired_result":"The parser works again.","intent":"build","continuation":true,"route":"inline"}"#
+        let registry = ProviderRegistry(
+            providers: [RouterReplyProvider(reply: reply)],
+            keyStore: RouterNullKeys())
+        let router = ConversationRouter(
+            providers: registry,
+            binding: ProviderBinding(providerId: "router-test"))
+
+        let resolution = await router.resolve("the parser still isn't working")
+
+        XCTAssertFalse(resolution.contract.intent.expectsMutation)
+        XCTAssertEqual(resolution.contract.authority, .readOnly)
+        XCTAssertEqual(resolution.contract.desiredResult, "the parser still isn't working")
+        XCTAssertEqual(resolution.contract.interpretedResult, "The parser works again.")
+    }
+
     func testDeepResearchRequestsReachTheClassifier() {
         XCTAssertFalse(ConversationRouter.isObviouslyChat(
             "Research the future of agentic coding systems and make a product roadmap for our system"))

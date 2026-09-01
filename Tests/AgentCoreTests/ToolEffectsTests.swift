@@ -449,13 +449,60 @@ final class ToolEffectsTests: XCTestCase {
         XCTAssertEqual(background.progress, .externalState)
     }
 
-    func testDelegationProgressIsSeparateAndIntentScoped() {
+    func testUntypedSpawnDoesNotManufactureDelegationProgress() {
         let effect = ToolEffectCatalog.observe(tool: "spawn_agent", arguments: ["task": "implement"])
         XCTAssertEqual(effect.mutation, .none)
         XCTAssertEqual(effect.verification, .none)
-        XCTAssertEqual(effect.progress, .delegation)
-        XCTAssertTrue(effect.advances(intent: .fleet))
+        XCTAssertEqual(effect.progress, .none)
+        XCTAssertFalse(effect.advances(intent: .fleet))
         XCTAssertFalse(effect.advances(intent: .build))
+
+        let untypedBackground = ToolEffectCatalog.observe(
+            tool: "spawn_agent", arguments: ["task": "implement", "background": true])
+        XCTAssertEqual(untypedBackground.progress, .none)
+        XCTAssertFalse(untypedBackground.advances(intent: .fleet))
+
+        let contradictoryBackground = ToolEffectCatalog.observe(
+            tool: "spawn_agent", arguments: ["task": "implement", "background": true],
+            outcomeMetadata: ["delegation_status": "completed"])
+        XCTAssertEqual(contradictoryBackground.progress, .none)
+
+        let completed = ToolEffectCatalog.observe(
+            tool: "spawn_agent", arguments: ["task": "review"],
+            outcomeMetadata: ["delegation_status": "completed"])
+        XCTAssertEqual(completed.progress, .delegation)
+        XCTAssertTrue(completed.advances(intent: .fleet))
+    }
+
+    func testSuccessfulSynchronousChildMutationIsTypedWithoutForgingParentLocalEdit() {
+        let effect = ToolEffectCatalog.observe(
+            tool: "spawn_agent",
+            arguments: ["task": "implement"],
+            outcomeMetadata: [
+                "delegation_status": "completed",
+                "delegation_scope": "parent-workspace",
+                "sub_agent_expected_outcome": TaskBrief.ExpectedOutcome.mutation.rawValue,
+            ])
+
+        XCTAssertEqual(effect.mutation, .none)
+        XCTAssertEqual(effect.verification, .none)
+        XCTAssertEqual(effect.progress, .delegatedMutation)
+        XCTAssertTrue(effect.advances(intent: .build))
+    }
+
+    func testBackgroundDelegationStartsButOnlyJoinCompletes() {
+        let started = ToolEffectCatalog.observe(
+            tool: "spawn_agent", arguments: ["task": "implement", "background": true],
+            outcomeMetadata: ["delegation_status": "running"])
+        let joined = ToolEffectCatalog.observe(
+            tool: "join_agent", arguments: ["handle": "h"],
+            outcomeMetadata: ["delegation_status": "completed"])
+
+        XCTAssertEqual(started.progress, .delegationStarted)
+        XCTAssertFalse(started.advances(intent: .fleet))
+        XCTAssertEqual(joined.progress, .delegation)
+        XCTAssertTrue(joined.advances(intent: .fleet))
+        XCTAssertFalse(joined.advances(intent: .build))
     }
 
     func testOldActionRecordJSONDecodesAndInfersEffects() throws {

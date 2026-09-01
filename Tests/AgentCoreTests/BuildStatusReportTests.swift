@@ -76,4 +76,61 @@ final class BuildStatusReportTests: XCTestCase {
         XCTAssertFalse(s.buildOrTestRan)
         XCTAssertFalse(s.isComplete)
     }
+
+    func testChildVerifiedDelegatedMutationIsCompleteWithoutForgingParentPatchFacts() {
+        let s = BuildStatusReport(trajectory: [
+            rec("spawn_agent", success: true,
+                ToolEffectObservation(progress: .delegatedMutation)),
+        ])
+
+        XCTAssertFalse(s.patchGenerated)
+        XCTAssertFalse(s.patchApplied)
+        XCTAssertFalse(s.buildOrTestRan)
+        XCTAssertTrue(s.delegatedMutationCompleted)
+        XCTAssertTrue(s.isComplete)
+        let output = s.render(color: false)
+        XCTAssertTrue(output.contains("Delegated result   ✓"))
+        XCTAssertTrue(output.contains("Result             COMPLETE"))
+    }
+
+    func testDelegatedMutationCannotMaskLaterUnverifiedOrFailedParentEdit() {
+        let delegated = rec("spawn_agent", success: true,
+                            ToolEffectObservation(progress: .delegatedMutation))
+        let sourceEdit = rec("edit_file", success: true,
+                             ToolEffectObservation(mutation: .source))
+        let failedEdit = rec("edit_file", success: false,
+                             ToolEffectObservation(mutation: .source,
+                                                   mutationEvidence: .mayMutate))
+
+        let unverified = BuildStatusReport(trajectory: [delegated, sourceEdit])
+        XCTAssertTrue(unverified.delegatedMutationCompleted)
+        XCTAssertFalse(unverified.isComplete)
+        XCTAssertTrue(unverified.render(color: false).contains("NOT COMPLETE"))
+
+        let failed = BuildStatusReport(trajectory: [delegated, failedEdit])
+        XCTAssertTrue(failed.delegatedMutationCompleted)
+        XCTAssertFalse(failed.isComplete)
+    }
+
+    func testLaterVerifiedParentEditRestoresCompleteStatus() {
+        let s = BuildStatusReport(trajectory: [
+            rec("spawn_agent", success: true,
+                ToolEffectObservation(progress: .delegatedMutation)),
+            rec("edit_file", success: true, ToolEffectObservation(mutation: .source)),
+            rec("run_command", success: true,
+                ToolEffectObservation(verification: .buildOrTest)),
+        ])
+
+        XCTAssertTrue(s.isComplete)
+    }
+
+    func testCanonicalFailedTurnCannotRenderCompleteDespiteVerifiedTrajectory() {
+        let s = BuildStatusReport(trajectory: [
+            rec("spawn_agent", success: true,
+                ToolEffectObservation(progress: .delegatedMutation)),
+        ], finalSuccess: false)
+
+        XCTAssertFalse(s.isComplete)
+        XCTAssertTrue(s.render(color: false).contains("NOT COMPLETE"))
+    }
 }

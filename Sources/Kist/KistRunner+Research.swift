@@ -16,6 +16,7 @@ extension KistRunner {
                                     rolesOverride: RoleBindings? = nil,
                                     runCouncilAfterResearch: Bool = true,
                                     capture: ResearchPipelineCaptureBox? = nil,
+                                    councilCapture: CouncilPipelineCaptureBox? = nil,
                                     requirePEEL: Bool = false) async -> Int32 {
         note("kist · research · \(root)")
         // LIVE PROGRESS (Luke 2026-08-02): research used to go dead-silent between blocking tool calls
@@ -243,10 +244,16 @@ extension KistRunner {
             err("research · report lineage mismatch for run \(runID): \(reportedPath)")
             return 1
         }
+        let evidenceURL = URL(fileURLWithPath: root).appendingPathComponent(evidencePath)
+        guard let evidenceData = try? Data(contentsOf: evidenceURL), !evidenceData.isEmpty else {
+            err("research · evidence ledger missing after synthesis for run \(runID)")
+            return 1
+        }
         capture?.set(ResearchPipelineCapture(
             runID: runID, manifestPath: manifestPath, evidencePath: evidencePath,
             reportPath: reportPath, dossier: dossier,
             dossierDigest: PEELEvidenceReceipt.contentDigest(dossier),
+            evidenceDigest: ResearchPipelineCapture.sha256Hex(evidenceData),
             peelReceipt: peelReceipt
         ))
         guard !requirePEEL || peelReceipt.satisfiesRequiredGate else {
@@ -259,7 +266,36 @@ extension KistRunner {
                                 registry: registry, root: root, tools: tools, context: context,
                                 providerId: providerId, model: model, rolesOverride: rolesOverride,
                                 researchDossier: dossier, researchRunID: runID,
-                                seedBoard: opts.councilExecute)
+                                seedBoard: opts.councilExecute, capture: councilCapture)
+    }
+
+    /// Compose bounded advisory context from a successful research route. The council's selected
+    /// result receives the larger share of the next-turn context budget; the underlying dossier
+    /// follows as evidence. Neither value is authority for a later mutation.
+    static func researchHandoffSummary(councilFinalPlan: String?, dossier: String?) -> String? {
+        func cleaned(_ value: String?) -> String? {
+            let clean = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clean?.isEmpty == false ? clean : nil
+        }
+
+        let finalPlan = cleaned(councilFinalPlan)
+        let dossier = cleaned(dossier)
+        guard finalPlan != nil || dossier != nil else { return nil }
+
+        // Stay below HeavyRouteResult's 4,000-character result boundary even after labels. When both
+        // exist, keep the council decision first and reserve a smaller, explicit evidence window.
+        let finalPlanLimit = dossier == nil ? 3_800 : 2_800
+        let dossierLimit = finalPlan == nil ? 3_800 : 1_000
+        var sections: [String] = []
+        if let finalPlan {
+            sections.append("Council decision (advisory result):\n"
+                + String(finalPlan.prefix(finalPlanLimit)))
+        }
+        if let dossier {
+            sections.append("Research dossier (advisory evidence):\n"
+                + String(dossier.prefix(dossierLimit)))
+        }
+        return sections.joined(separator: "\n\n")
     }
 
     /// `/dive` — a MULTI-AGENT deep-dive of OUR OWN CURRENT repo. `/research` is the wrong tool for "what
@@ -272,7 +308,9 @@ extension KistRunner {
                                 registry: ProviderRegistry, root: String,
                                 tools: ToolRegistry, context: ToolContext,
                                 providerId: String, model: String?,
-                                rolesOverride: RoleBindings? = nil) async -> Int32 {
+                                rolesOverride: RoleBindings? = nil,
+                                capture: ResearchPipelineCaptureBox? = nil,
+                                councilCapture: CouncilPipelineCaptureBox? = nil) async -> Int32 {
         let colored = KistREPL.stdoutColorEnabled(projectRoot: root)
         func dim(_ s: String) -> String { colored ? "\u{001B}[2m\(s)\u{001B}[0m" : s }
         func paint(_ code: String, _ s: String) -> String { colored ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
@@ -316,6 +354,27 @@ extension KistRunner {
             err("dive · incomplete: \(synth.error ?? synth.output)")
             return 1
         }
+        let manifestPath = ".kist/research-runs/\(runID)/manifest.json"
+        let evidencePath = ".kist/research-runs/\(runID)/evidence.jsonl"
+        let reportPath = ".kist/research-runs/\(runID)/report.md"
+        if let reportedPath = synth.metadata["report"],
+           reportedPath != reportPath && reportedPath != root + "/" + reportPath {
+            err("dive · report lineage mismatch for run \(runID): \(reportedPath)")
+            return 1
+        }
+        let evidenceURL = URL(fileURLWithPath: root).appendingPathComponent(evidencePath)
+        guard let evidenceData = try? Data(contentsOf: evidenceURL), !evidenceData.isEmpty else {
+            err("dive · evidence ledger missing after synthesis for run \(runID)")
+            return 1
+        }
+        capture?.set(ResearchPipelineCapture(
+            runID: runID, manifestPath: manifestPath, evidencePath: evidencePath,
+            reportPath: reportPath, dossier: synth.output,
+            dossierDigest: PEELEvidenceReceipt.contentDigest(synth.output),
+            evidenceDigest: ResearchPipelineCapture.sha256Hex(evidenceData),
+            peelReceipt: PEELEvidenceReceipt(
+                researchRunID: runID, status: .skippedUnavailable,
+                summary: "local code dive does not require the web PEEL gate")))
 
         // MULTI-AGENT READ: every reachable model analyzes the SAME grounded code dossier; the panel is
         // synthesized into one file-cited verdict. Wide council = consultation (no build hand-off): dive
@@ -331,6 +390,7 @@ extension KistRunner {
         \(synth.output)
         """
         return await runWideCouncil(opts, goal: brief, registry: registry, root: root,
-                                    providerId: providerId, model: model, rolesOverride: rolesOverride)
+                                    providerId: providerId, model: model,
+                                    rolesOverride: rolesOverride, capture: councilCapture)
     }
 }

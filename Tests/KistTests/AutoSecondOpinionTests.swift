@@ -360,8 +360,10 @@ final class AutoSecondOpinionTests: XCTestCase {
 
     func testMediaTurnsKeepCanonicalIntentAndBuildReviewContract() {
         let repl = kistREPLFamilySource()
-        XCTAssertTrue(repl.contains("let mediaIntent = PromptCompiler.inferIntent(text, mode: mediaMode)"),
-                      "a screenshot-fix request must not be hardcoded to chat")
+        XCTAssertTrue(repl.contains("let mediaOutcome = PromptCompiler.resolveOutcome("),
+                      "a screenshot-fix request must use the same outcome contract as text")
+        XCTAssertTrue(repl.contains("outcomeContract: mediaOutcome"),
+                      "media follow-ups must retain their host-admitted contract")
         XCTAssertTrue(repl.contains("turnIntent: mediaIntent, turnSucceeded: oc.success"),
                       "media builds must use the same automatic review gate as text builds")
         XCTAssertFalse(repl.contains("let mediaIntent: TaskBrief.Intent = .chat"))

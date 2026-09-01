@@ -21,16 +21,17 @@ extension KistRunner {
     static func builderRunRequired(for opts: KistOptions, goal: String) -> Bool {
         if opts.planMode && opts.planExecute { return false }
         if opts.resumeId != nil || opts.resumeLast || opts.planExecuteResumeID != nil { return true }
+        let intent = PromptCompiler.inferIntent(goal, mode: .inline)
+        if intent == .delegate { return false }
         if opts.headless || opts.mission || opts.fleet || opts.greatLoop || opts.ship
             || opts.planExecute { return true }
         if opts.planMode { return false }
         if builderCompletionMode(for: goal) == .verificationOnly { return true }
 
-        let intent = PromptCompiler.inferIntent(goal, mode: .inline)
         switch intent {
         case .build, .fleet, .desktop:
             return true
-        case .chat, .plan, .research, .review:
+        case .chat, .plan, .delegate, .research, .review:
             return false
         }
     }
@@ -65,7 +66,10 @@ extension KistRunner {
             return 2
         }
 
-        let routeTools = readOnlyOneShotTools(
+        // Delegation keeps the full SESSION ceiling inside SpawnAgentTool, while HeadlessAgentLoop
+        // projects the PARENT to read + trusted orchestration tools. Pre-filtering here would also
+        // cripple an explicitly authorized implementation child.
+        let routeTools = intent == .delegate ? tools : readOnlyOneShotTools(
             from: tools, fetchAllowedHosts: fetchAllowedHosts)
         let recorder = TrajectoryRecorder()
         let traceRecorder = TraceRecorder(traceId: TraceID.make())
@@ -89,7 +93,7 @@ extension KistRunner {
             maxIterations: min(opts.maxIterations, effort.iterationBudget),
             budget: runBudget, planMode: opts.planMode,
             extendedThinking: opts.extendedThinking || effort.thinking != .none,
-            toolMode: toolMode, roles: roles, delegationDepth: 0,
+            toolMode: toolMode, roles: roles, delegationDepth: intent == .delegate ? 1 : 0,
             showReasoning: opts.extendedThinking || effort.thinking == .deep,
             sinkOverride: TerminalEventSink(
                 showReasoning: opts.extendedThinking || effort.thinking == .deep,
@@ -113,7 +117,8 @@ extension KistRunner {
             ),
             resolvedIntent: intent
         )
-        var outcome = await loop.run(goal: compiledGoal)
+        var outcome = await loop.run(goal: compiledGoal, rawRequest: goal,
+                                     resolvedIntent: intent)
         // Provider resilience (parity with the REPL lane): a failed run whose trajectory is
         // safe to replay retries ONCE on a substitute provider instead of dying terminally.
         // Rate-limit/outage failures also cool the provider down cross-process so the next
@@ -139,14 +144,16 @@ extension KistRunner {
                     // attempt independently. Do NOT reconstruct a fresh ledger here.
                     budget: runBudget, planMode: opts.planMode,
                     extendedThinking: opts.extendedThinking || effort.thinking != .none,
-                    toolMode: toolMode, roles: roles, delegationDepth: 0,
+                    toolMode: toolMode, roles: roles,
+                    delegationDepth: intent == .delegate ? 1 : 0,
                     showReasoning: opts.extendedThinking || effort.thinking == .deep,
                     sinkOverride: TerminalEventSink(
                         showReasoning: opts.extendedThinking || effort.thinking == .deep,
                         style: .calm, proofStore: proofStore),
                     recorder: recorder, traceRecorder: traceRecorder
                 )
-                outcome = await retryLoop.run(goal: compiledGoal)
+                outcome = await retryLoop.run(goal: compiledGoal, rawRequest: goal,
+                                              resolvedIntent: intent)
             }
         }
         recordRuntimeLessons(goal: goal, success: outcome.success, recorder: recorder,

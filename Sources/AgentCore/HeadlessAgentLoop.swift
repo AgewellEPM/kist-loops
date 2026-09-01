@@ -104,8 +104,9 @@ public struct HeadlessAgentLoop: Sendable {
 
     /// P2 — task-targeted self__ surfacing. When true, each turn ADVERTISES only the self-authored tools whose
     /// manifest lexically matches the goal (trims schema bloat as the self__ population grows). ADVERTISEMENT-
-    /// ONLY: EXECUTION always runs against the full `tools`, and `toolNames` (self-evolution's tool universe)
-    /// stays full, so a filtered-out tool is never unreachable and the engine never re-authors an existing one.
+    /// ONLY within the authority-filtered registry: EXECUTION runs against the untrimmed authorized registry,
+    /// and `toolNames` (self-evolution's tool universe) stays full, so a relevance-filtered tool is never
+    /// unreachable on an effect-authorized turn and the engine never re-authors an existing one.
     /// Native-mode steering advertises the SAME filtered set as the schema it can actually call (review #6);
     /// text-mode steering may still name the full set (harmless — text execution accepts any real tool). The
     /// matcher itself is fail-open (a token-less tool is always surfaced; a no-match surfaces all) but the trim
@@ -117,6 +118,10 @@ public struct HeadlessAgentLoop: Sendable {
     /// Tools that never modify state — the only ones permitted while plan mode is ON.
     /// An ALLOWLIST (not a denylist) so unknown/MCP tools are blocked by default in plan mode.
     public static let readOnlyTools: Set<String> = ["read_file", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search"]
+    static let conversationalReadOnlyTools = readOnlyTools.union([
+        "ask_user", "delegation_updates", "read_spreadsheet", "query_data", "view_image",
+        "browse", "tasks",
+    ])
     let maxObservationBytes = 8_000   // internal: +VerificationReplay envelopes observations too
     private let replanThreshold = 2      // consecutive tool failures before steering a re-plan
     private let maxReplans = 2           // budget so a doomed run can't loop on re-plans forever
@@ -196,13 +201,17 @@ public struct HeadlessAgentLoop: Sendable {
     /// Start a fresh run.
     public func run(goal: String,
                     rawRequest explicitRawRequest: String? = nil,
-                    resolvedIntent: TaskBrief.Intent? = nil) async -> Outcome {
+                    resolvedIntent: TaskBrief.Intent? = nil,
+                    delegationGrant explicitDelegationGrant: DelegationGrant? = nil) async -> Outcome {
         if ownsRecorder { recorder.reset() }
         let rawRequest = explicitRawRequest ?? Self.scopeRequestSource(for: goal)
         let mode: PromptCompiler.Mode = planMode ? .plan : .inline
         let intent = resolvedIntent ?? PromptCompiler.inferIntent(rawRequest, mode: mode)
         let cp = LoopCheckpoint(goal: goal, rawRequest: rawRequest, intent: intent,
                                 expectedOutcome: PromptCompiler.expectedOutcome(intent: intent, mode: mode),
+                                delegationGrant: intent == .delegate
+                                    ? (explicitDelegationGrant
+                                        ?? PromptCompiler.delegationGrant(for: rawRequest)) : nil,
                                 providerId: providerId, model: model,
                                 projectRoot: context.projectRoot,
                                 messages: [ChatMessage(role: .user, content: goal)])
@@ -247,6 +256,9 @@ public struct HeadlessAgentLoop: Sendable {
         }
         recorder.restore(restored)
         var cp = authoritative
+        if cp.delegationGrant == nil, intent == .delegate {
+            cp.delegationGrant = PromptCompiler.delegationGrant(for: raw)
+        }
         cp.trajectory = restored
         cp.status = .running
         return await drive(cp, heldRunLease: runLease).0
@@ -261,7 +273,8 @@ public struct HeadlessAgentLoop: Sendable {
     public func turn(transcript: inout [ChatMessage], userInput: String,
                      attachments: [MediaAttachment] = [],
                      rawRequest: String? = nil,
-                     resolvedIntent: TaskBrief.Intent? = nil) async -> Outcome {
+                     resolvedIntent: TaskBrief.Intent? = nil,
+                     delegationGrant explicitDelegationGrant: DelegationGrant? = nil) async -> Outcome {
         if ownsRecorder { recorder.reset() }
         await hooks?.fireNotification(.userPromptSubmit, detail: String(userInput.prefix(500)))
         var messages = transcript
@@ -271,6 +284,9 @@ public struct HeadlessAgentLoop: Sendable {
         let intent = resolvedIntent ?? PromptCompiler.inferIntent(raw, mode: mode)
         let cp = LoopCheckpoint(goal: userInput, rawRequest: raw, intent: intent,
                                 expectedOutcome: PromptCompiler.expectedOutcome(intent: intent, mode: mode),
+                                delegationGrant: intent == .delegate
+                                    ? (explicitDelegationGrant
+                                        ?? PromptCompiler.delegationGrant(for: raw)) : nil,
                                 providerId: providerId, model: model,
                                 projectRoot: context.projectRoot, messages: messages)
         let (outcome, finalCp) = await drive(cp)
@@ -314,6 +330,9 @@ public struct HeadlessAgentLoop: Sendable {
         prepared.intent = intent
         prepared.expectedOutcome = prepared.expectedOutcome
             ?? PromptCompiler.expectedOutcome(intent: intent, mode: mode)
+        if prepared.delegationGrant == nil, intent == .delegate {
+            prepared.delegationGrant = PromptCompiler.delegationGrant(for: raw)
+        }
         // `maxIterations` is an absolute provider-request ceiling. Legacy checkpoints predate the
         // dedicated counter, so seed conservatively from their iteration cursor; never grant a resume
         // fewer consumed requests than the durable checkpoint already reports.
@@ -424,18 +443,32 @@ public struct HeadlessAgentLoop: Sendable {
         return BuilderEvidenceDigest.sha256(canonical)
     }
 
-    /// Interactive CHAT/REVIEW turns must NOT be handed `spawn_agent` — a weak model (e.g. MiMo) will
-    /// delegate a trivial "review this" into a runaway web-research SUB-agent (Luke, 2026-08-06: a 34-char
-    /// review ask spawned 3 web searches + a fetch_url for ~200k tokens — "too much research, not listening
-    /// to me"). Delegation belongs to the EXPLICIT heavy routes (/effort, /fleet, /council, /dive), never a
-    /// plain reply. build/plan/fleet/research/desktop intents keep it. A direct `web_search` stays available
-    /// (it's a single bounded call); only the RECURSIVE spawn vector is removed, so a simple answer can't
-    /// balloon into a research expedition. nil intent ⇒ unchanged (fail-open, exactly as before).
-    static func conversationalToolset(_ tools: ToolRegistry, intent: TaskBrief.Intent?) -> ToolRegistry {
-        guard intent == .chat || intent == .review else { return tools }
-        let spawnVector: Set<String> = ["spawn_agent", "spawn_specialist"]
-        let kept = tools.all().filter { !spawnVector.contains($0.name) }
-        return kept.count == tools.all().count ? tools : ToolRegistry(kept)
+    /// Enforce the typed effect contract at the tool-registry boundary. Chat/review/research/plan turns
+    /// can inspect and ask, but cannot mutate even if a weak/text-protocol model invents a hidden tool call
+    /// or the session is in bypass. Build/fleet and explicit desktop work retain their effectful tools.
+    /// A nil legacy intent remains unchanged for checkpoint compatibility.
+    public static func conversationalToolset(_ tools: ToolRegistry, intent: TaskBrief.Intent?) -> ToolRegistry {
+        guard let intent else { return tools }
+        switch intent {
+        case .build, .fleet, .desktop:
+            return tools
+        case .delegate:
+            let kept = tools.all().filter { implementation in
+                implementation is any ReadOnlyAgentTool
+                    || implementation is any DelegationAgentTool
+                    || implementation is ManageTasksTool
+                    || implementation is BrowserTool
+            }
+            return kept.count == tools.all().count ? tools : ToolRegistry(capabilityScoped: kept)
+        case .chat, .review, .research, .plan:
+            break
+        }
+        let kept = tools.all().filter { implementation in
+            implementation is any ReadOnlyAgentTool
+                || implementation is ManageTasksTool
+                || implementation is BrowserTool
+        }
+        return kept.count == tools.all().count ? tools : ToolRegistry(capabilityScoped: kept)
     }
 
     /// Result of the native loop: either it finished (success or honest failure), or it asks to be
@@ -500,10 +533,13 @@ public struct HeadlessAgentLoop: Sendable {
         _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
 
         reconcile(&cp)   // interrupted-action reconciliation (shared with the native loop)
-        let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
+        let scopeSource = cp.rawRequest ?? Self.scopeRequestSource(for: cp.goal)
+        let scopedContext = context.withAuthorizationScope(
+            AuthorizationScopeEngine.evaluate(scopeSource))
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard) —
         // applies to BOTH the standard prompt and the weak-model primer below (MiMo takes the weak path).
-        let turnTools = surfaceRelevantSelfTools(Self.conversationalToolset(tools, intent: cp.intent), goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
+        let authorizedTools = Self.conversationalToolset(tools, intent: cp.intent)
+        let turnTools = surfaceRelevantSelfTools(authorizedTools, goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
         var system = Self.systemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot, planMode: planMode,
                                        shellEnabled: scopedContext.shell.enabled, skillsXML: skillsXML,
                                        readableRoots: scopedContext.externalReadRoots)
@@ -597,7 +633,7 @@ public struct HeadlessAgentLoop: Sendable {
                                         "model did not emit a valid action after 3 attempts")
                 }
                 cp.messages.append(ChatMessage(role: .user, content:
-                    Self.jsonProtocolRecoverySteering(tools: tools, shellEnabled: scopedContext.shell.enabled,
+                    Self.jsonProtocolRecoverySteering(tools: turnTools, shellEnabled: scopedContext.shell.enabled,
                                                       attempt: parseFailures)))
                 cp.iteration = iteration; persist(&cp)
                 continue
@@ -685,15 +721,29 @@ public struct HeadlessAgentLoop: Sendable {
                 cp.iteration = iteration; persist(&cp)
                 continue
             }
-            // 4a) Plan mode: refuse state-changing tools (propose, don't execute).
-            if let block = planModeBlock(tool: tool, args: action.parameters) {
-                sink.emit(.actionFinished(index: iteration, success: false, output: "", error: "blocked by plan mode"))
+            let invocation = Self.delegationBoundInvocation(
+                registry: authorizedTools, intent: cp.intent, grant: cp.delegationGrant,
+                tool: tool, arguments: action.parameters)
+            let args = invocation.arguments
+            if let block = effectContractBlock(registry: authorizedTools, intent: cp.intent,
+                                               delegationGrant: cp.delegationGrant,
+                                               ownedDelegationHandles: Set(cp.delegationHandles ?? []),
+                                               tool: tool, args: args) {
+                let denied = await authorizedTools.policyDenied(
+                    name: tool, arguments: args, reason: block, context: scopedContext)
+                sink.emit(.actionStarted(index: iteration, tool: tool,
+                                         description: Self.toolDisplayDescription(
+                                            tool: tool, args: args,
+                                            thinking: action.thinking)))
+                sink.emit(.actionFinished(index: iteration, success: false,
+                                          output: "", error: planMode
+                                            ? "blocked by plan mode" : (denied.error ?? block)))
                 cp.messages.append(ChatMessage(role: .user, content: block))
                 cp.iteration = iteration; persist(&cp)
                 continue
             }
             // 4b) Human-in-the-loop: sensitive tools require approval (shared with the native loop).
-            let approvedForScope = await approve(tool: tool, args: action.parameters, context: scopedContext)
+            let approvedForScope = await approve(tool: tool, args: args, context: scopedContext)
             if !approvedForScope {
                 cp.messages.append(ChatMessage(role: .user, content:
                     "The user DECLINED to run \(tool). Do not retry it — choose a different approach or finish with done."))
@@ -701,7 +751,7 @@ public struct HeadlessAgentLoop: Sendable {
                 continue
             }
             // 4c) PreToolUse hooks may veto the action (user-configured guard).
-            if let block = await preHookBlock(tool: tool, args: action.parameters) {
+            if let block = await preHookBlock(tool: tool, args: args) {
                 sink.emit(.actionFinished(index: iteration, success: false, output: "", error: "blocked by PreToolUse hook"))
                 cp.messages.append(ChatMessage(role: .user, content: block))
                 cp.iteration = iteration; persist(&cp)
@@ -710,21 +760,25 @@ public struct HeadlessAgentLoop: Sendable {
             // Bracket the side effect: persist the action as PENDING BEFORE running it, so a crash
             // mid-tool is reconciled (not replayed) on resume.
             cp.pendingAction = PendingAction(
-                tool: tool, argsSummary: Self.compactArgs(action.parameters), iteration: iteration,
-                predictedEffects: tools.effectObservation(name: tool, arguments: action.parameters))
+                tool: tool, argsSummary: Self.compactArgs(args), iteration: iteration,
+                predictedEffects: authorizedTools.effectObservation(name: tool, arguments: args))
             persist(&cp)
             let displayDescription = Self.toolDisplayDescription(tool: tool,
-                                                                 args: action.parameters,
+                                                                 args: args,
                                                                  thinking: action.thinking)
             sink.emit(.actionStarted(index: iteration, tool: tool, description: displayDescription))
             let executionContext = scopedContext.withScopeOverrideApproved(approvedForScope)
-            let result = await tools.execute(name: tool, arguments: action.parameters, context: executionContext)
+            let result = await authorizedTools.executeHostBound(
+                name: tool, arguments: args,
+                hostArguments: invocation.hostArguments, context: executionContext)
+            Self.recordOwnedDelegationHandle(
+                registry: authorizedTools, tool: tool, result: result, checkpoint: &cp)
             sink.emit(.actionFinished(index: iteration, success: result.success, output: result.output, error: result.error))
-            let observed = tools.effectObservation(name: tool, arguments: action.parameters, result: result)
-            recorder.record(tool: tool, argsFingerprint: TrajectoryAnalyzer.fingerprint(action.parameters), success: result.success,
+            let observed = authorizedTools.effectObservation(name: tool, arguments: args, result: result)
+            recorder.record(tool: tool, argsFingerprint: TrajectoryAnalyzer.fingerprint(args), success: result.success,
                              failureDetail: result.success ? nil : String(Self.failureAwareRaw(result).prefix(1500)),
                              effectObservation: observed)
-            if let cand = Self.replayCandidate(tool: tool, args: action.parameters, context: executionContext,
+            if let cand = Self.replayCandidate(tool: tool, args: args, context: executionContext,
                                                succeeded: result.success, observed: observed) {
                 lastVerify = cand; replayAttempted = false
             }
@@ -737,13 +791,13 @@ public struct HeadlessAgentLoop: Sendable {
             let observation = Self.toolOutputEnvelope(tool: tool, success: result.success, body: body)
             cp.messages.append(ChatMessage(role: .user, content: observation))
             cp.pendingAction = nil   // the action completed; clear the bracket
-            await firePostHook(tool: tool, args: action.parameters, success: result.success, output: body)
+            await firePostHook(tool: tool, args: args, success: result.success, output: body)
 
             // 5a) CAPABILITY-DENIAL fast recovery: when a tool is denied because it's unavailable (shell
             // off) or the action/tool doesn't exist, steer the model IMMEDIATELY to the real tools instead
             // of letting it burn turns retrying the same dead end (the desktop-cleanup death-spiral).
             if !result.success, let steer = Self.capabilityDenialSteer(error: result.error ?? body,
-                                                                       tools: tools, shellEnabled: scopedContext.shell.enabled,
+                                                                       tools: turnTools, shellEnabled: scopedContext.shell.enabled,
                                                                        readableRoots: scopedContext.externalReadRoots) {
                 cp.messages.append(ChatMessage(role: .user, content: steer))
             }
@@ -756,7 +810,7 @@ public struct HeadlessAgentLoop: Sendable {
                 consecutiveFailures += 1
                 if consecutiveFailures >= replanThreshold && replansUsed < maxReplans {
                     replansUsed += 1; consecutiveFailures = 0
-                    let tv = Self.validToolNames(tools, shellEnabled: scopedContext.shell.enabled)
+                    let tv = Self.validToolNames(turnTools, shellEnabled: scopedContext.shell.enabled)
                     // Escalate: soft "revise" on the first re-plan, EXPLICIT diagnose→alternatives→pick once
                     // that didn't work (replansUsed >= 2).
                     let structured = replansUsed >= 2
@@ -780,7 +834,7 @@ public struct HeadlessAgentLoop: Sendable {
                 sink.emit(.replanStarted(reason: "breaking a tool-error spiral (\(spiral.tool) ×\(spiral.count))"))
                 cp.messages.append(ChatMessage(role: .user, content: ToolSpiralDetector.steer(
                     tool: spiral.tool, count: spiral.count, error: result.error ?? body,
-                    validTools: Self.validToolNames(tools, shellEnabled: scopedContext.shell.enabled))))
+                    validTools: Self.validToolNames(turnTools, shellEnabled: scopedContext.shell.enabled))))
             }
 
             // 5c) Forced synthesis: research/audit loops can read forever and never write findings. Count
@@ -792,7 +846,7 @@ public struct HeadlessAgentLoop: Sendable {
                 lastSynthesisNudge = iteration; consecutiveGathering = 0
                 cp.messages.append(ChatMessage(role: .user,
                                                content: Self.synthesisSteering(
-                                                validTools: Self.validToolNames(tools,
+                                                validTools: Self.validToolNames(turnTools,
                                                                                shellEnabled: scopedContext.shell.enabled))))
             }
             cp.iteration = iteration; persist(&cp)
@@ -836,9 +890,12 @@ public struct HeadlessAgentLoop: Sendable {
         var cp = initial
         _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
         reconcile(&cp)
-        let scopedContext = context.withAuthorizationScope(AuthorizationScopeEngine.evaluate(Self.scopeRequestSource(for: cp.goal)))
+        let scopeSource = cp.rawRequest ?? Self.scopeRequestSource(for: cp.goal)
+        let scopedContext = context.withAuthorizationScope(
+            AuthorizationScopeEngine.evaluate(scopeSource))
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard).
-        let turnTools = surfaceRelevantSelfTools(Self.conversationalToolset(tools, intent: cp.intent), goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
+        let authorizedTools = Self.conversationalToolset(tools, intent: cp.intent)
+        let turnTools = surfaceRelevantSelfTools(authorizedTools, goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
         let specs = turnTools.toolSpecs()
         var nativeSystem = Self.nativeSystemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot,
                                                    planMode: planMode, shellEnabled: scopedContext.shell.enabled,
@@ -1048,16 +1105,28 @@ public struct HeadlessAgentLoop: Sendable {
             cp.messages.append(ChatMessage(role: .assistant, content: text, toolCalls: calls,
                                            providerReasoningHandles: reasoningHandles))
             for call in calls {
-                let args = Self.parseArgs(call.argumentsJSON)
-                if let block = planModeBlock(tool: call.name, args: args) {
-                    // Plan mode is a deliberate read-only setting — a blocked write is the user's CHOICE,
-                    // not a tool failure. Don't feed the re-plan spiral (matches the text loop). (Codex Q3:
-                    // same native/text divergence as the decline bug.)
-                    sink.emit(.actionFinished(index: iteration, success: false, output: "", error: "blocked by plan mode"))
+                let requestedArgs = Self.parseArgs(call.argumentsJSON)
+                let invocation = Self.delegationBoundInvocation(
+                    registry: authorizedTools, intent: cp.intent, grant: cp.delegationGrant,
+                    tool: call.name, arguments: requestedArgs)
+                let args = invocation.arguments
+                if let block = effectContractBlock(registry: authorizedTools, intent: cp.intent,
+                                                   delegationGrant: cp.delegationGrant,
+                                                   ownedDelegationHandles: Set(cp.delegationHandles ?? []),
+                                                   tool: call.name, args: args) {
+                    let denied = await authorizedTools.policyDenied(
+                        name: call.name, arguments: args, reason: block, context: scopedContext)
+                    sink.emit(.actionStarted(index: iteration, tool: call.name,
+                                             description: Self.toolDisplayDescription(
+                                                tool: call.name, args: args)))
+                    sink.emit(.actionFinished(index: iteration, success: false,
+                                              output: "", error: planMode
+                                                ? "blocked by plan mode" : (denied.error ?? block)))
                     cp.messages.append(ChatMessage.toolResult(
                         callId: call.id,
-                        content: Self.toolOutputEnvelope(tool: call.name, success: false, body: block)
-                    ))
+                        content: Self.toolOutputEnvelope(
+                            tool: call.name, success: false,
+                            body: block)))
                     continue
                 }
                 let approvedForScope = await approve(tool: call.name, args: args, context: scopedContext)
@@ -1084,14 +1153,18 @@ public struct HeadlessAgentLoop: Sendable {
                 }
                 cp.pendingAction = PendingAction(
                     tool: call.name, argsSummary: Self.compactArgs(args), iteration: iteration,
-                    predictedEffects: tools.effectObservation(name: call.name, arguments: args))
+                    predictedEffects: authorizedTools.effectObservation(name: call.name, arguments: args))
                 persist(&cp)
                 let displayDescription = Self.toolDisplayDescription(tool: call.name, args: args)
                 sink.emit(.actionStarted(index: iteration, tool: call.name, description: displayDescription))
                 let executionContext = scopedContext.withScopeOverrideApproved(approvedForScope)
-                let result = await tools.execute(name: call.name, arguments: args, context: executionContext)
+                let result = await authorizedTools.executeHostBound(
+                    name: call.name, arguments: args,
+                    hostArguments: invocation.hostArguments, context: executionContext)
+                Self.recordOwnedDelegationHandle(
+                    registry: authorizedTools, tool: call.name, result: result, checkpoint: &cp)
                 sink.emit(.actionFinished(index: iteration, success: result.success, output: result.output, error: result.error))
-                let observed = tools.effectObservation(name: call.name, arguments: args, result: result)
+                let observed = authorizedTools.effectObservation(name: call.name, arguments: args, result: result)
                 recorder.record(tool: call.name, argsFingerprint: TrajectoryAnalyzer.fingerprint(args), success: result.success,
                                  failureDetail: result.success ? nil : String(Self.failureAwareRaw(result).prefix(1500)),
                                  effectObservation: observed)
@@ -1171,11 +1244,110 @@ public struct HeadlessAgentLoop: Sendable {
         return readOnlyTaskActions.contains(action)
     }
 
-    private func planModeBlock(tool: String, args: [String: Any] = [:]) -> String? {
-        guard planMode, !Self.readOnlyTools.contains(tool) else { return nil }
-        if Self.isReadOnlyTasksCall(tool: tool, args: args) { return nil }
+    private static func isReadOnlyBrowserCall(tool: String, args: [String: Any]) -> Bool {
+        guard tool == "browse" else { return false }
+        guard let actions = args["actions"] else { return true }
+        return (actions as? [Any])?.isEmpty == true
+    }
+
+    private static func isTrustedReadOnlyCall(registry: ToolRegistry, tool: String,
+                                              args: [String: Any]) -> Bool {
+        guard let implementation = registry.tool(named: tool) else { return false }
+        if implementation is any ReadOnlyAgentTool { return true }
+        if implementation is ManageTasksTool {
+            return isReadOnlyTasksCall(tool: tool, args: args)
+        }
+        if implementation is BrowserTool {
+            return isReadOnlyBrowserCall(tool: tool, args: args)
+        }
+        return false
+    }
+
+    private static func isTrustedDelegationCall(registry: ToolRegistry, tool: String) -> Bool {
+        registry.tool(named: tool) is any DelegationAgentTool
+    }
+
+    /// On a delegation turn, the host-owned grant replaces the model-authored child task and pins the
+    /// child intent. The model may still select a role/provider/specialist, but it cannot rewrite scope.
+    private static func delegationBoundInvocation(registry: ToolRegistry,
+                                                  intent: TaskBrief.Intent?,
+                                                  grant: DelegationGrant?,
+                                                  tool: String,
+                                                  arguments: [String: Any])
+        -> (arguments: [String: Any], hostArguments: [String: Any]) {
+        guard intent == .delegate,
+              let grant,
+              let implementation = registry.tool(named: tool),
+              implementation is SpawnAgentTool || implementation is SpawnSpecialistTool else {
+            return (arguments, [:])
+        }
+        var bounded = arguments
+        bounded["task"] = grant.task
+        var hostArguments: [String: Any] = [
+            DelegationGrant.childIntentArgument: grant.childIntent.rawValue,
+        ]
+        if let summary = grant.priorResultContext?.substantiveSummary {
+            hostArguments[DelegationGrant.priorSummaryArgument] = summary
+        }
+        if let artifacts = grant.priorResultContext?.artifactReferences, !artifacts.isEmpty {
+            hostArguments[DelegationGrant.priorArtifactsArgument] = artifacts
+        }
+        return (bounded, hostArguments)
+    }
+
+    private func effectContractBlock(registry: ToolRegistry, intent: TaskBrief.Intent?,
+                                     delegationGrant: DelegationGrant? = nil,
+                                     ownedDelegationHandles: Set<String> = [],
+                                     tool: String, args: [String: Any]) -> String? {
+        let safeRead = Self.isTrustedReadOnlyCall(registry: registry, tool: tool, args: args)
+        if intent == .delegate {
+            let delegation = Self.isTrustedDelegationCall(registry: registry, tool: tool)
+            if delegation,
+               (registry.tool(named: tool) is SpawnAgentTool
+                    || registry.tool(named: tool) is SpawnSpecialistTool),
+               delegationGrant == nil {
+                return "Policy denied \(tool): this delegation turn has no host-bound child grant. Ask for a self-contained delegated task."
+            }
+            if registry.tool(named: tool) is JoinDelegationTool
+                || registry.tool(named: tool) is CancelDelegationTool
+                || registry.tool(named: tool) is SteerDelegationTool {
+                guard let handle = args["handle"] as? String,
+                      ownedDelegationHandles.contains(handle) else {
+                    return "Policy denied \(tool): the handle was not created by this delegation turn."
+                }
+            }
+            if registry.tool(named: tool) is SteerDelegationTool {
+                return "Policy denied \(tool): a host-bound delegated task cannot be rewritten by model-authored steering. Cancel and request a new explicit delegation instead."
+            }
+            if !safeRead && !delegation {
+                return "Policy denied \(tool): delegation authority permits inspection and trusted spawn/join controls, not parent-local mutation."
+            }
+        } else if let intent, !intent.expectsMutation, intent != .desktop, !safeRead {
+            return "Policy denied \(tool): this is a read-only \(intent.rawValue) turn. "
+                + "Choose an inspection tool or finish without mutation."
+        }
+        return planModeBlock(registry: registry, tool: tool, args: args)
+    }
+
+    private static func recordOwnedDelegationHandle(registry: ToolRegistry, tool: String,
+                                                     result: ToolResult,
+                                                     checkpoint: inout LoopCheckpoint) {
+        guard result.success,
+              result.metadata["delegation_status"] == "running",
+              let handle = result.metadata["delegation_handle"], !handle.isEmpty,
+              let implementation = registry.tool(named: tool),
+              implementation is SpawnAgentTool || implementation is SpawnSpecialistTool else { return }
+        var handles = Set(checkpoint.delegationHandles ?? [])
+        handles.insert(handle)
+        checkpoint.delegationHandles = handles.sorted()
+    }
+
+    private func planModeBlock(registry: ToolRegistry, tool: String,
+                               args: [String: Any] = [:]) -> String? {
+        guard planMode, !Self.isTrustedReadOnlyCall(
+            registry: registry, tool: tool, args: args) else { return nil }
         return "PLAN MODE is ON — \"\(tool)\" would modify state, so it was NOT run. Only read/search " +
-            "tools are allowed (\(Self.readOnlyTools.sorted().joined(separator: ", "))). Investigate further, " +
+            "tools are allowed (\(Self.conversationalReadOnlyTools.sorted().joined(separator: ", "))). Investigate further, " +
             "using read_file, context_brain, search_code, list_files, or glob_files; do NOT retry blocked " +
             "tools in plan mode. Or finish with done:true and present your step-by-step PLAN as the summary. " +
             "The user reviews the plan and turns plan mode off before anything is executed."
@@ -1289,7 +1461,12 @@ public struct HeadlessAgentLoop: Sendable {
         case .mutation:
             missingToolReachableOutcome = !trajectory.contains {
                 $0.success && ($0.observedEffects.confirmsMutation
-                    || (taskIntent == .fleet && $0.observedEffects.progress == .delegation))
+                    || $0.observedEffects.progress == .delegatedMutation)
+            }
+        case .delegation:
+            missingToolReachableOutcome = !trajectory.contains {
+                $0.success && ($0.observedEffects.progress == .delegation
+                    || $0.observedEffects.progress == .delegatedMutation)
             }
         case .evidence:
             missingToolReachableOutcome = !trajectory.contains {

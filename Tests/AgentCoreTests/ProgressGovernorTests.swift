@@ -107,11 +107,13 @@ final class ProgressGovernorTests: XCTestCase {
         XCTAssertEqual(gov.decide(iteration: 6, trajectory: reads, taskIntent: .research), .cont)
     }
 
-    func testSuccessfulDelegationIsFleetProgressButNotMutationOrVerification() {
+    func testCompletedGenericDelegationIsFleetProgressButNotBuildProgress() {
         let reads = (0..<6).map { rec("read_file", "file\($0)") }
         let delegation = ActionRecord(
             tool: "spawn_agent", argsFingerprint: "task=implement", success: true,
-            effectObservation: ToolEffectCatalog.observe(tool: "spawn_agent", arguments: ["task": "implement"])
+            effectObservation: ToolEffectCatalog.observe(
+                tool: "spawn_agent", arguments: ["task": "implement"],
+                outcomeMetadata: ["delegation_status": "completed"])
         )
         XCTAssertEqual(gov.decide(iteration: 7, trajectory: reads + [delegation], taskIntent: .fleet), .cont)
 

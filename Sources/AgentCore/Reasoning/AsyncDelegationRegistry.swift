@@ -357,7 +357,7 @@ public struct DelegationInboxTool: AgentTool {
     }
 }
 
-public struct JoinDelegationTool: AgentTool {
+public struct JoinDelegationTool: AgentTool, DelegationAgentTool {
     public let name = "join_agent"
     public let description = "Wait for a background delegation and return its typed result projection."
     public let parameters = [ToolParameter(name: "handle", type: "string", description: "Handle returned by a background spawn.")]
@@ -372,7 +372,7 @@ public struct JoinDelegationTool: AgentTool {
     }
 }
 
-public struct CancelDelegationTool: AgentTool {
+public struct CancelDelegationTool: AgentTool, DelegationAgentTool {
     public let name = "cancel_agent"
     public let description = "Cancel a background delegation owned by this run."
     public let parameters = [ToolParameter(name: "handle", type: "string", description: "Handle returned by a background spawn.")]
@@ -388,7 +388,7 @@ public struct CancelDelegationTool: AgentTool {
     }
 }
 
-public struct SteerDelegationTool: AgentTool {
+public struct SteerDelegationTool: AgentTool, DelegationAgentTool {
     public let name = "steer_agent"
     public let description = "Send bounded steering to a running background delegation."
     public let parameters = [

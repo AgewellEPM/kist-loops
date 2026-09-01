@@ -495,6 +495,7 @@ public struct PlanExecuteCompletionContract: Sendable, Equatable {
         case verificationOnly = "verification-only"
         case evidence
         case externalAction = "external-action"
+        case delegation
         case answer
     }
 
@@ -525,7 +526,13 @@ public struct PlanExecuteCompletionContract: Sendable, Equatable {
 
         let kind: Kind
         let outcome: TaskBrief.ExpectedOutcome
-        if asksForVerification && forbidsUnneededEdits {
+        // The parent contract remains delegation even when the delegated child task contains
+        // verification/read-only wording. Child execution language must never authorize the parent
+        // PlanExecutor to perform that work locally.
+        if ordinaryOutcome == .delegation {
+            kind = .delegation
+            outcome = .delegation
+        } else if asksForVerification && forbidsUnneededEdits {
             kind = .verificationOnly
             outcome = .answer
         } else {
@@ -534,6 +541,7 @@ public struct PlanExecuteCompletionContract: Sendable, Equatable {
             case .mutation: kind = .mutationBuild
             case .evidence: kind = .evidence
             case .externalAction: kind = .externalAction
+            case .delegation: kind = .delegation
             case .answer, .plan: kind = .answer
             }
         }

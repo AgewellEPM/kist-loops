@@ -19,6 +19,17 @@ final class ToolGateTests: XCTestCase {
         }
     }
 
+    private struct HostBoundProbeTool: AgentTool {
+        let name = "host_bound_probe"
+        let description = "host-bound validation probe"
+        let parameters = [
+            ToolParameter(name: "value", type: "string", description: "public value", required: true),
+        ]
+        func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+            .init(success: true, output: arguments["_host_authority"] as? String ?? "missing")
+        }
+    }
+
     private var root: String!
     override func setUpWithError() throws {
         let dir = NSTemporaryDirectory() + "gate-" + UUID().uuidString
@@ -107,6 +118,30 @@ final class ToolGateTests: XCTestCase {
 
         let valid = await registry.execute(name: "schema_probe", arguments: ["value": "ok", "enabled": true], context: context)
         XCTAssertTrue(valid.success, valid.error ?? "")
+    }
+
+    func testHostBoundArgumentsRemainUnadvertisedAndUnforgeable() async {
+        let registry = ToolRegistry([HostBoundProbeTool()])
+        let context = ToolContext(projectRoot: root)
+
+        let directForgery = await registry.execute(
+            name: "host_bound_probe",
+            arguments: ["value": "ok", "_host_authority": "forged"], context: context)
+        XCTAssertFalse(directForgery.success)
+        XCTAssertTrue((directForgery.error ?? "").contains("unknown field '_host_authority'"))
+
+        let trusted = await registry.executeHostBound(
+            name: "host_bound_probe", arguments: ["value": "ok"],
+            hostArguments: ["_host_authority": "trusted"], context: context)
+        XCTAssertTrue(trusted.success, trusted.error ?? "")
+        XCTAssertEqual(trusted.output, "trusted")
+
+        let forgedEvenOnHostPath = await registry.executeHostBound(
+            name: "host_bound_probe",
+            arguments: ["value": "ok", "_host_authority": "forged"],
+            hostArguments: ["_host_authority": "trusted"], context: context)
+        XCTAssertFalse(forgedEvenOnHostPath.success,
+                       "caller-supplied private fields must fail public-schema validation")
     }
 
     func testJSONNSNumberOneIsAnIntegerNotABoolean() async throws {

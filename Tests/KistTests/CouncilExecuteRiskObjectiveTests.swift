@@ -34,7 +34,8 @@ final class CouncilExecuteRiskObjectiveTests: XCTestCase {
         XCTAssertLessThan(CaptainSimulationEnforcer.riskLevel(mode: .planExecute, objective: userGoal), .critical)
     }
 
-    // Source pin: the council→plan-execute hand-off passes the user goal as the risk objective.
+    // Source pin: the council→plan-execute hand-off uses a host-authored mutation objective for
+    // authority/risk and carries generated council prose only as typed advisory context.
     // The runCouncil / runPlanExecute logic now lives across KistRunner.swift and its extension files
     // (KistRunner+Council.swift, KistRunner+PlanExecuteEntry.swift), so scan them ALL — the invariant
     // pin must survive file extraction/refactoring rather than pinning to one filename.
@@ -47,9 +48,14 @@ final class CouncilExecuteRiskObjectiveTests: XCTestCase {
         let src = try names
             .map { try String(contentsOf: kistDir.appendingPathComponent($0), encoding: .utf8) }
             .joined(separator: "\n")
-        XCTAssertTrue(src.contains("riskObjective: goal"),
-                      "council-execute must hand the user's original goal as the gate risk objective")
+        XCTAssertTrue(src.contains(
+            "let executionGoal = \"Build and verify the council-selected implementation for:"))
+        XCTAssertTrue(src.contains("builderOptions.goal = executionGoal"))
+        XCTAssertTrue(src.contains("riskObjective: executionGoal"),
+                      "council-execute risk must use the host-authored mutation objective")
+        XCTAssertTrue(src.contains("substantiveSummary: result.builderBrief"),
+                      "the council brief must remain typed advisory context")
         XCTAssertTrue(src.contains("let gateObjective = riskObjective ?? goal"),
-                      "the safety gates must classify risk on gateObjective (user goal), not the builder blob")
+                      "the safety gates must classify the supplied canonical objective, not advisory prose")
     }
 }

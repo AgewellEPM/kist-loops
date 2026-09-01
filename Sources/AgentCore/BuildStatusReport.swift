@@ -13,13 +13,19 @@ public struct BuildStatusReport: Sendable, Equatable {
     public let filesChanged: Int      // count of applied (confirmed) mutations this turn
     public let buildOrTestRan: Bool   // a build/test command actually executed and succeeded
     public let boardUpdated: Bool     // the shared task board was written
+    public let delegatedMutationCompleted: Bool // a synchronous/joined child passed its mutation gate
+    private let delegatedMutationRemainsVerified: Bool
+    private let finalOutcomeSucceeded: Bool
 
     /// A build turn is only DONE when the change was actually applied AND a build/test executed to
     /// prove it. Applied-but-unverified, or generated-but-never-applied, are NOT COMPLETE — exactly the
     /// gap where Kist used to launder "here's the patch" into a success summary.
-    public var isComplete: Bool { patchApplied && buildOrTestRan }
+    public var isComplete: Bool {
+        finalOutcomeSucceeded
+            && (delegatedMutationRemainsVerified || (patchApplied && buildOrTestRan))
+    }
 
-    public init(trajectory: [ActionRecord]) {
+    public init(trajectory: [ActionRecord], finalSuccess: Bool? = nil) {
         patchGenerated = trajectory.contains { $0.observedEffects.mutation != .none }
         let applied = trajectory.filter { $0.success && $0.observedEffects.confirmsMutation }
         patchApplied = !applied.isEmpty
@@ -30,6 +36,14 @@ public struct BuildStatusReport: Sendable, Equatable {
         let verifyScope = lastMutation.map { trajectory[($0 + 1)...] } ?? trajectory[...]
         buildOrTestRan = verifyScope.contains { $0.success && $0.observedEffects.verification == .buildOrTest }
         boardUpdated = trajectory.contains { $0.success && $0.observedEffects.progress == .taskBoard }
+        delegatedMutationCompleted = trajectory.contains {
+            $0.success && $0.observedEffects.progress == .delegatedMutation
+        }
+        delegatedMutationRemainsVerified = delegatedMutationCompleted
+            && CompletionVerifier().check(
+                trajectory: trajectory, canRunCommands: true,
+                expectedOutcome: .mutation, taskIntent: .build).isAccept
+        finalOutcomeSucceeded = finalSuccess ?? true
     }
 
     public func render(color: Bool) -> String {
@@ -47,6 +61,7 @@ public struct BuildStatusReport: Sendable, Equatable {
           Patch applied      \(mark(patchApplied))
           Files changed      \(filesChanged)
           Build / tests run  \(mark(buildOrTestRan))
+          Delegated result   \(mark(delegatedMutationCompleted))
           Board updated      \(mark(boardUpdated))
           Result             \(result)
         """

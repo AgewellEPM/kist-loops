@@ -622,6 +622,29 @@ final class PlanExecuteLoopTests: XCTestCase {
         XCTAssertTrue(reviewPrompt.contains("Governed workspace digest:"), reviewPrompt)
     }
 
+    func testDelegationContractOutranksChildVerificationWordingAndPlanExecuteFailsClosed() async {
+        let request = "delegate a reviewer to verify the parser fix without edits"
+        let contract = PlanExecuteCompletionContract.derive(canonicalRequest: request)
+        XCTAssertEqual(contract.requestedIntent, .delegate)
+        XCTAssertEqual(contract.expectedOutcome, .delegation)
+        XCTAssertEqual(contract.kind, .delegation)
+
+        let provider = CapturingProvider(id: "planscript", responses: [])
+        let out = await PlanExecuteLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: PXLNullKeys()),
+            providerId: "planscript", model: nil,
+            tools: ToolRegistry([WriteFileTool()]),
+            context: ToolContext(projectRoot: root),
+            requireApproval: false, maxReplans: 0, verifyGoal: false,
+            completionContract: contract
+        ).run(goal: request)
+
+        XCTAssertFalse(out.success)
+        XCTAssertTrue(out.message.contains("host-bound delegation grant"), out.message)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/delegated.txt"),
+                       "PlanExecute must execute zero parent-local mutation for delegation")
+    }
+
     func testHostOwnedReviewClauseRepairsToFunctionalPlanAndReachesOuterBoundary() async {
         let original = """
         Verify the existing project without editing files. Run swift build, swift test, valid and invalid fixture inputs with actual/allowed exit 0 and 1, require a line-numbered invalid-fixture error, and structured stdin. Require independent final review by a concrete provider:model different from every producer. Emit BuilderRun verification and reviewer identities; fail closed rather than self-review.

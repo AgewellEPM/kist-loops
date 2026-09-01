@@ -130,15 +130,23 @@ final class CompletionVerifierTests: XCTestCase {
                               expectedOutcome: .mutation).isAccept)
     }
 
-    func testFleetDelegationFulfillsFleetProgressWithoutBecomingMutationVerification() {
+    func testPlainFleetDelegationDoesNotFulfillMutationContract() {
         let delegated = ActionRecord(
             tool: "spawn_agent", argsFingerprint: "task=worker", success: true,
             effectObservation: ToolEffectObservation(progress: .delegation)
         )
-        XCTAssertTrue(v.check(trajectory: [delegated], canRunCommands: true,
-                              expectedOutcome: .mutation, taskIntent: .fleet).isAccept)
+        XCTAssertFalse(v.check(trajectory: [delegated], canRunCommands: true,
+                               expectedOutcome: .mutation, taskIntent: .fleet).isAccept)
         XCTAssertFalse(v.check(trajectory: [delegated], canRunCommands: true,
                                expectedOutcome: .mutation, taskIntent: .build).isAccept)
+        XCTAssertTrue(v.check(trajectory: [delegated], canRunCommands: true,
+                              expectedOutcome: .delegation, taskIntent: .delegate).isAccept)
+
+        let started = ActionRecord(
+            tool: "spawn_agent", argsFingerprint: "background=true", success: true,
+            effectObservation: ToolEffectObservation(progress: .delegationStarted))
+        XCTAssertFalse(v.check(trajectory: [started], canRunCommands: true,
+                               expectedOutcome: .delegation, taskIntent: .delegate).isAccept)
     }
 
     // R7 over-block fix: editing a DOC/CONFIG file needs no build/test — demanding one was the review-

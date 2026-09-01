@@ -34,7 +34,12 @@ public struct ToolEffectObservation: Sendable, Equatable, Codable {
     /// this separate prevents delegation from accidentally satisfying the verify-after-edit gate.
     public enum Progress: String, Sendable, Codable {
         case none
+        /// A background child was admitted and is still running. This is activity, never completion.
+        case delegationStarted
         case delegation
+        /// A synchronous child completed its own mutation contract (including its verification gate).
+        /// This is stronger than merely spawning work, but is not reclassified as a parent-local edit.
+        case delegatedMutation
         case taskBoard
         case memory
         case research
@@ -85,7 +90,9 @@ public struct ToolEffectObservation: Sendable, Equatable, Codable {
 
     /// Concrete progress for a build turn. A generic successful shell command is intentionally absent:
     /// `ls`, `pwd`, and `echo` are observations, not progress. A successful mutation or real verifier is.
-    public var advancesBuild: Bool { confirmsMutation || verification == .buildOrTest }
+    public var advancesBuild: Bool {
+        confirmsMutation || verification == .buildOrTest || progress == .delegatedMutation
+    }
 
     /// Fleet delegation is real progress for a fleet turn, but deliberately remains neither a mutation
     /// nor verification evidence. Other intents still require their own concrete progress.
@@ -282,7 +289,24 @@ public enum ToolEffectCatalog {
             let found = Int(outcomeMetadata?["found"] ?? "0") ?? 0
             return found > 0 ? ToolEffectObservation(progress: .externalState) : .none
         case "spawn_agent", "spawn_specialist":
+            if arguments["background"] as? Bool == true {
+                return outcomeMetadata?["delegation_status"] == "running"
+                    ? ToolEffectObservation(progress: .delegationStarted) : .none
+            }
+            if outcomeMetadata?["delegation_status"] == "running" {
+                return ToolEffectObservation(progress: .delegationStarted)
+            }
+            guard outcomeMetadata?["delegation_status"] == "completed" else {
+                return .none
+            }
+            if outcomeMetadata?["delegation_scope"] == "parent-workspace",
+               outcomeMetadata?["sub_agent_expected_outcome"] == TaskBrief.ExpectedOutcome.mutation.rawValue {
+                return ToolEffectObservation(progress: .delegatedMutation)
+            }
             return ToolEffectObservation(progress: .delegation)
+        case "join_agent":
+            return outcomeMetadata?["delegation_status"] == "completed"
+                ? ToolEffectObservation(progress: .delegation) : .none
         case "tasks":
             let action = ((arguments["action"] as? String) ?? "list").lowercased()
             return ["list", "validate", "check"].contains(action)

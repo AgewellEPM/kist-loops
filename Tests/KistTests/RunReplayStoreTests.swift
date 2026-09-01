@@ -92,8 +92,14 @@ final class RunReplayStoreTests: XCTestCase {
         XCTAssertTrue(repl.contains("kind: .reviewAssessment"))
         XCTAssertTrue(repl.contains("kind: .verificationAssessment"))
         XCTAssertTrue(repl.contains("kind: .turnFinalized"))
-        XCTAssertTrue(repl.contains("router.propose(messageText, resolvedIntent: turnIntent)"),
-                      "routing must consume the same intent persisted by the turn")
+        XCTAssertTrue(repl.contains("await router.resolve(messageText, mode: turnMode,"),
+                      "pragmatic outcome resolution must run before execution routing")
+        XCTAssertTrue(repl.contains("previous: lastOutcomeContract"),
+                      "resolution must consume the last host-admitted goal")
+        XCTAssertTrue(repl.contains("humanTranscript, turnOutcome"),
+                      "prompt compilation must consume the same outcome contract persisted by the turn")
+        XCTAssertTrue(repl.contains("guard lastTurnInterruption != .cancel"),
+                      "a hard-cancelled turn must not leave continuation authority behind")
         XCTAssertTrue(repl.contains("rawRequest: messageText, resolvedIntent: turnIntent"),
                       "the existing REPL must pass its canonical contract into AgentCore")
         XCTAssertTrue(repl.contains("expected == .mutation, !fulfilledMutationContract"),

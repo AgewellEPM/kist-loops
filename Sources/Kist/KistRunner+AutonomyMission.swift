@@ -9,7 +9,12 @@ extension KistRunner {
         let reportPath: String
         let dossier: String
         let dossierDigest: String
+        let evidenceDigest: String
         let peelReceipt: PEELEvidenceReceipt
+
+        static func sha256Hex(_ data: Data) -> String {
+            MythosCrypto.sha256(data).map { String(format: "%02x", $0) }.joined()
+        }
     }
 
     final class ResearchPipelineCaptureBox: @unchecked Sendable {
@@ -391,9 +396,17 @@ extension KistRunner {
         }
         let runDirectory = URL(fileURLWithPath: ResearchRunStore.researchRoot(projectRoot: root))
             .appendingPathComponent(runID).standardizedFileURL
+        let evidenceURL = URL(fileURLWithPath: root)
+            .appendingPathComponent(expectedEvidence).standardizedFileURL
         let reportURL = URL(fileURLWithPath: root).appendingPathComponent(expectedReport).standardizedFileURL
-        guard reportURL.path.hasPrefix(runDirectory.path + "/") else {
-            throw ToolError.execution("research report escaped its run directory")
+        guard evidenceURL.path.hasPrefix(runDirectory.path + "/"),
+              reportURL.path.hasPrefix(runDirectory.path + "/") else {
+            throw ToolError.execution("research evidence or report escaped its run directory")
+        }
+        let evidenceData = try Data(contentsOf: evidenceURL)
+        guard !evidenceData.isEmpty,
+              ResearchPipelineCapture.sha256Hex(evidenceData) == capture.evidenceDigest else {
+            throw ToolError.execution("research evidence ledger changed after capture")
         }
         let report = try String(contentsOf: reportURL, encoding: .utf8)
         let reportDigest = PEELEvidenceReceipt.contentDigest(report)

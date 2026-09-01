@@ -97,6 +97,8 @@ public struct SpecialistSpawner: Sendable {
     /// isolation-worktree label (injected for deterministic tests). Returns the loop outcome, with an
     /// isolation footer appended when `isolation: worktree` was requested.
     public func run(specialist def: SpecialistDefinition, task: String,
+                    resolvedIntent: TaskBrief.Intent? = nil,
+                    advisoryContext: PriorResultContext? = nil,
                     approvalTools: Set<String> = [], planMode: Bool = false,
                     now: Double = Date().timeIntervalSince1970,
                     forceWorktreeIsolation: Bool = false,
@@ -174,13 +176,19 @@ public struct SpecialistSpawner: Sendable {
             extendedThinking: extendedThinking, budget: budget,
             contextWindow: ContextWindowManager.forModel(
                 capabilities: providers.capabilities(providerId: p.binding.providerId, model: p.binding.model)))
-        let runGoal = steeringMailbox == nil ? p.goal : p.goal + """
+        let contextualGoal = p.goal + (advisoryContext.flatMap {
+            $0.isEmpty ? nil : "\n\n" + $0.promptBlock
+        } ?? "")
+        let runGoal = steeringMailbox == nil ? contextualGoal : contextualGoal + """
 
 
         BACKGROUND CONTROL: call delegation_updates before each major phase and before your final
         response; incorporate returned parent messages without widening your permissions.
         """
-        let outcome = await loop.run(goal: runGoal)
+        let childIntent = planMode ? TaskBrief.Intent.plan
+            : (resolvedIntent ?? PromptCompiler.inferIntent(task, mode: .delegated))
+        let outcome = await loop.run(goal: runGoal, rawRequest: task,
+                                     resolvedIntent: childIntent)
 
         guard let wt = worktree else { return outcome }
         let committed = GitIsolation.commit(wt, message: "specialist/\(def.name): \(task.prefix(60))")

@@ -41,6 +41,13 @@ public struct LoopCheckpoint: Codable, Sendable {
     /// independently guessing whether the turn is chat, research, planning, or a state-changing build.
     public var intent: TaskBrief.Intent?
     public var expectedOutcome: TaskBrief.ExpectedOutcome?
+    /// Exact host-derived child scope for `.delegate` turns. Optional for backward compatibility;
+    /// resume deterministically reconstructs it from `rawRequest` when possible.
+    public var delegationGrant: DelegationGrant?
+    /// Background handles created by this exact turn. Delegation controls are accepted only for these
+    /// handles, preventing a later turn from joining/steering a stale process-global registry entry.
+    /// Optional for backward compatibility with checkpoints written before handle ownership shipped.
+    public var delegationHandles: [String]?
     public var providerId: String
     public var model: String?
     public var projectRoot: String
@@ -77,6 +84,8 @@ public struct LoopCheckpoint: Codable, Sendable {
     public init(id: String = UUID().uuidString, goal: String, rawRequest: String? = nil,
                 intent: TaskBrief.Intent? = nil,
                 expectedOutcome: TaskBrief.ExpectedOutcome? = nil,
+                delegationGrant: DelegationGrant? = nil,
+                delegationHandles: [String]? = [],
                 providerId: String, model: String?,
                 projectRoot: String, messages: [ChatMessage], iteration: Int = 0,
                 status: Status = .running, summary: String? = nil, pendingAction: PendingAction? = nil,
@@ -89,6 +98,8 @@ public struct LoopCheckpoint: Codable, Sendable {
                 createdAt: Date = Date(), updatedAt: Date = Date()) {
         self.id = id; self.goal = goal; self.rawRequest = rawRequest
         self.intent = intent; self.expectedOutcome = expectedOutcome
+        self.delegationGrant = delegationGrant
+        self.delegationHandles = delegationHandles.map { Array(Set($0)).sorted() }
         self.providerId = providerId; self.model = model
         self.projectRoot = projectRoot; self.messages = messages; self.iteration = iteration
         self.status = status; self.summary = summary; self.pendingAction = pendingAction
@@ -355,6 +366,10 @@ public struct LoopCheckpointStore: Sendable {
     }
 
     private func saveLocked(_ checkpoint: LoopCheckpoint, directoryFD: Int32) throws {
+        var checkpoint = checkpoint
+        checkpoint.delegationHandles = checkpoint.delegationHandles.map {
+            Array(Set($0)).sorted()
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(checkpoint)

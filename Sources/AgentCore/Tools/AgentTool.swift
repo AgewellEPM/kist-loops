@@ -586,6 +586,32 @@ public protocol AgentTool: Sendable {
     func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult
 }
 
+/// Host-reviewed tools whose implementation is intrinsically observational. This marker is used at
+/// execution-authority boundaries instead of trusting a model-visible name: an injected tool that merely
+/// calls itself `read_file` does not become read-only. Argument-sensitive tools such as `tasks` and
+/// `browse` are deliberately excluded and checked separately at the call boundary.
+public protocol ReadOnlyAgentTool: AgentTool {}
+
+/// Host-reviewed delegation lifecycle tools. Like `ReadOnlyAgentTool`, this is implementation
+/// provenance rather than a model-visible name, so a shadow tool cannot gain orchestration authority.
+public protocol DelegationAgentTool: AgentTool {}
+
+extension ReadFileTool: ReadOnlyAgentTool {}
+extension ListFilesTool: ReadOnlyAgentTool {}
+extension GlobFilesTool: ReadOnlyAgentTool {}
+extension SearchCodeTool: ReadOnlyAgentTool {}
+extension AstGrepTool: ReadOnlyAgentTool {}
+extension GitTool: ReadOnlyAgentTool {}
+extension SymbolsTool: ReadOnlyAgentTool {}
+extension ContextBrainTool: ReadOnlyAgentTool {}
+extension WebFetchTool: ReadOnlyAgentTool {}
+extension WebSearchTool: ReadOnlyAgentTool {}
+extension ReadSpreadsheetTool: ReadOnlyAgentTool {}
+extension QueryDataTool: ReadOnlyAgentTool {}
+extension ViewImageTool: ReadOnlyAgentTool {}
+extension AskUserTool: ReadOnlyAgentTool {}
+extension DelegationInboxTool: ReadOnlyAgentTool {}
+
 public extension AgentTool {
     /// Read a required string argument or throw `.missingParameter`.
     func requireString(_ key: String, from arguments: [String: Any]) throws -> String {

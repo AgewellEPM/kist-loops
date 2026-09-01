@@ -77,17 +77,26 @@ extension KistRunner {
         for line in await recorder.summary().terminalLines() { note(line) }
 
         guard execute else { return 0 }
-        let builderGoal = result.builderBrief + "\n\nCouncil artifact path: \(path)\nShared task board: .kist/plan.json. Use the tasks tool to start, update, block, and complete tasks."
         note("council · handing builder brief to plan→execute")
+        // `--execute` is explicit host authority to mutate. Keep that authority in a
+        // host-authored objective; council prose is useful planning context, not a source of
+        // permissions or completion requirements.
+        let executionGoal = "Build and verify the council-selected implementation for:\n\(goal)"
         var builderOptions = opts
-        builderOptions.goal = builderGoal
+        builderOptions.goal = executionGoal
         builderOptions.planExecute = true
-        return await runBuilderCompatibility(builderOptions, goal: builderGoal, registry: registry,
+        let references = HeavyRouteResult.verifiedArtifactReferences(
+            [path, ".kist/plan.json"], projectRoot: root)
+        let advisoryContext = PriorResultContext(
+            substantiveSummary: result.builderBrief,
+            artifactReferences: references)
+        return await runBuilderCompatibility(builderOptions, goal: executionGoal, registry: registry,
                                              root: root, tools: tools, context: context,
                                              checkpoints: nil, toolMode: .auto,
                                              providerId: providerId, model: model,
                                              rolesOverride: roles, budgetOverride: runBudget,
-                                             riskObjective: goal)
+                                             riskObjective: executionGoal,
+                                             advisoryContext: advisoryContext)
     }
 
     /// "Dig in deep" — the WIDE council: every reachable model answers the SAME question, synthesized into
@@ -95,7 +104,8 @@ extension KistRunner {
     static func runWideCouncil(_ opts: KistOptions, goal: String,
                                        registry: ProviderRegistry, root: String,
                                        providerId: String, model: String?,
-                                       rolesOverride: RoleBindings? = nil) async -> Int32 {
+                                       rolesOverride: RoleBindings? = nil,
+                                       capture: CouncilPipelineCaptureBox? = nil) async -> Int32 {
         guard let requestedRoles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
         let roles = autoCouncilRoles(requestedRoles, registry: registry)
         let recorder = TraceRecorder(traceId: TraceID.make())
@@ -104,11 +114,27 @@ extension KistRunner {
         let runBudget = opts.makeBudget()
         let result = await AICouncil(providers: registry, roles: roles,
                                      recorder: recorder, budget: runBudget).runWide(goal: goal)
-        let path = try? writeCouncilArtifact(result.markdown, goal: goal, root: root)
-        if let path { note("dig in deep · panel saved · \(path)") }
+        let path: String
+        do {
+            path = try writeCouncilArtifact(result.markdown, goal: goal, root: root)
+        } catch {
+            err("dig in deep · failed to write panel artifact: \(error)")
+            return 1
+        }
+        note("dig in deep · panel saved · \(path)")
         print(CouncilCard.render(result, artifactPath: path, color: TerminalCapabilities.stdoutIsInteractive))
         for line in await recorder.summary().terminalLines() { note(line) }
+        guard usableWideCouncilResult(result) else {
+            err("dig in deep · incomplete: no model returned a usable result")
+            return 1
+        }
+        capture?.set(CouncilPipelineCapture(result: result, artifactPath: path))
         return 0
+    }
+
+    static func usableWideCouncilResult(_ result: CouncilRunResult) -> Bool {
+        result.minds.contains(where: { !$0.failed })
+            && !result.finalPlan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func councilResearchProgress(projectRoot: String, runID: String?) -> AICouncil.ProgressSink? {

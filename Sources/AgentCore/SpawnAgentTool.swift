@@ -8,7 +8,7 @@ import Foundation
 /// Recursion is bounded by construction: nested sub-agents receive `spawn_agent` only while a
 /// caller-supplied delegation-depth budget remains, so a team can ask for help without forking
 /// unboundedly.
-public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
+public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationRegistryProviding {
     public let name = "spawn_agent"
     public var description: String {
         "Delegate a focused, SELF-CONTAINED subtask to a fresh sub-agent. " +
@@ -90,7 +90,18 @@ public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
             return .failure("unknown sub-agent provider '\(binding.providerId)'")
         }
         let selected = ProviderBinding(providerId: provider.id, model: binding.model)
-        let compiledTask = PromptCompiler.compiledPrompt(task, role: role, mode: .delegated)
+        let hostChildIntent = optionalString(DelegationGrant.childIntentArgument, from: arguments)
+            .flatMap(TaskBrief.Intent.init(rawValue:))
+        let taskBrief = PromptCompiler.compile(task, role: role, mode: .delegated,
+                                               resolvedIntent: hostChildIntent)
+        let hostPriorContext = PriorResultContext(
+            substantiveSummary: optionalString(
+                DelegationGrant.priorSummaryArgument, from: arguments),
+            artifactReferences: arguments[DelegationGrant.priorArtifactsArgument]
+                as? [String] ?? [])
+            .revalidated(projectRoot: context.projectRoot)
+        let compiledTask = taskBrief.prompt
+            + (hostPriorContext.isEmpty ? "" : "\n\n" + hostPriorContext.promptBlock)
         // CAPABILITY CEILING (Codex gate S1#2): if a loaded skill scoped the PARENT to a tool
         // allow-list, the child must NOT escape it. A spawned agent rediscovers skills with a fresh
         // tracker, so without this a parent scoped to e.g. [read_file spawn_agent] could spawn a child
@@ -101,6 +112,7 @@ public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
         let background = optionalBool("background", from: arguments) ?? false
         if background {
             return await spawnBackground(task: task, compiledTask: compiledTask, role: role,
+                                         intent: taskBrief.intent,
                                          selected: selected, childTools: childTools, context: context)
         }
         let sub = HeadlessAgentLoop(
@@ -114,13 +126,19 @@ public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
                 capabilities: providers.capabilities(providerId: selected.providerId, model: selected.model)
             )
         )
-        let outcome = await sub.run(goal: compiledTask)
+        let outcome = await sub.run(goal: compiledTask, rawRequest: task,
+                                    resolvedIntent: taskBrief.intent)
         var metadata = [
             "sub_agent_iterations": String(outcome.iterations),
             "sub_agent_provider": selected.providerId,
+            "delegation_status": "completed",
+            "delegation_scope": "parent-workspace",
         ]
         if let model = selected.model { metadata["sub_agent_model"] = model }
         if let role { metadata["sub_agent_role"] = role.rawValue }
+        if outcome.success {
+            metadata["sub_agent_expected_outcome"] = taskBrief.expectedOutcome.rawValue
+        }
         return ToolResult(
             success: outcome.success,
             output: outcome.summary,
@@ -155,6 +173,7 @@ public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
     }
 
     private func spawnBackground(task: String, compiledTask: String, role: AgentRole?,
+                                 intent: TaskBrief.Intent,
                                  selected: ProviderBinding, childTools: ToolRegistry,
                                  context: ToolContext) async -> ToolResult {
         guard let worktree = GitIsolation.makeWorktree(
@@ -209,7 +228,8 @@ public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
                     contextWindow: ContextWindowManager.forModel(
                         capabilities: self.providers.capabilities(providerId: selected.providerId,
                                                                   model: selected.model)))
-                let outcome = await loop.run(goal: backgroundGoal)
+                let outcome = await loop.run(goal: backgroundGoal, rawRequest: task,
+                                             resolvedIntent: intent)
                 let committed = GitIsolation.commit(worktree, message: "background agent: \(task.prefix(60))")
                 let changed = GitIsolation.committedChangedPaths(worktree)
                 if changed.isEmpty { GitIsolation.discard(worktree) }
@@ -239,6 +259,9 @@ public struct SpawnAgentTool: AgentTool, AsyncDelegationRegistryProviding {
                 if !changed.isEmpty && !committed {
                     risks.append(ReasoningRiskReceipt(level: .high,
                                                        summary: "isolated changes remain uncommitted"))
+                }
+                guard outcome.success else {
+                    throw DelegationRegistryError.failed(outcome.summary)
                 }
                 let after = await self.budget?.spentTokens() ?? before
                 return DelegationResult(

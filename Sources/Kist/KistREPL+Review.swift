@@ -227,6 +227,13 @@ extension KistREPL {
                 if !missing.isEmpty {
                     print("\u{001B}[33m⎇ ultra · review incomplete: \(missing.count) reviewer(s) returned no usable response; repairing known findings only\u{001B}[0m")
                 }
+                guard turnIntent != .delegate else {
+                    repairPhaseFailed = true
+                    print("\u{001B}[33m⎇ ultra · delegated result has blocking findings; start a new explicit delegation to repair it\u{001B}[0m")
+                    proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                             text: "blocking delegated-child findings require a new explicit delegation"))
+                    return
+                }
                 guard copilot.autoFix else {
                     repairPhaseFailed = true
                     print("\u{001B}[33m⎇ ultra · review findings reported; automatic repair is off\u{001B}[0m")
@@ -347,6 +354,13 @@ extension KistREPL {
 
             // `autoFix` is the authority: a review may print findings without silently creating another
             // mutating model turn. When armed, the ORIGINAL author—not the reviewer—owns every repair.
+            guard turnIntent != .delegate else {
+                repairPhaseFailed = true
+                print("\u{001B}[33m⎇ review · delegated result has blocking findings; start a new explicit delegation to repair it\u{001B}[0m")
+                proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: false,
+                                         text: "blocking delegated-child findings require a new explicit delegation"))
+                return
+            }
             guard copilot.autoFix else {
                 repairPhaseFailed = true
                 print("\u{001B}[33m⎇ review · findings reported; automatic repair is off\u{001B}[0m")

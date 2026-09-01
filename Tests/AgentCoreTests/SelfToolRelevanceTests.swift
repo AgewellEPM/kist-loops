@@ -72,8 +72,10 @@ final class SelfToolRelevanceTests: XCTestCase {
     // regression (r3/r5/r6 shape) would silently trim one protocol or starve CapabilityDiscovery.
     func testLoopWiresFilterAtBothSeamsAndKeepsToolNamesFull() throws {
         let src = try String(contentsOfFile: Self.loopSourcePath, encoding: .utf8)
-        let wired = src.components(separatedBy: "surfaceRelevantSelfTools(Self.conversationalToolset").count - 1
-        XCTAssertEqual(wired, 2, "the surfacing filter must wrap conversationalToolset at BOTH seams (text + native), not one")
+        let authoritySeams = src.components(separatedBy: "let authorizedTools = Self.conversationalToolset").count - 1
+        let relevanceSeams = src.components(separatedBy: "surfaceRelevantSelfTools(authorizedTools").count - 1
+        XCTAssertEqual(authoritySeams, 2, "authority filtering must run at BOTH seams (text + native)")
+        XCTAssertEqual(relevanceSeams, 2, "relevance filtering must consume the authorized registry at BOTH seams")
         XCTAssertTrue(src.contains("public var toolNames: [String] { tools.all().map { $0.name } }"),
                       "toolNames must stay on the FULL registry — self-evolution/CapabilityDiscovery must see every self__ tool")
     }

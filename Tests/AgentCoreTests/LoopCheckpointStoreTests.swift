@@ -64,6 +64,8 @@ final class LoopCheckpointStoreTests: XCTestCase {
         object.removeValue(forKey: "rawRequest")
         object.removeValue(forKey: "intent")
         object.removeValue(forKey: "expectedOutcome")
+        object.removeValue(forKey: "delegationGrant")
+        object.removeValue(forKey: "delegationHandles")
         object.removeValue(forKey: "trajectory")
         object.removeValue(forKey: "providerRequestsConsumed")
         if var pending = object["pendingAction"] as? [String: Any] {
@@ -77,9 +79,30 @@ final class LoopCheckpointStoreTests: XCTestCase {
         XCTAssertNil(decoded.rawRequest)
         XCTAssertNil(decoded.intent)
         XCTAssertNil(decoded.expectedOutcome)
+        XCTAssertNil(decoded.delegationGrant)
+        XCTAssertNil(decoded.delegationHandles)
         XCTAssertNil(decoded.trajectory)
         XCTAssertNil(decoded.providerRequestsConsumed)
         XCTAssertNil(decoded.pendingAction?.predictedEffects)
+    }
+
+    func testDelegationGrantRoundTripsWithTurnContract() throws {
+        var cp = make(.paused)
+        cp.rawRequest = "delegate a coder to implement parser tests"
+        cp.intent = .delegate
+        cp.expectedOutcome = .delegation
+        cp.delegationGrant = try XCTUnwrap(
+            PromptCompiler.delegationGrant(for: cp.rawRequest!))
+        cp.delegationHandles = ["handle-b", "handle-a"]
+
+        try store.save(cp)
+        let back = try store.load(id: cp.id)
+
+        XCTAssertEqual(back.intent, .delegate)
+        XCTAssertEqual(back.expectedOutcome, .delegation)
+        XCTAssertEqual(back.delegationGrant, cp.delegationGrant)
+        XCTAssertEqual(back.delegationGrant?.childIntent, .build)
+        XCTAssertEqual(back.delegationHandles, ["handle-a", "handle-b"])
     }
 
     func testResumableExcludesCompleted() throws {

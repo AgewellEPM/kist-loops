@@ -128,7 +128,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
                                      interactor: interactor, approvalTools: [],   // empty = nothing normally prompts
                                      maxIterations: 4)
         var transcript: [ChatMessage] = []
-        _ = await loop.turn(transcript: &transcript, userInput: "go")
+        _ = await loop.turn(transcript: &transcript, userInput: "go", resolvedIntent: .build)
         let asked = await interactor.asked, dangerous = await interactor.lastDangerous
         XCTAssertTrue(asked, "a dangerous escaping write must prompt even with empty approvalTools")
         XCTAssertTrue(dangerous, "and it must be flagged dangerous")
@@ -719,6 +719,7 @@ final class HeadlessAgentLoopTests: XCTestCase {
     func testSpawnAgentDelegatesSubtaskThatDoesRealWork() async throws {
         // One scripted provider drives BOTH the parent and the sub-agent (shared call counter):
         // main spawns → sub writes a file → sub done → main done.
+        let sink = RecordingEventSink()
         let registry = ProviderRegistry(providers: [ScriptedProvider([
             #"{"tool":"spawn_agent","parameters":{"task":"create sub.txt containing hello"}}"#,    // parent
             #"{"tool":"write_file","parameters":{"path":"sub.txt","content":"hello from sub"}}"#,  // sub
@@ -728,14 +729,28 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
         let base = ToolRegistry.headless()
         XCTAssertNil(base.tool(named: "spawn_agent"))   // nested delegation is added only by explicit depth budget
-        let spawn = SpawnAgentTool(providers: registry, providerId: "scripted", model: nil, baseTools: base, maxIterations: 5)
+        let spawn = SpawnAgentTool(providers: registry, providerId: "scripted", model: nil,
+                                   baseTools: base, sink: sink, maxIterations: 5)
         let mainTools = ToolRegistry(base.all() + [spawn])
 
         let out = await HeadlessAgentLoop(providers: registry, providerId: "scripted", model: nil,
-                                          tools: mainTools, context: ToolContext(projectRoot: root),
-                                          maxIterations: 5).run(goal: "delegate a file creation")
+                                          tools: mainTools, context: ToolContext(projectRoot: root), sink: sink,
+                                          maxIterations: 5).run(
+                                            goal: "delegate a worker to create sub.txt containing hello from sub")
 
-        XCTAssertTrue(out.success, out.summary)
+        let actionTrace = sink.events.compactMap { event -> String? in
+            switch event {
+            case .actionStarted(_, let tool, let description):
+                return "start \(tool ?? "nil"): \(description)"
+            case .actionFinished(_, let success, let output, let error):
+                return "finish \(success): \(error ?? output)"
+            case .failed(let reason):
+                return "failed: \(reason)"
+            default:
+                return nil
+            }
+        }.joined(separator: " | ")
+        XCTAssertTrue(out.success, "\(out.summary) | \(actionTrace)")
         XCTAssertEqual(out.summary, "delegated successfully")
         // The sub-agent actually executed the write inside the shared project:
         XCTAssertEqual(try? String(contentsOfFile: root + "/sub.txt", encoding: .utf8), "hello from sub")
@@ -760,12 +775,73 @@ final class HeadlessAgentLoopTests: XCTestCase {
         let out = await HeadlessAgentLoop(providers: registry, providerId: "parent", model: nil,
                                           tools: ToolRegistry(base.all() + [spawn]),
                                           context: ToolContext(projectRoot: root),
-                                          maxIterations: 5).run(goal: "delegate a file creation")
+                                          maxIterations: 5).run(
+                                            goal: "delegate a worker to write worker.txt containing researched by mimo")
 
         XCTAssertTrue(out.success, out.summary)
         XCTAssertEqual(try? String(contentsOfFile: root + "/worker.txt", encoding: .utf8), "researched by mimo")
         let workerModels = await worker.seenModels()
         XCTAssertEqual(workerModels.first, "mimo-research")
+    }
+
+    func testDelegationGrantReplacesModelAuthoredChildMutationTask() async throws {
+        let parent = NamedScriptedProvider(id: "parent", responses: [
+            #"{"tool":"spawn_agent","parameters":{"role":"coder","task":"implement unauthorized.txt"}}"#,
+            #"{"done":true,"summary":"review delegated"}"#,
+        ])
+        let child = NamedScriptedProvider(id: "child", responses: [
+            #"{"tool":"write_file","parameters":{"path":"unauthorized.txt","content":"bad"}}"#,
+            #"{"done":true,"summary":"could not widen review"}"#,
+        ])
+        let registry = ProviderRegistry(providers: [parent, child], keyStore: NullKeyStore())
+        let roles = RoleBindings(default: ProviderBinding(providerId: "parent"))
+            .binding(.coder, to: ProviderBinding(providerId: "child"))
+        let base = ToolRegistry.headless()
+        let spawn = SpawnAgentTool(providers: registry, providerId: "parent", model: nil,
+                                   roles: roles, baseTools: base, maxIterations: 5)
+
+        let out = await HeadlessAgentLoop(
+            providers: registry, providerId: "parent", model: nil,
+            tools: ToolRegistry(base.all() + [spawn]),
+            context: ToolContext(projectRoot: root), maxIterations: 5
+        ).run(goal: "delegate a review of the parser")
+
+        XCTAssertFalse(out.success, "a child that ignores its review grant cannot complete delegation")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/unauthorized.txt"))
+    }
+
+    func testDelegationControlsRejectHandleOwnedByAnotherTurn() async throws {
+        let delegationRegistry = AsyncDelegationRegistry()
+        let ceiling = DelegationCapabilityCeiling(
+            allowedToolNames: ["read_file"], allowedProjectPaths: [root],
+            maxIterations: 1, maxDelegationDepth: 0)
+        let stale = try await delegationRegistry.spawn(.init(
+            role: "reviewer", task: "old review", capabilityCeiling: ceiling)) { context in
+                DelegationResult(handleID: context.handle.id, summary: "old review completed")
+            }
+        _ = try await delegationRegistry.join(stale)
+
+        let parent = NamedScriptedProvider(id: "parent", responses: [
+            "{\"tool\":\"join_agent\",\"parameters\":{\"handle\":\"\(stale.id)\"}}",
+            #"{"done":true,"summary":"joined an old child"}"#,
+        ])
+        let providers = ProviderRegistry(providers: [parent], keyStore: NullKeyStore())
+        let base = ToolRegistry.headless()
+        let spawn = SpawnAgentTool(
+            providers: providers, providerId: "parent", model: nil,
+            baseTools: base, maxIterations: 2, delegationRegistry: delegationRegistry)
+        let sink = RecordingEventSink()
+        let out = await HeadlessAgentLoop(
+            providers: providers, providerId: "parent", model: nil,
+            tools: ToolRegistry(base.all() + [spawn]),
+            context: ToolContext(projectRoot: root), sink: sink, maxIterations: 2
+        ).run(goal: "delegate a review of the parser")
+
+        XCTAssertFalse(out.success, "a stale handle cannot fulfill a new delegation contract")
+        XCTAssertTrue(sink.events.contains { event in
+            guard case .actionFinished(_, false, _, let error) = event else { return false }
+            return (error ?? "").contains("not created by this delegation turn")
+        })
     }
 
     func testSpawnAgentProviderAndModelOverrideRoleBinding() async throws {
@@ -822,11 +898,11 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
     func testSpawnAgentAllowsBoundedNestedTeammateHelp() async throws {
         let parent = NamedScriptedProvider(id: "parent", responses: [
-            #"{"tool":"spawn_agent","parameters":{"role":"researcher","task":"research, ask critic if needed, then report"}}"#,
+            #"{"tool":"spawn_agent","parameters":{"role":"researcher","task":"build nested.txt with critic help, then report"}}"#,
             #"{"done":true,"summary":"nested help completed"}"#,
         ])
         let worker = NamedScriptedProvider(id: "mimo", responses: [
-            #"{"tool":"spawn_agent","parameters":{"role":"critic","task":"verify the answer and write nested.txt"}}"#,
+            #"{"tool":"spawn_agent","parameters":{"role":"critic","task":"write nested.txt containing critic helped, then verify it"}}"#,
             #"{"done":true,"summary":"worker used critic help"}"#,
         ])
         let critic = NamedScriptedProvider(id: "gemini", responses: [
@@ -845,7 +921,8 @@ final class HeadlessAgentLoopTests: XCTestCase {
         let out = await HeadlessAgentLoop(providers: registry, providerId: "parent", model: nil,
                                           tools: ToolRegistry(base.all() + [spawn]),
                                           context: ToolContext(projectRoot: root),
-                                          maxIterations: 6).run(goal: "delegate nested help")
+                                          maxIterations: 6).run(
+                                            goal: "delegate a worker to build nested.txt with critic help")
 
         XCTAssertTrue(out.success, out.summary)
         XCTAssertEqual(try? String(contentsOfFile: root + "/nested.txt", encoding: .utf8), "critic helped")
@@ -880,9 +957,10 @@ final class HeadlessAgentLoopTests: XCTestCase {
         let out = await HeadlessAgentLoop(providers: registry, providerId: "parent", model: nil,
                                           tools: ToolRegistry(base.all() + [spawn]),
                                           context: ToolContext(projectRoot: root),
-                                          maxIterations: 6).run(goal: "delegate without nested budget")
+                                          maxIterations: 6).run(
+                                            goal: "delegate a worker to build should-not-exist.txt with critic help")
 
-        XCTAssertTrue(out.success, out.summary)
+        XCTAssertFalse(out.success, "plain delegation without a completed mutation must not satisfy the parent build contract")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/should-not-exist.txt"))
         let criticModels = await critic.seenModels()
         XCTAssertEqual(criticModels, [])
@@ -1630,8 +1708,8 @@ final class HeadlessAgentLoopTests: XCTestCase {
             providers: registry, providerId: "scripted", model: nil,
             tools: ToolRegistry(base.all() + [spawn]), context: ToolContext(projectRoot: root),
             interactor: DecliningInteractor(), approvalTools: ["write_file"], maxIterations: 5
-        ).run(goal: "delegate a write")
-        XCTAssertTrue(out.success)
+        ).run(goal: "delegate write blocked.txt")
+        XCTAssertFalse(out.success, "a declined child mutation cannot satisfy the parent build contract")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/blocked.txt"))   // sub write was gated
     }
 
@@ -1805,6 +1883,38 @@ final class HeadlessAgentLoopTests: XCTestCase {
         // ast_grep is read-only (search + preview); ast_grep_apply (mutating) is intentionally absent.
         XCTAssertEqual(HeadlessAgentLoop.readOnlyTools, ["read_file", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search"])
         XCTAssertFalse(HeadlessAgentLoop.readOnlyTools.contains("ast_grep_apply"), "the mutating rewrite must never be read-only")
+    }
+
+    func testReadOnlyIntentToolsetDropsMutatorsAtExecutionBoundary() async {
+        let scoped = HeadlessAgentLoop.conversationalToolset(.headless(), intent: .chat)
+        XCTAssertNotNil(scoped.tool(named: "read_file"))
+        XCTAssertNil(scoped.tool(named: "write_file"))
+        XCTAssertNil(scoped.tool(named: "edit_file"))
+        XCTAssertNil(scoped.tool(named: "apply_patch"))
+        XCTAssertNil(scoped.tool(named: "run_command"))
+
+        let registry = ProviderRegistry(providers: [ScriptedProvider([
+            #"{"tool":"write_file","parameters":{"path":"forbidden.txt","content":"nope"}}"#,
+            #"{"done":true,"summary":"answered without mutation"}"#,
+        ])], keyStore: NullKeyStore())
+        let audit = AuditLog(path: root + "/audit/tools.jsonl")
+        let loop = HeadlessAgentLoop(
+            providers: registry, providerId: "scripted", model: nil,
+            tools: .headless(),
+            context: ToolContext(projectRoot: root).withAuditLog(audit),
+            interactor: AutoApproveInteractor())
+
+        _ = await loop.run(goal: "just explain the parser",
+                           rawRequest: "just explain the parser",
+                           resolvedIntent: .chat)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/forbidden.txt"),
+                       "read-only authority must survive bypass/auto-approval and text tool calls")
+        let denials = await audit.entries().filter {
+            $0.tool == "write_file" && $0.outcome == "blocked_auth"
+        }
+        XCTAssertEqual(denials.count, 1,
+                       "a host-denied mutation attempt must remain visible in the audit trail")
     }
 
     // MARK: - Lifecycle hooks (PreToolUse / PostToolUse / Stop)

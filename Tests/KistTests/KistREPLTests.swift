@@ -25,6 +25,37 @@ final class KistREPLTests: XCTestCase {
         XCTAssertFalse(KistREPL.isSlashCommand(""))
     }
 
+    func testNaturalLanguageDelegationBoundaryPrecedesEffectfulInterceptors() throws {
+        for request in [
+            "delegate someone to run the sandbox headless",
+            "delegate a researcher to do legal research",
+            "delegate an agent to export this as PDF",
+            "delegate someone to audit your codebase",
+        ] {
+            XCTAssertEqual(PromptCompiler.inferIntent(request), .delegate, request)
+        }
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/Kist/KistREPL.swift"),
+                                encoding: .utf8)
+        let boundary = try XCTUnwrap(source.range(of: "let submittedOutcome = PromptCompiler.resolveOutcome("))
+        for interceptor in [
+            "Self.taskSelectedByUser(input",
+            "SandboxIntent.parse(input)",
+            "Self.parseForgeIntent(input)",
+            "ControlIntentParser.parse(input",
+        ] {
+            let position = try XCTUnwrap(source.range(of: interceptor))
+            XCTAssertLessThan(boundary.lowerBound, position.lowerBound,
+                              "\(interceptor) ran before the delegation boundary")
+        }
+        XCTAssertTrue(source.contains("if !submittedIsDelegation, let sandbox"))
+        XCTAssertTrue(source.contains("if preDispatchOutcome.intent != .delegate"))
+        XCTAssertTrue(source.contains("if outcome.intent != .delegate"),
+                      "a role-selection residual delegate must not be forced into PlanExecute")
+    }
+
     func testPlanExecuteResumeDispatchUsesExactTypedMissionAndPreservesFreshRoute() throws {
         let source = kistREPLFamilySource()
         let start = try XCTUnwrap(source.range(of: #"case "plan-execute", "pe", "dag":"#))
@@ -38,7 +69,9 @@ final class KistREPLTests: XCTestCase {
         XCTAssertTrue(command.contains("PlanExecuteMissionID(rawValue: String(fields[1]))"))
         XCTAssertTrue(command.contains("guard !goal.isEmpty"))
         XCTAssertTrue(command.contains("await resumePlanExecute(missionID, goal, roleSelection.bindings)"))
-        XCTAssertTrue(command.contains("await planExecute(args, roleSelection.bindings)"),
+        XCTAssertTrue(command.contains("let authorityGoal = outcome.executionRequest(currentRequest: args)"))
+        XCTAssertTrue(command.contains("await invokePlanExecute(authorityGoal: authorityGoal,")
+                      && command.contains("priorResultContext: outcome.priorResultContext"),
                       "the ordinary /pe path must remain explicitly fresh")
         XCTAssertFalse(command.contains("resumeLast"))
         XCTAssertFalse(command.contains("resumeId"))
@@ -82,6 +115,20 @@ final class KistREPLTests: XCTestCase {
         XCTAssertFalse(command.contains("runTurnInterruptible"))
     }
 
+    func testDiveSlashCommandRemembersTypedReadOnlyResearchOutcome() throws {
+        let source = kistREPLFamilySource()
+        let start = try XCTUnwrap(source.range(of: #"case "dive", "codebase", "read-code", "digest":"#))
+        let tail = source[start.lowerBound...]
+        let end = try XCTUnwrap(tail.range(of: "\n                case \"grow\", \"evolve-tool\", \"growtool\":"))
+        let command = String(tail[..<end.lowerBound])
+
+        XCTAssertTrue(command.contains("desiredResult: diveGoal, intent: .research, mode: .inline"))
+        XCTAssertTrue(command.contains("authority: .readOnly, isContinuation: false"))
+        XCTAssertTrue(command.contains("outcomeContract: outcome"))
+        XCTAssertTrue(command.contains("rememberInConversation: true"),
+                      "/dive results must remain available to pragmatic follow-up resolution")
+    }
+
     func testAcceptedNaturalLanguageResearchRouteDispatchesResearchNotCouncil() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -95,7 +142,8 @@ final class KistREPLTests: XCTestCase {
         let researchStart = try XCTUnwrap(dispatch.range(of: "case .research:"))
         let researchDispatch = String(dispatch[researchStart.lowerBound...])
 
-        XCTAssertTrue(researchDispatch.contains("await research(messageText, roleSelection.bindings)"))
+        XCTAssertTrue(researchDispatch.contains("await research(executionGoal, roleSelection.bindings)"),
+                      "natural-language research must receive the canonical host-owned outcome request")
         XCTAssertFalse(researchDispatch.contains("await council("),
                        "natural-language research must not bypass evidence collection through council")
     }
@@ -150,20 +198,50 @@ final class KistREPLTests: XCTestCase {
         let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("case \"build\", \"implement\", \"buildit\", \"ship-it\", \"makeit\":"),
                       "/build (and aliases) must be a command")
-        XCTAssertTrue(repl.contains("execution: \"build\"") && repl.contains("await planExecute(buildGoal, roleSelection.bindings)"),
+        XCTAssertTrue(repl.contains("execution: \"build\"")
+                      && repl.contains("await invokePlanExecute(authorityGoal: authorityGoal,"),
                       "/build must fire the plan→execute worker, not another analysis turn")
-        XCTAssertTrue(repl.contains("EXECUTE and BUILD the plan you just proposed"),
-                      "no-arg /build must execute the just-proposed plan (stop researching, start building)")
+        XCTAssertTrue(repl.contains("buildRequest = \"build off it\"")
+                      && repl.contains("await runHeavyRoute(goal: buildRequest"),
+                      "no-arg /build must keep its canonical authority goal separate from prior result prose")
+        XCTAssertTrue(repl.contains("PriorResultContext(substantiveSummary: $0,"),
+                      "a transcript plan may be supplied only as typed advisory result context")
+        XCTAssertTrue(repl.contains("lastOutcomeContract?.priorResultSucceeded == nil"),
+                      "only ordinary conversational output may use transcript fallback; typed heavy results must stand on their verified context")
+        XCTAssertFalse(repl.contains("EXECUTE and BUILD the plan you just proposed"),
+                       "provider-authored plan prose must not be promoted into the canonical build goal")
     }
 
     func testMainTurnActionFirstFiresBuilderOnBuildIntent() {
         // Action-first: a clear build intent must fire the plan→execute worker instead of an inline
         // chat/analysis turn (the "researches forever, never builds" disease).
         let repl = kistREPLFamilySource()
-        XCTAssertTrue(repl.contains("if turnIntent == .build, turnMode != .plan, !armedTeamThisTurn, !lineFromQueue, let planExecute {"),
+        XCTAssertTrue(repl.contains("if turnOutcome.allowsMutation, turnIntent == .build, turnMode != .plan,"),
                       "a build-intent turn (not plan mode) must route to the plan→execute worker")
         XCTAssertTrue(repl.contains("action-first: firing the plan→execute worker"),
                       "the action-first build routing must be disclosed to the user")
+        XCTAssertTrue(repl.contains("await invokePlanExecute(authorityGoal: executionGoal,"),
+                      "the worker must receive the host-owned goal plus follow-up, not the literal follow-up alone")
+        XCTAssertTrue(repl.contains("executionOutcome.executionRequest(currentRequest: messageText)"),
+                      "heavy routing must not pass a generated TASK BRIEF into host risk scoring")
+    }
+
+    func testHeavyRouteOnlyCarriesSuccessfulResultContextForward() {
+        let repl = kistREPLFamilySource()
+
+        XCTAssertTrue(repl.contains("let resultCanBecomeContext = result.satisfiesExpectedOutcome("))
+        XCTAssertTrue(repl.contains("summary: resultCanBecomeContext ? result.substantiveSummary : nil"))
+        XCTAssertTrue(repl.contains("artifactReferences: resultCanBecomeContext ? result.artifactReferences : []"),
+                      "failed or interrupted route output must not become a future referent")
+        XCTAssertTrue(repl.contains("succeeded: resultCanBecomeContext"))
+    }
+
+    func testClearDropsPragmaticIntentCarryOver() {
+        let repl = kistREPLFamilySource()
+
+        XCTAssertTrue(repl.contains("humanTranscript = []"))
+        XCTAssertTrue(repl.contains("lastOutcomeContract = nil"),
+                      "/clear must revoke stale continuation authority with the transcript")
     }
 
     func testModeCommandExistsAndInjectsStyleIntoTurn() {

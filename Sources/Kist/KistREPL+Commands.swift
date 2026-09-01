@@ -52,6 +52,8 @@ extension KistREPL {
                 case "clear":
                     transcript = []
                     humanTranscript = []
+                    lastOutcomeContract = nil
+                    lastTurnInterruption = nil
                     lastConfidenceReport = nil
                     print("\u{001B}[37m(context cleared)\u{001B}[0m")
                     return .handled
@@ -553,16 +555,23 @@ extension KistREPL {
                         resetTurnEvidence()
                         armTurnLoop()
                         let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
-                        let intent = PromptCompiler.inferIntent(step, mode: mode)
+                        let outcome = PromptCompiler.resolveOutcome(
+                            step, mode: mode, previous: lastOutcomeContract)
+                        let intent = outcome.intent
                         proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
-                                                 text: "intent=\(intent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: intent, mode: mode).rawValue) execution=chain-inline"))
+                                                 text: "intent=\(intent.rawValue) authority=\(outcome.authority.rawValue) outcome=\(outcome.expectedOutcome.rawValue) execution=chain-inline"))
                         let compiled = briefCompiler?(step, roleSelection.bindings, mode,
-                                                      humanTranscript, intent) ?? step
+                                                      humanTranscript, outcome) ?? step
                         let enriched = attachCaptainContext(to: compiled, objective: step)
                         let reviewBaseline = reviewBaselineIfArmed(intent: intent)
+                        let delegationGrant = intent == .delegate
+                            ? PromptCompiler.delegationGrant(
+                                for: step, resolvedOutcome: outcome) : nil
                         let oc = await runTurnInterruptible(loop: loop, userInput: enriched,
-                                                            rawRequest: step, resolvedIntent: intent)
-                        rememberHumanTurn(user: step, assistantSummary: oc.summary)
+                                                            rawRequest: step, resolvedIntent: intent,
+                                                            delegationGrant: delegationGrant)
+                        rememberModelTurn(user: step, assistantSummary: oc.summary,
+                                          outcomeContract: outcome)
                         await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
                         await runCopilotReview(task: step, baselineDiff: reviewBaseline,
                                                turnIntent: intent, turnSucceeded: oc.success)
@@ -929,11 +938,20 @@ extension KistREPL {
                             await resumePlanExecute(missionID, goal, roleSelection.bindings)
                         }
                     } else {
-                        guard let planExecute else { print("\u{001B}[31m/plan-execute isn't available here\u{001B}[0m"); return .handled }
+                        guard planExecute != nil || planExecuteWithContext != nil else {
+                            print("\u{001B}[31m/plan-execute isn't available here\u{001B}[0m"); return .handled
+                        }
                         guard !args.isEmpty else { print("usage: /plan-execute <goal>"); return .handled }
+                        let outcome = PromptCompiler.resolveOutcome(
+                            args, mode: .planExecute, previous: lastOutcomeContract)
+                        let authorityGoal = outcome.executionRequest(currentRequest: args)
                         await runHeavyRoute(goal: args, intent: .build, mode: .planExecute,
-                                            execution: "plan-execute", startProof: true) {
-                            await planExecute(args, roleSelection.bindings)
+                                            execution: "plan-execute", startProof: true,
+                                            outcomeContract: outcome,
+                                            rememberInConversation: true) {
+                            await invokePlanExecute(authorityGoal: authorityGoal,
+                                                    priorResultContext: outcome.priorResultContext,
+                                                    roles: roleSelection.bindings)
                         }
                     }
                     return .handled
@@ -943,27 +961,40 @@ extension KistREPL {
                     // args it BUILDS THE PLAN JUST PROPOSED — so after Kist lays out a plan you type
                     // `/build` and it executes it instead of researching forever. Compose with `/ultra`
                     // first for consensus review on the build.
-                    guard let planExecute else { print("\u{001B}[31m/build isn't available here\u{001B}[0m"); return .handled }
-                    let buildGoal: String
+                    guard planExecute != nil || planExecuteWithContext != nil else {
+                        print("\u{001B}[31m/build isn't available here\u{001B}[0m"); return .handled
+                    }
+                    let buildRequest: String
+                    let fallbackPlanContext: PriorResultContext?
                     if !args.isEmpty {
-                        buildGoal = Self.expandBoardReference(args, projectRoot: projectRoot,
-                                                              sessionStartedAt: sessionStart)
+                        buildRequest = Self.expandBoardReference(args, projectRoot: projectRoot,
+                                                                 sessionStartedAt: sessionStart)
+                        fallbackPlanContext = nil
                     } else {
-                        let lastUser = humanTranscript.reversed().first { $0.role == .user }?.content
                         let lastPlan = humanTranscript.reversed().first { $0.role == .assistant }?.content
-                        guard let lastUser else {
+                        guard lastOutcomeContract != nil || lastPlan != nil else {
                             print("usage: /build <goal> — or run it right after a plan and it builds what was just proposed")
                             return .handled
                         }
-                        buildGoal = "EXECUTE and BUILD the plan you just proposed — implement it now with real "
-                            + "code and a passing build/test. Do NOT re-research, re-plan, or re-analyze; the "
-                            + "plan is already decided.\n\nOriginal request: \(lastUser)"
-                            + (lastPlan.map { "\n\nThe plan to execute:\n\($0)" } ?? "")
+                        buildRequest = "build off it"
+                        fallbackPlanContext = lastOutcomeContract?.priorResultSucceeded == nil
+                            ? lastPlan.map {
+                                PriorResultContext(substantiveSummary: $0,
+                                                   artifactReferences: [])
+                            } : nil
                     }
+                    let outcome = PromptCompiler.resolveOutcome(
+                        buildRequest, mode: .planExecute, previous: lastOutcomeContract)
+                    let authorityGoal = outcome.executionRequest(currentRequest: buildRequest)
+                    let priorContext = outcome.priorResultContext ?? fallbackPlanContext
                     print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · firing plan→execute worker (real code + build/tests)\u{001B}[0m")
-                    await runHeavyRoute(goal: buildGoal, intent: .build, mode: .planExecute,
-                                        execution: "build", startProof: true) {
-                        await planExecute(buildGoal, roleSelection.bindings)
+                    await runHeavyRoute(goal: buildRequest, intent: .build, mode: .planExecute,
+                                        execution: "build", startProof: true,
+                                        outcomeContract: outcome,
+                                        rememberInConversation: true) {
+                        await invokePlanExecute(authorityGoal: authorityGoal,
+                                                priorResultContext: priorContext,
+                                                roles: roleSelection.bindings)
                     }
                     return .handled
                 case "council", "consult":
@@ -974,17 +1005,29 @@ extension KistREPL {
                     }
                     let councilIntent: TaskBrief.Intent = invocation.execute ? .build : .plan
                     let councilMode: PromptCompiler.Mode = invocation.execute ? .planExecute : .inline
+                    let outcome = OutcomeContract(
+                        desiredResult: invocation.goal,
+                        intent: councilIntent,
+                        mode: councilMode,
+                        authority: invocation.execute ? .explicitRequest : .readOnly,
+                        isContinuation: false)
                     await runHeavyRoute(goal: invocation.goal, intent: councilIntent, mode: councilMode,
                                         execution: invocation.execute ? "council-execute" : "council",
-                                        startProof: true) {
+                                        startProof: true, outcomeContract: outcome,
+                                        rememberInConversation: true) {
                         await council(invocation.goal, roleSelection.bindings, invocation.execute)
                     }
                     return .handled
                 case "dig", "digdeep", "minds", "mind":
                     guard let digDeep else { print("\u{001B}[31m/dig isn't available here\u{001B}[0m"); return .handled }
                     guard !args.isEmpty else { print("usage: /dig <question> — ask every reachable model in parallel and synthesize"); return .handled }
+                    let outcome = OutcomeContract(
+                        desiredResult: args, intent: .review, mode: .inline,
+                        authority: .readOnly, isContinuation: false)
                     await runHeavyRoute(goal: args, intent: .review, mode: .inline,
-                                        execution: "dig-in-deep", startProof: true) {
+                                        execution: "dig-in-deep", startProof: true,
+                                        outcomeContract: outcome,
+                                        rememberInConversation: true) {
                         await digDeep(args, roleSelection.bindings)
                     }
                     return .handled
@@ -1164,8 +1207,13 @@ extension KistREPL {
                         return .handled
                     }
                     print("\u{001B}[2m↳ evidence dossier → role-bound council → durable task board\u{001B}[0m")
+                    let outcome = OutcomeContract(
+                        desiredResult: researchGoal, intent: .research, mode: .inline,
+                        authority: .readOnly, isContinuation: false)
                     await runHeavyRoute(goal: researchGoal, intent: .research, mode: .inline,
-                                        execution: "research", startProof: true) {
+                                        execution: "research", startProof: true,
+                                        outcomeContract: outcome,
+                                        rememberInConversation: true) {
                         await research(researchGoal, roleSelection.bindings)
                     }
                     return .handled
@@ -1180,8 +1228,13 @@ extension KistREPL {
                     }
                     guard let dive else { print("\u{001B}[31m/dive isn't available here\u{001B}[0m"); return .handled }
                     print("\u{001B}[36;1m🔬 dive\u{001B}[0m\u{001B}[2m · reading our code (local, no web) → multi-model → truth\u{001B}[0m")
+                    let outcome = OutcomeContract(
+                        desiredResult: diveGoal, intent: .research, mode: .inline,
+                        authority: .readOnly, isContinuation: false)
                     await runHeavyRoute(goal: diveGoal, intent: .research, mode: .inline,
-                                        execution: "codebase-dive", startProof: true) {
+                                        execution: "codebase-dive", startProof: true,
+                                        outcomeContract: outcome,
+                                        rememberInConversation: true) {
                         await dive(diveGoal, roleSelection.bindings)
                     }
                     return .handled
@@ -1243,8 +1296,13 @@ extension KistREPL {
                     Target: \(target)
                     """
                     print("\u{001B}[36;1m📊 competitive\u{001B}[0m\u{001B}[2m · cross-comparing our project vs \(target)\u{001B}[0m")
+                    let outcome = OutcomeContract(
+                        desiredResult: competitiveGoal, intent: .research, mode: .inline,
+                        authority: .readOnly, isContinuation: false)
                     await runHeavyRoute(goal: competitiveGoal, intent: .research, mode: .inline,
-                                        execution: "competitive-analysis", startProof: true) {
+                                        execution: "competitive-analysis", startProof: true,
+                                        outcomeContract: outcome,
+                                        rememberInConversation: true) {
                         await research(competitiveGoal, roleSelection.bindings)
                     }
                     return .handled
@@ -1254,16 +1312,23 @@ extension KistREPL {
                         if let display = personaDisplay?(expanded) { print(Self.stdoutColorEnabled(projectRoot: projectRoot) ? "\u{001B}[95;1m🎭 \(display)\u{001B}[0m" : "↳ \(display)") }
                         armTurnLoop()   // arm the permission tier — never run a turn on a stale loop
                         let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
-                        let intent = PromptCompiler.inferIntent(expanded, mode: mode)
+                        let outcome = PromptCompiler.resolveOutcome(
+                            expanded, mode: mode, previous: lastOutcomeContract)
+                        let intent = outcome.intent
                         proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
-                                                 text: "intent=\(intent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: intent, mode: mode).rawValue) execution=command-inline"))
+                                                 text: "intent=\(intent.rawValue) authority=\(outcome.authority.rawValue) outcome=\(outcome.expectedOutcome.rawValue) execution=command-inline"))
                         let compiled = briefCompiler?(expanded, roleSelection.bindings, mode,
-                                                      humanTranscript, intent) ?? expanded
+                                                      humanTranscript, outcome) ?? expanded
                         let enriched = attachCaptainContext(to: compiled, objective: expanded)
                         let reviewBaseline = reviewBaselineIfArmed(intent: intent)
+                        let delegationGrant = intent == .delegate
+                            ? PromptCompiler.delegationGrant(
+                                for: expanded, resolvedOutcome: outcome) : nil
                         let oc = await runTurnInterruptible(loop: loop, userInput: enriched,
-                                                            rawRequest: expanded, resolvedIntent: intent)
-                        rememberHumanTurn(user: expanded, assistantSummary: oc.summary)
+                                                            rawRequest: expanded, resolvedIntent: intent,
+                                                            delegationGrant: delegationGrant)
+                        rememberModelTurn(user: expanded, assistantSummary: oc.summary,
+                                          outcomeContract: outcome)
                         await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
                         await runCopilotReview(task: expanded, baselineDiff: reviewBaseline,
                                                turnIntent: intent, turnSucceeded: oc.success)

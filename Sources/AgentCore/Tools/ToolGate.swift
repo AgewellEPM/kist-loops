@@ -22,6 +22,7 @@ public enum ToolGate {
     public static func run(name: String, arguments: [String: Any], context: ToolContext,
                            precomputedAllowlist: Set<String>?? = nil,
                            parameters: [ToolParameter]? = nil,
+                           validationArguments: [String: Any]? = nil,
                            body: () async throws -> ToolResult) async -> ToolResult {
         let (argKeys, argsDigest) = AuditLog.digest(arguments)
         // Use the caller's already-read allow-list when provided (.some), else read it here. Not the `??`
@@ -63,7 +64,9 @@ public enum ToolGate {
         // Validate at the same execution choke point as authorization. Provider JSON schemas are advisory;
         // a caller can invoke the registry directly, so required fields, unknown fields, and runtime types
         // must be checked again immediately before the tool body runs.
-        if let parameters, let reason = argumentValidationError(parameters: parameters, arguments: arguments) {
+        let argumentsToValidate = validationArguments ?? arguments
+        if let parameters,
+           let reason = argumentValidationError(parameters: parameters, arguments: argumentsToValidate) {
             await audit("invalid_arguments", false)
             return SecretMasker.mask(.failure(ToolError.invalidParameter(reason).description))
         }

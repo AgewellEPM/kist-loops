@@ -5,6 +5,36 @@ import AgentCore
 /// execution -> deterministic verification -> independent review state machine; the established
 /// Kist route bodies remain adapters so their safety gates, receipts, and terminal UX stay intact.
 extension KistRunner {
+    struct BuilderCompatibilityGoals: Equatable {
+        let authorityGoal: String
+        let contextualWorkerGoal: String
+        let executionGoal: String
+        let canonicalFunctionalGoal: String
+        let functionalExecutionGoal: String
+    }
+
+    /// Keep operator authority and generated/advisory planning material on separate planes. Every
+    /// classifier, contract, fingerprint, and deterministic completion obligation consumes
+    /// `authorityGoal`; only planner/worker prompts receive `advisoryContext`.
+    static func builderCompatibilityGoals(
+        authorityGoal: String,
+        advisoryContext: PriorResultContext?,
+        effortContext: String
+    ) -> BuilderCompatibilityGoals {
+        let advisoryBlock = advisoryContext.flatMap { $0.isEmpty ? nil : $0.promptBlock }
+        let contextualWorkerGoal = authorityGoal
+            + (advisoryBlock.map { "\n\n" + $0 } ?? "")
+        let executionGoal = contextualWorkerGoal + "\n\n" + effortContext
+        let canonicalFunctionalGoal =
+            PlanExecuteCompletionContract.functionalObjective(from: authorityGoal)
+        return BuilderCompatibilityGoals(
+            authorityGoal: authorityGoal,
+            contextualWorkerGoal: contextualWorkerGoal,
+            executionGoal: executionGoal,
+            canonicalFunctionalGoal: canonicalFunctionalGoal,
+            functionalExecutionGoal: canonicalFunctionalGoal + "\n\n" + effortContext)
+    }
+
     static func runBuilderCompatibility(
         _ opts: KistOptions,
         goal: String,
@@ -18,7 +48,8 @@ extension KistRunner {
         model: String?,
         rolesOverride: RoleBindings? = nil,
         budgetOverride: BudgetLedger? = nil,
-        riskObjective: String? = nil
+        riskObjective: String? = nil,
+        advisoryContext: PriorResultContext? = nil
     ) async -> Int32 {
         let launch = builderCompatibilityLaunch(for: opts, goal: goal)
         let contractID = builderCompatibilityContractID(root: root, goal: goal, adapter: launch.adapter)
@@ -133,10 +164,23 @@ extension KistRunner {
         }
 
         let effortContext = builderEffortContext(launch.effort)
-        let executionGoal = goal + "\n\n" + effortContext
-        let canonicalFunctionalExecutionGoal =
-            PlanExecuteCompletionContract.functionalObjective(from: goal)
-        let functionalExecutionGoal = canonicalFunctionalExecutionGoal + "\n\n" + effortContext
+        // Authority, completion mode, contract identity, and risk were frozen from `goal` above.
+        // Only now may bounded prior-result evidence enter the worker prompt. The sealed preflight
+        // below still receives the canonical goal alone, so advisory prose cannot mint paths/checks.
+        let currentAdvisoryContext = advisoryContext.map {
+            PriorResultContext(
+                substantiveSummary: $0.substantiveSummary,
+                artifactReferences: HeavyRouteResult.revalidatedArtifactReferences(
+                    $0.artifactReferences, projectRoot: root))
+        }
+        let compatibilityGoals = builderCompatibilityGoals(
+            authorityGoal: goal, advisoryContext: currentAdvisoryContext,
+            effortContext: effortContext)
+        let executionGoal = compatibilityGoals.executionGoal
+        // Functional obligations and verification remain canonical. Advisory findings may help the
+        // planner choose an implementation, but they cannot add done-when requirements.
+        let canonicalFunctionalExecutionGoal = compatibilityGoals.canonicalFunctionalGoal
+        let functionalExecutionGoal = compatibilityGoals.functionalExecutionGoal
         let completionMode = builderCompletionMode(for: goal)
         let effectiveTokenBudget = max(1, opts.budgetTokens ?? 200_000)
         let configuredBudget = budgetOverride ?? opts.makeBudget()

@@ -8,7 +8,7 @@ import Foundation
 ///
 /// Bounded by construction: the spawned specialist's tool ceiling is `baseTools`, which the caller builds
 /// WITHOUT `spawn_specialist`/`spawn_agent` — so a named specialist cannot recursively fan out.
-public struct SpawnSpecialistTool: AgentTool, AsyncDelegationRegistryProviding {
+public struct SpawnSpecialistTool: AgentTool, DelegationAgentTool, AsyncDelegationRegistryProviding {
     public let name = "spawn_specialist"
     public var description: String {
         guard !specialists.isEmpty else {
@@ -51,18 +51,47 @@ public struct SpawnSpecialistTool: AgentTool, AsyncDelegationRegistryProviding {
         // permissionMode "plan" ⇒ read-only run; other modes keep the inherited approval set (the REPL's
         // explicit `use <agent>` path applies full permissionMode→tier fidelity).
         let planMode = def.permissionMode?.lowercased().replacingOccurrences(of: " ", with: "") == "plan"
-        if optionalBool("background", from: arguments) ?? false {
-            return await spawnBackground(definition: def, task: task, planMode: planMode, context: context)
+        let hostChildIntent = (arguments[DelegationGrant.childIntentArgument] as? String)
+            .flatMap(TaskBrief.Intent.init(rawValue:))
+        let hostPriorContext = PriorResultContext(
+            substantiveSummary: arguments[DelegationGrant.priorSummaryArgument] as? String,
+            artifactReferences: arguments[DelegationGrant.priorArtifactsArgument]
+                as? [String] ?? [])
+            .revalidated(projectRoot: context.projectRoot)
+        if planMode, hostChildIntent?.expectsMutation == true {
+            return .failure("specialist '\(def.name)' is plan-only and cannot satisfy the host-bound mutation delegation")
         }
-        let outcome = await spawner.run(specialist: def, task: task, approvalTools: approvalTools, planMode: planMode)
+        let childIntent = planMode ? TaskBrief.Intent.plan
+            : (hostChildIntent ?? PromptCompiler.inferIntent(task, mode: .delegated))
+        if optionalBool("background", from: arguments) ?? false {
+            return await spawnBackground(definition: def, task: task, childIntent: childIntent,
+                                         advisoryContext: hostPriorContext,
+                                         planMode: planMode, context: context)
+        }
+        let outcome = await spawner.run(specialist: def, task: task, resolvedIntent: childIntent,
+                                        advisoryContext: hostPriorContext,
+                                        approvalTools: approvalTools, planMode: planMode)
+        var metadata = [
+            "specialist": def.name,
+            "specialist_iterations": String(outcome.iterations),
+            "delegation_status": "completed",
+        ]
+        let isolated = def.isolation?.lowercased() == "worktree"
+        if outcome.success, !planMode, !isolated,
+           PromptCompiler.expectedOutcome(intent: childIntent, mode: .delegated) == .mutation {
+            metadata["sub_agent_expected_outcome"] = TaskBrief.ExpectedOutcome.mutation.rawValue
+            metadata["delegation_scope"] = "parent-workspace"
+        }
         return ToolResult(
             success: outcome.success,
             output: outcome.summary,
             error: outcome.success ? nil : outcome.summary,
-            metadata: ["specialist": def.name, "specialist_iterations": String(outcome.iterations)])
+            metadata: metadata)
     }
 
     private func spawnBackground(definition def: SpecialistDefinition, task: String,
+                                 childIntent: TaskBrief.Intent,
+                                 advisoryContext: PriorResultContext,
                                  planMode: Bool, context: ToolContext) async -> ToolResult {
         guard let worktree = GitIsolation.makeWorktree(
             repo: context.projectRoot, label: def.name,
@@ -96,7 +125,9 @@ public struct SpawnSpecialistTool: AgentTool, AsyncDelegationRegistryProviding {
             let handle = try await delegationRegistry.spawn(request, parentCeiling: parentCeiling) { execution in
                 let before = await spawner.budget?.spentTokens() ?? 0
                 let outcome = await spawner.run(
-                    specialist: def, task: task, approvalTools: approvalTools, planMode: planMode,
+                    specialist: def, task: task, resolvedIntent: childIntent,
+                    advisoryContext: advisoryContext,
+                    approvalTools: approvalTools, planMode: planMode,
                     forceWorktreeIsolation: true, preparedWorktree: worktree,
                     steeringMailbox: execution.steering)
                 let evidence = ReasoningEvidenceReference(
@@ -111,6 +142,9 @@ public struct SpawnSpecialistTool: AgentTool, AsyncDelegationRegistryProviding {
                                                    artifactIDs: []))
                 let risks = outcome.success ? [] : [ReasoningRiskReceipt(
                     level: .high, summary: "background specialist did not complete successfully")]
+                guard outcome.success else {
+                    throw DelegationRegistryError.failed(outcome.summary)
+                }
                 let after = await spawner.budget?.spentTokens() ?? before
                 return DelegationResult(
                     handleID: execution.handle.id, summary: outcome.summary,

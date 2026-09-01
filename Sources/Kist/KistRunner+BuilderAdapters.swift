@@ -377,13 +377,15 @@ extension KistRunner {
     /// request classification. Explicit read-only wording wins inside PromptCompiler; provider output,
     /// retrieved memory, council prose, and the generated preflight never participate in this decision.
     static func builderDeterministicMutationIntent(for opts: KistOptions, goal: String) -> Bool {
+        let intent = PromptCompiler.inferIntent(goal, mode: .inline)
+        if intent == .delegate { return false }
         if opts.cobolo { return true }
         guard !opts.planMode, builderCompletionMode(for: goal) == .build else { return false }
         if opts.headless || opts.mission || opts.fleet || opts.planExecute || opts.greatLoop || opts.ship
             || opts.resumeId != nil || opts.resumeLast || opts.planExecuteResumeID != nil {
             return true
         }
-        return PromptCompiler.inferIntent(goal, mode: .inline).expectsMutation
+        return intent.expectsMutation
     }
 
     /// Lean direct builds never inherit the broad runtime registry. Read-only capabilities remain
@@ -1053,7 +1055,8 @@ extension KistRunner {
                                 style: .calm),
                             recorder: recorder, traceRecorder: traceRecorder)
                         let invokePartition: @Sendable () async -> HeadlessAgentLoop.Outcome = {
-                            await loop.run(goal: partitionGoal)
+                            await loop.run(goal: partitionGoal, rawRequest: goal,
+                                           resolvedIntent: .build)
                         }
                         let outcome = await invokePartition()
                         status = outcome.success ? 0 : 1

@@ -316,6 +316,15 @@ public struct PlanExecuteLoop: Sendable {
         let checkpointGoal = checkpointGoal ?? goal
         let completionContract = suppliedCompletionContract
             ?? PlanExecuteCompletionContract.derive(canonicalRequest: checkpointGoal)
+        if completionContract.kind == .delegation {
+            let message = "plan-execute does not own the host-bound delegation grant; route this request through the inline delegation loop"
+            sink.emit(.failed(message))
+            var outcome = PlanOutcome(success: false, plan: nil, execution: nil,
+                                      message: message, replansUsed: 0)
+            outcome.missionInstanceID = missionInstanceID
+            outcome.checkpointId = runID
+            return outcome
+        }
         let trimmedFunctionalObjective = suppliedFunctionalObjective?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let functionalObjective = (trimmedFunctionalObjective?.isEmpty == false)

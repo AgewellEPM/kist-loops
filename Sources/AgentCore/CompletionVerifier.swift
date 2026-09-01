@@ -123,15 +123,25 @@ public struct CompletionVerifier: Sendable {
             }
         }
 
-        // A build/fleet contract promises a state change. A zero-tool or read-only run must not fall
+        // A build/fleet contract promises a state change. A zero-tool, read-only child, or merely
+        // started background delegation must not fall
         // through the "no source mutation" branch and turn a model's `done` claim into success.
         let fulfilledMutationContract = trajectory.contains {
             $0.success && ($0.observedEffects.confirmsMutation
-                || (taskIntent == .fleet && $0.observedEffects.progress == .delegation))
+                || $0.observedEffects.progress == .delegatedMutation)
         }
         if expectedOutcome == .mutation, !fulfilledMutationContract {
             return .needsVerification(reason:
                 "the turn expected a workspace mutation, but no successful mutation was recorded")
+        }
+
+        if expectedOutcome == .delegation,
+           !trajectory.contains(where: {
+               $0.success && ($0.observedEffects.progress == .delegation
+                   || $0.observedEffects.progress == .delegatedMutation)
+           }) {
+            return .needsVerification(reason:
+                "the turn expected a completed delegation, but only local work or a running handle was recorded")
         }
 
         // Research is complete only when a successful tool observation records gathered/synthesized

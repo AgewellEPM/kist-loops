@@ -682,7 +682,7 @@ enum KistRunner {
                 // It is never seeded, mutated, or folded into a model prompt.
                 let cortex = opts.noMemory ? nil : CortexMemory()
                 repl.cortex = cortex
-                repl.briefCompiler = { input, roles, mode, transcript, intent in
+                repl.briefCompiler = { input, roles, mode, transcript, outcome in
                     let personaContext = TaskPersonaMatcher.promptContext(
                         matches: personaMatcher.matches(for: input, limit: 3))
                     let reviewContext = ReviewContext.renderIfNeeded(request: input, projectRoot: root)
@@ -693,7 +693,7 @@ enum KistRunner {
                                                                                       lessons: lessonStore?.primer(forGoal: input),
                                                                                       specialists: personaContext,
                                                                                       reviewTargets: reviewContext),
-                                                         resolvedIntent: intent)
+                                                         resolvedOutcome: outcome)
                 }
                 // Rebuilt on /model (new default provider+model) and /roles (new team). The default
                 // binding drives the conversational turn AND the spawn-tool default; roles drive the team.
@@ -869,7 +869,9 @@ enum KistRunner {
                     return RoleBindings(default: ProviderBinding(providerId: strong))
                 }
                 func runPlanExecuteRoute(_ missionID: PlanExecuteMissionID?, _ g: String,
-                                         _ roles: RoleBindings) async -> HeavyRouteResult {
+                                         _ roles: RoleBindings,
+                                         riskObjective: String? = nil,
+                                         priorResultContext: PriorResultContext? = nil) async -> HeavyRouteResult {
                     var o = opts; o.goal = g; o.planExecute = true
                     o.planExecuteResumeID = missionID
                     // R1: ESC works on the plan-execute plane too — previously this plane was a
@@ -890,7 +892,9 @@ enum KistRunner {
                         await runBuilderCompatibility(o, goal: g, registry: registry, root: root,
                                                       tools: tools, context: context, checkpoints: checkpoints,
                                                       toolMode: toolMode, providerId: providerId, model: model,
-                                                      rolesOverride: roles)
+                                                      rolesOverride: roles,
+                                                      riskObjective: riskObjective,
+                                                      advisoryContext: priorResultContext)
                     }
                     let verification: HeavyRouteResult.Verification
                     if interrupted.value != nil {
@@ -909,6 +913,11 @@ enum KistRunner {
                 repl.planExecute = { g, roles in
                     await runPlanExecuteRoute(nil, g, roles)
                 }
+                repl.planExecuteWithContext = { authorityGoal, context, roles in
+                    await runPlanExecuteRoute(nil, authorityGoal, roles,
+                                              riskObjective: authorityGoal,
+                                              priorResultContext: context)
+                }
                 repl.resumePlanExecute = { missionID, g, roles in
                     await runPlanExecuteRoute(missionID, g, roles)
                 }
@@ -919,6 +928,7 @@ enum KistRunner {
                     // honest partial beats a dead zone.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
+                    let capture = CouncilPipelineCaptureBox()
                     let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
                     let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
                         interrupted.value = reason
@@ -929,7 +939,8 @@ enum KistRunner {
                     }) {
                         await runCouncil(opts, goal: g, execute: execute, registry: registry,
                                          root: root, tools: tools, context: context,
-                                         providerId: providerId, model: model, rolesOverride: roles)
+                                         providerId: providerId, model: model, rolesOverride: roles,
+                                         capture: capture)
                     }
                     let verification: HeavyRouteResult.Verification
                     if interrupted.value != nil {
@@ -943,14 +954,20 @@ enum KistRunner {
                             ? "the council was rejected before builder verification ran"
                             : "an advisory council has no deterministic execution oracle")
                     }
-                    return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
-                                            review: .handledInternally("the role-bound council synthesizes its own critique"),
-                                            verification: verification)
+                    let verifiedContext = HeavyRouteResult.verifiedCouncilContext(
+                        capture.get(), projectRoot: root)
+                    return HeavyRouteResult(
+                        exitCode: exitCode, interruption: interrupted.value,
+                        review: .handledInternally("the role-bound council synthesizes its own critique"),
+                        verification: verification,
+                        substantiveSummary: verifiedContext?.substantiveSummary,
+                        artifactReferences: verifiedContext?.artifactReferences ?? [])
                 }
                 repl.digDeep = { g, roles in
                     // "Dig in deep" / "consult the minds": same ESC watcher as council — top-level, sequential.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
+                    let capture = CouncilPipelineCaptureBox()
                     let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
                     let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
                         interrupted.value = reason
@@ -960,19 +977,26 @@ enum KistRunner {
                               + " — dig-in-deep stopped\u{001B}[0m")
                     }) {
                         await runWideCouncil(opts, goal: g, registry: registry, root: root,
-                                             providerId: providerId, model: model, rolesOverride: roles)
+                                             providerId: providerId, model: model, rolesOverride: roles,
+                                             capture: capture)
                     }
+                    let verifiedContext = HeavyRouteResult.verifiedCouncilContext(
+                        capture.get(), projectRoot: root)
                     return HeavyRouteResult(
                         exitCode: exitCode, interruption: interrupted.value,
                         review: .handledInternally("the heterogeneous wide council synthesizes its panel"),
                         verification: .unavailable(interrupted.value == nil
                             ? "advisory consensus has no deterministic execution oracle"
-                            : "the wide council was interrupted before completion"))
+                            : "the wide council was interrupted before completion"),
+                        substantiveSummary: verifiedContext?.substantiveSummary,
+                        artifactReferences: verifiedContext?.artifactReferences ?? [])
                 }
                 repl.research = { g, roles in
                     // R1 sibling: same watcher for the research pipeline.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
+                    let researchCapture = ResearchPipelineCaptureBox()
+                    let councilCapture = CouncilPipelineCaptureBox()
                     let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
                     let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
                         interrupted.value = reason
@@ -984,7 +1008,8 @@ enum KistRunner {
                         await runResearch(opts, goal: g, registry: registry, root: root,
                                           tools: tools, context: context,
                                           providerId: providerId, model: model,
-                                          rolesOverride: roles)
+                                          rolesOverride: roles, capture: researchCapture,
+                                          councilCapture: councilCapture)
                     }
                     let verification: HeavyRouteResult.Verification
                     if interrupted.value != nil {
@@ -998,15 +1023,31 @@ enum KistRunner {
                             ? "research was rejected before builder verification ran"
                             : "evidence synthesis and board seeding have no deterministic execution oracle")
                     }
-                    return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
-                                            review: .handledInternally("research feeds its evidence dossier through the role-bound council"),
-                                            verification: verification)
+                    let verifiedResearch = HeavyRouteResult.verifiedResearchContext(
+                        researchCapture.get(), projectRoot: root)
+                    let verifiedCouncil = HeavyRouteResult.verifiedCouncilContext(
+                        councilCapture.get(), projectRoot: root)
+                    let references = (verifiedResearch?.artifactReferences ?? [])
+                        + (verifiedCouncil?.artifactReferences ?? [])
+                    let substantiveSummary = exitCode == 0 && interrupted.value == nil
+                        ? researchHandoffSummary(
+                            councilFinalPlan: verifiedCouncil?.substantiveSummary,
+                            dossier: verifiedResearch?.substantiveSummary)
+                        : nil
+                    return HeavyRouteResult(
+                        exitCode: exitCode, interruption: interrupted.value,
+                        review: .handledInternally("research feeds its evidence dossier through the role-bound council"),
+                        verification: verification,
+                        substantiveSummary: substantiveSummary,
+                        artifactReferences: references)
                 }
                 repl.dive = { g, roles in
                     // Same ESC/typeahead watcher as research — top-level, sequential. Dive is LOCAL-ONLY:
                     // no web, no cross-repo estate sweep. It reads our code and consults the panel.
                     TurnInputQueue.shared.begin()
                     defer { TurnInputQueue.shared.end() }
+                    let researchCapture = ResearchPipelineCaptureBox()
+                    let councilCapture = CouncilPipelineCaptureBox()
                     let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
                     let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
                         interrupted.value = reason
@@ -1017,14 +1058,28 @@ enum KistRunner {
                     }) {
                         await runDive(opts, goal: g, registry: registry, root: root,
                                       tools: tools, context: context,
-                                      providerId: providerId, model: model, rolesOverride: roles)
+                                      providerId: providerId, model: model, rolesOverride: roles,
+                                      capture: researchCapture, councilCapture: councilCapture)
                     }
+                    let verifiedResearch = HeavyRouteResult.verifiedResearchContext(
+                        researchCapture.get(), projectRoot: root)
+                    let verifiedCouncil = HeavyRouteResult.verifiedCouncilContext(
+                        councilCapture.get(), projectRoot: root)
+                    let references = (verifiedResearch?.artifactReferences ?? [])
+                        + (verifiedCouncil?.artifactReferences ?? [])
+                    let substantiveSummary = exitCode == 0 && interrupted.value == nil
+                        ? researchHandoffSummary(
+                            councilFinalPlan: verifiedCouncil?.substantiveSummary,
+                            dossier: verifiedResearch?.substantiveSummary)
+                        : nil
                     return HeavyRouteResult(
                         exitCode: exitCode, interruption: interrupted.value,
                         review: .handledInternally("the wide panel reads the same grounded code dossier"),
                         verification: .unavailable(interrupted.value == nil
                             ? "a grounded code read has no deterministic execution oracle"
-                            : "the dive was interrupted before completion"))
+                            : "the dive was interrupted before completion"),
+                        substantiveSummary: substantiveSummary,
+                        artifactReferences: references)
                 }
                 repl.evolve = { brief in
                     // On-demand, transparent self-evolution proof. Manual only — the autonomous caller
@@ -1125,6 +1180,18 @@ enum KistRunner {
             if opts.eval {
                 return await runEval(opts, goal: opts.goal ?? "", registry: registry, root: root,
                                      tools: tools, context: context, providerId: providerId, model: model)
+            }
+            // Delegation is its own authority lane. Forced builder/research/fleet flags describe HOW a
+            // fresh normal task runs; they must not turn the parent into a mutator or bypass its
+            // host-bound child grant. Plan mode is still honored by runReadOnlyOneShot, while a sealed
+            // plan-execute resume keeps its mission identity and is never reinterpreted as fresh work.
+            if opts.planExecuteResumeID == nil,
+               PromptCompiler.inferIntent(goal, mode: .inline) == .delegate {
+                return await runReadOnlyOneShot(
+                    opts, goal: goal, registry: registry, root: root,
+                    tools: tools, context: context, checkpoints: checkpoints,
+                    fetchAllowedHosts: fetchAllowedHosts, toolMode: toolMode,
+                    providerId: providerId, model: model)
             }
             if opts.cobolo {
                 return await runBuilderCompatibility(opts, goal: goal, registry: registry, root: root,

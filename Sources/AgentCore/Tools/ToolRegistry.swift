@@ -26,6 +26,12 @@ public struct ToolRegistry: Sendable {
         self.tools = map
     }
 
+    /// Build an exact capability projection without auto-installing sibling/control tools. Callers must
+    /// have already selected trusted implementations; this constructor preserves that ceiling verbatim.
+    init(capabilityScoped tools: [AgentTool]) {
+        self.init(tools, installDelegationControls: false)
+    }
+
     /// The portable, Foundation-only tool set shared by Kist and mcp-server. Pure
     /// filesystem + search + (policy-gated) shell — NO AppKit/desktop-automation tools.
     /// Those stay in the GUI app because they cannot exist on Linux headless.
@@ -84,6 +90,21 @@ public struct ToolRegistry: Sendable {
     public func all() -> [AgentTool] { Array(tools.values) }
 
     public var names: [String] { tools.keys.sorted() }
+
+    /// Record a host authority denial without invoking the denied implementation. Ordinary unknown and
+    /// ToolGate denials are audited by `execute`; pre-dispatch effect-contract blocks use this companion
+    /// seam so invented writes remain visible in receipts while remaining impossible to execute.
+    func policyDenied(name: String, arguments: [String: Any], reason: String,
+                      context: ToolContext) async -> ToolResult {
+        let (keys, digest) = AuditLog.digest(arguments)
+        let activeAllowlist = await context.skillTracker?.activeToolAllowlist()
+        await context.auditLog?.record(AuditEntry(
+            at: Self.now(), tool: name, argKeys: keys, argsDigest: digest,
+            outcome: "blocked_auth", success: false,
+            scope: activeAllowlist.map { $0.sorted() },
+            correlationID: context.correlationID))
+        return .failure(reason)
+    }
 
     /// Build-relevant effects for one invocation, classified from the complete arguments at the same
     /// registry seam every loop executes through. The result is recorded with the trajectory so later
@@ -144,6 +165,21 @@ public struct ToolRegistry: Sendable {
     /// Execute a tool by name, never throwing — unknown tools and thrown errors are
     /// normalized into a failed `ToolResult` so the agent loop can observe and recover.
     public func execute(name: String, arguments: [String: Any], context: ToolContext) async -> ToolResult {
+        await executeImpl(name: name, arguments: arguments, hostArguments: [:], context: context)
+    }
+
+    /// Execute with additional host-owned arguments that are deliberately absent from the advertised
+    /// model schema. The caller-supplied arguments are still validated against that public schema before
+    /// the trusted additions reach the implementation, so a model cannot forge an internal authority
+    /// field. This is module-internal because only host orchestration code may bind those values.
+    func executeHostBound(name: String, arguments: [String: Any],
+                          hostArguments: [String: Any], context: ToolContext) async -> ToolResult {
+        await executeImpl(name: name, arguments: arguments,
+                          hostArguments: hostArguments, context: context)
+    }
+
+    private func executeImpl(name: String, arguments: [String: Any],
+                             hostArguments: [String: Any], context: ToolContext) async -> ToolResult {
         let spanStartedAt = Date()
         let telemetryStarted = DispatchTime.now().uptimeNanoseconds
         // Audit at THE choke point (council #1): one immutable record per invocation, capturing the
@@ -210,16 +246,19 @@ public struct ToolRegistry: Sendable {
             return await traced(.failure("unknown tool: \(name)"),
                                 argumentKeys: rawArgKeys, argumentsDigest: rawArgsDigest)
         }
-        let effectiveArguments = (tool as? any ToolArgumentCanonicalizing)?
+        let callerArguments = (tool as? any ToolArgumentCanonicalizing)?
             .canonicalizeToolArguments(arguments) ?? arguments
-        let (_, argsDigest) = AuditLog.digest(effectiveArguments)
+        var effectiveArguments = callerArguments
+        for (key, value) in hostArguments { effectiveArguments[key] = value }
+        let (effectiveArgKeys, argsDigest) = AuditLog.digest(effectiveArguments)
         // Authorization scope (plan-only / needs-approval), skill capability scope, audit, secret-mask,
         // and the run are ALL the SHARED gate (ToolGate) now — the one enforcement site that composite
         // sub-actions also route through, so a research_run sub-action can't skip the action-class gate
         // (Codex HIGH). execute only owns the unknown-tool audit above. Forward the allow-list we ALREADY
         // read so the gate doesn't re-read it (one read drives both audits + the decision; DeepSeek LOW).
         let result = await ToolGate.run(name: name, arguments: effectiveArguments, context: context,
-                                  precomputedAllowlist: .some(activeAllowlist), parameters: tool.parameters) {
+                                  precomputedAllowlist: .some(activeAllowlist), parameters: tool.parameters,
+                                  validationArguments: callerArguments) {
             try await tool.execute(arguments: effectiveArguments, context: context)
         }
         let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
@@ -228,7 +267,7 @@ public struct ToolRegistry: Sendable {
             elapsedMilliseconds: max(1, Int(elapsed / 1_000_000)),
             workspaceRootIdentity: try? BuilderWorkspaceRootIdentity.capture(
                 rootPath: context.projectRoot))
-        return await traced(result, argumentKeys: rawArgKeys, argumentsDigest: argsDigest)
+        return await traced(result, argumentKeys: effectiveArgKeys, argumentsDigest: argsDigest)
     }
 
     /// Epoch seconds without `Date()` ambiguity (kept simple + Sendable).

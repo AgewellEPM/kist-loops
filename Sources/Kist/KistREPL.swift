@@ -16,6 +16,10 @@ final class KistREPL {
     var fleet: ((_ goal: String, _ agents: Int, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Escalate to PLAN→EXECUTE (a typed DAG built by the team) from inside the conversation.
     var planExecute: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
+    /// Context-aware sibling used for referential builds. The canonical operator goal and the bounded
+    /// prior-result context travel as different typed arguments so safety gates never classify prose.
+    var planExecuteWithContext: ((_ authorityGoal: String, _ context: PriorResultContext,
+                                  _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Resume one exact PLAN→EXECUTE mission. Kept separate so every existing build route stays fresh.
     var resumePlanExecute: ((_ missionID: PlanExecuteMissionID, _ goal: String,
                             _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
@@ -134,7 +138,7 @@ final class KistREPL {
     var saveTranscript: ((_ transcript: [ChatMessage], _ path: String) throws -> String)? = nil
     /// Compile messy user text into a clear, self-contained task brief before handing it to the loop.
     var briefCompiler: ((_ input: String, _ roles: RoleBindings, _ mode: PromptCompiler.Mode,
-                        _ transcript: [ChatMessage], _ intent: TaskBrief.Intent) -> String)? = nil
+                        _ transcript: [ChatMessage], _ outcome: OutcomeContract) -> String)? = nil
     /// Human-visible specialist adoption for the next turn ("acting as: security-auditor").
     var personaDisplay: ((_ input: String) -> String?)? = nil
     /// Lines typed into an approval prompt that were not approval answers, queued for the next REPL turn.
@@ -186,6 +190,9 @@ final class KistREPL {
     var submittedTurnSpans: [AgentSpan] = []
     var transcript: [ChatMessage] = []
     var humanTranscript: [ChatMessage] = []
+    /// The last host-admitted outcome survives route boundaries so a failed-result follow-up can
+    /// continue the same goal without asking Luke to restate the mutation imperative.
+    var lastOutcomeContract: OutcomeContract?
     var style = ReplStyle()
     var currentPersona = "captain"
     var copilot = CopilotConfig()
@@ -193,6 +200,7 @@ final class KistREPL {
     var repairPhaseFailed = false
     var noInlinePreviewHintShown = false
     var lastTurnInterrupted = false
+    var lastTurnInterruption: InterruptibleTurn.InterruptReason?
     var lastConfidenceReport: ConfidenceReport?
     var chainServer: ChainServer?              // /chain — the local automation-builder web server (kept alive for the session)
     var sessionStart = Date()
@@ -388,7 +396,16 @@ final class KistREPL {
                 }
             }
 
-            if let task = Self.taskSelectedByUser(input, projectRoot: projectRoot,
+            // Resolve the raw submitted directive before any natural-language shortcut can perform an
+            // effect. Explicit delegation owns the parent lane, so task selection, sandbox control,
+            // specialist forging, and other deterministic interceptors must not steal the child task.
+            let submittedMode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+            let submittedOutcome = PromptCompiler.resolveOutcome(
+                input, mode: submittedMode, previous: lastOutcomeContract)
+            let submittedIsDelegation = submittedOutcome.intent == .delegate
+
+            if !submittedIsDelegation,
+               let task = Self.taskSelectedByUser(input, projectRoot: projectRoot,
                                                   sessionStartedAt: sessionStart) {
                 if Self.isSimulationRemediationTask(task) {
                     print("\u{001B}[37m↳ running simulation remediation task [\(task.id)] directly · plan→execute bypassed\u{001B}[0m")
@@ -400,26 +417,40 @@ final class KistREPL {
                 }
                 let taskPrompt = Self.executionBrief(for: task, userInput: input)
                 _ = PlanStore(projectRoot: projectRoot).update(id: task.id, status: .inProgress)
-                if let planExecute {
+                if planExecute != nil || planExecuteWithContext != nil {
+                    let outcome = PromptCompiler.resolveOutcome(
+                        taskPrompt, mode: .planExecute, previous: lastOutcomeContract)
+                    let executionGoal = outcome.executionRequest(currentRequest: taskPrompt)
                     print("\u{001B}[37m↳ running task [\(task.id)] through plan→execute · \(roleSelection.summary)\u{001B}[0m")
                     await runHeavyRoute(goal: taskPrompt, intent: .build, mode: .planExecute,
-                                        execution: "task-plan-execute", startProof: true) {
-                        await planExecute(taskPrompt, roleSelection.bindings)
+                                        execution: "task-plan-execute", startProof: true,
+                                        outcomeContract: outcome,
+                                        rememberInConversation: true) {
+                        await invokePlanExecute(authorityGoal: executionGoal,
+                                                priorResultContext: outcome.priorResultContext,
+                                                roles: roleSelection.bindings)
                     }
                 } else {
                     proofStore?.startTurn(goal: taskPrompt)
                     armTurnLoop()   // arm the permission tier — never run a turn on a stale loop
                     let mode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
-                    let intent = PromptCompiler.inferIntent(taskPrompt, mode: mode)
+                    let outcome = PromptCompiler.resolveOutcome(taskPrompt, mode: mode,
+                                                                previous: lastOutcomeContract)
+                    let intent = outcome.intent
                     proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
                                              text: "intent=\(intent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: intent, mode: mode).rawValue) execution=task-inline"))
                     let compiled = briefCompiler?(taskPrompt, roleSelection.bindings, mode,
-                                                  humanTranscript, intent) ?? taskPrompt
+                                                  humanTranscript, outcome) ?? taskPrompt
                     let enriched = attachCaptainContext(to: compiled, objective: taskPrompt)
                     let reviewBaseline = reviewBaselineIfArmed(intent: intent)
+                    let delegationGrant = intent == .delegate
+                        ? PromptCompiler.delegationGrant(
+                            for: taskPrompt, resolvedOutcome: outcome) : nil
                     let oc = await runTurnInterruptible(loop: loop, userInput: enriched,
-                                                        rawRequest: taskPrompt, resolvedIntent: intent)
-                    rememberHumanTurn(user: taskPrompt, assistantSummary: oc.summary)
+                                                        rawRequest: taskPrompt, resolvedIntent: intent,
+                                                        delegationGrant: delegationGrant)
+                    rememberModelTurn(user: taskPrompt, assistantSummary: oc.summary,
+                                      outcomeContract: outcome)
                     await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
                     await runCopilotReview(task: taskPrompt, baselineDiff: reviewBaseline,
                                            turnIntent: intent, turnSucceeded: oc.success)
@@ -443,14 +474,14 @@ final class KistREPL {
             // NATURAL-LANGUAGE SANDBOX CONTROL: "run it headless" / "run it in a small window at the
             // top of my screen" drive the isolated macOS-guest sandbox (~/bin/vmsandbox) directly —
             // deterministic device command, no LLM turn. Conservative parser; see SandboxIntent.
-            if let sandbox = SandboxIntent.parse(input) {
+            if !submittedIsDelegation, let sandbox = SandboxIntent.parse(input) {
                 SandboxIntent.execute(sandbox)
                 continue
             }
 
             // NATURAL-LANGUAGE AGENT CREATION: "make me an agent that reviews Swift UI" should forge a
             // specialist, same as `/agent new ...`, instead of becoming a generic chat prompt.
-            if let specialistDescription = Self.parseForgeIntent(input) {
+            if !submittedIsDelegation, let specialistDescription = Self.parseForgeIntent(input) {
                 guard let forge else { print("\u{001B}[31mforging isn't available here\u{001B}[0m"); continue }
                 await forge(specialistDescription, roleSelection.bindings)
                 continue
@@ -466,7 +497,8 @@ final class KistREPL {
             // with reasoning keywords would otherwise flip "ask deepseek architect X" to a different
             // reasoning model). Set on an explicit .setModel intent; gates the autoRoute block.
             var userPinnedModelThisTurn = false
-            if let intent = ControlIntentParser.parse(input, knownProviders: providerAliases) {
+            if !submittedIsDelegation,
+               let intent = ControlIntentParser.parse(input, knownProviders: providerAliases) {
                 switch intent.action {
                 case .setModel(let binding):
                     userPinnedModelThisTurn = true
@@ -505,21 +537,36 @@ final class KistREPL {
                 if intent.isControlOnly { continue }          // pure directive → applied; wait for the task
                 // A team was named AND a task given → run it as a team (plan→execute) so the roles are
                 // actually USED — a normal turn would only use the default model. Model-only → normal turn.
-                if case .setRoles = intent.action, let planExecute {
+                if case .setRoles = intent.action,
+                   planExecute != nil || planExecuteWithContext != nil {
                     let routedTask = Self.expandBoardReference(intent.residualTask, projectRoot: projectRoot,
                                                                sessionStartedAt: sessionStart)
-                    print("\u{001B}[37m↳ running as your team (plan→execute) · \(roleSelection.summary)\u{001B}[0m")
-                    await runHeavyRoute(goal: routedTask, intent: .build, mode: .planExecute,
-                                        execution: "team-plan-execute", startProof: true) {
-                        await planExecute(routedTask, roleSelection.bindings)
+                    let outcome = PromptCompiler.resolveOutcome(
+                        routedTask, mode: .planExecute, previous: lastOutcomeContract)
+                    if outcome.intent != .delegate {
+                        let executionGoal = outcome.executionRequest(currentRequest: routedTask)
+                        print("\u{001B}[37m↳ running as your team (plan→execute) · \(roleSelection.summary)\u{001B}[0m")
+                        await runHeavyRoute(goal: routedTask, intent: .build, mode: .planExecute,
+                                            execution: "team-plan-execute", startProof: true,
+                                            outcomeContract: outcome,
+                                            rememberInConversation: true) {
+                            await invokePlanExecute(authorityGoal: executionGoal,
+                                                    priorResultContext: outcome.priorResultContext,
+                                                    roles: roleSelection.bindings)
+                        }
+                        continue
                     }
-                    continue
                 }
                 messageBody = Self.expandBoardReference(intent.residualTask, projectRoot: projectRoot,
                                                         sessionStartedAt: sessionStart)
             }
 
-            if let request = Self.selfCodebaseAuditRequest(messageBody, currentProjectRoot: projectRoot) {
+            let preDispatchMode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
+            let preDispatchOutcome = PromptCompiler.resolveOutcome(
+                messageBody, mode: preDispatchMode, previous: lastOutcomeContract)
+
+            if preDispatchOutcome.intent != .delegate,
+               let request = Self.selfCodebaseAuditRequest(messageBody, currentProjectRoot: projectRoot) {
                 print("\u{001B}[37m↳ self-codebase audit · \(request.projectRoot)\u{001B}[0m")
                 let report = CaptainImmuneSystem(projectRoot: request.projectRoot)
                     .run(seedRepairs: request.seedRepairs, trajectory: recorder?.snapshot() ?? [])
@@ -531,25 +578,28 @@ final class KistREPL {
                 continue
             }
 
-            if Self.isLegalResearchIntent(messageBody) {
+            if preDispatchOutcome.intent != .delegate,
+               Self.isLegalResearchIntent(messageBody) {
                 await runLegalResearchCommand(messageBody, forceResearch: false)
                 continue
             }
 
-            switch Self.handleDocumentExportRequest(messageBody,
-                                                    humanTranscript: humanTranscript,
-                                                    projectRoot: projectRoot) {
-            case .notDocumentExport:
-                break
-            case .handled(let exportMessage):
-                print(exportMessage)
-                continue
-            case .failed(let reason):
-                print("\u{001B}[31mdocument export failed: \(reason)\u{001B}[0m")
-                await openFailureAnalysis(goal: messageBody,
-                                          summary: "document export failed: \(reason)",
-                                          automaticRepair: true)
-                continue
+            if preDispatchOutcome.intent != .delegate {
+                switch Self.handleDocumentExportRequest(messageBody,
+                                                        humanTranscript: humanTranscript,
+                                                        projectRoot: projectRoot) {
+                case .notDocumentExport:
+                    break
+                case .handled(let exportMessage):
+                    print(exportMessage)
+                    continue
+                case .failed(let reason):
+                    print("\u{001B}[31mdocument export failed: \(reason)\u{001B}[0m")
+                    await openFailureAnalysis(goal: messageBody,
+                                              summary: "document export failed: \(reason)",
+                                              automaticRepair: true)
+                    continue
+                }
             }
 
             // MULTIMODAL: lift any dragged-in media paths out of the line into attachments. When the
@@ -581,16 +631,42 @@ final class KistREPL {
             // and gemini reviews", "work as a team to X" → arm the coder(lead)+reviewer(co) partnership
             // + review→fix loop, then run the residual task. No team phrasing ⇒ nil ⇒ a normal turn.
             var armedTeamThisTurn = false
-            if !lineFromQueue, let team = TeamIntent.parse(messageText) {
+            if preDispatchOutcome.intent != .delegate,
+               !lineFromQueue, let team = TeamIntent.parse(messageText) {
                 armTeam(team)
                 armedTeamThisTurn = true
                 messageText = team.goal
                 if messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }  // pure setup
             }
-            // Resolve semantics once from the raw, current request. Routing, prompt compilation, the
-            // headless progress governor, monitoring, and replay all consume this same value.
+            // Resolve the operator's observable result BEFORE selecting an execution lane. The model
+            // may interpret shorthand against recent conversation, while PromptCompiler alone admits
+            // authority and freezes mutation scope. Every downstream consumer gets this one contract.
             let turnMode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
-            let turnIntent = PromptCompiler.inferIntent(messageText, mode: turnMode)
+            var turnOutcome = messageText == messageBody && turnMode == preDispatchMode
+                ? preDispatchOutcome
+                : PromptCompiler.resolveOutcome(
+                    messageText, mode: turnMode, previous: lastOutcomeContract)
+            let routingWasInterrupted = MutableBox(false)
+            var routeProposal: ConversationRouter.Proposal?
+            if let router, !lineFromQueue, !armedTeamThisTurn {
+                let conversationContext = PromptCompiler.conversationContext(from: humanTranscript)
+                let resolution = await InterruptibleTurn.run(onInterrupt: { reason in
+                    routingWasInterrupted.value = true
+                    if reason == .cancel { TurnInputQueue.shared.clearAll() }
+                    else { TurnInputQueue.shared.commitPending() }
+                    print("\n\u{001B}[33m"
+                          + (reason == .cancel ? "⎋⎋ intent resolution cancelled" : "⎋ intent resolution interrupted — your turn")
+                          + "\u{001B}[0m")
+                }) {
+                    await router.resolve(messageText, mode: turnMode,
+                                         conversationContext: conversationContext,
+                                         previous: self.lastOutcomeContract)
+                }
+                turnOutcome = resolution.contract
+                routeProposal = resolution.proposal
+            }
+            if routingWasInterrupted.value { continue }
+            let turnIntent = turnOutcome.intent
 
             // AUTO-ROUTE (Increment B): for a plain message, the router may PROPOSE an escalation to a
             // fleet / plan-DAG / research pass / council. It never spends big silently — we confirm first; a no falls through to a
@@ -600,11 +676,15 @@ final class KistREPL {
             // the partnership the user just asked for (review catch).
             // "Dig in deep" / "consult the minds": an explicit ask to hear from EVERY reachable model, not
             // one model answering (and re-answering) alone. Fires only on the narrow phrase set, so a normal
-            // message is never hijacked; runs before the router so it isn't shadowed by a research proposal.
-            if let digDeep, !lineFromQueue, AICouncil.looksLikeDigDeep(messageText) {
+            // message is never hijacked; explicit council intent runs before an inferred route proposal.
+            if turnIntent != .delegate,
+               let digDeep, !lineFromQueue, AICouncil.looksLikeDigDeep(messageText) {
+                let executionGoal = turnOutcome.executionRequest(currentRequest: messageText)
                 await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
-                                    execution: "dig-in-deep", startProof: false) {
-                    await digDeep(messageText, roleSelection.bindings)
+                                    execution: "dig-in-deep", startProof: false,
+                                    outcomeContract: turnOutcome,
+                                    rememberInConversation: true) {
+                    await digDeep(executionGoal, roleSelection.bindings)
                 }
                 continue
             }
@@ -613,30 +693,23 @@ final class KistREPL {
             // plans and never built them. Only for an explicit build intent, not in plan mode, not a
             // team/queued line. The worker's edits stay approval-gated; /plan (or "just plan …") keeps it
             // read-only. This is the main-turn half of the "stop researching, start building" contract.
-            if turnIntent == .build, turnMode != .plan, !armedTeamThisTurn, !lineFromQueue, let planExecute {
+            if turnOutcome.allowsMutation, turnIntent == .build, turnMode != .plan,
+               !armedTeamThisTurn, !lineFromQueue,
+               planExecute != nil || planExecuteWithContext != nil {
+                let executionOutcome = turnOutcome.inMode(.planExecute)
+                let executionGoal = executionOutcome.executionRequest(currentRequest: messageText)
                 print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · action-first: firing the plan→execute worker (edits still ask; /plan for read-only)\u{001B}[0m")
                 await runHeavyRoute(goal: messageText, intent: .build, mode: .planExecute,
-                                    execution: "build", startProof: false) {
-                    await planExecute(messageText, roleSelection.bindings)
+                                    execution: "build", startProof: false,
+                                    outcomeContract: executionOutcome,
+                                    rememberInConversation: true) {
+                    await invokePlanExecute(authorityGoal: executionGoal,
+                                            priorResultContext: executionOutcome.priorResultContext,
+                                            roles: roleSelection.bindings)
                 }
                 await printTurnSummary()
                 continue
             }
-            let routingWasInterrupted = MutableBox(false)
-            var routeProposal: ConversationRouter.Proposal?
-            if let router, !lineFromQueue, !armedTeamThisTurn {
-                routeProposal = await InterruptibleTurn.run(onInterrupt: { reason in
-                    routingWasInterrupted.value = true
-                    if reason == .cancel { TurnInputQueue.shared.clearAll() }
-                    else { TurnInputQueue.shared.commitPending() }
-                    print("\n\u{001B}[33m"
-                          + (reason == .cancel ? "⎋⎋ routing cancelled" : "⎋ routing interrupted — your turn")
-                          + "\u{001B}[0m")
-                }) {
-                    await router.propose(messageText, resolvedIntent: turnIntent)
-                }
-            }
-            if routingWasInterrupted.value { continue }
             if let proposal = routeProposal {
                 FileHandle.standardOutput.write(Data(("\u{001B}[33m" + proposal.prompt + " \u{001B}[0m").utf8))
                 let ans = StdinArbiter.shared.withStdin {
@@ -646,28 +719,48 @@ final class KistREPL {
                 if ans == "y" || ans == "yes" {
                     switch proposal.route {
                     case .fleet(let agents):
-                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
-                                            execution: "fleet(\(agents))", startProof: false) {
+                        let executionOutcome = turnOutcome.inMode(.fleet)
+                        let executionGoal = executionOutcome.executionRequest(currentRequest: messageText)
+                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: .fleet,
+                                            execution: "fleet(\(agents))", startProof: false,
+                                            outcomeContract: executionOutcome,
+                                            rememberInConversation: true) {
                             guard let fleet else { return unavailableHeavyRoute("fleet") }
-                            return await fleet(messageText, agents, roleSelection.bindings)
+                            return await fleet(executionGoal, agents, roleSelection.bindings)
                         }
                     case .planExecute:
-                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
-                                            execution: "plan-execute", startProof: false) {
-                            guard let planExecute else { return unavailableHeavyRoute("plan-execute") }
-                            return await planExecute(messageText, roleSelection.bindings)
+                        let executionOutcome = turnOutcome.inMode(.planExecute)
+                        let executionGoal = executionOutcome.executionRequest(currentRequest: messageText)
+                        await runHeavyRoute(goal: messageText, intent: turnIntent, mode: .planExecute,
+                                            execution: "plan-execute", startProof: false,
+                                            outcomeContract: executionOutcome,
+                                            rememberInConversation: true) {
+                            guard planExecute != nil || planExecuteWithContext != nil else {
+                                return unavailableHeavyRoute("plan-execute")
+                            }
+                            return await invokePlanExecute(authorityGoal: executionGoal,
+                                                           priorResultContext: executionOutcome.priorResultContext,
+                                                           roles: roleSelection.bindings)
                         }
                     case .council:
+                        let executionGoal = turnOutcome.executionRequest(currentRequest: messageText)
                         await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
-                                            execution: "council", startProof: false) {
+                                            execution: "council", startProof: false,
+                                            outcomeContract: turnOutcome,
+                                            rememberInConversation: true) {
                             guard let council else { return unavailableHeavyRoute("council") }
-                            return await council(messageText, roleSelection.bindings, false)
+                            return await council(executionGoal, roleSelection.bindings, false)
                         }
                     case .research:
+                        // Research uses the canonical host-owned goal directly as its durable goal,
+                        // URL source, and search query. Never feed it generated prompt/context text.
+                        let executionGoal = turnOutcome.desiredResult
                         await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
-                                            execution: "research", startProof: false) {
+                                            execution: "research", startProof: false,
+                                            outcomeContract: turnOutcome,
+                                            rememberInConversation: true) {
                             guard let research else { return unavailableHeavyRoute("research") }
-                            return await research(messageText, roleSelection.bindings)
+                            return await research(executionGoal, roleSelection.bindings)
                         }
                     }
                     continue
@@ -694,9 +787,9 @@ final class KistREPL {
 
             armTurnLoop()   // apply the permission tier (plan/approvals); confirm bypass if just armed
             proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
-                                     text: "intent=\(turnIntent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: turnIntent, mode: turnMode).rawValue) execution=inline model=\(Self.render(activeBinding))"))
+                                     text: "intent=\(turnIntent.rawValue) authority=\(turnOutcome.authority.rawValue) outcome=\(turnOutcome.expectedOutcome.rawValue) execution=inline model=\(Self.render(activeBinding))"))
             let compiled = briefCompiler?(messageText, roleSelection.bindings, turnMode,
-                                          humanTranscript, turnIntent) ?? messageText
+                                          humanTranscript, turnOutcome) ?? messageText
             if let display = personaDisplay?(messageText) { print(Self.stdoutColorEnabled(projectRoot: projectRoot) ? "\u{001B}[95;1m🎭 \(display)\u{001B}[0m" : "↳ \(display)") }
             var enriched = attachCaptainContext(to: compiled, objective: messageText)
             // STYLE (`/mode`): prepend the requested voice — interaction mode / reading level / custom
@@ -739,9 +832,13 @@ final class KistREPL {
             }
             let transcriptBeforeModelAttempt = transcript
             let reviewBaseline = reviewBaselineIfArmed(intent: turnIntent)
+            let turnDelegationGrant = turnIntent == .delegate
+                ? PromptCompiler.delegationGrant(
+                    for: messageText, resolvedOutcome: turnOutcome) : nil
             var turnAuthor = activeBinding
             var oc = await runTurnInterruptible(loop: loop, userInput: enriched,
-                                                rawRequest: messageText, resolvedIntent: turnIntent)
+                                                rawRequest: messageText, resolvedIntent: turnIntent,
+                                                delegationGrant: turnDelegationGrant)
             // A transient live failure (rate limit / outage) benches this provider CROSS-PROCESS
             // even when no substitute exists — one-shot lanes and future sessions must not walk
             // into the same wall (parity with KistRunner+OneShotResilience, 2026-08-14).
@@ -772,9 +869,11 @@ final class KistREPL {
                                                            extendedThinking))
                 turnAuthor = substitution.replacement
                 oc = await runTurnInterruptible(loop: replacementLoop, userInput: enriched,
-                                                rawRequest: messageText, resolvedIntent: turnIntent)
+                                                rawRequest: messageText, resolvedIntent: turnIntent,
+                                                delegationGrant: turnDelegationGrant)
             }
-            rememberHumanTurn(user: messageText, assistantSummary: oc.summary)
+            rememberModelTurn(user: messageText, assistantSummary: oc.summary,
+                              outcomeContract: turnOutcome)
             await printTurnSummary(outcomeSummary: oc.summary, success: oc.success)
             // Opt-in second opinion: ordinary Q&A returns one canonical answer unless the user armed review.
             await runCopilotReview(task: messageText, answer: oc.summary, allowAdvisory: true,

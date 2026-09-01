@@ -29,12 +29,28 @@ extension KistREPL {
         // Show the "this terminal can't render inline images" hint at most once per session, so a
         // user on Terminal.app (no inline-image protocol) isn't left thinking the drop silently broke.
 
-        func rememberHumanTurn(user: String, assistantSummary: String) {
+        func rememberHumanTurn(user: String,
+                               assistantSummary: String,
+                               outcomeContract: OutcomeContract? = nil) {
             humanTranscript.append(ChatMessage(role: .user, content: user))
             if !assistantSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 humanTranscript.append(ChatMessage(role: .assistant, content: assistantSummary))
             }
             if humanTranscript.count > 20 { humanTranscript = Array(humanTranscript.suffix(20)) }
+            if let outcomeContract { lastOutcomeContract = outcomeContract }
+        }
+
+        /// Model-turn wrapper: a hard cancel means "drop this turn," including its authority. A single
+        /// ESC interjection keeps the resumable goal and partial conversational context.
+        func rememberModelTurn(user: String,
+                               assistantSummary: String,
+                               outcomeContract: OutcomeContract) {
+            guard lastTurnInterruption != .cancel else {
+                lastOutcomeContract = nil
+                return
+            }
+            rememberHumanTurn(user: user, assistantSummary: assistantSummary,
+                              outcomeContract: outcomeContract)
         }
 
         // Apply the active permission tier to `loop` right before a turn runs. If the user shuffled onto
@@ -72,10 +88,12 @@ extension KistREPL {
         func runTurnInterruptible(loop l: HeadlessAgentLoop, userInput: String,
                                   attachments: [MediaAttachment] = [],
                                   rawRequest: String? = nil,
-                                  resolvedIntent: TaskBrief.Intent? = nil) async -> HeadlessAgentLoop.Outcome {
+                                  resolvedIntent: TaskBrief.Intent? = nil,
+                                  delegationGrant: DelegationGrant? = nil) async -> HeadlessAgentLoop.Outcome {
             let preTurnTranscript = transcript
             let tBox = MutableBox(transcript)
             lastTurnInterrupted = false   // fresh turn; post-turn guards read it, next turn resets it
+            lastTurnInterruption = nil
             // Collection is session-wide (submit → routing → model → post-review). InterruptibleTurn
             // borrows that session's one watcher and only registers this active model task.
             // R1: single ESC = interject (take over, work stays resumable); double ESC = hard
@@ -95,13 +113,15 @@ extension KistREPL {
                 let outcome = await l.turn(transcript: &t, userInput: userInput,
                                            attachments: attachments,
                                            rawRequest: rawRequest,
-                                           resolvedIntent: resolvedIntent)
+                                           resolvedIntent: resolvedIntent,
+                                           delegationGrant: delegationGrant)
                 tBox.value = t
                 return outcome
             }
             // "Dropping this turn" must MEAN dropped: on cancel the cancelled turn's user message +
             // partial output must not keep colouring future context (review catch).
             transcript = (reasonBox.value == .cancel) ? preTurnTranscript : tBox.value
+            lastTurnInterruption = reasonBox.value
             lastTurnInterrupted = reasonBox.value != nil
             // R2a: interject = what you typed IS the next instruction (queued + drained right
             // away); hard cancel = typed + queued input is dropped with the turn.
@@ -190,13 +210,29 @@ extension KistREPL {
             // is resolved from the same raw prompt passed into AgentCore; attachment presence must not erase it.
             let text = prompt.isEmpty ? "Describe what's in the attached media and note anything important." : prompt
             let mediaMode: PromptCompiler.Mode = perm.mode.isPlan ? .plan : .inline
-            let mediaIntent = PromptCompiler.inferIntent(text, mode: mediaMode)
+            let mediaOutcome = PromptCompiler.resolveOutcome(
+                text, mode: mediaMode, previous: lastOutcomeContract)
+            let mediaIntent = mediaOutcome.intent
             proofStore?.record(.init(kind: .routeSelected, tool: nil, success: nil,
-                                     text: "intent=\(mediaIntent.rawValue) outcome=\(PromptCompiler.expectedOutcome(intent: mediaIntent, mode: mediaMode).rawValue) execution=inline-media"))
+                                     text: "intent=\(mediaIntent.rawValue) authority=\(mediaOutcome.authority.rawValue) outcome=\(mediaOutcome.expectedOutcome.rawValue) execution=inline-media"))
+            if mediaIntent == .delegate {
+                let blocker = "Delegating an attached media item is not supported yet because the child would not receive the attachment. Ask Kist to inspect it directly, or save it and delegate a self-contained task that names the file path."
+                print("\u{001B}[33m\(blocker)\u{001B}[0m")
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: false, text: "failed — \(blocker)"))
+                proofStore?.record(.init(kind: .turnFinalized, tool: nil, success: false,
+                                         text: "intent=delegate expected=delegation result=failed unsupported-media-delegation"))
+                rememberHumanTurn(user: text, assistantSummary: blocker,
+                                  outcomeContract: mediaOutcome)
+                return
+            }
             let mediaInstruction = mediaIntent.expectsMutation
                 ? "The media is ATTACHED directly to this message. Inspect it as evidence, then carry out the requested workspace change with the available tools and verify it. Do not call view_image/read_file merely to locate the attachment and do not ask for its path—it is already here."
                 : "The media is ATTACHED directly to this message — look at it and answer from what you actually see/hear. It is ALREADY provided to you; do NOT call view_image, read_file, run_command, or any tool to find, open, load, or fetch it, and do NOT ask for a file path. Answer directly and finish."
-            let compiled = text + "\n\n" + mediaInstruction
+            let taskBrief = briefCompiler?(
+                text, roleSelection.bindings, mediaMode,
+                humanTranscript, mediaOutcome) ?? text
+            let compiled = taskBrief + "\n\n" + mediaInstruction
             let reviewBaseline = reviewBaselineIfArmed(intent: mediaIntent)
             let mustUseGemini = atts.contains { $0.kind != .image || $0.fileURI != nil }
             // Vision capability is a property of the model the loop is ACTUALLY running (activeBinding),
@@ -256,7 +292,8 @@ extension KistREPL {
                                                     rawRequest: text, resolvedIntent: mediaIntent)
                 }
             }
-            rememberHumanTurn(user: text, assistantSummary: oc.summary)
+            rememberModelTurn(user: text, assistantSummary: oc.summary,
+                              outcomeContract: mediaOutcome)
             await runCopilotReview(task: text, answer: oc.summary, allowAdvisory: true,
                                    authoredBy: turnAuthor, baselineDiff: reviewBaseline,
                                    turnIntent: mediaIntent, turnSucceeded: oc.success)
@@ -297,6 +334,22 @@ extension KistREPL {
             }
         }
 
+        func invokePlanExecute(authorityGoal: String,
+                               priorResultContext: PriorResultContext?,
+                               roles: RoleBindings) async -> HeavyRouteResult {
+            if let priorResultContext, !priorResultContext.isEmpty,
+               let planExecuteWithContext {
+                return await planExecuteWithContext(authorityGoal, priorResultContext, roles)
+            }
+            if let planExecute {
+                return await planExecute(authorityGoal, roles)
+            }
+            return HeavyRouteResult(
+                exitCode: 2, interruption: nil,
+                review: .notApplicable("plan-execute was unavailable in this REPL"),
+                verification: .unavailable("plan-execute never started"))
+        }
+
         /// Run one of the existing long-running REPL routes and close this submitted turn from the
         /// runner's actual result. The route remains responsible for doing the work; this boundary only
         /// prevents a successful-looking synthetic "handed off" record after a failure or ESC.
@@ -306,6 +359,8 @@ extension KistREPL {
                            mode: PromptCompiler.Mode,
                            execution: String,
                            startProof: Bool,
+                           outcomeContract: OutcomeContract? = nil,
+                           rememberInConversation: Bool = false,
                            operation: () async -> HeavyRouteResult) async -> HeavyRouteResult {
             if startProof { proofStore?.startTurn(goal: goal) }
             proofStore?.record(HeavyRouteProof.routeEntry(intent: intent, mode: mode,
@@ -315,6 +370,32 @@ extension KistREPL {
             for entry in HeavyRouteProof.completionEntries(result: result, intent: intent,
                                                             mode: mode, execution: execution) {
                 proofStore?.record(entry)
+            }
+            // Mutation routes always become the active goal so a failed-result follow-up can continue
+            // them. Read-only heavy commands opt in only when their result is part of conversational flow;
+            // generic proof summaries must not displace a real council plan consumed by `/build`.
+            if rememberInConversation || intent.expectsMutation || intent == .desktop {
+                if result.interruption == .cancel {
+                    lastOutcomeContract = nil
+                    return result
+                }
+                let resultCanBecomeContext = result.satisfiesExpectedOutcome(
+                    intent: intent, mode: mode)
+                let rememberedContract = (outcomeContract ?? OutcomeContract(
+                    desiredResult: goal,
+                    intent: intent,
+                    mode: mode,
+                    authority: mode == .plan ? .planMode
+                        : (intent.expectsMutation || intent == .desktop
+                            ? .explicitRequest : .readOnly),
+                    isContinuation: false))
+                    .withResultContext(
+                        summary: resultCanBecomeContext ? result.substantiveSummary : nil,
+                        artifactReferences: resultCanBecomeContext ? result.artifactReferences : [],
+                        succeeded: resultCanBecomeContext)
+                rememberHumanTurn(user: goal,
+                                  assistantSummary: result.transcriptSummary,
+                                  outcomeContract: rememberedContract)
             }
             return result
         }
@@ -337,10 +418,13 @@ extension KistREPL {
             var deterministicVerification: Bool?
             let fulfilledMutationContract = trajectory.contains {
                 $0.success && ($0.observedEffects.confirmsMutation
-                    || (intent == .fleet && $0.observedEffects.progress == .delegation))
+                    || $0.observedEffects.progress == .delegatedMutation)
             }
             let fulfilledEvidenceContract = trajectory.contains {
                 $0.success && [.research, .evidence].contains($0.observedEffects.progress)
+            }
+            let fulfilledDelegationContract = trajectory.contains {
+                $0.success && [.delegation, .delegatedMutation].contains($0.observedEffects.progress)
             }
             let fulfilledExternalAction = trajectory.contains {
                 $0.success && $0.observedEffects.progress == .externalState
@@ -349,7 +433,12 @@ extension KistREPL {
                 deterministicVerification = false
                 proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
                                          success: false,
-                                         text: "failed — this turn promised a mutation but recorded no successful mutation or fleet delegation"))
+                                         text: "failed — this turn promised a mutation but recorded no successful local or delegated mutation"))
+            } else if expected == .delegation, !fulfilledDelegationContract {
+                deterministicVerification = false
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: false,
+                                         text: "failed — this turn promised delegation but recorded no completed child result"))
             } else if expected == .evidence, !fulfilledEvidenceContract {
                 deterministicVerification = false
                 proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
@@ -382,7 +471,12 @@ extension KistREPL {
                 deterministicVerification = true
                 proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
                                          success: true,
-                                         text: "passed — successful non-source mutation or fleet delegation recorded; no source build was required"))
+                                         text: "passed — successful non-source or child-verified delegated mutation recorded; no parent-local source build was required"))
+            } else if expected == .delegation {
+                deterministicVerification = true
+                proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
+                                         success: true,
+                                         text: "passed — a typed child completion was recorded"))
             } else if expected == .evidence {
                 deterministicVerification = true
                 proofStore?.record(.init(kind: .verificationAssessment, tool: nil,
@@ -408,7 +502,8 @@ extension KistREPL {
             // "I will apply the patch" vs "the patch is applied and verified" impossible to confuse —
             // the exact gap Luke hit where a plan was laundered into a done summary.
             if expected == .mutation {
-                let status = BuildStatusReport(trajectory: trajectory)
+                let status = BuildStatusReport(
+                    trajectory: trajectory, finalSuccess: finalSuccess)
                 print(status.render(color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
             }
             return finalSuccess
