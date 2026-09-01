@@ -19,15 +19,39 @@ HOME="$INSTALL_HOME"
 # so append order resolves them identically.
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$INSTALL_HOME/bin"
 export HOME PATH
-has_computer=0; has_shell=0; has_read=0
+# Captain contract v2 (2026-09-01, supersedes the hand-edited v0.17.5 truth pin): routing and
+# roles come from a PINNED config root, never ~/.config/kist — that account config (codex-cli /
+# gpt-5.6-sol, autoRouting off, deepseek excluded) is the proven-broken route the 2026-08-30
+# truth contract quarantined. Fail closed if the pin is missing; falling back to account config
+# would silently reload the rejected state. Escape hatch: ~/bin/kist-truth (pinned v0.17.5).
+CAPTAIN_CONFIG_ROOT="$INSTALL_HOME/.kist/captain-config"
+if [ ! -r "$CAPTAIN_CONFIG_ROOT/kist/config.json" ] || [ ! -r "$CAPTAIN_CONFIG_ROOT/kist/roles.json" ]; then
+  echo "kist: pinned captain config is unavailable at $CAPTAIN_CONFIG_ROOT/kist (config.json + roles.json required)" >&2
+  echo "kist: refusing to fall back to ~/.config/kist (rejected 2026-08-30 contract). Fallback: ~/bin/kist-truth" >&2
+  exit 126
+fi
+XDG_CONFIG_HOME="$CAPTAIN_CONFIG_ROOT"
+export XDG_CONFIG_HOME
+has_computer=0; has_shell=0; has_read=0; has_roles=0; has_project=0
 for arg in "$@"; do
   [ "$arg" = "--enable-computer-use" ] && has_computer=1
   [ "$arg" = "--allow-shell" ] && has_shell=1
   [ "$arg" = "--allow-read" ] && has_read=1
+  [ "$arg" = "--roles" ] && has_roles=1
+  case "$arg" in --project|--project=*|-C) has_project=1 ;; esac
 done
+# Never run with the account HOME as project root: a home-rooted session reads ~/.kist directly
+# (polluted plan board, 940 undecodable cortex rows, shallow-word retrieval — the 2026-08-30
+# contamination). Launching from ~ lands in a clean dedicated workspace instead; launching from
+# any real project directory (or with an explicit --project/-C) is untouched.
+if [ "$has_project" -eq 0 ] && [ "$(pwd -P)" = "$(cd "$INSTALL_HOME" 2>/dev/null && pwd -P)" ]; then
+  /bin/mkdir -p "$INSTALL_HOME/.kist/workspaces/captain" || exit 126
+  cd "$INSTALL_HOME/.kist/workspaces/captain" || exit 126
+fi
 [ "$has_computer" -eq 1 ] || set -- --enable-computer-use "$@"
 [ "$has_shell" -eq 1 ] || set -- --allow-shell "$@"
 [ "$has_read" -eq 1 ] || set -- --allow-read /Volumes "$@"
+[ "$has_roles" -eq 1 ] || set -- --roles truth-team "$@"
 # --sticky-turns is OPT-IN ONLY (project CLAUDE.md contract). The wrapper forced it on 2026-08-02;
 # result: during-turn stdout capture bleached the whole UI white (isatty=0 → no ANSI) and the
 # DECSTBM scroll region corrupted the screen on window resize (2026-08-03 regression). Never

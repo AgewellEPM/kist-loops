@@ -30,11 +30,15 @@ final class DeploymentProvenanceTests: XCTestCase {
     private func run(
         _ executable: URL,
         arguments: [String] = [],
-        environment additions: [String: String] = [:]
+        environment additions: [String: String] = [:],
+        currentDirectory: URL? = nil
     ) throws -> ProcessResult {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        if let currentDirectory {
+            process.currentDirectoryURL = currentDirectory
+        }
         process.environment = ProcessInfo.processInfo.environment.merging(additions) { _, new in new }
         let output = Pipe()
         let error = Pipe()
@@ -268,6 +272,18 @@ final class DeploymentProvenanceTests: XCTestCase {
                       "eviction must re-stat + verify identity before unlink (fail-closed)")
     }
 
+    private func scaffoldCaptainConfig(in home: URL) throws {
+        let kistDir = home.appendingPathComponent(".kist/captain-config/kist", isDirectory: true)
+        try write(
+            "{\"provider\": \"openai\", \"model\": \"gpt-5.5\", \"autoRouting\": true}\n",
+            to: kistDir.appendingPathComponent("config.json"))
+        try write(
+            "{\"profiles\": {\"truth-team\": {\"planner\": \"openai:gpt-5.5\", " +
+            "\"worker\": \"deepseek:deepseek-v4-pro\", \"coder\": \"deepseek:deepseek-v4-pro\", " +
+            "\"critic\": \"openai:gpt-5.5\"}}}\n",
+            to: kistDir.appendingPathComponent("roles.json"))
+    }
+
     func testCaptainWrapperSourcesSecretsAndPreservesExplicitAuthority() throws {
         let root = try temporaryDirectory(named: "wrapper")
         let home = root.appendingPathComponent("home", isDirectory: true)
@@ -275,10 +291,13 @@ final class DeploymentProvenanceTests: XCTestCase {
         try write(
             "KIST_TEST_SECRET=loaded\nexport KIST_TEST_SECRET\n",
             to: home.appendingPathComponent(".config/kist/secrets.env"))
+        try scaffoldCaptainConfig(in: home)
         try write(
             """
             #!/bin/sh
             printf '%s\\n' "${KIST_TEST_SECRET-}" > "${KIST_CAPTURE:?}.secret"
+            printf '%s\\n' "${XDG_CONFIG_HOME-}" > "${KIST_CAPTURE:?}.xdg"
+            pwd -P > "${KIST_CAPTURE:?}.pwd"
             : > "${KIST_CAPTURE:?}.args"
             for argument in "$@"; do
               printf '%s\\n' "$argument" >> "${KIST_CAPTURE}.args"
@@ -289,32 +308,78 @@ final class DeploymentProvenanceTests: XCTestCase {
 
         let wrapper = try installPatchedScript(
             "scripts/kist-wrapper", in: home, named: "kist")
+        let projectDir = root.appendingPathComponent("some-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         var result = try run(
             wrapper,
-            environment: ["HOME": home.path, "KIST_CAPTURE": capture.path])
+            environment: ["HOME": home.path, "KIST_CAPTURE": capture.path],
+            currentDirectory: projectDir)
         XCTAssertEqual(result.status, 0, result.stderr)
         // The wrapper must NEVER inject --sticky-turns (CLAUDE.md opt-in contract; the 19dbb9c
-        // force caused the 2026-08-03 white-out + resize corruption). Authority flags only.
+        // force caused the 2026-08-03 white-out + resize corruption). Authority + roles only.
         let bareArgs = try sourceFile(capture.appendingPathExtension("args"))
-        XCTAssertEqual(bareArgs, "--allow-read\n/Volumes\n--allow-shell\n--enable-computer-use\n")
+        XCTAssertEqual(
+            bareArgs,
+            "--roles\ntruth-team\n--allow-read\n/Volumes\n--allow-shell\n--enable-computer-use\n")
         XCTAssertFalse(bareArgs.contains("--sticky-turns"),
                        "wrapper must never force --sticky-turns (19dbb9c regression)")
         XCTAssertEqual(
             try sourceFile(capture.appendingPathExtension("secret")),
             "loaded\n")
+        // Contract v2: routing/roles config is PINNED — the session must read the captain config
+        // root, never ~/.config/kist (the rejected 2026-08-30 account routing).
+        XCTAssertEqual(
+            try sourceFile(capture.appendingPathExtension("xdg")),
+            home.appendingPathComponent(".kist/captain-config").path + "\n")
+        // Launching from a real project directory keeps that directory as the project root.
+        XCTAssertEqual(
+            try sourceFile(capture.appendingPathExtension("pwd")),
+            projectDir.path + "\n",
+            "a project-directory launch must not be redirected to the captain workspace")
+
+        // Launching from the account HOME must land in the clean captain workspace — a
+        // home-rooted session reads ~/.kist directly (the 2026-08-30 contamination).
+        result = try run(
+            wrapper,
+            environment: ["HOME": home.path, "KIST_CAPTURE": capture.path],
+            currentDirectory: home)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(
+            try sourceFile(capture.appendingPathExtension("pwd")),
+            home.appendingPathComponent(".kist/workspaces/captain").path + "\n",
+            "a HOME launch must be redirected into the clean captain workspace")
 
         let explicit = [
+            "--roles", "quality",
             "--enable-computer-use", "--allow-shell", "--allow-read", "/private/tmp/media", "goal",
         ]
         result = try run(
             wrapper,
             arguments: explicit,
-            environment: ["HOME": home.path, "KIST_CAPTURE": capture.path])
+            environment: ["HOME": home.path, "KIST_CAPTURE": capture.path],
+            currentDirectory: projectDir)
         XCTAssertEqual(result.status, 0, result.stderr)
         XCTAssertEqual(
             try sourceFile(capture.appendingPathExtension("args")),
             explicit.map { "\($0)\n" }.joined(),
-            "explicit caller authority forwarded exactly once in order; nothing injected")
+            "explicit caller authority and roles forwarded exactly once in order; nothing injected")
+
+        // Missing pinned captain config must FAIL CLOSED (exit 126), never fall back to
+        // ~/.config/kist — that silent fallback would reload the rejected account routing.
+        let bareHome = root.appendingPathComponent("bare-home", isDirectory: true)
+        try write(
+            "#!/bin/sh\nexit 0\n",
+            to: bareHome.appendingPathComponent("bin/kist-current"),
+            executable: true)
+        let unpinnedWrapper = try installPatchedScript(
+            "scripts/kist-wrapper", in: bareHome, named: "kist")
+        result = try run(
+            unpinnedWrapper,
+            environment: ["HOME": bareHome.path, "KIST_CAPTURE": capture.path],
+            currentDirectory: projectDir)
+        XCTAssertEqual(result.status, 126,
+                       "wrapper must refuse to run without the pinned captain config")
+        XCTAssertTrue(result.stderr.contains("pinned captain config"), result.stderr)
 
         let attackerHome = root.appendingPathComponent("attacker-home", isDirectory: true)
         let startupMarker = root.appendingPathComponent("hostile-startup-ran")

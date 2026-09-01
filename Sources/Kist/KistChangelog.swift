@@ -13,6 +13,16 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.61", date: "2026-09-01",
+                headline: "Captain contract v2: plain `kist` graduates off the pinned v0.17.5 truth build — new binary, pinned routing config, clean workspace guard, custom agents in every session",
+                changes: [
+                    "The deployed wrapper now pins XDG_CONFIG_HOME to ~/.kist/captain-config (openai/gpt-5.5, autoRouting on, truth-team roles) and FAILS CLOSED (exit 126) if the pin is missing - it never falls back to ~/.config/kist, whose codex-cli/gpt-5.6-sol route (autoRouting off, deepseek excluded by allowedProviders) is the proven-broken config the 2026-08-30 truth contract quarantined",
+                    "HOME-launch guard: launching kist from the account home no longer roots the session at ~/ (whose ~/.kist carries the polluted plan board and 940 undecodable cortex rows) - it lands in the clean dedicated workspace ~/.kist/workspaces/captain; launches from a real project directory, or with --project/-C, are untouched",
+                    "Default --roles truth-team unless the caller passes --roles - the same heterogeneous openai+deepseek team the accepted truth contract ran",
+                    "Custom agents load in EVERY session: ~/.kist/captain-config/kist/agents symlinks to ~/.kist/agents (the XDG user scope the SpecialistRegistry already reads), so the 18 personal specialists no longer require a home-rooted session to appear",
+                    "Per-site wrapper pins in DeploymentProvenanceTests: exact injected-args contract, XDG pin value, project-launch vs HOME-launch project root, fail-closed missing-config exit, and no --sticky-turns force (19dbb9c regression stays pinned)",
+                    "Escape hatch preserved: ~/bin/kist-truth still runs the checksum-pinned v0.17.5 truth build with its isolated config and recovered work root",
+                ]),
         Release(version: "0.17.60", date: "2026-08-25",
                 headline: "Routing availability gate: the health daemon's provider-health.json finally feeds selection; no lane stays on a known-down provider, and a dead escalation classifier announces itself",
                 changes: [
