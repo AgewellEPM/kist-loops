@@ -22,7 +22,7 @@ public enum PlanLint {
                     out.append("step \(step.id) chains \(segments) shell commands — split into singular steps (at most two chained commands per step, e.g. `cd X && make`)")
                 }
                 if installsLegacyEmulator(cmd) {
-                    out.append("step \(step.id) installs a legacy emulator/toolchain on the host — forbidden; route DOS/Win9x work through Perslis (perslis__vm_launch → perslis__vm_write_file → perslis__win98_run_command, or the `perslis`/`perslis-play`/`legacy-fetch` host CLIs)")
+                    out.append("step \(step.id) installs a legacy emulator/toolchain on the host — forbidden; route registered VM lifecycle through GhostBridge (ghostbridge-legacy__legacy_system_catalog → follow launchDirection → ghostbridge-legacy__legacy_session_open), then use Perslis guest tools only after the session is HOT; if the broker MCP is unavailable, use `legacy open <registered-system>` or the `perslis-play`/`legacy-fetch` host CLIs")
                 }
             }
         }

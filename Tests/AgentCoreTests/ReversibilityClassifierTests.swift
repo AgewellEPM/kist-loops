@@ -131,6 +131,21 @@ final class ReversibilityClassifierTests: XCTestCase {
         }
     }
 
+    func testTrustedTinkyObservationsAreReadOnlyButControlRemainsDangerous() {
+        let reads = [
+            "portal_state", "portal_snapshot", "portal_remote_status", "os_ax_check",
+            "os_find_window", "os_focused_window", "os_list_apps", "os_screenshot",
+            "vision_find_text",
+        ]
+        for leaf in reads {
+            let name = "tinky-vision-control__\(leaf)"
+            XCTAssertTrue(ReversibilityClassifier.isReadOnlyMCPTool(name), name)
+            XCTAssertEqual(assess(name, [:]), .safe, name)
+        }
+        XCTAssertEqual(assess("tinky-vision-control__portal_remote_control", [:]), .dangerous)
+        XCTAssertEqual(assess("tinky-vision-control__os_click", [:]), .dangerous)
+    }
+
     func testMcpSeparatorAndCompoundBypassesClosed() {
         // Codex HIGH: server name containing __ must not shift the leaf (split on LAST __).
         XCTAssertEqual(assess("lsp__swift__edit_file", [:]), .dangerous)

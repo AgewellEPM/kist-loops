@@ -20,13 +20,44 @@ public extension AgentTool {
     var usageExamples: [String] { [] }
 }
 
+/// Registered VM lifecycle is broker-owned. Perslis still exposes low-level launch methods for the
+/// broker, but advertising those methods directly to a model bypasses GhostBridge's authenticated
+/// one-VM lease and exact-generation registry resolution.
+private enum RegisteredVMLifecycleRouting {
+    static let catalog = "ghostbridge-legacy__legacy_system_catalog"
+    static let sessionOpen = "ghostbridge-legacy__legacy_session_open"
+    static let directPerslisLaunchTools: Set<String> = ["perslis__vm_launch", "perslis__legacy_launch"]
+
+    static func brokerIsAvailable(in tools: ToolRegistry) -> Bool {
+        tools.names.contains(sessionOpen)
+    }
+
+    static func unavailableReason(in tools: ToolRegistry) -> String {
+        if tools.names.contains(catalog) {
+            return "direct registered-VM launch is broker-internal; first call \(catalog), follow its launchDirection, then call \(sessionOpen) so GhostBridge resolves the exact registered generation and acquires the authenticated one-VM lease"
+        }
+        return "direct registered-VM launch is broker-internal; call \(sessionOpen) so GhostBridge resolves the registered target and acquires the authenticated one-VM lease"
+    }
+
+    static func applying(tools: ToolRegistry, to disabled: [String: String]) -> [String: String] {
+        guard brokerIsAvailable(in: tools) else { return disabled }
+        var effective = disabled
+        let reason = unavailableReason(in: tools)
+        for name in directPerslisLaunchTools where effective[name] == nil {
+            effective[name] = reason
+        }
+        return effective
+    }
+}
+
 public enum ToolContractBook {
 
     /// Render the contract for a live registry. `disabled` maps a tool name → the reason it's currently
     /// UNAVAILABLE (e.g. run_command when shell is off), so the model plans around it instead of retrying.
     public static func render(tools: ToolRegistry, disabled: [String: String] = [:]) -> String {
+        let effectiveDisabled = RegisteredVMLifecycleRouting.applying(tools: tools, to: disabled)
         var out = """
-        \(CapabilityRegistry.render(tools: tools, disabled: disabled))
+        \(CapabilityRegistry.render(tools: tools, disabled: effectiveDisabled))
 
         TOOL CONTRACT — these are the ONLY tools and action names that exist in this session. If a tool,
         action, or capability is NOT listed here, it does NOT exist — do not call it or invent it. When a
@@ -41,7 +72,7 @@ public enum ToolContractBook {
         for tool in tools.all().sorted(by: { $0.name < $1.name }) {
             let safeName = safeInline(tool.name)
             out += "\n## \(safeName)"
-            if let reason = disabled[tool.name] {
+            if let reason = effectiveDisabled[tool.name] {
                 out += "  ⚠ UNAVAILABLE this session — \(safeInline(reason)). Do NOT call it."
             }
             out += "\n" + safeBlock(tool.description.trimmingCharacters(in: .whitespacesAndNewlines)) + "\n"
@@ -92,18 +123,22 @@ public enum CapabilityRegistry {
         ("Visual Verification", ["visual_verify", "view_image", "browse", "edit_file", "write_file"]),
         ("Vision/Media/Data", ["view_image", "generate_image", "edit_image", "generate_audio", "generate_video", "watch_video", "live_screen_watch",
                                "analyze_media", "translate_document", "extract_clip", "read_spreadsheet", "query_data"]),
-        // Perslis = Luke's legacy-software system (win98/DOS VM + era toolchains). Naming these here
-        // lifts them out of the anonymous "MCP/Other" blob on BOTH prompt surfaces (planner + chat),
-        // so legacy goals route onto the VM instead of brew-installing emulators on the host.
-        ("Legacy DOS/Win9x VM (Perslis)", ["perslis__vm_launch", "perslis__vm_write_file", "perslis__win98_run_command",
-                                           "perslis__win98_run_commands", "perslis__win98_run_command_recipe",
-                                           "perslis__legacy_launch", "perslis__vm_control", "perslis__vm_ocr",
-                                           "perslis__vm_finalize_poweroff"]),
+        // GhostBridge owns registered-VM lifecycle and the one-slot lease. Perslis tools operate inside
+        // an already brokered HOT guest; its raw launch methods are deliberately handled below as off.
+        ("Registered Legacy VM Lifecycle (GhostBridge)", ["ghostbridge-legacy__legacy_system_catalog",
+                                                           "ghostbridge-legacy__legacy_session_open",
+                                                           "ghostbridge-legacy__legacy_session_status",
+                                                           "ghostbridge-legacy__legacy_session_close"]),
+        ("Legacy Guest Operations (Perslis)", ["perslis__vm_write_file", "perslis__win98_run_command",
+                                                "perslis__win98_run_commands", "perslis__win98_run_command_recipe",
+                                                "perslis__vm_control", "perslis__vm_ocr",
+                                                "perslis__vm_finalize_poweroff"]),
         ("Planning/Coordination", ["tasks", "ask_user", "spawn_agent", "generate"]),
     ]
 
     public static func render(tools: ToolRegistry, disabled: [String: String] = [:]) -> String {
         let names = Set(tools.names)
+        let effectiveDisabled = RegisteredVMLifecycleRouting.applying(tools: tools, to: disabled)
         var used = Set<String>()
         var lines: [String] = [
             "CAPABILITY NEGOTIATION — build plans only from these available capabilities. If a capability",
@@ -117,13 +152,27 @@ public enum CapabilityRegistry {
             let present = domain.tools.filter { names.contains($0) }
             guard !present.isEmpty else { continue }
             used.formUnion(present)
-            let usable = present.filter { disabled[$0] == nil }
+            let usable = present.filter { effectiveDisabled[$0] == nil }
             let marker = usable.isEmpty ? "✗" : "✓"
             let rendered = present.map { tool -> String in
-                if let reason = disabled[tool] { return "\(tool) (off: \(reason))" }
+                if let reason = effectiveDisabled[tool] { return "\(tool) (off: \(reason))" }
                 return tool
             }.joined(separator: ", ")
             lines.append("\(marker) \(domain.name): \(rendered)")
+        }
+
+        if RegisteredVMLifecycleRouting.brokerIsAvailable(in: tools) {
+            let directLaunchTools = RegisteredVMLifecycleRouting.directPerslisLaunchTools
+                .filter { names.contains($0) }
+                .sorted()
+            if !directLaunchTools.isEmpty {
+                used.formUnion(directLaunchTools)
+                lines.append("✗ Direct Perslis registered-VM launch (broker-internal; DO NOT call): " +
+                             directLaunchTools.joined(separator: ", "))
+            }
+            if names.contains(RegisteredVMLifecycleRouting.catalog) {
+                lines.append("→ Registered VM route: \(RegisteredVMLifecycleRouting.catalog) → follow launchDirection → \(RegisteredVMLifecycleRouting.sessionOpen); never provide a qcow2 image or QMP socket. GhostBridge owns the exact disk/QMP and authenticated one-VM lease; use Perslis guest tools only after the session is HOT.")
+            }
         }
 
         let other = tools.names.filter { !used.contains($0) }

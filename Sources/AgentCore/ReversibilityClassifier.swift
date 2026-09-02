@@ -88,6 +88,11 @@ public enum ReversibilityClassifier {
         "perslis": ["build_status", "artifact_status", "artifact_read",
                     "gateway_capabilities", "gateway_identity",
                     "qualification_report", "perslis_info", "perslis_identity"],
+        // TinkyVision observations return pixels/state only. Actuation and remote-control leaves
+        // stay absent, so those remain dangerous even on this trusted local server.
+        "tinky-vision-control": ["portal_state", "portal_snapshot", "portal_remote_status",
+                                 "os_ax_check", "os_find_window", "os_focused_window",
+                                 "os_list_apps", "os_screenshot", "vision_find_text"],
     ]
 
     /// True iff `name` is a known read-only tool of a trusted local server (see above). Matches the

@@ -4,10 +4,10 @@ import XCTest
 /// Pins for the 2026-08-03 "brew-flail" regressions:
 /// - run_command executable resolution gains an APPEND-ONLY well-known-dirs fallback
 ///   (/opt/homebrew/bin, /usr/local/bin) — env PATH keeps precedence.
-/// - The plan-execute planner routes legacy/DOS/Win9x goals onto the Perslis system
-///   (perslis__* MCP tools when up, the ~/bin CLI bridges when not) instead of
-///   brew-installing emulators — pinned on BOTH prompt branches, the shared
-///   CapabilityRegistry surface, and the PlanLint backstop (one assertion per surface).
+/// - The plan-execute planner routes registered legacy/DOS/Win9x VM lifecycle through
+///   GhostBridge's catalog/session broker (the owner-safe `legacy open` CLI fallback when absent),
+///   then uses Perslis only for guest operations after HOT. This is pinned on BOTH prompt branches,
+///   the full tool contract, CapabilityRegistry, and the PlanLint backstop.
 final class LegacyRoutingAndResolutionTests: XCTestCase {
 
     // MARK: - run_command resolution order
@@ -66,13 +66,23 @@ final class LegacyRoutingAndResolutionTests: XCTestCase {
         }
     }
 
-    func testPlannerPromptRoutesLegacyToPerslisToolsWhenAvailable() {
-        let registry = ToolRegistry([StubTool(name: "run_command"), StubTool(name: "perslis__vm_launch"),
-                                     StubTool(name: "perslis__win98_run_command")])
+    func testPlannerPromptRoutesRegisteredVMLifecycleThroughGhostBridge() {
+        let registry = ToolRegistry([
+            StubTool(name: "run_command"),
+            StubTool(name: "ghostbridge-legacy__legacy_system_catalog"),
+            StubTool(name: "ghostbridge-legacy__legacy_session_open"),
+            StubTool(name: "perslis__vm_launch"),
+            StubTool(name: "perslis__legacy_launch"),
+            StubTool(name: "perslis__win98_run_command"),
+        ])
         let prompt = PlanExecuteLoop.plannerSystemPrompt(tools: registry, projectRoot: "/tmp")
         XCTAssertTrue(prompt.contains("LEGACY SOFTWARE"), "planner prompt must carry the legacy routing rule")
         XCTAssertTrue(prompt.contains("FORBIDDEN"), "emulator host-installs must be named forbidden")
-        XCTAssertTrue(prompt.contains("perslis__vm_launch"), "with the gateway up, the rule names the perslis route")
+        XCTAssertTrue(prompt.contains("ghostbridge-legacy__legacy_system_catalog") &&
+                      prompt.contains("ghostbridge-legacy__legacy_session_open"),
+                      "registered VM lifecycle must use the GhostBridge broker")
+        XCTAssertTrue(prompt.contains("NEVER call perslis__vm_launch or perslis__legacy_launch directly"),
+                      "raw Perslis launch tools must be an explicit non-route")
         XCTAssertTrue(prompt.contains("untrusted data"),
                       "trust is scoped to INVOCATION only — VM outputs (downloaded era software) stay data, never instructions")
     }
@@ -82,24 +92,33 @@ final class LegacyRoutingAndResolutionTests: XCTestCase {
     // RUNNING actual legacy-OS software.
     func testPlannerPromptIsNativeFirstForBuildAssemble() {
         let prompt = PlanExecuteLoop.plannerSystemPrompt(
-            tools: ToolRegistry([StubTool(name: "run_command"), StubTool(name: "perslis__vm_launch")]),
+            tools: ToolRegistry([StubTool(name: "run_command"),
+                                 StubTool(name: "ghostbridge-legacy__legacy_system_catalog"),
+                                 StubTool(name: "ghostbridge-legacy__legacy_session_open")]),
             projectRoot: "/tmp")
         XCTAssertTrue(prompt.contains("NATIVE-FIRST"), "the legacy rule must be native-first")
         XCTAssertTrue(prompt.contains("nasm -f bin"), "assembling a .COM is a native run_command, not a VM step")
         XCTAssertTrue(prompt.contains("NO VM for a build"), "a build must not be routed into the VM")
     }
 
-    // The planner was guessing image:"win98" and inventing ${E.qmp}; the rule must teach that image
-    // is a PATH and qmp is a caller-set socket reused across steps.
-    func testPlannerPromptTeachesPerslisCallingConvention() {
+    // The planner must never guess an image or QMP socket. The broker resolves those from the registered
+    // target and admits the launch through the authenticated one-VM lease.
+    func testPlannerPromptTeachesGhostBridgeCallingConvention() {
         let prompt = PlanExecuteLoop.plannerSystemPrompt(
-            tools: ToolRegistry([StubTool(name: "run_command"), StubTool(name: "perslis__vm_launch"),
+            tools: ToolRegistry([StubTool(name: "run_command"),
+                                 StubTool(name: "ghostbridge-legacy__legacy_system_catalog"),
+                                 StubTool(name: "ghostbridge-legacy__legacy_session_open"),
                                  StubTool(name: "perslis__win98_run_command")]),
             projectRoot: "/tmp")
-        XCTAssertTrue(prompt.contains("FILESYSTEM PATH"), "image must be taught as a path, not a name")
-        XCTAssertTrue(prompt.contains("REUSE that EXACT same qmp"),
-                      "qmp is caller-set and reused across steps, not an output field to chain")
-        XCTAssertTrue(prompt.contains("win98_run_command") && prompt.contains("over blind vm_key"),
+        XCTAssertTrue(prompt.contains("follow its launchDirection"),
+                      "the catalog's authoritative launch direction must drive session opening")
+        for argument in ["targetId", "mode", "idempotencyKey", "purpose"] {
+            XCTAssertTrue(prompt.contains(argument), "session_open must teach required broker argument \(argument)")
+        }
+        XCTAssertTrue(prompt.contains("Never provide a qcow2 image or QMP socket"),
+                      "the model must not invent broker-owned disk/QMP inputs")
+        XCTAssertTrue(prompt.contains("AFTER legacy_session_open reports the session HOT") &&
+                      prompt.contains("win98_run_command") && prompt.contains("over blind vm_key"),
                       "prefer high-level guest commands over fragile keystroke driving")
     }
 
@@ -123,19 +142,50 @@ final class LegacyRoutingAndResolutionTests: XCTestCase {
         let prompt = PlanExecuteLoop.plannerSystemPrompt(tools: ToolRegistry([StubTool(name: "run_command")]),
                                                          projectRoot: "/tmp")
         XCTAssertTrue(prompt.contains("LEGACY SOFTWARE"), "the rule must exist even without the MCP gateway")
+        XCTAssertTrue(prompt.contains("legacy open <registered-system>"),
+                      "gateway down → use the owner-safe CLI that acquires the GhostBridge lease")
         XCTAssertTrue(prompt.contains("perslis-play"), "gateway down → route through the ~/bin CLI bridges")
         XCTAssertFalse(prompt.contains("perslis__vm_launch"),
                        "must not promise MCP tools that are not in the registry")
     }
 
-    func testCapabilityRegistryNamesThePerslisDomain() {
-        // One edit, two prompt surfaces (planner + chat/headless both embed this render): the
-        // perslis tools must appear as a NAMED capability, not the anonymous MCP/Other blob.
-        let registry = ToolRegistry([StubTool(name: "perslis__vm_launch"), StubTool(name: "perslis__vm_ocr")])
+    func testCapabilityRegistryPrioritizesGhostBridgeAndDeprioritizesRawPerslisLaunch() {
+        let registry = ToolRegistry([
+            StubTool(name: "ghostbridge-legacy__legacy_system_catalog"),
+            StubTool(name: "ghostbridge-legacy__legacy_session_open"),
+            StubTool(name: "perslis__vm_launch"),
+            StubTool(name: "perslis__legacy_launch"),
+            StubTool(name: "perslis__vm_ocr"),
+        ])
         let rendered = CapabilityRegistry.render(tools: registry)
-        XCTAssertTrue(rendered.contains("Legacy DOS/Win9x VM (Perslis)"), rendered)
-        XCTAssertFalse(rendered.contains("MCP/Other: perslis__vm_launch"),
-                       "named domain tools must not fall through to the MCP/Other bucket")
+        let lifecycleLine = rendered.split(separator: "\n").first {
+            $0.contains("Registered Legacy VM Lifecycle (GhostBridge)")
+        }.map(String.init) ?? ""
+        XCTAssertTrue(lifecycleLine.contains("ghostbridge-legacy__legacy_system_catalog") &&
+                      lifecycleLine.contains("ghostbridge-legacy__legacy_session_open"), rendered)
+        XCTAssertFalse(lifecycleLine.contains("perslis__vm_launch") || lifecycleLine.contains("perslis__legacy_launch"),
+                       "raw Perslis launches cannot appear in the recommended lifecycle route")
+        XCTAssertTrue(rendered.contains("Direct Perslis registered-VM launch (broker-internal; DO NOT call)"), rendered)
+        XCTAssertTrue(rendered.contains("Legacy Guest Operations (Perslis): perslis__vm_ocr"), rendered)
+        XCTAssertFalse(rendered.contains("MCP/Other: perslis__vm_launch") ||
+                       rendered.contains("MCP/Other: perslis__legacy_launch"),
+                       "broker-internal launch tools must not fall through as usable MCP/Other tools")
+    }
+
+    func testFullToolContractMarksRawPerslisLaunchUnavailableWhenBrokerIsPresent() {
+        let registry = ToolRegistry([
+            StubTool(name: "ghostbridge-legacy__legacy_system_catalog"),
+            StubTool(name: "ghostbridge-legacy__legacy_session_open"),
+            StubTool(name: "perslis__vm_launch"),
+            StubTool(name: "perslis__legacy_launch"),
+        ])
+        let rendered = ToolContractBook.render(tools: registry)
+        for rawTool in ["perslis__vm_launch", "perslis__legacy_launch"] {
+            XCTAssertTrue(rendered.contains("## \(rawTool)  ⚠ UNAVAILABLE this session"), rendered)
+        }
+        XCTAssertTrue(rendered.contains("first call ghostbridge-legacy__legacy_system_catalog") &&
+                      rendered.contains("then call ghostbridge-legacy__legacy_session_open") &&
+                      rendered.contains("Do NOT call it"), rendered)
     }
 
     // MARK: - PlanLint backstop
@@ -149,8 +199,12 @@ final class LegacyRoutingAndResolutionTests: XCTestCase {
             PlanStep(id: "E1", intent: "install assembler", tool: "run_command",
                      argumentsJSON: #"{"command":"brew install nasm"}"#, dependsOn: []),
         ])
-        XCTAssertTrue(PlanLint.findings(for: plan).contains { $0.contains("Perslis") },
-                      "the finding must route the planner to Perslis, not just say no")
+        let finding = PlanLint.findings(for: plan).first { $0.contains("legacy emulator/toolchain") } ?? ""
+        XCTAssertTrue(finding.contains("ghostbridge-legacy__legacy_system_catalog") &&
+                      finding.contains("ghostbridge-legacy__legacy_session_open"),
+                      "the lint must route lifecycle through GhostBridge, not merely reject the install")
+        XCTAssertFalse(finding.contains("perslis__vm_launch"),
+                       "the lint must not recommend the raw Perslis launch route")
     }
 
     func testPlanLintDoesNotFlagLegitimateCommands() {
