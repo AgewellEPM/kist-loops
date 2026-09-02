@@ -127,6 +127,21 @@ struct KistOptions {
     var bench = false              // --bench: run a task across configured providers and compare
     var eval = false               // --eval: run agent regression assertions for a task
     var protocolStatus = false     // --protocols: MCP/A2A/computer-control surface status
+    // host-snapshot (PROTOTYPE, SECURITY BOUNDARY): token-gated, signed macOS-host frame for a guest VM.
+    var hostSnapshot = false       // `host-snapshot`: single signed frame
+    var hostSnapshotStream = false // `host-snapshot --stream`: NDJSON stream of independently-signed frames
+    var hostSnapshotPubkey = false // `host-snapshot --pubkey`: print ONLY the Ed25519 public key + key_id (no token, no frame)
+    var authToken: String?         // --auth-token <token> (prefer env KIST_HOST_SNAPSHOT_TOKEN)
+    var displayIndex: Int?         // --display <N>: which display to capture (default main/0)
+    // Parse-error signals: a value was PRESENT for the flag but was not a valid Int. Kept OUT of the general
+    // `optionErrors` list so the host-snapshot runner can emit an ATOMIC kist-cli-json-v1 error (not a plain
+    // stderr line + generic exit 2) BEFORE auth/capture — a non-integer must fail closed, never capture 0.
+    var hostSnapshotDisplayParseError = false // --display <non-int>: fail-closed "invalid --display index"
+    var hostSnapshotFpsParseError = false     // --fps <non-int>: fail-closed "invalid --fps"
+    var hostSnapshotMaxFramesParseError = false // --max-frames <non-int>: fail-closed "invalid --max-frames"
+    var fps: Int?                  // --fps <N>: stream frame rate (clamped 1..5)
+    var maxFrames: Int?            // --max-frames <N>: stream frame cap (hard-capped 300)
+    var hostSnapshotNonce: String? // --nonce <hex>: client-planted per-request nonce (replay defense; echoed + signed)
     var noAudit = false            // --no-audit: disable the immutable tool audit log (.kist/audit/tools.jsonl)
     var replayId: String?          // --replay [id|latest]: render durable run replay from .kist/runs
     var trustSkill: String?        // --trust-skill <name>: pin a project skill's current content hash (trust it)
@@ -518,6 +533,19 @@ struct KistOptions {
             case "--bench":                 o.bench = true
             case "--eval":                  o.eval = true
             case "--protocols":             o.protocolStatus = true
+            case "--auth-token":            o.authToken = next()
+            // host-snapshot numeric flags: a PRESENT-but-non-integer value is NOT silently swallowed (which
+            // would proceed on display 0 / default rate). It sets a parse-error signal the host-snapshot
+            // runner turns into an atomic kist-cli-json-v1 error + nonzero exit BEFORE auth/capture.
+            case "--display":
+                if let v = next() { if let n = Int(v) { o.displayIndex = n } else { o.hostSnapshotDisplayParseError = true } }
+            case "--stream":                o.hostSnapshotStream = true
+            case "--pubkey":                o.hostSnapshotPubkey = true
+            case "--nonce":                 o.hostSnapshotNonce = next()
+            case "--fps":
+                if let v = next() { if let n = Int(v) { o.fps = n } else { o.hostSnapshotFpsParseError = true } }
+            case "--max-frames":
+                if let v = next() { if let n = Int(v) { o.maxFrames = n } else { o.hostSnapshotMaxFramesParseError = true } }
             case "--no-audit":              o.noAudit = true
             case "--trust-skill":           o.trustSkill = next()
             case "--trust-publisher":
@@ -533,6 +561,10 @@ struct KistOptions {
         // authorize for a remote MCP server. Captured before the positional becomes a goal.
         if positional.count >= 2, positional[0] == "mcp", positional[1] == "auth" {
             o.mcpAuth = Array(positional.dropFirst(2))
+        } else if positional.first == "host-snapshot" {
+            // Fixed CLI mode (SECURITY BOUNDARY): `host-snapshot` ⇒ single frame; `--stream` ⇒ NDJSON.
+            // Not a goal, not a model-callable tool. hostSnapshotStream (set by --stream) branches dispatch.
+            o.hostSnapshot = true
         } else if !positional.isEmpty {
             o.goal = positional.joined(separator: " ")
         }

@@ -58,6 +58,8 @@ extension KistRunner {
         lines.append("A2A · native agent-card/task schema ready · endpoint not exposed yet")
         lines.append("browser · first-class browse tool with SSRF entry-host guard")
         lines.append("computer_control · first-class approval-gated desktop/app control tool")
+        lines.append("host_snapshot · kist-cli-json-v1 · macos-host · ed25519 guest-verifiable authenticity (pin pubkey via `host-snapshot --pubkey`) + hmac-sha256 host-side integrity tag · client --nonce for replay defense · requires KIST_HOST_SNAPSHOT_TOKEN")
+        lines.append("legacy_lifecycle · ghostbridge.kist-perslis-legacy-lifecycle.v1 · ssh-ed25519 pinned 10.0.2.2:49222 forced-command kist-lifecycle-v1 · catalog/status/start with CAS stop gating · 49323 bootstrap-only")
         return lines.joined(separator: "\n")
     }
 

@@ -217,6 +217,7 @@ enum KistRunner {
         if opts.providersDoctor { print(await providerDoctorReport(registry)); return 0 }
         if let mcpAuthArgs = opts.mcpAuth { return await runMCPAuth(mcpAuthArgs) }
         if opts.protocolStatus { return protocolStatus(projectRoot: opts.project) }
+        if opts.hostSnapshot { return opts.hostSnapshotStream ? await runHostSnapshotStream(opts) : await runHostSnapshot(opts) }
         if let replayId = opts.replayId { return replayRun(projectRoot: opts.project, id: replayId) }
         if opts.listRuns { return listRuns(checkpoints) }
         if opts.installGuardHook { return installReceiptHook(opts) }
