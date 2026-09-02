@@ -13,6 +13,17 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.62", date: "2026-09-02",
+                headline: "One tree, one captain: SML durable host P0-P2, host_snapshot, MCP tool media, broker-first legacy VM routing, and the 2026-09-01 parallel-session work reconciled into the single REPL line",
+                changes: [
+                    "SML durable workflow host lands whole: P0 real store/clock/authority foundation, P1 approve-everything gating (scribe staging, signed catalogs, sealed execution), P2 production capability drivers (tool, model, retrieval, observe)",
+                    "host_snapshot capability: authenticated Ed25519-signed macOS screen frames (TinkyStream latest.jpg -> atomic signed JSON with base64 PNG + sha256 + ForgeSeal HMAC) so a guest Command Deck can see the Mac without trusting model text",
+                    "MCP tool results carrying base64 images become typed MediaAttachments (jpeg/png/gif/webp, magic-byte validated, 8MB/4-image bounds); the loop appends tool media as a separate [UNTRUSTED TOOL MEDIA] message and base64 never floods model-visible text",
+                    "Legacy VM lifecycle routes through the GhostBridge broker when registered: raw Perslis launch tools render UNAVAILABLE with reason, the planner is taught catalog -> launchDirection -> legacy_session_open, guest operations surface only after the session reports HOT, and PlanLint backstops the contract",
+                    "tinky-vision-control observation tools (portal_state, os_screenshot, vision_find_text, ...) join the read-only allowlist; actuation and remote-control stay dangerous",
+                    "Versioned model aliases (gpt-5.5-2026-09-01) resolve capabilities via exact match then longest id- prefix, so gpt-5.50-* can never inherit gpt-5.5 metadata",
+                    "Working-tree reconciliation (2026-09-02): the parallel-session golden-runtime revert (wrapper -> kist-truth) lost the deploy race and is parked (stash + ~/.kist/archive patch), stale worktrees pruned (sticky-fix merged, 2 recovery snapshots), and main fast-forwarded so ONE branch carries the product",
+                ]),
         Release(version: "0.17.61", date: "2026-09-01",
                 headline: "Captain contract v2: plain `kist` graduates off the pinned v0.17.5 truth build — new binary, pinned routing config, clean workspace guard, custom agents in every session",
                 changes: [
