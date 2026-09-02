@@ -31,7 +31,15 @@ extension KistRunner {
             )
         }
 
-        let loaded = try loadSMLRuntimeSource(data: sourceData, path: sourceURL.path)
+        var loaded = try loadSMLRuntimeSource(data: sourceData, path: sourceURL.path)
+        // Durable (live) hosts run every workflow through approval gating BEFORE validation and
+        // admission, so the DAG proofs hold for the gated graph and no externally advanced step
+        // can execute without a human gate. Ephemeral export stays byte-stable and ungated —
+        // it proves installability, not execution authority.
+        if case .durable = mode {
+            let policy = try SMLApprovalPolicy.load(projectRoot: projectRoot)
+            loaded = try loaded.approvalGated(policy: policy)
+        }
         let actor = actor ?? "sml-runtime-exporter"
         let title = title ?? "SML Workflow Runtime API"
         let version = version ?? "1.0.0"
@@ -402,6 +410,29 @@ extension KistRunner {
             self.package = package
             self.workflows = workflows
             self.sourceSetMounts = sourceSetMounts
+        }
+
+        /// The durable-host view of this source: every workflow (top-level and per-mount) gated
+        /// through approval injection. The pre-compiled runtime package is dropped on purpose —
+        /// it embeds the UNGATED graphs, so a durable registry always recompiles from the gated
+        /// candidate workflows (mount roles/paths are preserved via sourceSetMounts).
+        func approvalGated(policy: SMLApprovalPolicy) throws -> LoadedSMLRuntimeSource {
+            LoadedSMLRuntimeSource(
+                format: format,
+                package: nil,
+                workflows: try workflows.map {
+                    try SMLWorkflowApprovalGating.gate($0, policy: policy)
+                },
+                sourceSetMounts: try sourceSetMounts.map { mount in
+                    LoadedSMLRuntimeSourceMount(
+                        workflow: try SMLWorkflowApprovalGating.gate(mount.workflow, policy: policy),
+                        role: mount.role,
+                        apiBasePath: mount.apiBasePath,
+                        apiWorkflowPath: mount.apiWorkflowPath,
+                        modelMaximumCommandRounds: mount.modelMaximumCommandRounds
+                    )
+                }
+            )
         }
     }
 
