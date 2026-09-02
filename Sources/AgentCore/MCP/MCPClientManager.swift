@@ -262,14 +262,15 @@ public actor MCPClientManager {
         do {
             let raw = try await connection.callTool(name: tool, arguments: arguments,
                                                     correlationID: correlationID)
-            let (text, isError) = MCPOutputSanitizer.extract(from: raw)
+            let extracted = MCPOutputSanitizer.extractContent(from: raw)
             return ToolResult(
-                success: !isError,
-                output: text,
-                error: isError ? text : nil,
+                success: !extracted.isError,
+                output: extracted.text,
+                error: extracted.isError ? extracted.text : nil,
                 // The raw remote tool name is UNTRUSTED and this metadata is rendered into the model-facing
                 // observation footer — sanitize it (Codex #4).
-                metadata: ["mcp_server": server, "mcp_tool": MCPOutputSanitizer.sanitize(tool)]
+                metadata: ["mcp_server": server, "mcp_tool": MCPOutputSanitizer.sanitize(tool)],
+                attachments: extracted.attachments
             )
         } catch {
             // Never replay an ambiguous failed call: it may have executed remotely.

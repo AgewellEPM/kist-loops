@@ -54,6 +54,7 @@ public enum SecretMasker {
                    output: mask(result.output),
                    error: result.error.map(mask),
                    metadata: result.metadata.mapValues(mask),
+                   attachments: result.attachments,
                    trustedCommandReference: result.trustedCommandReference)
     }
 

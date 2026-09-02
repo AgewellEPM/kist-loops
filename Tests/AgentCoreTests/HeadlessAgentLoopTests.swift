@@ -1038,6 +1038,63 @@ final class HeadlessAgentLoopTests: XCTestCase {
         })
     }
 
+    func testTextLoopCarriesToolImageAttachmentIntoNextModelRequest() async {
+        let provider = ToolMediaTextCaptureProvider()
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: provider.id, model: nil,
+            tools: ToolRegistry([ToolMediaResultTool()]),
+            context: ToolContext(projectRoot: root), maxIterations: 3)
+        var transcript: [ChatMessage] = []
+
+        let out = await subject.turn(transcript: &transcript, userInput: "inspect the returned frame",
+                                     resolvedIntent: .chat)
+
+        XCTAssertTrue(out.success, out.summary)
+        let requests = provider.capturedMessages()
+        XCTAssertEqual(requests.count, 2)
+        guard let observation = requests.last?.last(where: {
+            $0.role == .user && $0.content.contains(#"<tool_output tool="image_result" status="ok">"#)
+        }) else { return XCTFail("the second text request is missing its tool observation") }
+        XCTAssertEqual(observation.attachments.count, 1)
+        XCTAssertEqual(observation.attachments.first?.inlineData, ToolMediaResultTool.imageData)
+        XCTAssertFalse(observation.content.contains(ToolMediaResultTool.imageData.base64EncodedString()),
+                       "image base64 must stay outside model-visible observation text")
+    }
+
+    func testNativeLoopCarriesToolImagesAfterCompleteToolResultBatch() async {
+        let provider = ToolMediaNativeCaptureProvider()
+        let registry = ProviderRegistry(providers: [provider], keyStore: NullKeyStore())
+        let subject = HeadlessAgentLoop(
+            providers: registry, providerId: provider.id, model: nil,
+            tools: ToolRegistry([ToolMediaResultTool()]),
+            context: ToolContext(projectRoot: root), maxIterations: 3)
+        var transcript: [ChatMessage] = []
+
+        let out = await subject.turn(transcript: &transcript, userInput: "inspect both returned frames",
+                                     resolvedIntent: .chat)
+
+        XCTAssertTrue(out.success, out.summary)
+        let requests = provider.capturedMessages()
+        XCTAssertEqual(requests.count, 2)
+        guard let messages = requests.last,
+              let assistantIndex = messages.lastIndex(where: {
+                  $0.role == .assistant && $0.toolCalls?.map(\.id) == ["image-one", "image-two"]
+              }), assistantIndex + 3 < messages.count else {
+            return XCTFail("missing complete native image tool exchange")
+        }
+        XCTAssertEqual(messages[assistantIndex + 1].role, .tool)
+        XCTAssertEqual(messages[assistantIndex + 1].toolCallId, "image-one")
+        XCTAssertTrue(messages[assistantIndex + 1].attachments.isEmpty)
+        XCTAssertEqual(messages[assistantIndex + 2].role, .tool)
+        XCTAssertEqual(messages[assistantIndex + 2].toolCallId, "image-two")
+        XCTAssertTrue(messages[assistantIndex + 2].attachments.isEmpty)
+        XCTAssertEqual(messages[assistantIndex + 3].role, .user,
+                       "media must follow every native tool result, never split their adjacency")
+        XCTAssertEqual(messages[assistantIndex + 3].attachments.count, 2)
+        XCTAssertTrue(messages[assistantIndex + 3].content.contains("UNTRUSTED TOOL MEDIA"))
+    }
+
     func testNativeLoopReplansAfterFailureStreak() async {
         let sink = RecordingEventSink()
         let registry = ProviderRegistry(providers: [NativeScriptedProvider([
@@ -2212,6 +2269,81 @@ private actor ScriptedResponses {
     func next() -> String {
         defer { idx += 1 }
         return idx < responses.count ? responses[idx] : #"{"done":true,"summary":"(out of script)"}"#
+    }
+}
+
+private struct ToolMediaResultTool: ReadOnlyAgentTool {
+    static let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01])
+    let name = "image_result"
+    let description = "Return a deterministic image fixture."
+    let parameters: [ToolParameter] = []
+
+    func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        ToolResult(
+            success: true, output: "fresh frame",
+            attachments: [MediaAttachment(kind: .image, mimeType: "image/png",
+                                          payload: .inline(Self.imageData))])
+    }
+}
+
+private final class ToolMediaTextCaptureProvider: ChatProvider, @unchecked Sendable {
+    let id = "tool-media-text", name = "Tool Media Text", iconName = "cpu"
+    let requiresAPIKey = false, keyAccount = "tool-media-text", defaultModel = "media-text-1"
+    let availableModels = [AIModel(id: "media-text-1", isVision: true)]
+    private let lock = NSLock()
+    private var requests: [[ChatMessage]] = []
+
+    func capturedMessages() -> [[ChatMessage]] { lock.withLock { requests } }
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        let call = lock.withLock { () -> Int in
+            requests.append(messages)
+            return requests.count
+        }
+        let response = call == 1
+            ? #"{"tool":"image_result","parameters":{}}"#
+            : #"{"done":true,"summary":"frame inspected"}"#
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta(response))
+            continuation.finish()
+        }
+    }
+}
+
+private final class ToolMediaNativeCaptureProvider: ChatProvider, @unchecked Sendable {
+    let id = "tool-media-native", name = "Tool Media Native", iconName = "cpu"
+    let requiresAPIKey = false, keyAccount = "tool-media-native", defaultModel = "media-native-1"
+    let availableModels = [AIModel(id: "media-native-1", isVision: true)]
+    let supportsNativeTools = true
+    private let lock = NSLock()
+    private var requests: [[ChatMessage]] = []
+
+    func capturedMessages() -> [[ChatMessage]] { lock.withLock { requests } }
+
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
+                     apiKey: String?, tools: [ToolSpec]) async throws
+        -> AsyncThrowingStream<StreamEvent, Error> {
+        let call = lock.withLock { () -> Int in
+            requests.append(messages)
+            return requests.count
+        }
+        return AsyncThrowingStream { continuation in
+            if call == 1 {
+                continuation.yield(.toolCall(id: "image-one", name: "image_result",
+                                             argumentsJSON: "{}"))
+                continuation.yield(.toolCall(id: "image-two", name: "image_result",
+                                             argumentsJSON: "{}"))
+            } else {
+                continuation.yield(.delta("both frames inspected"))
+            }
+            continuation.finish()
+        }
     }
 }
 

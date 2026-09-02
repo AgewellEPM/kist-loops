@@ -17,15 +17,43 @@ public enum MCPOutputSanitizer {
     /// Hard cap on text forwarded to the model from a single tool call. 64 KB is
     /// generous while preventing a hostile/buggy server from exhausting context.
     public static let maxBytes = 64 * 1024
+    /// Aggregate decoded-image ceiling for one MCP tool result. The encoded-length preflight below
+    /// rejects oversized base64 before allocating its decoded representation.
+    public static let maxImageBytes = 8 * 1024 * 1024
+    /// A server cannot turn one tool result into an unbounded image batch even when every image is tiny.
+    public static let maxImages = 4
+
+    public struct ExtractedContent: Sendable, Equatable {
+        public let text: String
+        public let isError: Bool
+        public let attachments: [MediaAttachment]
+
+        public init(text: String, isError: Bool, attachments: [MediaAttachment]) {
+            self.text = text
+            self.isError = isError
+            self.attachments = attachments
+        }
+    }
 
     /// Extract + sanitize the text payload from an MCP `tools/call` result.
     /// Result shape: `{ "content": [ { "type": "text", "text": "..." } ], "isError": Bool }`.
     /// `isError` reflects the server's structured flag — we never infer success from
     /// the (untrusted, spoofable) text.
     public static func extract(from result: [String: Any]) -> (text: String, isError: Bool) {
+        let extracted = extractContent(from: result)
+        return (extracted.text, extracted.isError)
+    }
+
+    /// Extract text plus strictly validated raster image blocks. Base64 never enters the returned text;
+    /// callers receive decoded bytes as `MediaAttachment`s for the provider's existing vision encoder.
+    /// SVG is deliberately unsupported because active content does not belong in an image trust boundary.
+    public static func extractContent(from result: [String: Any]) -> ExtractedContent {
         let isError = (result["isError"] as? Bool) ?? false
 
         var pieces: [String] = []
+        var attachments: [MediaAttachment] = []
+        var imageBytes = 0
+        var imageBlocks = 0
         if let content = result["content"] as? [[String: Any]] {
             for block in content {
                 let type = block["type"] as? String ?? "text"
@@ -33,8 +61,23 @@ public enum MCPOutputSanitizer {
                 case "text":
                     if let t = block["text"] as? String { pieces.append(t) }
                 case "image":
-                    let mime = block["mimeType"] as? String ?? "image"
-                    pieces.append("[image content omitted: \(mime)]")
+                    imageBlocks += 1
+                    guard imageBlocks <= maxImages else {
+                        if imageBlocks == maxImages + 1 {
+                            pieces.append("[image content rejected: image-count limit exceeded]")
+                        }
+                        continue
+                    }
+                    let remaining = max(0, maxImageBytes - imageBytes)
+                    switch validatedImageAttachment(block, maxDecodedBytes: remaining) {
+                    case .success(let attachment):
+                        let bytes = attachment.inlineByteCount
+                        attachments.append(attachment)
+                        imageBytes += bytes
+                        pieces.append("[image attached: \(attachment.mimeType), \(bytes) bytes]")
+                    case .failure(let reason):
+                        pieces.append("[image content rejected: \(reason)]")
+                    }
                 case "resource":
                     if let res = block["resource"] as? [String: Any], let uri = res["uri"] as? String {
                         pieces.append("[resource: \(uri)]")
@@ -46,7 +89,58 @@ public enum MCPOutputSanitizer {
         }
 
         let joined = pieces.isEmpty ? "(no content)" : pieces.joined(separator: "\n")
-        return (sanitize(joined), isError)
+        return ExtractedContent(text: sanitize(joined), isError: isError, attachments: attachments)
+    }
+
+    private enum ImageValidation {
+        case success(MediaAttachment)
+        case failure(String)
+    }
+
+    private static let supportedImageMIMEs: Set<String> = [
+        "image/jpeg", "image/png", "image/gif", "image/webp",
+    ]
+
+    private static func validatedImageAttachment(
+        _ block: [String: Any], maxDecodedBytes: Int
+    ) -> ImageValidation {
+        guard maxDecodedBytes > 0 else { return .failure("decoded-byte limit exceeded") }
+        guard let rawMIME = block["mimeType"] as? String else { return .failure("missing MIME type") }
+        let mime = rawMIME.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard supportedImageMIMEs.contains(mime) else { return .failure("unsupported MIME type") }
+        guard let encoded = block["data"] as? String, !encoded.isEmpty else {
+            return .failure("missing base64 data")
+        }
+
+        // Four base64 characters encode at most three bytes. Bound the encoded string before decoding,
+        // with four bytes of padding slack for the final quartet.
+        let encodedLimit = ((maxDecodedBytes + 2) / 3) * 4 + 4
+        guard encoded.utf8.count <= encodedLimit else { return .failure("decoded-byte limit exceeded") }
+        guard let data = Data(base64Encoded: encoded), !data.isEmpty else {
+            return .failure("invalid base64 data")
+        }
+        guard data.count <= maxDecodedBytes else { return .failure("decoded-byte limit exceeded") }
+        guard hasExpectedMagic(data, mime: mime) else {
+            return .failure("payload does not match MIME type")
+        }
+        return .success(MediaAttachment(kind: .image, mimeType: mime, payload: .inline(data)))
+    }
+
+    private static func hasExpectedMagic(_ data: Data, mime: String) -> Bool {
+        switch mime {
+        case "image/jpeg":
+            return data.starts(with: [0xFF, 0xD8, 0xFF])
+        case "image/png":
+            return data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        case "image/gif":
+            return data.starts(with: Array("GIF87a".utf8)) || data.starts(with: Array("GIF89a".utf8))
+        case "image/webp":
+            guard data.count >= 12 else { return false }
+            return data.starts(with: Array("RIFF".utf8))
+                && data.dropFirst(8).starts(with: Array("WEBP".utf8))
+        default:
+            return false
+        }
     }
 
     /// Bound + strip a free-form string from an untrusted source.

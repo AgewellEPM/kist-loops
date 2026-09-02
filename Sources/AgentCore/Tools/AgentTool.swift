@@ -22,6 +22,9 @@ public struct ToolResult: Sendable, Equatable {
     public let output: String
     public let error: String?
     public let metadata: [String: String]
+    /// Bounded media returned by a tool. MCP image blocks use this path so the loop can hand the
+    /// actual pixels to a vision-capable provider without ever placing base64 in model-visible text.
+    public let attachments: [MediaAttachment]
     /// Host-only proof handle. Publicly readable by orchestration code, but public callers cannot
     /// populate it and it is never serialized into model-visible metadata/output.
     public private(set) var trustedCommandReference: BuilderTrustedCommandReference?
@@ -29,21 +32,25 @@ public struct ToolResult: Sendable, Equatable {
     /// verification command. It is deliberately internal and never enters model-visible metadata.
     var trustedBuilderVerification: BuilderVerificationCommandAuthorityReceipt?
 
-    public init(success: Bool, output: String, error: String? = nil, metadata: [String: String] = [:]) {
+    public init(success: Bool, output: String, error: String? = nil,
+                metadata: [String: String] = [:], attachments: [MediaAttachment] = []) {
         self.success = success
         self.output = output
         self.error = error
         self.metadata = metadata
+        self.attachments = attachments
         self.trustedCommandReference = nil
         self.trustedBuilderVerification = nil
     }
 
     init(success: Bool, output: String, error: String? = nil,
          metadata: [String: String] = [:],
+         attachments: [MediaAttachment] = [],
          trustedCommandReference: BuilderTrustedCommandReference?,
          trustedBuilderVerification: BuilderVerificationCommandAuthorityReceipt? = nil) {
         self.success = success; self.output = output; self.error = error
         self.metadata = metadata
+        self.attachments = attachments
         self.trustedCommandReference = trustedCommandReference
         self.trustedBuilderVerification = trustedBuilderVerification
     }

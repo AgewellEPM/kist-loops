@@ -269,11 +269,76 @@ final class MCPClientTests: XCTestCase {
         XCTAssertTrue(isError)   // honored the structured flag, not the spoofable "OK" text
     }
 
-    func testSanitizer_omitsImageBase64() {
-        let result: [String: Any] = ["content": [["type": "image", "mimeType": "image/png", "data": "BASE64DATA"]]]
-        let (text, _) = MCPOutputSanitizer.extract(from: result)
-        XCTAssertFalse(text.contains("BASE64DATA"))
-        XCTAssertTrue(text.contains("image content omitted"))
+    func testSanitizer_preservesValidatedImageOutsideModelVisibleText() {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01])
+        let base64 = png.base64EncodedString()
+        let result: [String: Any] = ["content": [
+            ["type": "text", "text": "fresh frame"],
+            ["type": "image", "mimeType": "image/png", "data": base64],
+        ]]
+
+        let extracted = MCPOutputSanitizer.extractContent(from: result)
+
+        XCTAssertEqual(extracted.attachments.count, 1)
+        XCTAssertEqual(extracted.attachments.first?.inlineData, png)
+        XCTAssertEqual(extracted.attachments.first?.mimeType, "image/png")
+        XCTAssertTrue(extracted.text.contains("fresh frame"))
+        XCTAssertTrue(extracted.text.contains("[image attached: image/png, 9 bytes]"))
+        XCTAssertFalse(extracted.text.contains(base64), "base64 must never enter model-visible text")
+    }
+
+    func testSanitizer_rejectsInvalidUnsupportedAndMismatchedImages() {
+        let jpegHeader = Data([0xFF, 0xD8, 0xFF, 0x01]).base64EncodedString()
+        let result: [String: Any] = ["content": [
+            ["type": "image", "mimeType": "image/png", "data": "not base64!"],
+            ["type": "image", "mimeType": "image/svg+xml", "data": "PHN2Zz4="],
+            ["type": "image", "mimeType": "image/png", "data": jpegHeader],
+        ]]
+
+        let extracted = MCPOutputSanitizer.extractContent(from: result)
+
+        XCTAssertTrue(extracted.attachments.isEmpty)
+        XCTAssertTrue(extracted.text.contains("invalid base64 data"))
+        XCTAssertTrue(extracted.text.contains("unsupported MIME type"))
+        XCTAssertTrue(extracted.text.contains("payload does not match MIME type"))
+    }
+
+    func testSanitizer_boundsImageCountAndDecodedBytes() {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01])
+        let smallBlock: [String: Any] = [
+            "type": "image", "mimeType": "image/png", "data": png.base64EncodedString(),
+        ]
+        let countResult = MCPOutputSanitizer.extractContent(from: [
+            "content": Array(repeating: smallBlock, count: MCPOutputSanitizer.maxImages + 1),
+        ])
+        XCTAssertEqual(countResult.attachments.count, MCPOutputSanitizer.maxImages)
+        XCTAssertTrue(countResult.text.contains("image-count limit exceeded"))
+
+        var oversized = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        oversized.append(Data(repeating: 0, count: MCPOutputSanitizer.maxImageBytes))
+        let byteResult = MCPOutputSanitizer.extractContent(from: ["content": [[
+            "type": "image", "mimeType": "image/png", "data": oversized.base64EncodedString(),
+        ]]])
+        XCTAssertTrue(byteResult.attachments.isEmpty)
+        XCTAssertTrue(byteResult.text.contains("decoded-byte limit exceeded"))
+    }
+
+    func testManager_carriesSanitizedImageIntoToolResultAttachments() async {
+        let jpeg = Data([0xFF, 0xD8, 0xFF, 0x01])
+        let config = MCPServerConfig(name: "vision", command: "/bin/echo")
+        let connection = ImageResultMCPConnection(config: config, rawResult: ["content": [[
+            "type": "image", "mimeType": "image/jpeg", "data": jpeg.base64EncodedString(),
+        ]]])
+        let manager = MCPClientManager(
+            serversForTesting: [config], connectionFactory: { _ in connection })
+        _ = await manager.discoverAndWrapTools(projectRoot: dir)
+
+        let result = await manager.call(server: "vision", tool: "snapshot", arguments: [:])
+        await manager.shutdownAll()
+
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(result.attachments.first?.inlineData, jpeg)
+        XCTAssertFalse(result.output.contains(jpeg.base64EncodedString()))
     }
 
     // MARK: - RemoteMCPTool schema mapping
@@ -399,4 +464,24 @@ final class MCPClientTests: XCTestCase {
         XCTAssertTrue(snap.hasSuffix("Z"), "keeps the most-recent bytes")
         XCTAssertFalse(snap.contains("missing API key"), "old bytes evicted once past the cap")
     }
+}
+
+private actor ImageResultMCPConnection: MCPConnection {
+    nonisolated let config: MCPServerConfig
+    private let rawResult: [String: Any]
+    private var alive = false
+
+    init(config: MCPServerConfig, rawResult: [String: Any]) {
+        self.config = config
+        self.rawResult = rawResult
+    }
+
+    var isAlive: Bool { alive }
+
+    func start() { alive = true }
+    func listTools() -> [RemoteToolSpec] { [] }
+    func callTool(name: String, arguments: [String: Any], correlationID: String?) -> [String: Any] {
+        rawResult
+    }
+    func shutdown() { alive = false }
 }
