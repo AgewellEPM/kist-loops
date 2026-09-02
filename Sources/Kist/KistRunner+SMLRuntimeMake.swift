@@ -452,6 +452,7 @@ extension KistRunner {
     static func makeSMLRuntimeHostAPIExchange(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         method: SMLWorkflowAPIMethod = .get,
         path: String?,
         bodyJSON: String? = nil,
@@ -474,6 +475,7 @@ extension KistRunner {
         return try await withSMLRuntimeHostLaunch(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
@@ -510,6 +512,7 @@ extension KistRunner {
     static func makeSMLRuntimeHostAPITranscript(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         scriptPath: String?,
         roleOverride: String? = nil,
         actor: String? = nil,
@@ -526,6 +529,7 @@ extension KistRunner {
         return try await withSMLRuntimeHostLaunch(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
@@ -751,6 +755,7 @@ extension KistRunner {
     static func makeSMLRuntimeHostREPLCommand(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         workflowID: String? = nil,
         line: String?,
         roleOverride: String? = nil,
@@ -768,6 +773,7 @@ extension KistRunner {
         return try await withSMLRuntimeHostLaunch(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,
@@ -801,6 +807,7 @@ extension KistRunner {
     static func makeSMLRuntimeHostREPLTranscript(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         workflowID: String? = nil,
         scriptPath: String?,
         roleOverride: String? = nil,
@@ -818,6 +825,7 @@ extension KistRunner {
         return try await withSMLRuntimeHostLaunch(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             roleOverride: roleOverride,
             actor: actor,
             apiBasePathOverride: apiBasePathOverride,

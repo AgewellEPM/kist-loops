@@ -5,6 +5,7 @@ extension KistRunner {
     static func withSMLRuntimeHostLaunch<T>(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         roleOverride: String? = nil,
         actor: String? = nil,
         apiBasePathOverride: String? = nil,
@@ -39,9 +40,31 @@ extension KistRunner {
             apiWorkflowPathOverrides,
             workflows: loaded.workflows
         )
-        let admissionCatalog = derivedSMLAdmissionCatalog(for: loaded.workflows)
-        let commandIDSource = SMLRuntimeSequentialIDSource(prefix: "sml-runtime-export-command")
-        let taskIDSource = SMLRuntimeSequentialIDSource(prefix: "TASK-SML-RUNTIME-EXPORT")
+        // The derived catalog rubber-stamps the workflow's own references — offline install proof
+        // only. A durable (live) host admits against the human-reviewed catalog file, never the
+        // workflow's self-description.
+        let admissionCatalog: SMLExecutionAdmissionCatalog
+        switch mode {
+        case .ephemeralExport:
+            admissionCatalog = derivedSMLAdmissionCatalog(for: loaded.workflows)
+        case .durable:
+            admissionCatalog = try SMLRuntimeHostCatalogFile.load(projectRoot: projectRoot)
+        }
+        // Ephemeral exports keep deterministic IDs (goldens depend on them; the store dies with
+        // the process). Durable sessions MUST salt their IDs: the persistent store keeps replay
+        // claims across launches, so a restarted sequential source would collide with its own
+        // prior session's claims and every command would die "already claimed".
+        let commandIDSource: SMLRuntimeSequentialIDSource
+        let taskIDSource: SMLRuntimeSequentialIDSource
+        switch mode {
+        case .ephemeralExport:
+            commandIDSource = SMLRuntimeSequentialIDSource(prefix: "sml-runtime-export-command")
+            taskIDSource = SMLRuntimeSequentialIDSource(prefix: "TASK-SML-RUNTIME-EXPORT")
+        case .durable:
+            let nonce = UUID().uuidString.lowercased().prefix(8)
+            commandIDSource = SMLRuntimeSequentialIDSource(prefix: "sml-cmd-\(nonce)")
+            taskIDSource = SMLRuntimeSequentialIDSource(prefix: "TASK-SML-\(String(nonce).uppercased())")
+        }
         let registry: SMLWorkflowRuntimeRegistry
         if let package = loaded.package {
             registry = try SMLWorkflowRuntimeRegistry.compile(
@@ -95,44 +118,66 @@ extension KistRunner {
             normalizedWorkflows: loaded.workflows,
             runtime: registry.export(title: title, version: version)
         )
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("kist-sml-runtime-export-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: tempDirectory,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: tempDirectory) }
-        let store = SMLRuntimeStore(
-            fileURL: tempDirectory.appendingPathComponent("runtime.json"),
-            clock: { 0 }
-        )
-        let runtime = SMLRuntime(store: store, clock: { 0 })
-        let authority: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = {
-            command in
-            SMLCommandAuthority(
-                authenticatedActor: actor,
-                leaseID: "sml-runtime-export-lease",
-                roles: [command.role],
-                tasks: [command.task],
-                operations: [command.op],
-                scope: command.scope
+        switch mode {
+        case .ephemeralExport:
+            let tempDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("kist-sml-runtime-export-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: tempDirectory,
+                withIntermediateDirectories: true
             )
+            defer { try? FileManager.default.removeItem(at: tempDirectory) }
+            let store = SMLRuntimeStore(
+                fileURL: tempDirectory.appendingPathComponent("runtime.json"),
+                clock: { 0 }
+            )
+            let runtime = SMLRuntime(store: store, clock: { 0 })
+            let authority: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = {
+                command in
+                SMLCommandAuthority(
+                    authenticatedActor: actor,
+                    leaseID: "sml-runtime-export-lease",
+                    roles: [command.role],
+                    tasks: [command.task],
+                    operations: [command.op],
+                    scope: command.scope
+                )
+            }
+            let launch = try await SMLWorkflowRuntimeApp.launch(
+                registry: registry,
+                runtime: runtime,
+                replayGuard: store,
+                authorityResolver: authority,
+                sourcePackage: runtimePackage,
+                clock: { 0 }
+            )
+            let host = SMLRuntimeHostLaunch(
+                sourcePath: sourceURL.standardizedFileURL.path,
+                sourceFormat: loaded.format,
+                runtimePackage: runtimePackage,
+                launch: launch
+            )
+            return try await body(host)
+        case .durable:
+            let environment = try await SMLRuntimeDurableHostEnvironment.acquire(projectRoot: projectRoot)
+            defer { environment.lock.release() }
+            let runtime = SMLRuntime(store: environment.store, clock: environment.clock)
+            let launch = try await SMLWorkflowRuntimeApp.launch(
+                registry: registry,
+                runtime: runtime,
+                replayGuard: environment.store,
+                authorityResolver: environment.authorityResolver,
+                sourcePackage: runtimePackage,
+                clock: environment.clock
+            )
+            let host = SMLRuntimeHostLaunch(
+                sourcePath: sourceURL.standardizedFileURL.path,
+                sourceFormat: loaded.format,
+                runtimePackage: runtimePackage,
+                launch: launch
+            )
+            return try await body(host)
         }
-        let launch = try await SMLWorkflowRuntimeApp.launch(
-            registry: registry,
-            runtime: runtime,
-            replayGuard: store,
-            authorityResolver: authority,
-            sourcePackage: runtimePackage,
-            clock: { 0 }
-        )
-        let host = SMLRuntimeHostLaunch(
-            sourcePath: sourceURL.standardizedFileURL.path,
-            sourceFormat: loaded.format,
-            runtimePackage: runtimePackage,
-            launch: launch
-        )
-        return try await body(host)
     }
 
     private static func normalizedSMLRuntimeAPIWorkflowPathOverrides(

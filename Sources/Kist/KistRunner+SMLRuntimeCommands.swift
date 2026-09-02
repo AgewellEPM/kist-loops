@@ -305,6 +305,7 @@ extension KistRunner {
             let json = try await renderSMLRuntimeHostREPLCommand(
                 sourcePath: opts.smlRuntimeREPL,
                 projectRoot: opts.project,
+                mode: opts.smlRuntimeDurable ? .durable : .ephemeralExport,
                 workflowID: opts.smlRuntimeWorkflowID,
                 line: opts.smlRuntimeREPLLine,
                 roleOverride: opts.smlRuntimeRole,
@@ -328,6 +329,7 @@ extension KistRunner {
             let json = try await renderSMLRuntimeHostREPLTranscript(
                 sourcePath: opts.smlRuntimeREPLScript,
                 projectRoot: opts.project,
+                mode: opts.smlRuntimeDurable ? .durable : .ephemeralExport,
                 workflowID: opts.smlRuntimeWorkflowID,
                 scriptPath: opts.smlRuntimeREPLScriptPath,
                 roleOverride: opts.smlRuntimeRole,
@@ -351,6 +353,7 @@ extension KistRunner {
             let json = try await renderSMLRuntimeHostAPIExchange(
                 sourcePath: opts.smlRuntimeAPI,
                 projectRoot: opts.project,
+                mode: opts.smlRuntimeDurable ? .durable : .ephemeralExport,
                 method: opts.smlRuntimeAPIMethod,
                 path: opts.smlRuntimeAPIPath,
                 bodyJSON: opts.smlRuntimeAPIBody,
@@ -375,6 +378,7 @@ extension KistRunner {
             let json = try await renderSMLRuntimeHostAPITranscript(
                 sourcePath: opts.smlRuntimeAPIScript,
                 projectRoot: opts.project,
+                mode: opts.smlRuntimeDurable ? .durable : .ephemeralExport,
                 scriptPath: opts.smlRuntimeAPIScriptPath,
                 roleOverride: opts.smlRuntimeRole,
                 actor: opts.smlRuntimeActor,

@@ -171,6 +171,7 @@ struct KistOptions {
     var smlRuntimeRunbook: String? // --sml-runtime-runbook <source.json>: emit host scaffold runbook
     var smlRuntimeScaffold: String? // --sml-runtime-scaffold <source.json>: write all host-consumable runtime artifacts
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
+    var smlRuntimeDurable = false   // --sml-runtime-durable: REPL/API verbs use the persistent project store, real clock, and .kist/sml authority/catalog files instead of the ephemeral rubber-stamp export host
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeREPLScript: String? // --sml-runtime-repl-script <source.json>: run a generated workflow REPL script offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/runbook/attachments
@@ -280,6 +281,7 @@ struct KistOptions {
             case let flag where ["--sml-runtime-attachments", "--sml-attachments"].contains(flag):
                                             if let v = next() { o.smlRuntimeAttachments = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
+            case "--sml-runtime-durable":   o.smlRuntimeDurable = true
             case let flag where ["--sml-runtime-repl", "--sml-repl"].contains(flag):
                                             if let v = next() { o.smlRuntimeREPL = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
@@ -972,6 +974,11 @@ struct KistOptions {
           --sml-runtime-model-script <json> --sml-model-script <path> [--provider <id>] [--model <id>]
                                     Launch the wrapped source and run a multi-turn prompt script
                                     through one generated model-router session.
+              --sml-runtime-durable     REPL/API verbs use the persistent project store
+                                        (.kist/sml/runtime.json), the real clock, and the
+                                        human-owned .kist/sml/authority.json + catalog.json
+                                        instead of the ephemeral rubber-stamp export host;
+                                        takes the exclusive .kist/sml/host.lock while running.
               --sml-role <role>         Override workflow role for the generated mount.
               --sml-api-base <path>     Override API base path for generated endpoints.
               --sml-api-workflow-path <id>=<path>

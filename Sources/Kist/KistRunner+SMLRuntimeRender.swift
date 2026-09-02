@@ -362,6 +362,7 @@ extension KistRunner {
     static func renderSMLRuntimeHostREPLCommand(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         workflowID: String? = nil,
         line: String?,
         roleOverride: String? = nil,
@@ -375,6 +376,7 @@ extension KistRunner {
         let command = try await makeSMLRuntimeHostREPLCommand(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             workflowID: workflowID,
             line: line,
             roleOverride: roleOverride,
@@ -393,6 +395,7 @@ extension KistRunner {
     static func renderSMLRuntimeHostREPLTranscript(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         workflowID: String? = nil,
         scriptPath: String?,
         roleOverride: String? = nil,
@@ -406,6 +409,7 @@ extension KistRunner {
         let transcript = try await makeSMLRuntimeHostREPLTranscript(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             workflowID: workflowID,
             scriptPath: scriptPath,
             roleOverride: roleOverride,
@@ -453,6 +457,7 @@ extension KistRunner {
     static func renderSMLRuntimeHostAPIExchange(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         method: SMLWorkflowAPIMethod = .get,
         path: String?,
         bodyJSON: String? = nil,
@@ -467,6 +472,7 @@ extension KistRunner {
         let exchange = try await makeSMLRuntimeHostAPIExchange(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             method: method,
             path: path,
             bodyJSON: bodyJSON,
@@ -486,6 +492,7 @@ extension KistRunner {
     static func renderSMLRuntimeHostAPITranscript(
         sourcePath: String?,
         projectRoot: String,
+        mode: SMLRuntimeHostMode = .ephemeralExport,
         scriptPath: String?,
         roleOverride: String? = nil,
         actor: String? = nil,
@@ -498,6 +505,7 @@ extension KistRunner {
         let transcript = try await makeSMLRuntimeHostAPITranscript(
             sourcePath: sourcePath,
             projectRoot: projectRoot,
+            mode: mode,
             scriptPath: scriptPath,
             roleOverride: roleOverride,
             actor: actor,
