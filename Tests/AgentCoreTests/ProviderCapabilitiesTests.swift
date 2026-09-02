@@ -14,6 +14,36 @@ final class ProviderCapabilitiesTests: XCTestCase {
         XCTAssertTrue(registry.capabilities(providerId: "grok", model: nil).nativeTools)
     }
 
+    func testOpenAICompatibleVersionedAliasesUseExactThenLongestBoundaryMatch() {
+        let provider = OpenAICompatibleProvider(
+            id: "alias-test", name: "Alias Test", iconName: "cpu", keyAccount: "alias-test",
+            endpoint: "https://example.invalid/v1/chat/completions", defaultModel: "gpt-5.5",
+            availableModels: [
+                AIModel(id: "gpt-5", isVision: false, isLocal: true, contextWindowTokens: 100),
+                AIModel(id: "gpt-5.5", isVision: true, contextWindowTokens: 200),
+                AIModel(id: "gpt-5.5-preview", isVision: false, isLocal: true,
+                        contextWindowTokens: 300),
+            ])
+
+        let versioned = provider.capabilities(forModel: "gpt-5.5-2026-09-01")
+        XCTAssertTrue(versioned.vision)
+        XCTAssertTrue(versioned.nativeTools)
+        XCTAssertEqual(versioned.contextWindowTokens, 200,
+                       "the longest id prefix must win over gpt-5")
+
+        let exact = provider.capabilities(forModel: "gpt-5.5-preview")
+        XCTAssertFalse(exact.vision)
+        XCTAssertFalse(exact.nativeTools)
+        XCTAssertEqual(exact.contextWindowTokens, 300,
+                       "exact metadata must win over the gpt-5.5 prefix")
+
+        let sibling = provider.capabilities(forModel: "gpt-5.50-preview")
+        XCTAssertFalse(sibling.vision)
+        XCTAssertTrue(sibling.nativeTools)
+        XCTAssertNil(sibling.contextWindowTokens,
+                     "a sibling id must not inherit gpt-5.5 or gpt-5 metadata")
+    }
+
     func testDeepSeekDefaultsToTextProtocol() {
         // DeepSeek is OpenAI-compatible, but its native multi-turn tool history can 400. Keep it
         // useful by defaulting to Mythos's text protocol; explicit --tools native can still test it.

@@ -47,7 +47,7 @@ public struct OpenAICompatibleProvider: ChatProvider {
     /// servers (MLX), any model flagged `isLocal`, AND providers with broken multi-turn tools (MiMo)
     /// degrade to the text protocol — honest "uses all AIs", not a silent failure.
     public func capabilities(forModel model: String) -> ModelCapabilities {
-        let meta = availableModels.first { $0.id == model || $0.name == model }
+        let meta = modelMetadata(for: model)
         let modelIsLocal = isLocal || (meta?.isLocal ?? false)
         return ModelCapabilities(nativeTools: !modelIsLocal && nativeToolsSupported,
                                  vision: meta?.isVision ?? false,
@@ -59,6 +59,19 @@ public struct OpenAICompatibleProvider: ChatProvider {
                                  // guarantee it, so we advertise it only for the remote, tool-capable path —
                                  // the same honesty gate as nativeTools (label down when unproven).
                                  structuredOutput: !modelIsLocal && nativeToolsSupported)
+    }
+
+    /// `/models` reconciliation can replace a catalog id with a dated/versioned alias. Preserve the
+    /// catalog model's capabilities only for an unambiguous `id-...` descendant: exact id/name wins,
+    /// then the longest matching id wins (`gpt-5.5-*` must not inherit from the shorter `gpt-5`).
+    /// A sibling such as `gpt-5.50-*` does not match because the hyphen boundary is mandatory.
+    private func modelMetadata(for model: String) -> AIModel? {
+        if let exact = availableModels.first(where: { $0.id == model || $0.name == model }) {
+            return exact
+        }
+        return availableModels
+            .filter { model.hasPrefix($0.id + "-") }
+            .max { $0.id.count < $1.id.count }
     }
 
     /// Heuristic: does this model id belong to a reasoning family that emits hidden `reasoning_content`
