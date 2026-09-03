@@ -19,6 +19,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let runbookDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeRunbook != nil"))
         let scaffoldDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeScaffold != nil"))
         let attachmentsDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAttachments != nil"))
+        let serveDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeServe != nil"))
         let replScriptDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeREPLScript != nil"))
         let replDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeREPL != nil"))
         let apiScriptDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAPIScript != nil"))
@@ -99,6 +100,11 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "offline SML runtime attachments must not initialize providers, keychain, MCP, tools, or REPL"
         )
         XCTAssertLessThan(
+            serveDispatch.lowerBound,
+            configLoad.lowerBound,
+            "SML runtime serve must own its bounded headless driver registry"
+        )
+        XCTAssertLessThan(
             replScriptDispatch.lowerBound,
             configLoad.lowerBound,
             "offline SML runtime REPL script must not initialize providers, keychain, MCP, tools, or REPL"
@@ -142,9 +148,12 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let workflowPathOverrideForwardCount = source.components(
             separatedBy: "apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides"
         ).count - 1
+        let runtimeLaunchCount = source.components(
+            separatedBy: "withSMLRuntimeHostLaunch("
+        ).count - 1
         XCTAssertEqual(
             workflowPathOverrideForwardCount,
-            20,
+            runtimeLaunchCount,
             "every SML runtime CLI mode must forward --sml-api-workflow-path into the runtime launch helpers"
         )
     }

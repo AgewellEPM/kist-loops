@@ -163,7 +163,8 @@ extension KistRunner {
                 sourcePath: sourceURL.standardizedFileURL.path,
                 sourceFormat: loaded.format,
                 runtimePackage: runtimePackage,
-                launch: launch
+                launch: launch,
+                durableEnvironment: nil
             )
             return try await body(host)
         case .durable:
@@ -182,7 +183,9 @@ extension KistRunner {
                 sourcePath: sourceURL.standardizedFileURL.path,
                 sourceFormat: loaded.format,
                 runtimePackage: runtimePackage,
-                launch: launch
+                launch: launch,
+                durableEnvironment: environment,
+                durableRuntime: runtime
             )
             return try await body(host)
         }

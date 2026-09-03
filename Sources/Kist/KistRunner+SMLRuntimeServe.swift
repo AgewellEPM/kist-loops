@@ -1,0 +1,181 @@
+import Foundation
+import AgentCore
+
+/// `kist --sml-runtime-serve <source.json>` — the long-lived harness milestone: a durable,
+/// approval-gated SML workflow runtime served over loopback HTTP.
+///
+/// Assembly (every piece host-owned): durable environment (persistent store, real clock,
+/// deny-by-default authority, exclusive host lock) → approval-gated workflows (injected at load)
+/// → production capability drivers built from the human catalog → single-flight capability pump →
+/// loopback HTTP core with a per-session bearer token. An approval POSTed to the generated
+/// `.../tasks/{id}/approve` route is followed immediately by its gated dispatch; SIGINT/SIGTERM
+/// stop accepting, let the single in-flight dispatch finish, and release the host lock.
+extension KistRunner {
+    static func runSMLRuntimeServe(_ opts: KistOptions) async -> Int32 {
+        do {
+            return try await withSMLRuntimeHostLaunch(
+                sourcePath: opts.smlRuntimeServe,
+                projectRoot: opts.project,
+                mode: .durable,
+                roleOverride: opts.smlRuntimeRole,
+                actor: opts.smlRuntimeActor,
+                apiBasePathOverride: opts.smlRuntimeAPIBasePath,
+                apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides,
+                title: opts.smlRuntimeTitle,
+                version: opts.smlRuntimeVersion,
+                modelMaximumCommandRoundsOverride: opts.smlRuntimeModelRounds
+            ) { host in
+                try await serveLaunchedRuntime(host, opts: opts)
+            }
+        } catch {
+            err("error: \(error)")
+            return 2
+        }
+    }
+
+    private static func serveLaunchedRuntime(
+        _ host: SMLRuntimeHostLaunch,
+        opts: KistOptions
+    ) async throws -> Int32 {
+        guard let environment = host.durableEnvironment,
+              let runtime = host.durableRuntime else {
+            err("error: serve mode requires the durable host launch")
+            return 2
+        }
+        let projectRoot = opts.project
+        let catalog = try SMLRuntimeHostCatalogFile.load(projectRoot: projectRoot)
+        let actor = opts.smlRuntimeActor ?? "sml-runtime-exporter"
+
+        // Drivers + launch-time disjointness proof, then the gated dispatch stack.
+        let drivers = try buildSMLCapabilityDrivers(projectRoot: projectRoot, catalog: catalog)
+        let router = SMLCapabilityRouter(drivers: drivers)
+        try requireDisjointSMLDrivers(router: router, catalog: catalog)
+        let gateway = SMLCommandGateway(runtime: runtime, replayGuard: environment.store)
+        let coordinator = SMLCapabilityCoordinator(
+            runtime: runtime,
+            router: router,
+            claimCompiler: SMLCapabilityClaimCompiler(
+                actor: actor,
+                commandID: { "sml-claim-\(UUID().uuidString.lowercased())" },
+                dispatchID: { "sml-dispatch-\(UUID().uuidString.lowercased())" }
+            ),
+            completionCompiler: SMLCapabilityCompletionCompiler(
+                actor: actor,
+                commandID: { "sml-complete-\(UUID().uuidString.lowercased())" }
+            ),
+            gateway: gateway,
+            authorityResolver: environment.authorityResolver,
+            clock: environment.clock
+        )
+        let pump = SMLRuntimeCapabilityPump(
+            store: environment.store,
+            coordinator: SMLApprovalGatedCoordinator(
+                coordinator: coordinator,
+                store: environment.store
+            )
+        )
+
+        let api = host.launch.registry.makeAPI(
+            gateway: gateway,
+            authorityResolver: environment.authorityResolver,
+            launchDescriptor: host.launch.app.launchDescriptor,
+            clock: environment.clock
+        )
+        let tokenURL = URL(fileURLWithPath: projectRoot)
+            .appendingPathComponent(".kist/sml/serve/session-token")
+        let token = try SMLRuntimeHTTPCore.mintSessionToken(writingTo: tokenURL)
+        defer {
+            do {
+                try SMLRuntimeHTTPCore.removeSessionToken(at: tokenURL)
+            } catch {
+                err(
+                    "warning: could not remove the SML runtime session token; "
+                        + "remove \(tokenURL.path) before restarting"
+                )
+            }
+        }
+        let portRange: ClosedRange<UInt16>
+        if let requested = opts.smlRuntimeServePort {
+            portRange = requested...requested
+        } else {
+            portRange = 8850...8880
+        }
+        let core = SMLRuntimeHTTPCore(
+            api: api,
+            store: environment.store,
+            pump: pump,
+            sessionToken: token,
+            configuration: SMLRuntimeHTTPCore.Configuration(portRange: portRange)
+        )
+        guard let url = core.start() else {
+            err("error: no free loopback port in \(portRange)")
+            return 2
+        }
+
+        print("sml runtime serving \(url)")
+        print("  source: \(host.sourcePath)")
+        print("  workflows: \(host.runtimePackage.workflowIDs.sorted().joined(separator: ", "))")
+        print("  session token: \(tokenURL.path)")
+        print("  tool audit: \(AuditLog.forProject(root: projectRoot).path)")
+        print("  pending work: GET /approvals · approve: POST <api>/tasks/<id>/approve")
+        print("  stop: ctrl-c (drains in-flight work, releases the host lock)")
+
+        // Drain anything already dispatchable (resumed store), then park until a signal.
+        reportSMLRuntimeDrain(await pump.drain())
+        let ticker = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { break }
+                reportSMLRuntimeDrain(await pump.drain())
+            }
+        }
+        await Self.parkUntilTerminationSignal()
+        ticker.cancel()
+        core.stop()
+        // One final drain so an approval accepted moments before shutdown completes its dispatch.
+        reportSMLRuntimeDrain(await pump.drain())
+        print("sml runtime stopped")
+        return 0
+    }
+
+    private static func reportSMLRuntimeDrain(_ report: SMLRuntimeCapabilityPump.DrainReport) {
+        if report.hostFailure != nil {
+            err("warning: SML capability pump could not read the durable store")
+        }
+        for taskID in report.failed.keys.sorted() {
+            err("warning: SML capability dispatch failed for \(taskID); inspect its durable receipts")
+        }
+    }
+
+    /// Parks until SIGINT or SIGTERM. Dispatch signal sources fire on a queue; the latch makes
+    /// double-delivery (ctrl-c mashing) resume the continuation exactly once.
+    private static func parkUntilTerminationSignal() async {
+        final class Latch: @unchecked Sendable {
+            private let lock = NSLock()
+            private var fired = false
+            func fireOnce(_ body: () -> Void) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !fired else { return }
+                fired = true
+                body()
+            }
+        }
+        let latch = Latch()
+        let queue = DispatchQueue(label: "sml-serve-signals")
+        signal(SIGINT, SIG_IGN)
+        signal(SIGTERM, SIG_IGN)
+        let sources = [SIGINT, SIGTERM].map { number in
+            DispatchSource.makeSignalSource(signal: number, queue: queue)
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            for source in sources {
+                source.setEventHandler {
+                    latch.fireOnce { continuation.resume() }
+                }
+                source.resume()
+            }
+        }
+        for source in sources { source.cancel() }
+    }
+}

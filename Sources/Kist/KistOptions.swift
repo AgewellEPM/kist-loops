@@ -172,6 +172,8 @@ struct KistOptions {
     var smlRuntimeScaffold: String? // --sml-runtime-scaffold <source.json>: write all host-consumable runtime artifacts
     var smlRuntimeAttachments: String? // --sml-runtime-attachments <source.json>: emit generated workflow attachment manifests
     var smlRuntimeDurable = false   // --sml-runtime-durable: REPL/API verbs use the persistent project store, real clock, and .kist/sml authority/catalog files instead of the ephemeral rubber-stamp export host
+    var smlRuntimeServe: String?    // --sml-runtime-serve <source.json>: long-lived durable harness — loopback HTTP + approval-gated capability pump
+    var smlRuntimeServePort: UInt16? // --sml-port <port>: exact loopback port for --sml-runtime-serve (default: first free in 8850...8880)
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeREPLScript: String? // --sml-runtime-repl-script <source.json>: run a generated workflow REPL script offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/runbook/attachments
@@ -282,6 +284,13 @@ struct KistOptions {
                                             if let v = next() { o.smlRuntimeAttachments = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
             case "--sml-runtime-durable":   o.smlRuntimeDurable = true
+            case "--sml-runtime-serve":
+                                            if let v = next() { o.smlRuntimeServe = v }
+                                            else { o.optionErrors.append("--sml-runtime-serve requires <source.json>") }
+            case "--sml-port":
+                                            if let v = next(), let port = UInt16(v), port >= 1_024 {
+                                                o.smlRuntimeServePort = port
+                                            } else { o.optionErrors.append("--sml-port requires a port number >= 1024") }
             case let flag where ["--sml-runtime-repl", "--sml-repl"].contains(flag):
                                             if let v = next() { o.smlRuntimeREPL = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
@@ -618,6 +627,7 @@ struct KistOptions {
             ("--sml-runtime-runbook", o.smlRuntimeRunbook != nil),
             ("--sml-runtime-scaffold", o.smlRuntimeScaffold != nil),
             ("--sml-runtime-attachments", o.smlRuntimeAttachments != nil),
+            ("--sml-runtime-serve", o.smlRuntimeServe != nil),
             ("--sml-runtime-repl", o.smlRuntimeREPL != nil),
             ("--sml-runtime-repl-script", o.smlRuntimeREPLScript != nil),
             ("--sml-runtime-api", o.smlRuntimeAPI != nil),
@@ -632,6 +642,9 @@ struct KistOptions {
                     "\(activeSMLRuntimeModes[firstIndex].flag) conflicts with \(activeSMLRuntimeModes[secondIndex].flag)"
                 )
             }
+        }
+        if o.smlRuntimeServe == nil, o.smlRuntimeServePort != nil {
+            o.optionErrors.append("--sml-port requires --sml-runtime-serve <source.json>")
         }
         if o.smlRuntimeREPL != nil {
             if o.smlRuntimeREPLLine?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
@@ -974,6 +987,13 @@ struct KistOptions {
           --sml-runtime-model-script <json> --sml-model-script <path> [--provider <id>] [--model <id>]
                                     Launch the wrapped source and run a multi-turn prompt script
                                     through one generated model-router session.
+          --sml-runtime-serve <json> [--sml-port <port>]
+                                    Long-lived durable harness: approval-gated workflows served
+                                    over loopback HTTP with a per-session bearer token
+                                    (.kist/sml/serve/session-token). GET /approvals lists pending
+                                    human gates; approving through the generated task routes
+                                    triggers the single-flight capability pump. Requires the
+                                    human-owned .kist/sml/authority.json + catalog.json.
               --sml-runtime-durable     REPL/API verbs use the persistent project store
                                         (.kist/sml/runtime.json), the real clock, and the
                                         human-owned .kist/sml/authority.json + catalog.json
