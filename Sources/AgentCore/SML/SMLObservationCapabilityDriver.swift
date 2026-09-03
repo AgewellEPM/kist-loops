@@ -10,18 +10,18 @@ public struct SMLObservationCapabilityDriver: SMLInstructionDriver {
     public let id = "kist-observation-driver"
 
     private let allowedSources: Set<String>
-    private let tool: @Sendable (String) -> (any AgentTool)?
+    private let registry: ToolRegistry
     private let context: ToolContext
     private let clock: @Sendable () -> Double
 
     public init(
         allowedSources: Set<String>,
-        toolLookup: @escaping @Sendable (String) -> (any AgentTool)?,
+        registry: ToolRegistry,
         context: ToolContext,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
         self.allowedSources = allowedSources
-        self.tool = toolLookup
+        self.registry = registry
         self.context = context
         self.clock = clock
     }
@@ -34,7 +34,7 @@ public struct SMLObservationCapabilityDriver: SMLInstructionDriver {
         _ invocation: SMLCapabilityInvocation
     ) async throws -> SMLCapabilityOutcome {
         let request = invocation.request
-        guard let tool = tool(request.reference) else {
+        guard let tool = registry.tool(named: request.reference) else {
             throw SMLCapabilityDriverConfigurationError.unknownTool(capability: request.reference)
         }
         guard tool is ReadOnlyAgentTool else {
@@ -46,26 +46,13 @@ public struct SMLObservationCapabilityDriver: SMLInstructionDriver {
 
         var arguments = request.arguments
         arguments.removeValue(forKey: SMLCapabilityDriverSupport.outputFieldArgument)
-        let result: ToolResult
-        do {
-            result = try await tool.execute(
-                arguments: SMLCapabilityDriverSupport.foundationArguments(arguments),
-                context: context
-            )
-        } catch {
-            return SMLCapabilityDriverSupport.outcome(
-                for: invocation,
-                driverID: id,
-                status: .failed,
-                statePatch: [:],
-                evidencePayload: [
-                    "source": .string(request.reference),
-                    "error": .string(String(describing: error)),
-                ],
-                receiptID: "observe.\(request.reference).threw",
-                observedAtEpoch: clock()
-            )
-        }
+        // Type-check the resolved implementation above, but execute through the registry so the
+        // same ToolGate, argument validation, audit, and tracing boundary applies to observations.
+        let result = await registry.execute(
+            name: request.reference,
+            arguments: SMLCapabilityDriverSupport.foundationArguments(arguments),
+            context: context
+        )
 
         var statePatch: SMLObject = [:]
         if result.success, let outputField {

@@ -32,7 +32,7 @@ final class SMLProductionDriverTests: XCTestCase {
     private struct StubTool: AgentTool {
         let name: String
         let description = "stub"
-        let parameters: [ToolParameter] = []
+        var parameters: [ToolParameter] = []
         var supportedActions: [String] { [] }
         var unsupportedActions: [String] { [] }
         var capabilityNote: String? { nil }
@@ -51,14 +51,16 @@ final class SMLProductionDriverTests: XCTestCase {
     private struct ReadOnlyStubTool: ReadOnlyAgentTool {
         let name: String
         let description = "read-only stub"
-        let parameters: [ToolParameter] = []
+        var parameters: [ToolParameter] = []
         var supportedActions: [String] { [] }
         var unsupportedActions: [String] { [] }
         var capabilityNote: String? { nil }
         var usageExamples: [String] { [] }
+        var capture: ArgumentCapture?
 
         func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
-            ToolResult(success: true, output: "observed")
+            capture?.record(arguments: arguments, projectRoot: context.projectRoot)
+            return ToolResult(success: true, output: "observed")
         }
     }
 
@@ -137,7 +139,7 @@ final class SMLProductionDriverTests: XCTestCase {
         tool.result = ToolResult(success: true, output: "file contents")
         let driver = SMLToolCapabilityDriver(
             allowedCapabilities: ["read_file"],
-            toolLookup: { name in name == "read_file" ? tool : nil },
+            registry: ToolRegistry([tool]),
             context: context(),
             clock: { 2_000 }
         )
@@ -160,12 +162,41 @@ final class SMLProductionDriverTests: XCTestCase {
         XCTAssertEqual(capture.projectRoot, "/tmp/sml-driver-tests")
     }
 
+    func testToolDriverCannotBypassRegistryArgumentGate() async throws {
+        let capture = ArgumentCapture()
+        var tool = StubTool(name: "guarded_tool")
+        tool.parameters = [
+            ToolParameter(
+                name: "path",
+                type: "string",
+                description: "A required path"
+            ),
+        ]
+        tool.capture = capture
+        let driver = SMLToolCapabilityDriver(
+            allowedCapabilities: ["guarded_tool"],
+            registry: ToolRegistry([tool]),
+            context: context()
+        )
+        let request = request(
+            operation: .callTool,
+            reference: "guarded_tool",
+            arguments: ["path": .number(7)]
+        )
+
+        let outcome = try await driver.execute(invocation(request, driverID: driver.id))
+        XCTAssertEqual(outcome.status, .failed)
+        XCTAssertNil(capture.projectRoot,
+                     "invalid arguments must be rejected by ToolGate before AgentTool.execute")
+        XCTAssertTrue(outcome.statePatch.isEmpty)
+    }
+
     func testToolDriverConvertsAThrowingToolIntoAFailedOutcome() async throws {
         var tool = StubTool(name: "write_file")
         tool.thrown = StubError.refused
         let driver = SMLToolCapabilityDriver(
             allowedCapabilities: ["write_file"],
-            toolLookup: { name in name == "write_file" ? tool : nil },
+            registry: ToolRegistry([tool]),
             context: context()
         )
         let request = request(operation: .callTool, reference: "write_file")
@@ -178,7 +209,7 @@ final class SMLProductionDriverTests: XCTestCase {
     func testToolDriverSupportsOnlyAllowedCapabilitiesAndCallToolOp() {
         let driver = SMLToolCapabilityDriver(
             allowedCapabilities: ["cap.allowed"],
-            toolLookup: { _ in nil },
+            registry: ToolRegistry([]),
             context: context()
         )
         XCTAssertFalse(driver.supports(request(operation: .callTool, reference: "cap.other")))
@@ -188,7 +219,7 @@ final class SMLProductionDriverTests: XCTestCase {
     func testToolDriverUnknownToolFailsClosedWithNamedError() async {
         let driver = SMLToolCapabilityDriver(
             allowedCapabilities: ["ghost"],
-            toolLookup: { _ in nil },
+            registry: ToolRegistry([]),
             context: context()
         )
         let request = request(operation: .callTool, reference: "ghost")
@@ -208,7 +239,7 @@ final class SMLProductionDriverTests: XCTestCase {
         let mutating = StubTool(name: "sensor.fake")
         let driver = SMLObservationCapabilityDriver(
             allowedSources: ["sensor.fake"],
-            toolLookup: { name in name == "sensor.fake" ? mutating : nil },
+            registry: ToolRegistry([mutating]),
             context: context()
         )
         let request = request(operation: .observe, reference: "sensor.fake")
@@ -226,7 +257,7 @@ final class SMLProductionDriverTests: XCTestCase {
         let readOnly = ReadOnlyStubTool(name: "sensor.real")
         let driver = SMLObservationCapabilityDriver(
             allowedSources: ["sensor.real"],
-            toolLookup: { name in name == "sensor.real" ? readOnly : nil },
+            registry: ToolRegistry([readOnly]),
             context: context()
         )
         let request = request(operation: .observe, reference: "sensor.real",
@@ -234,6 +265,35 @@ final class SMLProductionDriverTests: XCTestCase {
         let outcome = try await driver.execute(invocation(request, driverID: driver.id))
         XCTAssertEqual(outcome.status, .passed)
         XCTAssertEqual(outcome.statePatch["result"], .string("observed"))
+    }
+
+    func testObservationDriverCannotBypassRegistryArgumentGate() async throws {
+        let capture = ArgumentCapture()
+        var readOnly = ReadOnlyStubTool(name: "sensor.guarded")
+        readOnly.parameters = [
+            ToolParameter(
+                name: "query",
+                type: "string",
+                description: "A required query"
+            ),
+        ]
+        readOnly.capture = capture
+        let driver = SMLObservationCapabilityDriver(
+            allowedSources: ["sensor.guarded"],
+            registry: ToolRegistry([readOnly]),
+            context: context()
+        )
+        let request = request(
+            operation: .observe,
+            reference: "sensor.guarded",
+            arguments: ["query": .bool(true)]
+        )
+
+        let outcome = try await driver.execute(invocation(request, driverID: driver.id))
+        XCTAssertEqual(outcome.status, .failed)
+        XCTAssertNil(capture.projectRoot,
+                     "invalid observation arguments must stop at ToolGate")
+        XCTAssertTrue(outcome.statePatch.isEmpty)
     }
 
     // MARK: - Model driver
@@ -334,12 +394,12 @@ final class SMLProductionDriverTests: XCTestCase {
         let toolA = StubTool(name: "cap.shared")
         let driverA = SMLToolCapabilityDriver(
             allowedCapabilities: ["cap.shared"],
-            toolLookup: { _ in toolA },
+            registry: ToolRegistry([toolA]),
             context: context()
         )
         let driverB = SMLToolCapabilityDriver(
             allowedCapabilities: ["cap.shared"],
-            toolLookup: { _ in toolA },
+            registry: ToolRegistry([toolA]),
             context: context()
         )
         let router = SMLCapabilityRouter(drivers: [driverA, driverB])
