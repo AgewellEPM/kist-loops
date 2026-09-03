@@ -2,6 +2,55 @@ import Foundation
 import AgentCore
 
 extension KistRunner {
+    struct SMLRuntimeCapabilityStack {
+        let gateway: SMLCommandGateway
+        let pump: SMLRuntimeCapabilityPump
+    }
+
+    /// One assembly seam for every durable operator surface. Serve and the interactive REPL must
+    /// never drift into different catalogs, driver sets, claim compilers, or authority resolvers.
+    static func makeSMLRuntimeCapabilityStack(
+        host: SMLRuntimeHostLaunch,
+        projectRoot: String,
+        actor: String
+    ) throws -> SMLRuntimeCapabilityStack {
+        guard let environment = host.durableEnvironment,
+              let runtime = host.durableRuntime else {
+            throw SMLRuntimeCapabilityStackError.durableHostRequired
+        }
+        let catalog = try SMLRuntimeHostCatalogFile.load(projectRoot: projectRoot)
+        let drivers = try buildSMLCapabilityDrivers(projectRoot: projectRoot, catalog: catalog)
+        let router = SMLCapabilityRouter(drivers: drivers)
+        try requireDisjointSMLDrivers(router: router, catalog: catalog)
+        let gateway = SMLCommandGateway(runtime: runtime, replayGuard: environment.store)
+        let coordinator = SMLCapabilityCoordinator(
+            runtime: runtime,
+            router: router,
+            claimCompiler: SMLCapabilityClaimCompiler(
+                actor: actor,
+                commandID: { "sml-claim-\(UUID().uuidString.lowercased())" },
+                dispatchID: { "sml-dispatch-\(UUID().uuidString.lowercased())" }
+            ),
+            completionCompiler: SMLCapabilityCompletionCompiler(
+                actor: actor,
+                commandID: { "sml-complete-\(UUID().uuidString.lowercased())" }
+            ),
+            gateway: gateway,
+            authorityResolver: environment.authorityResolver,
+            clock: environment.clock
+        )
+        return SMLRuntimeCapabilityStack(
+            gateway: gateway,
+            pump: SMLRuntimeCapabilityPump(
+                store: environment.store,
+                coordinator: SMLApprovalGatedCoordinator(
+                    coordinator: coordinator,
+                    store: environment.store
+                )
+            )
+        )
+    }
+
     /// Builds the production capability driver set for a durable/serve host from the human-owned
     /// catalog plus the optional driver config files. Missing config is a missing CAPABILITY, not
     /// an error: no models.json simply means no model driver, so CALL_MODEL steps park honestly
@@ -105,5 +154,13 @@ extension KistRunner {
         } catch SMLRetrievalSourceBindings.LoadError.missing {
             return nil
         }
+    }
+}
+
+enum SMLRuntimeCapabilityStackError: Error, CustomStringConvertible {
+    case durableHostRequired
+
+    var description: String {
+        "SML capability execution requires a durable host"
     }
 }

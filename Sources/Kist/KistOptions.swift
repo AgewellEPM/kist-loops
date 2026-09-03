@@ -177,7 +177,7 @@ struct KistOptions {
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeREPLScript: String? // --sml-runtime-repl-script <source.json>: run a generated workflow REPL script offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/runbook/attachments
-    var smlRuntimeREPLLine: String? // --sml-line <line>: generated workflow REPL line to run
+    var smlRuntimeREPLLine: String? // --sml-line <line>: optional one-shot line; omit for interactive REPL
     var smlRuntimeREPLScriptPath: String? // --sml-script <path>: generated workflow REPL script file to run
     var smlRuntimeAPI: String?      // --sml-runtime-api <source.json>: run one generated runtime API request offline
     var smlRuntimeAPIScript: String? // --sml-runtime-api-script <source.json>: run a generated runtime API request script offline
@@ -647,8 +647,11 @@ struct KistOptions {
             o.optionErrors.append("--sml-port requires --sml-runtime-serve <source.json>")
         }
         if o.smlRuntimeREPL != nil {
-            if o.smlRuntimeREPLLine?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
-                o.optionErrors.append("--sml-runtime-repl requires --sml-line <line>")
+            // No --sml-line means the INTERACTIVE loop (reads lines from stdin until exit/EOF).
+            // A provided-but-blank line is still an operator mistake.
+            if let line = o.smlRuntimeREPLLine,
+               line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                o.optionErrors.append("--sml-line must not be blank")
             }
         } else if o.smlRuntimeREPLLine != nil {
             o.optionErrors.append("--sml-line requires --sml-runtime-repl <source.json>")
@@ -967,10 +970,10 @@ struct KistOptions {
                                     Emit the per-workflow attachment manifests for generated REPL,
                                     API, model-router, Onyx driver, and planning adapters; optionally
                                     filter to one mounted workflow.
-          --sml-runtime-repl <json> --sml-line <line> [--sml-workflow <id>]
-                                    Launch the same wrapped source offline and run one generated
-                                    workflow REPL command, returning command/result JSON for host
-                                    adapters and model drivers.
+          --sml-runtime-repl <json> [--sml-line <line>] [--sml-workflow <id>]
+                                    Open the generated workflow REPL on stdin/stdout. With --sml-line,
+                                    run one command and return command/result JSON instead. Add
+                                    --sml-runtime-durable for approval-gated live capability dispatch.
           --sml-runtime-repl-script <json> --sml-script <path> [--sml-workflow <id>]
                                     Launch the same wrapped source offline and run a multi-turn
                                     generated workflow REPL script, returning a transcript whose

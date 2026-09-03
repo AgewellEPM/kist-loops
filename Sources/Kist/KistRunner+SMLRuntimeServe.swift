@@ -38,42 +38,20 @@ extension KistRunner {
         opts: KistOptions
     ) async throws -> Int32 {
         guard let environment = host.durableEnvironment,
-              let runtime = host.durableRuntime else {
+              host.durableRuntime != nil else {
             err("error: serve mode requires the durable host launch")
             return 2
         }
         let projectRoot = opts.project
-        let catalog = try SMLRuntimeHostCatalogFile.load(projectRoot: projectRoot)
         let actor = opts.smlRuntimeActor ?? "sml-runtime-exporter"
 
-        // Drivers + launch-time disjointness proof, then the gated dispatch stack.
-        let drivers = try buildSMLCapabilityDrivers(projectRoot: projectRoot, catalog: catalog)
-        let router = SMLCapabilityRouter(drivers: drivers)
-        try requireDisjointSMLDrivers(router: router, catalog: catalog)
-        let gateway = SMLCommandGateway(runtime: runtime, replayGuard: environment.store)
-        let coordinator = SMLCapabilityCoordinator(
-            runtime: runtime,
-            router: router,
-            claimCompiler: SMLCapabilityClaimCompiler(
-                actor: actor,
-                commandID: { "sml-claim-\(UUID().uuidString.lowercased())" },
-                dispatchID: { "sml-dispatch-\(UUID().uuidString.lowercased())" }
-            ),
-            completionCompiler: SMLCapabilityCompletionCompiler(
-                actor: actor,
-                commandID: { "sml-complete-\(UUID().uuidString.lowercased())" }
-            ),
-            gateway: gateway,
-            authorityResolver: environment.authorityResolver,
-            clock: environment.clock
+        let capabilityStack = try makeSMLRuntimeCapabilityStack(
+            host: host,
+            projectRoot: projectRoot,
+            actor: actor
         )
-        let pump = SMLRuntimeCapabilityPump(
-            store: environment.store,
-            coordinator: SMLApprovalGatedCoordinator(
-                coordinator: coordinator,
-                store: environment.store
-            )
-        )
+        let gateway = capabilityStack.gateway
+        let pump = capabilityStack.pump
 
         let api = host.launch.registry.makeAPI(
             gateway: gateway,
