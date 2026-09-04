@@ -867,6 +867,32 @@ final class LiveModelMetadataGateTests: XCTestCase {
         XCTAssertTrue(blockers.contains { $0.contains("untrusted acquisition executable") }, blockers.joined())
     }
 
+    func testAcquisitionExecutableTrustAllowsOnlyVersionedPipUserBin() {
+        let home = (NSHomeDirectory() as NSString).resolvingSymlinksInPath
+        let projectRoot = "/private/tmp/kist-acquisition-project"
+
+        XCTAssertTrue(OrganizationalLearningStore.isTrustedLocalModelAcquisitionExecutable(
+            home + "/Library/Python/3.11/bin/hf",
+            executable: "hf",
+            projectRoot: projectRoot
+        ))
+        XCTAssertFalse(OrganizationalLearningStore.isTrustedLocalModelAcquisitionExecutable(
+            home + "/Library/Python/current/bin/hf",
+            executable: "hf",
+            projectRoot: projectRoot
+        ))
+        XCTAssertFalse(OrganizationalLearningStore.isTrustedLocalModelAcquisitionExecutable(
+            home + "/Library/Python/3.11/scripts/hf",
+            executable: "hf",
+            projectRoot: projectRoot
+        ))
+        XCTAssertFalse(OrganizationalLearningStore.isTrustedLocalModelAcquisitionExecutable(
+            home + "/Library/Python/3.11/bin/other",
+            executable: "hf",
+            projectRoot: projectRoot
+        ))
+    }
+
     func testHuggingFaceMetadataGateRejectsGatedUnknownLicenseUnsafeRepo() async {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }

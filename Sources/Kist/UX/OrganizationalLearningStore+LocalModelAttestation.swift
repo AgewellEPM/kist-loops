@@ -507,7 +507,28 @@ extension OrganizationalLearningStore {
             home + "/bin/",
             home + "/.local/bin/"
         ]
-        return allowedPrefixes.contains { resolved.hasPrefix($0) }
+        if allowedPrefixes.contains(where: { resolved.hasPrefix($0) }) {
+            return true
+        }
+
+        // `python3 -m pip install --user`, which is the remediation command emitted above,
+        // installs console scripts here on macOS. Keep the exception narrower than a prefix
+        // allowlist: only a numeric Python version, the literal `bin` directory, and the exact
+        // requested executable are accepted.
+        let pythonUserRoot = home + "/Library/Python/"
+        guard resolved.hasPrefix(pythonUserRoot) else { return false }
+        let components = resolved.dropFirst(pythonUserRoot.count).split(
+            separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 3,
+              components[1] == "bin",
+              components[2] == Substring(executable) else {
+            return false
+        }
+        let versionParts = components[0].split(separator: ".", omittingEmptySubsequences: false)
+        guard (2...3).contains(versionParts.count) else { return false }
+        return versionParts.allSatisfy { part in
+            !part.isEmpty && part.unicodeScalars.allSatisfy { (48...57).contains($0.value) }
+        }
     }
 
     static func scrubbedLocalModelAcquisitionEnvironment() -> [String: String] {
