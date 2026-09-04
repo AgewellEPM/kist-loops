@@ -132,6 +132,21 @@ public enum SMLWireCodec {
         return object
     }
 
+    /// Strict JSON ingress for document formats whose MEMBER NAMES are not SML identifiers (for
+    /// example OpenAPI path keys, `$ref`, and media types). It retains the same byte/depth/node and
+    /// duplicate-key preflight as every SML wire boundary, but deliberately does not apply SML's
+    /// identifier policy to open-format object keys. Callers must validate their own document shape.
+    public static func decodeArbitraryJSONObject(
+        from data: Data,
+        limits: Limits = .standard
+    ) throws -> SMLObject {
+        let tree = try preflight(data, limits: limits)
+        guard case .object = tree else {
+            throw SMLWireCodecError.decodingFailed("expected a JSON object")
+        }
+        return try decode(SMLObject.self, from: data)
+    }
+
     private static func preflight(_ data: Data, limits: Limits) throws -> SMLWireJSONNode {
         guard limits.maximumBytes > 0, limits.maximumDepth > 0, limits.maximumNodes > 0 else {
             throw SMLWireCodecError.invalidLimits

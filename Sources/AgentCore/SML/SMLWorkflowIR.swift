@@ -3,6 +3,7 @@ import Foundation
 public enum SMLWorkflowSourceKind: String, Sendable, Codable, Equatable {
     case native
     case langGraph = "langgraph"
+    case openAPI = "openapi"
     case jobDescription = "job_description"
     case scribe
     case demonstration

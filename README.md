@@ -51,6 +51,10 @@ Local, no key needed: run an [Ollama](https://ollama.com) model and `kist --prov
 | **MCP** | use any [Model Context Protocol](https://modelcontextprotocol.io) server's tools — configure in `~/.mcp.json`. |
 | **Multi-agent** | the agent can `spawn_agent` to delegate a focused subtask to a fresh sub-agent. |
 
+The approval-gated SML harness can also turn reviewed OpenAPI 3 JSON operations into pinned HTTP
+capabilities and single-operation workflows. See the [SML runtime operator guide](docs/SML_RUNTIME_OPERATOR_GUIDE.md)
+for the import, human-admission, credential, and durable-run procedure.
+
 ## Safety & privacy
 
 **No telemetry. No phone-home.** Mythos sends your prompts and code only to the AI provider *you*

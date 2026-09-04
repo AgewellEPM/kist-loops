@@ -18,6 +18,7 @@ final class SourceFileSizeInvariantTests: XCTestCase {
         "Sources/Kist/KistRunner+SMLRuntimeMake.swift",
         "Sources/Kist/KistRunner+SMLRuntimeScaffoldWriter.swift",
         "Sources/Kist/KistRunner+SMLRuntimeLoaders.swift",
+        "Sources/Kist/KistRunner+SMLRuntimeAdmission.swift",
         "Sources/AgentCore/SML/SMLWorkflowRuntimeBundle.swift",
         "Sources/AgentCore/SML/SMLWorkflowRuntimeDescriptors.swift",
         "Sources/AgentCore/SML/SMLWorkflowRuntimeExports.swift",

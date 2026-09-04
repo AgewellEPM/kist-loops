@@ -157,6 +157,8 @@ struct KistOptions {
     var modelAcquire: String?       // --model-acquire <manifest.json>: verify acquisition manifest
     var modelRunStage: String?      // --model-run <stage> <manifest.json>: execute verified manifest stage
     var modelRunManifest: String?
+    var smlOpenAPIImport: String?  // --sml-import-openapi <openapi.json>: propose HTTP capabilities/workflows
+    var smlOpenAPIID: String?      // --sml-api-id <id>: stable id for --sml-import-openapi
     var smlRuntimeExport: String?   // --sml-runtime-export <source.json>: offline source/package -> REPL/API/model/Onyx/planning JSON
     var smlRuntimeLaunch: String?   // --sml-runtime-launch <source.json>: emit offline launch descriptor/receipt
     var smlRuntimeOpenAPI: String?  // --sml-runtime-openapi <source.json>: emit generated OpenAPI document
@@ -241,6 +243,11 @@ struct KistOptions {
                                             } else {
                                                 o.optionErrors.append("\(flag) requires <stage> <manifest.json>")
                                             }
+            case let flag where ["--sml-import-openapi", "--sml-openapi-import"].contains(flag):
+                                            if let v = next() { o.smlOpenAPIImport = v }
+                                            else { o.optionErrors.append("\(flag) requires <openapi.json>") }
+            case "--sml-api-id":          if let v = next() { o.smlOpenAPIID = v }
+                                            else { o.optionErrors.append("--sml-api-id requires <id>") }
             case "--sml-runtime-export":
                                             if let v = next() { o.smlRuntimeExport = v }
                                             else { o.optionErrors.append("--sml-runtime-export requires <source.json>") }
@@ -613,6 +620,7 @@ struct KistOptions {
             o.optionErrors.append("--cobol-max-revisions requires --cobolo or --cobol-loop")
         }
         let smlRuntimeModes: [(flag: String, active: Bool)] = [
+            ("--sml-import-openapi", o.smlOpenAPIImport != nil),
             ("--sml-runtime-export", o.smlRuntimeExport != nil),
             ("--sml-runtime-launch", o.smlRuntimeLaunch != nil),
             ("--sml-runtime-openapi", o.smlRuntimeOpenAPI != nil),
@@ -699,8 +707,15 @@ struct KistOptions {
             if o.smlRuntimeOutputDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                 o.optionErrors.append("--sml-runtime-scaffold requires --sml-out <dir>")
             }
-        } else if o.smlRuntimeOutputDirectory != nil {
-            o.optionErrors.append("--sml-out requires --sml-runtime-scaffold <source.json>")
+        } else if o.smlRuntimeOutputDirectory != nil && o.smlOpenAPIImport == nil {
+            o.optionErrors.append(
+                "--sml-out requires --sml-runtime-scaffold or --sml-import-openapi <source.json>")
+        }
+        if o.smlOpenAPIImport == nil, o.smlOpenAPIID != nil {
+            o.optionErrors.append("--sml-api-id requires --sml-import-openapi <openapi.json>")
+        } else if let apiID = o.smlOpenAPIID,
+                  apiID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            o.optionErrors.append("--sml-api-id must not be blank")
         }
         if o.smlRuntimeModel != nil {
             let prompt = o.smlRuntimeModelPrompt ?? o.goal
@@ -919,6 +934,11 @@ struct KistOptions {
                                     Execute only the stage authorized by a verified acquisition
                                     manifest. Download requires a prior passing dry-run marker;
                                     inspect/onboard/benchmark require the prior stage markers.
+          --sml-import-openapi <openapi.json> [--sml-api-id <id>] [--sml-out <dir>]
+                                    Import a project-confined OpenAPI 3 JSON document into a
+                                    secret-free, pinned HTTP endpoint bundle, create-only wrapper
+                                    workflows/source set, and a review-required catalog proposal.
+                                    Never modifies the live catalog or creates credentials.
           --sml-runtime-export <json>
                                     Offline-wrap a LangGraph manifest, SML workflow JSON, SML
                                     runtime source package, or runtime source set with optional
@@ -1006,7 +1026,7 @@ struct KistOptions {
               --sml-api-base <path>     Override API base path for generated endpoints.
               --sml-api-workflow-path <id>=<path>
                                         Override one generated workflow API path; repeat per workflow.
-              --sml-out <dir>           Output directory for --sml-runtime-scaffold.
+              --sml-out <dir>           Project-confined output directory for scaffold/import.
               --sml-script <path>       Script file for --sml-runtime-repl-script; blank lines and
                                         leading # comments are ignored.
               --sml-api-script <path>   JSON request array for --sml-runtime-api-script.

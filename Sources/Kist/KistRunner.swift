@@ -127,6 +127,9 @@ enum KistRunner {
         if opts.stickyBarSelfTest {
             return await runStickyBarSelfTest()
         }
+        if opts.smlOpenAPIImport != nil {
+            return runSMLOpenAPIImport(opts)
+        }
         if opts.smlRuntimeOpenAPI != nil {
             return await runSMLRuntimeOpenAPI(opts)
         }

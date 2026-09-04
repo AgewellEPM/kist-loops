@@ -5364,7 +5364,26 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             XCTFail("duplicate runtime source set should fail closed")
         } catch {
             let message = String(describing: error)
-            XCTAssertTrue(message.contains("duplicate workflow id 'langgraph.review'"))
+            XCTAssertTrue(message.contains("duplicates another source path"), message)
+        }
+
+        let reviewCopyURL = directory.appendingPathComponent("review-copy.langgraph.json")
+        try langGraphReviewManifest().write(to: reviewCopyURL)
+        let duplicateWorkflowSetURL = directory.appendingPathComponent(
+            "duplicate-workflow.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: "review.langgraph.json"),
+            .init(path: "review-copy.langgraph.json"),
+        ])).write(to: duplicateWorkflowSetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "duplicate-workflow.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("duplicate workflow ids across distinct sources should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("duplicate workflow id 'langgraph.review'"), message)
         }
 
         let sourceExport = try await KistRunner.makeSMLRuntimeHostExport(
@@ -5432,6 +5451,77 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         } catch {
             let message = String(describing: error)
             XCTAssertTrue(message.contains("modelMaximumCommandRounds must be between 1 and 8"))
+        }
+    }
+
+    func testRuntimeSourceLoadingRefusesTraversalAbsoluteAndSymlinkedEntries() async throws {
+        let directory = try temporaryDirectory()
+        let outside = try temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        let outsideWorkflow = outside.appendingPathComponent("outside.workflow.json")
+        try langGraphReviewManifest().write(to: outsideWorkflow)
+
+        do {
+            _ = try await KistRunner.withSMLRuntimeHostLaunch(
+                sourcePath: outsideWorkflow.path,
+                projectRoot: directory.path,
+                mode: .durable
+            ) { _ in true }
+            XCTFail("a durable host must not mount an external runtime source")
+        } catch {
+            XCTAssertTrue(
+                String(describing: error).contains("escapes the project root"),
+                "unexpected durable external-source refusal: \(error)")
+        }
+
+        let cases: [(name: String, path: String)] = [
+            ("traversal", "../\(outside.lastPathComponent)/outside.workflow.json"),
+            ("absolute", outsideWorkflow.path),
+        ]
+        for item in cases {
+            let sourceSetURL = directory.appendingPathComponent("\(item.name).sources.json")
+            try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+                .init(path: item.path),
+            ])).write(to: sourceSetURL)
+            do {
+                _ = try await KistRunner.makeSMLRuntimeHostExport(
+                    sourcePath: sourceSetURL.lastPathComponent,
+                    projectRoot: directory.path)
+                XCTFail("\(item.name) source-set path should fail closed")
+            } catch {
+                XCTAssertTrue(
+                    String(describing: error).contains("confined relative file path"),
+                    "unexpected \(item.name) refusal: \(error)")
+            }
+        }
+
+        let linked = directory.appendingPathComponent("linked.workflow.json")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outsideWorkflow)
+        let linkedSet = directory.appendingPathComponent("linked.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: linked.lastPathComponent),
+        ])).write(to: linkedSet)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: linkedSet.lastPathComponent,
+                projectRoot: directory.path)
+            XCTFail("symlinked source-set entry should fail closed")
+        } catch {
+            XCTAssertTrue(
+                String(describing: error).contains("could not read sources[0]"),
+                "unexpected linked source-set refusal: \(error)")
+        }
+
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: linked.lastPathComponent,
+                projectRoot: directory.path)
+            XCTFail("symlinked top-level source should fail closed")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("could not read SML runtime source"))
         }
     }
 

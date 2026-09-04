@@ -615,7 +615,7 @@ final class KistOptionsTests: XCTestCase {
 
         let outputOnly = KistOptions.parse(["--sml-out", ".kist/generated/review-runtime"])
         XCTAssertTrue(outputOnly.optionErrors.contains {
-            $0.contains("--sml-out requires --sml-runtime-scaffold <source.json>")
+            $0.contains("--sml-out requires --sml-runtime-scaffold or --sml-import-openapi <source.json>")
         })
         XCTAssertEqual(outputOnly.smlRuntimeOutputDirectory, ".kist/generated/review-runtime")
 

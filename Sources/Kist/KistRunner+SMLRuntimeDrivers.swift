@@ -75,11 +75,28 @@ extension KistRunner {
             allowMediaDropInbox: false
         )
 
-        if !catalog.toolCapabilities.isEmpty {
+        // Endpoint files are inert until their exact capability also appears in the human-owned
+        // catalog. Partition those reviewed names from built-in tools so CALL_TOOL has one owner.
+        let endpointRegistry = try SMLHTTPEndpointRegistry.load(projectRoot: projectRoot)
+        let admittedHTTPRegistry = endpointRegistry.selecting(catalog.toolCapabilities)
+        let httpCapabilities = Set(admittedHTTPRegistry.endpoints.keys)
+        for capability in httpCapabilities.sorted() where registry.tool(named: capability) != nil {
+            throw SMLRuntimeCapabilityStackError.httpToolCollision(capability)
+        }
+        let builtInToolCapabilities = catalog.toolCapabilities.subtracting(httpCapabilities)
+
+        if !builtInToolCapabilities.isEmpty {
             drivers.append(SMLToolCapabilityDriver(
-                allowedCapabilities: catalog.toolCapabilities,
+                allowedCapabilities: builtInToolCapabilities,
                 registry: registry,
                 context: context
+            ))
+        }
+        if !httpCapabilities.isEmpty {
+            let authentication = try SMLHTTPAuthenticationStore.load(projectRoot: projectRoot)
+            drivers.append(try SMLHTTPCapabilityDriver(
+                registry: admittedHTTPRegistry,
+                authentication: authentication
             ))
         }
         if !catalog.observationSources.isEmpty {
@@ -159,8 +176,15 @@ extension KistRunner {
 
 enum SMLRuntimeCapabilityStackError: Error, CustomStringConvertible {
     case durableHostRequired
+    case httpToolCollision(String)
 
     var description: String {
-        "SML capability execution requires a durable host"
+        switch self {
+        case .durableHostRequired:
+            return "SML capability execution requires a durable host"
+        case .httpToolCollision(let capability):
+            return "SML capability '\(capability)' is defined by both the HTTP endpoint registry "
+                + "and the built-in tool registry"
+        }
     }
 }
