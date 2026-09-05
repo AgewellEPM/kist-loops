@@ -62,20 +62,6 @@ public struct SMLApprovalPolicy: Sendable, Equatable {
         }
     }
 
-    private struct FileFormat: Decodable {
-        let schemaVersion: Int
-        let defaultMode: Mode?
-        let overrides: [String: Mode]?
-        let approvalOwner: String?
-
-        enum CodingKeys: String, CodingKey {
-            case schemaVersion = "schema_version"
-            case defaultMode = "default"
-            case overrides
-            case approvalOwner = "approval_owner"
-        }
-    }
-
     public static func defaultURL(projectRoot: String) -> URL {
         URL(fileURLWithPath: projectRoot).appendingPathComponent(relativePath)
     }
@@ -85,41 +71,91 @@ public struct SMLApprovalPolicy: Sendable, Equatable {
     /// typo can never silently change gating.
     public static func load(projectRoot: String) throws -> SMLApprovalPolicy {
         let url = defaultURL(projectRoot: projectRoot)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return SMLApprovalPolicy()
-        }
         let data: Data
         do {
-            data = try Data(contentsOf: url)
+            data = try SMLHostConfigurationFile.read(
+                projectRoot: projectRoot,
+                relativePath: relativePath
+            )
+        } catch SMLHostConfigurationFile.ReadError.missing {
+            return SMLApprovalPolicy()
         } catch {
             throw LoadError.unreadable(path: url.path, reason: String(describing: error))
         }
-        let decoded: FileFormat
+
         do {
-            decoded = try JSONDecoder().decode(FileFormat.self, from: data)
+            let root = try SMLHostConfigurationFile.decodeRoot(from: data)
+            try SMLHostConfigurationFile.requireOnlyKeys(
+                root,
+                allowed: ["schema_version", "default", "overrides", "approval_owner"],
+                path: "policy"
+            )
+            let version = try SMLHostConfigurationFile.requiredInteger(
+                root["schema_version"], path: "policy.schema_version")
+            guard version == schemaVersion else {
+                throw LoadError.unsupportedSchemaVersion(version)
+            }
+
+            let defaultMode: Mode
+            if let rawMode = try SMLHostConfigurationFile.optionalString(
+                root["default"], path: "policy.default") {
+                guard let mode = Mode(rawValue: rawMode) else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "policy.default is not a supported approval mode")
+                }
+                defaultMode = mode
+            } else {
+                defaultMode = .approveAlways
+            }
+
+            var overrides: [String: Mode] = [:]
+            if let rawOverrides = try SMLHostConfigurationFile.optionalObject(
+                root["overrides"], path: "policy.overrides") {
+                guard rawOverrides.count <= SMLHostConfigurationFile.maximumBindings else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "policy.overrides exceeds "
+                            + "\(SMLHostConfigurationFile.maximumBindings) entries")
+                }
+                for key in rawOverrides.keys.sorted() {
+                    let parts = key.split(
+                        separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                    guard parts.count == 2,
+                          SMLInstructionOperation(rawValue: String(parts[0])) != nil,
+                          !parts[1].isEmpty else {
+                        throw LoadError.invalidOverrideKey(key)
+                    }
+                    do {
+                        _ = try SMLHostConfigurationFile.reference(
+                            String(parts[1]), path: "policy.overrides.\(key)")
+                    } catch {
+                        throw LoadError.invalidOverrideKey(key)
+                    }
+                    let rawMode = try SMLHostConfigurationFile.requiredString(
+                        rawOverrides[key], path: "policy.overrides.\(key)")
+                    guard let mode = Mode(rawValue: rawMode) else {
+                        throw SMLHostConfigurationFile.SchemaError(
+                            reason: "policy override '\(key)' is not a supported approval mode")
+                    }
+                    overrides[key] = mode
+                }
+            }
+
+            let owner = try SMLHostConfigurationFile.optionalString(
+                root["approval_owner"], path: "policy.approval_owner")
+                ?? defaultApprovalOwner
+            guard SMLValidationSupport.identifierIsValid(owner) else {
+                throw LoadError.invalidOwner(owner)
+            }
+            return SMLApprovalPolicy(
+                defaultMode: defaultMode,
+                overrides: overrides,
+                approvalOwner: owner
+            )
+        } catch let error as LoadError {
+            throw error
         } catch {
             throw LoadError.malformed(path: url.path, reason: String(describing: error))
         }
-        guard decoded.schemaVersion == schemaVersion else {
-            throw LoadError.unsupportedSchemaVersion(decoded.schemaVersion)
-        }
-        let owner = decoded.approvalOwner ?? defaultApprovalOwner
-        guard SMLValidationSupport.identifierIsValid(owner) else {
-            throw LoadError.invalidOwner(owner)
-        }
-        for key in (decoded.overrides ?? [:]).keys {
-            let parts = key.split(separator: ":", maxSplits: 1)
-            guard parts.count == 2,
-                  SMLInstructionOperation(rawValue: String(parts[0])) != nil,
-                  !parts[1].isEmpty else {
-                throw LoadError.invalidOverrideKey(key)
-            }
-        }
-        return SMLApprovalPolicy(
-            defaultMode: decoded.defaultMode ?? .approveAlways,
-            overrides: decoded.overrides ?? [:],
-            approvalOwner: owner
-        )
     }
 
     /// The mode governing one instruction: exact "<OP>:<reference>" override, else the default.

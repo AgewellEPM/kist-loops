@@ -109,12 +109,17 @@ final class KistSMLRuntimeDurableHostTests: XCTestCase {
     private func writeCatalogFile() throws {
         let smlDir = projectRoot.appendingPathComponent(".kist/sml", isDirectory: true)
         try FileManager.default.createDirectory(at: smlDir, withIntermediateDirectories: true)
+        let catalogURL = smlDir.appendingPathComponent("catalog.json")
         try """
         {"schema_version": 1}
         """.write(
-            to: smlDir.appendingPathComponent("catalog.json"),
+            to: catalogURL,
             atomically: true,
             encoding: .utf8
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o600))],
+            ofItemAtPath: catalogURL.path
         )
     }
 

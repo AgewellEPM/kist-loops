@@ -63,14 +63,24 @@ so revoke and re-review the grant before intentionally replacing a bundle. A cap
 with a built-in driver aborts the launch.
 
 The durable host also requires `.kist/sml/authority.json`. Grant the runtime actor only the command
-operations and approval authorities it needs. Keep this file owner-only:
+operations and approval authorities it needs. Every present host trust file is loaded through one
+bounded, stable, descriptor-confined read and must be a single-link regular file owned by the
+runtime user with exact mode `0600`:
 
 ```bash
-chmod 600 .kist/sml/authority.json .kist/sml/catalog.json
+chmod 600 \
+  .kist/sml/authority.json \
+  .kist/sml/catalog.json \
+  .kist/sml/policy.json \
+  .kist/sml/models.json \
+  .kist/sml/retrieval.json
 ```
 
 The default policy gates every externally advanced instruction. An absent `.kist/sml/policy.json`
 means `approve_always`; do not add a relaxation unless the host owner has reviewed its effect.
+Absent model or retrieval bindings leave those admitted steps visibly parked. A present file with
+unknown or duplicate fields, invalid types, excessive entries, an out-of-range budget, a symlinked
+ancestor or leaf, a hard link, or any other unsafe file state aborts launch instead of falling back.
 
 ## 3. Add host-only credentials
 

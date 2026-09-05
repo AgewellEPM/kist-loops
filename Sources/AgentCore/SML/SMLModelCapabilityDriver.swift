@@ -30,6 +30,7 @@ public struct SMLModelPurposeBindings: Sendable {
 
     public enum LoadError: Error, Equatable, CustomStringConvertible {
         case missing(path: String)
+        case unreadable(path: String, reason: String)
         case malformed(path: String, reason: String)
         case unsupportedSchemaVersion(Int)
 
@@ -39,6 +40,8 @@ public struct SMLModelPurposeBindings: Sendable {
                 return "SML model bindings are missing: \(path) — CALL_MODEL steps need "
                     + "purpose→provider bindings (\"purposes\": {\"<purpose>\": "
                     + "{\"provider\": ..., \"model\": ...}})"
+            case .unreadable(let path, let reason):
+                return "SML model bindings are unsafe or unreadable: \(path) (\(reason))"
             case .malformed(let path, let reason):
                 return "SML model bindings are malformed: \(path) (\(reason))"
             case .unsupportedSchemaVersion(let version):
@@ -48,57 +51,96 @@ public struct SMLModelPurposeBindings: Sendable {
         }
     }
 
-    private struct FileFormat: Decodable {
-        struct Entry: Decodable {
-            let provider: String
-            let model: String
-            let systemPrompt: String?
-            let maxTokens: Int?
-
-            enum CodingKeys: String, CodingKey {
-                case provider, model
-                case systemPrompt = "system_prompt"
-                case maxTokens = "max_tokens"
-            }
-        }
-
-        let schemaVersion: Int
-        let purposes: [String: Entry]
-
-        enum CodingKeys: String, CodingKey {
-            case schemaVersion = "schema_version"
-            case purposes
-        }
-    }
-
     public static func load(projectRoot: String) throws -> SMLModelPurposeBindings {
         let url = URL(fileURLWithPath: projectRoot).appendingPathComponent(relativePath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw LoadError.missing(path: url.path)
-        }
         let data: Data
         do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw LoadError.malformed(path: url.path, reason: String(describing: error))
-        }
-        let decoded: FileFormat
-        do {
-            decoded = try JSONDecoder().decode(FileFormat.self, from: data)
-        } catch {
-            throw LoadError.malformed(path: url.path, reason: String(describing: error))
-        }
-        guard decoded.schemaVersion == schemaVersion else {
-            throw LoadError.unsupportedSchemaVersion(decoded.schemaVersion)
-        }
-        return SMLModelPurposeBindings(purposes: decoded.purposes.mapValues {
-            Binding(
-                providerId: $0.provider,
-                model: $0.model,
-                systemPrompt: $0.systemPrompt,
-                maxTokens: min(max($0.maxTokens ?? 4_096, 256), 32_768)
+            data = try SMLHostConfigurationFile.read(
+                projectRoot: projectRoot,
+                relativePath: relativePath
             )
-        })
+        } catch SMLHostConfigurationFile.ReadError.missing {
+            throw LoadError.missing(path: url.path)
+        } catch {
+            throw LoadError.unreadable(path: url.path, reason: String(describing: error))
+        }
+
+        do {
+            let root = try SMLHostConfigurationFile.decodeRoot(from: data)
+            try SMLHostConfigurationFile.requireOnlyKeys(
+                root,
+                allowed: ["schema_version", "purposes"],
+                path: "models"
+            )
+            let version = try SMLHostConfigurationFile.requiredInteger(
+                root["schema_version"], path: "models.schema_version")
+            guard version == schemaVersion else {
+                throw LoadError.unsupportedSchemaVersion(version)
+            }
+            let rawPurposes = try SMLHostConfigurationFile.requiredObject(
+                root["purposes"], path: "models.purposes")
+            guard rawPurposes.count <= SMLHostConfigurationFile.maximumBindings else {
+                throw SMLHostConfigurationFile.SchemaError(
+                    reason: "models.purposes exceeds "
+                        + "\(SMLHostConfigurationFile.maximumBindings) entries")
+            }
+
+            var purposes: [String: Binding] = [:]
+            for purpose in rawPurposes.keys.sorted() {
+                _ = try SMLHostConfigurationFile.reference(
+                    purpose, path: "models.purposes key")
+                let entryPath = "models.purposes.\(purpose)"
+                let entry = try SMLHostConfigurationFile.requiredObject(
+                    rawPurposes[purpose], path: entryPath)
+                try SMLHostConfigurationFile.requireOnlyKeys(
+                    entry,
+                    allowed: ["provider", "model", "system_prompt", "max_tokens"],
+                    path: entryPath
+                )
+                let provider = try SMLHostConfigurationFile.requiredString(
+                    entry["provider"], path: "\(entryPath).provider")
+                guard SMLValidationSupport.identifierIsValid(provider) else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "\(entryPath).provider is not a valid provider identifier")
+                }
+                let model = try SMLHostConfigurationFile.boundedText(
+                    try SMLHostConfigurationFile.requiredString(
+                        entry["model"], path: "\(entryPath).model"),
+                    path: "\(entryPath).model",
+                    maximumBytes: SMLHostConfigurationFile.maximumShortStringBytes
+                )
+                let systemPrompt: String?
+                if let prompt = try SMLHostConfigurationFile.optionalString(
+                    entry["system_prompt"], path: "\(entryPath).system_prompt") {
+                    systemPrompt = try SMLHostConfigurationFile.boundedText(
+                        prompt,
+                        path: "\(entryPath).system_prompt",
+                        maximumBytes: SMLHostConfigurationFile.maximumLongStringBytes,
+                        allowEmpty: true,
+                        allowFormattingWhitespace: true
+                    )
+                } else {
+                    systemPrompt = nil
+                }
+                let maxTokens = try SMLHostConfigurationFile.optionalInteger(
+                    entry["max_tokens"], path: "\(entryPath).max_tokens") ?? 4_096
+                guard (256...32_768).contains(maxTokens) else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "\(entryPath).max_tokens must be within 256...32768")
+                }
+                purposes[purpose] = Binding(
+                    providerId: provider,
+                    model: model,
+                    systemPrompt: systemPrompt,
+                    maxTokens: maxTokens
+                )
+            }
+            return SMLModelPurposeBindings(purposes: purposes)
+        } catch let error as LoadError {
+            throw error
+        } catch {
+            throw LoadError.malformed(path: url.path, reason: String(describing: error))
+        }
     }
 }
 

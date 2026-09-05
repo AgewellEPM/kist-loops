@@ -99,14 +99,19 @@ final class KistSMLRuntimeServeTests: XCTestCase {
             [.posixPermissions: NSNumber(value: Int16(0o600))],
             ofItemAtPath: authorityURL.path
         )
+        let catalogURL = smlDir.appendingPathComponent("catalog.json")
         try """
         {
           "schema_version": 1,
           "tool_capabilities": ["list_files"],
           "approval_authorities": ["host-operator"]
         }
-        """.write(to: smlDir.appendingPathComponent("catalog.json"),
+        """.write(to: catalogURL,
                   atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o600))],
+            ofItemAtPath: catalogURL.path
+        )
     }
 
     // MARK: - HTTP helpers

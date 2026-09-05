@@ -220,6 +220,7 @@ final class KistSMLRuntimeInteractiveREPLTests: XCTestCase {
             [.posixPermissions: NSNumber(value: Int16(0o600))],
             ofItemAtPath: authorityURL.path
         )
+        let catalogURL = directory.appendingPathComponent("catalog.json")
         try """
         {
           "schema_version": 1,
@@ -227,9 +228,13 @@ final class KistSMLRuntimeInteractiveREPLTests: XCTestCase {
           "approval_authorities": ["host-operator"]
         }
         """.write(
-            to: directory.appendingPathComponent("catalog.json"),
+            to: catalogURL,
             atomically: true,
             encoding: .utf8
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o600))],
+            ofItemAtPath: catalogURL.path
         )
     }
 }
