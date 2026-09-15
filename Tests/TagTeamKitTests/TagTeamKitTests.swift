@@ -3,7 +3,7 @@ import XCTest
 
 final class ReviewClassifierTests: XCTestCase {
     func testNoShipOrBlockerMeansMustFix() {
-        XCTAssertEqual(ReviewClassifier.classify(reviewer: "x", text: "Looks good. SHIP").verdict, .ship)
+        XCTAssertEqual(ReviewClassifier.classify(reviewer: "x", text: "Looks good.\nSHIP").verdict, .ship)
         XCTAssertEqual(ReviewClassifier.classify(reviewer: "x", text: "Found issues. NO-SHIP").verdict, .mustFix)
         // A BLOCKER outweighs a stray "ship" word.
         let mixed = ReviewClassifier.classify(reviewer: "x", text: "BLOCKER: bad thing. otherwise ship it")
@@ -13,6 +13,14 @@ final class ReviewClassifierTests: XCTestCase {
 
     func testUnclearWhenNoSignal() {
         XCTAssertEqual(ReviewClassifier.classify(reviewer: "x", text: "some notes, nothing conclusive").verdict, .unclear)
+    }
+
+    func testProseAndNegationCannotGrantApproval() {
+        for text in ["Do not ship", "Ownership needs work", "Looks good. SHIP",
+                     "SHIP\nMore work is required", ""] {
+            XCTAssertNotEqual(ReviewClassifier.classify(reviewer: "x", text: text).verdict, .ship, text)
+        }
+        XCTAssertEqual(ReviewClassifier.classify(reviewer: "x", text: "Reviewed.\nSHIP\n\n").verdict, .ship)
     }
 
     func testCountsSeverities() {
@@ -84,5 +92,29 @@ final class ReviewerFactoryTests: XCTestCase {
         XCTAssertEqual(ReviewerFactory.make("deepseek")?.name, "deepseek")
         XCTAssertEqual(ReviewerFactory.make("codex")?.name, "codex")
         XCTAssertNil(ReviewerFactory.make("nope"))
+    }
+}
+
+final class CodexReviewerProcessTests: XCTestCase {
+    func testReviewerDrainsStderrWhileReadingStdout() async throws {
+        let reviewer = CodexReviewer(
+            executable: "/bin/sh",
+            arguments: ["-c", "dd if=/dev/zero bs=1024 count=128 >&2; printf 'SHIP\\n'"],
+            timeoutSeconds: 5
+        )
+        let output = try await reviewer.review(diff: "local fixture")
+        XCTAssertEqual(output, "SHIP\n")
+    }
+
+    func testReviewerTimeoutFailsInsteadOfHangingPanel() async {
+        let reviewer = CodexReviewer(executable: "/bin/sh", arguments: ["-c", "sleep 10"], timeoutSeconds: 1)
+        let start = Date()
+        do {
+            _ = try await reviewer.review(diff: "local fixture")
+            XCTFail("timed-out review must fail")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("timeout true"), "\(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 6)
     }
 }

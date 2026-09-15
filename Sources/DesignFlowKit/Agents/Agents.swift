@@ -1,4 +1,5 @@
 import Foundation
+import AgentCore
 
 /// LLM-backed agent: builds a prompt from accumulated context, calls the model,
 /// and writes the result to its designated artifact path.
@@ -24,8 +25,7 @@ public struct PromptAgent: Agent {
 }
 
 /// The Build Architect does NOT ask a model whether the build passed — it runs a
-/// real `swiftc -parse` on the Developer's generated code and reports the actual
-/// result. A failed parse is written truthfully; nothing is ever faked green.
+/// real Swift type check on the Developer's generated code and reports the result.
 public struct BuildArchitectAgent: Agent {
     public let kind: AgentKind = .buildArchitect
     public init() {}
@@ -33,7 +33,7 @@ public struct BuildArchitectAgent: Agent {
     public func produce(context: PipelineContext, workspace: GitWorkspace) async throws -> String {
         let generatedRel = AgentKind.developer.artifactPath
         let generatedURL = workspace.root.appendingPathComponent(generatedRel)
-        let (status, detail) = Self.compileCheck(generatedURL)
+        let (status, detail) = await Self.compileCheck(generatedURL)
 
         let report = """
         # Build Report
@@ -41,14 +41,14 @@ public struct BuildArchitectAgent: Agent {
         Seed: \(context.seedBrief)
 
         - Generated source: `\(generatedRel)`
-        - swiftc parse: **\(status)**
+        - swiftc type check: **\(status)**
 
         ## Detail
         ```
         \(detail.isEmpty ? "(no diagnostics)" : detail)
         ```
 
-        _This report reflects a real `swiftc -parse` invocation. It is not a claim._
+        _This report reflects `swiftc -typecheck`; application linking and runtime behavior require separate verification._
         """
         try workspace.write(report, to: kind.artifactPath)
         // FAIL-CLOSED (Codex BLOCKER-1): a non-PASS build is a stage FAILURE. Write the
@@ -72,25 +72,21 @@ public struct BuildArchitectAgent: Agent {
 
     /// Returns (statusLabel, diagnostics). Never throws — a missing toolchain or a
     /// syntax error is a truthful result, not a loop-fatal error.
-    static func compileCheck(_ file: URL) -> (String, String) {
+    static func compileCheck(_ file: URL) async -> (String, String) {
         guard FileManager.default.fileExists(atPath: file.path) else {
             return ("NO SOURCE", "Developer produced no source at \(file.lastPathComponent)")
         }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["swiftc", "-parse", file.path]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-        } catch {
-            return ("TOOLCHAIN UNAVAILABLE", "Could not launch swiftc: \(error.localizedDescription)")
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let out = String(data: data, encoding: .utf8) ?? ""
-        return process.terminationStatus == 0 ? ("PASS", out) : ("FAIL", out)
+        let result = await BoundedProcessRunner.run(
+            executable: "/usr/bin/env", arguments: ["swiftc", "-typecheck", file.path],
+            cwd: file.deletingLastPathComponent().path,
+            environment: ProcessInfo.processInfo.environment,
+            timeoutSeconds: 60, maximumOutputBytes: 1_048_576
+        )
+        var detail = result.stdout + result.stderr
+        if result.timedOut { detail += "\nSwift type check timed out." }
+        if result.cancelled { detail += "\nSwift type check cancelled." }
+        if result.outputTruncated { detail += "\nSwift diagnostics exceeded the output limit." }
+        return (result.succeeded ? "PASS" : "FAIL", detail)
     }
 }
 

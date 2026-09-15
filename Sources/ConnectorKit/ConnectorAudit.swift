@@ -1,5 +1,10 @@
 import Foundation
 import AgentCore
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// Tamper-evident "doing history": every connector invocation is recorded, sealed
 /// (ForgeSeal HMAC), and hash-chained — the same forge-proof discipline as the fleet
@@ -16,9 +21,11 @@ public struct ConnectorAuditEntry: Codable, Sendable, Equatable {
     public var atEpoch: Int64
     public var entryHash: String
     public var seal: String?
+    public var phase: String? = nil
+    public var invocationID: String? = nil
 
     public var canonical: String {
-        [
+        var fields = [
             "seq=\(seq)",
             "prev=\(ForgeSeal.field(prevHash))",
             "connector=\(ForgeSeal.field(connector))",
@@ -27,7 +34,10 @@ public struct ConnectorAuditEntry: Codable, Sendable, Equatable {
             "status=\(statusCode)",
             "ok=\(ok ? 1 : 0)",
             "at=\(atEpoch)",
-        ].joined(separator: "|")
+        ]
+        if let phase { fields.append("phase=\(ForgeSeal.field(phase))") }
+        if let invocationID { fields.append("invocation=\(ForgeSeal.field(invocationID))") }
+        return fields.joined(separator: "|")
     }
 
     public var sealValid: Bool {
@@ -45,14 +55,24 @@ public struct ConnectorAudit: Sendable {
 
     public enum AuditError: Error, CustomStringConvertible {
         case unsealed
+        case invalidHistory
+        case io(Int32)
         public var description: String {
-            switch self { case .unsealed: return "audit seal empty (no ForgeSeal key) — refusing to record" }
+            switch self {
+            case .unsealed: return "audit seal empty (no ForgeSeal key) — refusing to record"
+            case .invalidHistory: return "connector audit history is incomplete or invalid"
+            case .io(let code): return "connector audit could not be persisted (errno \(code))"
+            }
         }
     }
 
     /// SHA-256 (base64) of the input map — stable, secret-free.
     public static func hashInput(_ input: [String: String]) -> String {
-        let canonical = input.keys.sorted().map { "\($0)=\(input[$0] ?? "")" }.joined(separator: "&")
+        // Length prefixes make boundaries unambiguous even when values contain delimiters.
+        let canonical = input.keys.sorted().map { key in
+            let value = input[key] ?? ""
+            return "\(key.utf8.count):\(key)\(value.utf8.count):\(value)"
+        }.joined()
         return FleetSignoffEntry.computeHash(prevHash: "", canonical: canonical)
     }
 
@@ -86,13 +106,23 @@ public struct ConnectorAudit: Sendable {
 
     @discardableResult
     public func record(connector: String, action: String, input: [String: String],
-                       statusCode: Int, ok: Bool, atEpoch: Double) throws -> ConnectorAuditEntry {
-        let existing = entries()
+                       statusCode: Int, ok: Bool, atEpoch: Double,
+                       phase: String? = nil, invocationID: String? = nil) throws -> ConnectorAuditEntry {
+        let lockFD = open(fileURL.path + ".lock", O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+        guard lockFD >= 0 else { throw AuditError.io(errno) }
+        defer { _ = close(lockFD) }
+        var locked: Int32
+        repeat { locked = flock(lockFD, LOCK_EX) } while locked < 0 && errno == EINTR
+        guard locked == 0 else { throw AuditError.io(errno) }
+        defer { _ = flock(lockFD, LOCK_UN) }
+        let existing = try validatedEntries()
         let prev = existing.last?.entryHash ?? ""
         var e = ConnectorAuditEntry(
             seq: existing.count, prevHash: prev, connector: connector, action: action,
             inputHash: Self.hashInput(input), statusCode: statusCode, ok: ok,
             atEpoch: Int64(atEpoch), entryHash: "", seal: nil)
+        e.phase = phase
+        e.invocationID = invocationID
         let canonical = e.canonical
         e.entryHash = FleetSignoffEntry.computeHash(prevHash: prev, canonical: canonical)
         let seal = ForgeSeal.sign(canonical)
@@ -101,14 +131,38 @@ public struct ConnectorAudit: Sendable {
         let line = (try JSONEncoder().encode(e))
         var text = String(data: line, encoding: .utf8) ?? ""
         text += "\n"
-        if let handle = try? FileHandle(forWritingTo: fileURL) {
-            defer { try? handle.close() }
-            handle.seekToEndOfFile()
-            handle.write(Data(text.utf8))
-        } else {
-            let prior = (try? Data(contentsOf: fileURL)) ?? Data()
-            try (prior + Data(text.utf8)).write(to: fileURL)
+        let fd = open(fileURL.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+        guard fd >= 0 else { throw AuditError.io(errno) }
+        defer { _ = close(fd) }
+        try Data(text.utf8).withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw AuditError.io(errno) }
+                offset += count
+            }
         }
+        guard fsync(fd) == 0 else { throw AuditError.io(errno) }
+        let parent = open(fileURL.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard parent >= 0 else { throw AuditError.io(errno) }
+        defer { _ = close(parent) }
+        guard fsync(parent) == 0 else { throw AuditError.io(errno) }
         return e
+    }
+
+    private func validatedEntries() throws -> [ConnectorAuditEntry] {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        let text = try String(contentsOf: fileURL, encoding: .utf8)
+        guard text.isEmpty || text.hasSuffix("\n") else { throw AuditError.invalidHistory }
+        var result: [ConnectorAuditEntry] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let entry = try JSONDecoder().decode(ConnectorAuditEntry.self, from: Data(line.utf8))
+            let previous = result.last?.entryHash ?? ""
+            guard entry.seq == result.count, entry.prevHash == previous,
+                  entry.sealValid, entry.chainValid(prev: previous) else { throw AuditError.invalidHistory }
+            result.append(entry)
+        }
+        return result
     }
 }

@@ -18,12 +18,15 @@ public struct DockerControl: Sendable {
     public enum ControlError: Error, CustomStringConvertible, Equatable {
         case unavailable(String)
         case refusedUnmanaged(name: String, prefix: String)
+        case invalidImage
         case commandFailed(argv: String, code: Int32, output: String)
         public var description: String {
             switch self {
             case let .unavailable(r): return "docker unavailable: \(r)"
             case let .refusedUnmanaged(name, prefix):
                 return "refusing to operate on “\(name)” — not managed (must start with \(prefix))"
+            case .invalidImage:
+                return "container image must be a nonempty image reference, not an option"
             case let .commandFailed(argv, code, out):
                 return "docker \(argv) failed (\(code)): \(out.prefix(300))"
             }
@@ -58,6 +61,9 @@ public struct DockerControl: Sendable {
 
     @discardableResult
     public func run(_ spec: ContainerSpec, command: [String] = []) throws -> RunOutcome {
+        guard !spec.image.isEmpty, !spec.image.hasPrefix("-"),
+              !spec.image.contains(where: { $0.isWhitespace || $0.isNewline }),
+              !spec.image.utf8.contains(0) else { throw ControlError.invalidImage }
         try requireAvailable()
         try requireManaged(spec.name)
         return try exec(DockerCommand.run(spec, command: command))

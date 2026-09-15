@@ -49,7 +49,12 @@ public enum ReviewClassifier {
         let blockers = count(lower, "blocker")
         let highs = count(lower, "high")
         let saysNoShip = lower.contains("no-ship") || lower.contains("no ship")
-        let saysShip = lower.contains("ship") && !saysNoShip
+        // The reviewer contract requires a standalone terminal verdict. Prose such as
+        // "do not ship" or "ownership needs work" must never become an approval.
+        let finalLine = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .last(where: { !$0.isEmpty })?.uppercased()
+        let saysShip = finalLine == "SHIP" && !saysNoShip
 
         let verdict: ReviewVerdict
         if saysNoShip || blockers > 0 {

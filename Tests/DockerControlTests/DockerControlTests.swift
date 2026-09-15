@@ -54,6 +54,11 @@ final class DockerCommandSafetyTests: XCTestCase {
     func testPsIsScopedToManagedPrefix() {
         XCTAssertTrue(DockerCommand.ps(managedPrefix: "kist-df-").joined(separator: " ").contains("name=kist-df-"))
     }
+
+    func testImageAlwaysFollowsOptionTerminator() {
+        let argv = DockerCommand.run(ContainerSpec(image: "--privileged", name: "kist-df-test"), command: ["alpine"])
+        XCTAssertEqual(Array(argv.suffix(3)), ["--", "--privileged", "alpine"])
+    }
 }
 
 final class DockerControlNameScopeTests: XCTestCase {
@@ -90,6 +95,16 @@ final class DockerControlNameScopeTests: XCTestCase {
         let c = DockerControl(managedPrefix: "kist-df-") { _ in (1, "") }  // version exits 1
         XCTAssertThrowsError(try c.stop("kist-df-abc")) { e in
             guard case DockerControl.ControlError.unavailable = e else { return XCTFail("\(e)") }
+        }
+    }
+
+    func testInvalidImageIsRejectedBeforeRunningDocker() {
+        let c = DockerControl { _ in
+            XCTFail("invalid image must be refused before any Docker command")
+            return (0, "")
+        }
+        for image in ["", "--privileged", "alpine latest", "alpine\n"] {
+            XCTAssertThrowsError(try c.run(ContainerSpec(image: image, name: "kist-df-test")))
         }
     }
 }
