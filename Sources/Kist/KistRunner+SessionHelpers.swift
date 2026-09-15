@@ -90,9 +90,13 @@ extension KistRunner {
             // yet guarantee a no-follow read through every path component. Cross-project event,
             // curated-context, episode and research reads use AgentCore's confined readers.
             guard project == originalProject else { return [] }
+            // Organizational rows are temporally projected inside the store before this closure
+            // returns them; the admission gate records them as host_projected_lesson rather than
+            // silently trusting unlabeled entries.
             let organizational = OrganizationalLearningStore(projectRoot: project).memoryCandidates(at: now).map {
                 AgentMemoryEntry(id: $0.recordID, title: $0.title, text: $0.excerpt,
-                                 locator: $0.sourcePath.hasPrefix("/") ? $0.sourcePath : project + "/" + $0.sourcePath)
+                                 locator: $0.sourcePath.hasPrefix("/") ? $0.sourcePath : project + "/" + $0.sourcePath,
+                                 provenanceHint: .hostProjectedLesson)
             }
             // Global lessons require a source explicitly bound to this project identity. A source-less
             // or other-project lesson cannot enter cross-project recall through a global store.
@@ -101,8 +105,13 @@ extension KistRunner {
                 guard let identity, let source = $0.source else { return false }
                 return source.split(separator: ":").contains(Substring(identity))
             }.map {
+                // Lessons carry their real event clock and envelope so the admission gate can
+                // evaluate them directly instead of trusting this closure's upstream filtering.
                 AgentMemoryEntry(id: $0.id, title: "Advisory \($0.kind.rawValue) lesson", text: $0.text,
-                                 locator: $0.source ?? "")
+                                 locator: $0.source ?? "",
+                                 observedAt: Date(timeIntervalSince1970: $0.at),
+                                 temporal: $0.temporal,
+                                 provenanceHint: .supplementalLesson)
             }
             return organizational + lessons
         }

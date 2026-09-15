@@ -36,4 +36,27 @@ Tool responses also fit a 6,000-byte JSON window, below the CLI's default observ
 
 History lives in `.kist/runs/agent-history/v1` as immutable owner-private files. Appends use confined, no-replace publication and fsync. Concurrent processes write distinct records; restart and worktree removal leave original-project history intact. Events sort by original time and a stable ID tie-break, not an invented causal order between simultaneous processes. The archive excludes hidden reasoning and token fragments. It masks common secrets and clips oversized event details with their original byte count and digest recorded. Directory enumeration currently scales with archive size; page file reads are bounded.
 
+## Admission gate and reactivation
+
+Every `search`-mode candidate — history events, curated project context, episodes, research
+evidence, and supplemental lessons — passes one fail-closed admission gate before it can reach a
+model. The gate applies per-provenance temporal policy (curated facts are supersession-governed;
+research evidence decays fast; events, episodes and lessons decay medium), denies unknown-age,
+out-of-scope, lifecycle-ineligible (retired/superseded/expired/future) and below-floor candidates,
+and treats its own evaluation failures as denials. Retrieval is not authorization: retrievability
+never implies influence. Raw `history`/`history_search` pages remain the ungated forensic surface,
+labeled "raw event; not current knowledge". Each recall writes one bounded audit record under
+`.kist/memory/admission/v1` (counts, denial reasons, bounded denial samples); tool responses report
+`admission_denied_rows` and `admission_denial_reasons`, and the pre-model brief discloses gate
+counts.
+
+A memory that decayed below the floor can return only on context recurrence: signatures derived
+from recent FAILURE details (never from the query) are matched against dormant candidates, and a
+match at or above the threshold readmits the memory at the floor. Reactivation lifts decay only —
+it never resurrects retired, superseded, expired, or unknown-age records. Each fresh reactivation
+appends one bounded overlay record under `.kist/memory/reactivation/v1` (reconsolidation: current
+context merged, original bytes untouched, event ages never refreshed); the overlay boost itself
+halves every seven days, so an unrecurred memory sinks back. Reactivated entries are surfaced
+after ranked results because they are query-dissimilar by construction.
+
 Recalled text and model summaries are advisory data. They grant no permissions and establish no accepted completion, independent review or evolution authority. Training or analysis consumers should retain original timestamps, provenance, failure status and usage labels. Operational model fallback remains available; refusals and access denials are not execution-routing shortcuts.

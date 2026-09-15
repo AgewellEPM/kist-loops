@@ -247,7 +247,7 @@ public struct ProjectMemory: Sendable {
 
     /// Hydrate a legacy row from its one stable event timestamp. The shared defaults are deliberate:
     /// there is no fabricated evidence refresh, recurrence, pin, or external authority.
-    private static func episodeWithTemporalMetadata(_ episode: Episode) -> Episode? {
+    static func episodeWithTemporalMetadata(_ episode: Episode) -> Episode? {
         guard isWireDate(episode.at) else { return nil }
         let temporal: MemoryTemporalEnvelope
         if let stored = episode.temporal {
@@ -269,7 +269,7 @@ public struct ProjectMemory: Sendable {
 
     /// Application-time bounds may legitimately be in the future. Event/evidence/transaction clocks
     /// may not be more than the shared skew allowance ahead of the captured retrieval clock.
-    private static func hasFutureEvidence(_ episode: Episode, relativeTo now: Date) -> Bool {
+    static func hasFutureEvidence(_ episode: Episode, relativeTo now: Date) -> Bool {
         guard let temporal = episode.temporal else { return true }
         let evidenceClocks = [
             episode.at,
@@ -284,7 +284,7 @@ public struct ProjectMemory: Sendable {
         }
     }
 
-    private static func isWireDate(_ date: Date) -> Bool {
+    static func isWireDate(_ date: Date) -> Bool {
         let epoch = date.timeIntervalSince1970
         return epoch.isFinite
             && (MemoryTemporalEnvelope.minimumWireEpoch...MemoryTemporalEnvelope.maximumWireEpoch)

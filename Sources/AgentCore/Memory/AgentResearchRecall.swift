@@ -61,7 +61,9 @@ enum AgentResearchRecall {
                             id: "research-\(entry.name)-\(item.id)",
                             title: "Fetched research: \(primary.title) · \(Date(timeIntervalSince1970: item.at).ISO8601Format())",
                             text: "URL: \(primary.url)\nContent SHA-256: \(primary.contentSHA256)\n" + primary.text,
-                            locator: project.canonicalPath + "/" + base + "/evidence.jsonl:L\(ordinal + 1)"))
+                            locator: project.canonicalPath + "/" + base + "/evidence.jsonl:L\(ordinal + 1)",
+                            observedAt: Date(timeIntervalSince1970: item.at),
+                            provenanceHint: .researchEvidence))
                     }
                 } catch { result.issues.append("research recall unavailable for \(base): \(error)") }
             }
