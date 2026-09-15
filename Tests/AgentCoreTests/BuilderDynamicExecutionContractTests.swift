@@ -1535,7 +1535,7 @@ private func dynamicSameModelCLIProvider() -> CLIChatProvider {
         defaultModel: "fixture-model",
         availableModels: [AIModel(id: "fixture-model")],
         binaryName: "/bin/sh",
-        argsForModel: { _ in ["-c", "cat >/dev/null; printf approved"] },
+        argsForModel: { _ in ["-c", #"cat >/dev/null; printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"approved"}}' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}'"#] },
         parseOutput: { $0 })
 }
 

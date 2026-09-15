@@ -201,7 +201,7 @@ extension KistRunner {
             auditLog: context.auditLog,
             externalReadRoots: context.externalReadRoots,
             correlationID: context.correlationID,
-            traceRecorder: context.traceRecorder)
+            traceRecorder: context.traceRecorder, agentMemory: context.agentMemory)
         var captures: [CommandCapture] = []
         for (index, command) in plan.verificationCommands.enumerated() {
                 let remaining = Int(floor(wallDeadline.timeIntervalSinceNow))

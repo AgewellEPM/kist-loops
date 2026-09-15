@@ -360,11 +360,15 @@ final class KistBuilderRouteBehaviorV2Tests: XCTestCase {
             sealedPlan: envelope.plan)
         XCTAssertTrue(scoped.names.contains("read_file"))
         XCTAssertTrue(scoped.names.contains("write_file"))
-        XCTAssertFalse(scoped.names.contains("edit_file"))
+        XCTAssertTrue(scoped.names.contains("edit_file"))
         XCTAssertFalse(scoped.names.contains("apply_patch"))
         XCTAssertTrue(scoped.names.contains("run_command"))
 
         let context = ToolContext(projectRoot: fixture.project.path)
+        let prematureEdit = await scoped.execute(
+            name: "edit_file", arguments: ["path": "RESULT.txt", "old_text": "OLD", "new_text": "NEW"],
+            context: context)
+        XCTAssertFalse(prematureEdit.success, "a create contract alone cannot mint edit authority")
         let accepted = await scoped.execute(
             name: "write_file",
             arguments: ["path": "RESULT.txt", "content": "HEADLESS_OK\n"],
@@ -391,6 +395,24 @@ final class KistBuilderRouteBehaviorV2Tests: XCTestCase {
             ],
             context: context)
         XCTAssertTrue(verified.success)
+        let emptyCWD = await scoped.execute(
+            name: "run_command", arguments: [
+                "executable": "python3",
+                "args": ["-c", "from pathlib import Path; assert Path('RESULT.txt').read_text() == 'HEADLESS_OK\\n'"],
+                "cwd": "", "timeout": 30,
+            ], context: context)
+        XCTAssertTrue(emptyCWD.success, emptyCWD.error ?? emptyCWD.output)
+        let contractTool = try XCTUnwrap(scoped.all().first { $0.name == "run_command" })
+        XCTAssertEqual(Set(contractTool.parameters.map(\.name)),
+                       ["executable", "args", "cwd", "timeout", "allowed_exit_codes"])
+        XCTAssertFalse(contractTool.usageExamples.contains { $0.contains("shell") })
+        let example = try XCTUnwrap(contractTool.usageExamples.first)
+        let exampleArgs = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(example.utf8)) as? [String: Any])
+        let advertised = await scoped.execute(name: "run_command", arguments: exampleArgs, context: context)
+        XCTAssertTrue(advertised.success)
+        let shellForm = await scoped.execute(name: "run_command",
+            arguments: ["command": "python3 -c anything", "shell": true], context: context)
+        XCTAssertFalse(shellForm.success)
         let unsealedCommand = await scoped.execute(
             name: "run_command",
             arguments: [
@@ -399,6 +421,43 @@ final class KistBuilderRouteBehaviorV2Tests: XCTestCase {
             ],
             context: context)
         XCTAssertFalse(unsealedCommand.success)
+        XCTAssertTrue(unsealedCommand.error?.contains(example) == true, "denial must teach the valid sealed call")
+    }
+
+    func testCreatedFileCanBeRepairedWithoutGrantingUnrelatedOrDriftedEdits() async throws {
+        let fixture = try root("create-repair")
+        let plan = KistRunner.BuilderPreflightPlan(
+            schemaVersion: 1, adapter: "headless",
+            operations: [.init(kind: .create, path: "solution.cob", preimageSHA256: nil)],
+            verificationCommands: [], partitions: [])
+        let scoped = KistRunner.builderScopedHeadlessTools(
+            from: ToolRegistry([WriteFileTool(), EditFileTool()]), sealedPlan: plan)
+        let context = ToolContext(projectRoot: fixture.project.path)
+        let source = "       01 MAGNITUDE PIC 9(10).\n"
+        let written = await scoped.execute(name: "write_file",
+            arguments: ["path": "solution.cob", "content": source], context: context)
+        XCTAssertTrue(written.success, written.error ?? "")
+        let repaired = await scoped.execute(name: "edit_file",
+            arguments: ["path": "solution.cob", "old_text": "PIC 9(10)", "new_text": "PIC S9(10)"],
+            context: context)
+        XCTAssertTrue(repaired.success, repaired.error ?? "")
+        let file = fixture.project.appendingPathComponent("solution.cob")
+        XCTAssertTrue(try String(contentsOf: file, encoding: .utf8).contains("PIC S9(10)"))
+
+        try source.write(to: fixture.staging.appendingPathComponent("solution.cob"), atomically: true, encoding: .utf8)
+        let otherRoot = await scoped.execute(name: "edit_file",
+            arguments: ["path": "solution.cob", "old_text": "PIC 9(10)", "new_text": "PIC S9(10)"],
+            context: ToolContext(projectRoot: fixture.staging.path))
+        XCTAssertFalse(otherRoot.success, "a different root cannot reuse creation evidence")
+
+        try (source + "       *> external edit\n").write(to: file, atomically: true, encoding: .utf8)
+        let drifted = await scoped.execute(name: "edit_file",
+            arguments: ["path": "solution.cob", "old_text": "PIC 9(10)", "new_text": "PIC S9(10)"],
+            context: context)
+        XCTAssertFalse(drifted.success, "unobserved contents require new creation evidence")
+        let uncreated = await scoped.execute(name: "edit_file",
+            arguments: ["path": "TASK.md", "old_text": "OLD", "new_text": "NEW"], context: context)
+        XCTAssertFalse(uncreated.success)
     }
 
     func testStoppedUnverifiedHeadlessHandsOffOnlyWithSealedMutationAndVerifier() throws {

@@ -36,7 +36,12 @@ public enum BuilderOSProcessSandboxError: Error, LocalizedError, Sendable, Equat
 /// session in the current process. `withRegisteredScope` consumes that pending session, installs a
 /// TaskLocal token, and removes all authority and private policy files when the operation returns.
 public struct BuilderOSProcessSandboxAttestor: BuilderSandboxAttestor, Sendable {
-    public init() {}
+    private let toolchainParentEnvironment: [String: String]?
+    public init() { toolchainParentEnvironment = nil }
+    /// Host-only injection for deterministic policy integration tests; never a worker argument.
+    init(toolchainParentEnvironment: [String: String]) {
+        self.toolchainParentEnvironment = toolchainParentEnvironment
+    }
 
     public func attest(_ request: BuilderSandboxAttestationRequest) async throws
         -> BuilderSandboxAttestation {
@@ -47,8 +52,11 @@ public struct BuilderOSProcessSandboxAttestor: BuilderSandboxAttestor, Sendable 
             let backend = try BuilderSandboxBackend.make(
                 stagedRoot: normalized.stagedRoot, stage: normalized.request.stage,
                 privatePaths: paths,
-                forbiddenReadPaths: normalized.request.forbiddenReadPaths)
+                forbiddenReadPaths: normalized.request.forbiddenReadPaths,
+                toolchainParentEnvironment: toolchainParentEnvironment ?? ProcessInfo.processInfo.environment)
             try backend.writePrivatePolicy(to: paths.policyURL)
+            try backend.toolchains.prepareSystemLookupCache(
+                environment: backend.fixedEnvironment(privatePaths: paths), cwd: normalized.stagedRoot)
             try backend.proveUsable(
                 stagedRoot: normalized.stagedRoot, privatePaths: paths)
             guard backend.policy.utf8.count <= BuilderSandboxBackend.maximumPolicyBytes else {
@@ -157,6 +165,15 @@ struct BuilderSandboxExecutionAuthority: Sendable {
 }
 
 extension BuilderOSProcessSandboxAttestor {
+    static func currentExecutionEnvironment() throws -> [String: String]? {
+        guard let token = BuilderSandboxTaskScope.token else { return nil }
+        guard let session = BuilderSandboxSessionRegistry.shared.active(token: token) else {
+            throw BuilderOSProcessSandboxError.sessionUnavailable
+        }
+        try session.validateEvidence()
+        return session.backend.fixedEnvironment(privatePaths: session.privatePaths)
+    }
+
     static func currentExecutionAuthority() throws -> BuilderSandboxExecutionAuthority? {
         guard let token = BuilderSandboxTaskScope.token else { return nil }
         guard let session = BuilderSandboxSessionRegistry.shared.active(token: token) else {
@@ -441,18 +458,22 @@ private struct BuilderSandboxBackend: Sendable {
     let stagedWritable: Bool
     let writableGeneratedPaths: [String]
     let forbiddenReadPaths: [String]
+    let toolchains: BuilderToolchainEnvironment
 
     var mechanism: String {
-        "builder-os-sandbox/v3;backend=\(kind.rawValue);binary=\(binaryDigest);policy=\(policyDigest);stage=\(stage.rawValue);staged=\(stagedWritable ? "rw" : "ro");generated_rw=\(writableGeneratedPaths.count);read_deny=\(forbiddenReadPaths.count)"
+        "builder-os-sandbox/v3;backend=\(kind.rawValue);binary=\(binaryDigest);policy=\(policyDigest);stage=\(stage.rawValue);staged=\(stagedWritable ? "rw" : "ro");generated_rw=\(writableGeneratedPaths.count);read_deny=\(forbiddenReadPaths.count);toolchains=\(Self.environmentDigest(toolchains.values))"
     }
 
     static func make(stagedRoot: String, stage: BuilderExecutionStage,
                      privatePaths: BuilderSandboxPrivatePaths,
-                     forbiddenReadPaths: [String]) throws -> Self {
+                     forbiddenReadPaths: [String],
+                     toolchainParentEnvironment: [String: String]) throws -> Self {
         let stagedWritable = stage == .build
         let generatedPaths = stagedWritable ? [] : try writableGeneratedDirectories(
             stagedRoot: stagedRoot)
         let home = BuilderSandboxPath.canonical(NSHomeDirectory())
+        let toolchains = try BuilderToolchainEnvironment.discover(
+            parent: toolchainParentEnvironment, forbiddenReadPaths: forbiddenReadPaths)
         #if os(Linux)
         guard !BuilderSandboxPath.contains(parent: home, child: stagedRoot) else {
             throw BuilderOSProcessSandboxError.mechanismUnavailable(
@@ -483,12 +504,13 @@ private struct BuilderSandboxBackend: Sendable {
             stagedRoot: stagedRoot, stagedWritable: stagedWritable,
             writableGeneratedPaths: generatedPaths,
             writablePrivatePaths: [privatePaths.temp, privatePaths.home, privatePaths.cache],
-            forbiddenReadPaths: readDenyPaths)
+            forbiddenReadPaths: readDenyPaths,
+            readOnlyToolchainRoots: toolchains.readOnlyRoots)
         return Self(kind: .seatbelt, binaryPath: binary, binaryDigest: digest,
                     policy: policy, policyDigest: BuilderEvidenceDigest.sha256(policy),
                     stage: stage, stagedWritable: stagedWritable,
                     writableGeneratedPaths: generatedPaths,
-                    forbiddenReadPaths: readDenyPaths)
+                    forbiddenReadPaths: readDenyPaths, toolchains: toolchains)
         #elseif os(Linux)
         guard let binary = ["/usr/bin/bwrap", "/bin/bwrap"].first(where: {
             FileManager.default.isExecutableFile(atPath: $0)
@@ -502,7 +524,7 @@ private struct BuilderSandboxBackend: Sendable {
                     policy: policy, policyDigest: BuilderEvidenceDigest.sha256(policy),
                     stage: stage, stagedWritable: stagedWritable,
                     writableGeneratedPaths: generatedPaths,
-                    forbiddenReadPaths: readDenyPaths)
+                    forbiddenReadPaths: readDenyPaths, toolchains: toolchains)
         #else
         throw BuilderOSProcessSandboxError.mechanismUnavailable("unsupported operating system")
         #endif
@@ -541,7 +563,7 @@ private struct BuilderSandboxBackend: Sendable {
             throw BuilderOSProcessSandboxError.mechanismUntrusted("binary identity changed")
         }
         _ = environment
-        let env = Self.fixedEnvironment(privatePaths: privatePaths)
+        let env = fixedEnvironment(privatePaths: privatePaths)
         let environmentDigest = Self.environmentDigest(env)
         switch kind {
         case .seatbelt:
@@ -592,6 +614,9 @@ private struct BuilderSandboxBackend: Sendable {
             for path in writableGeneratedPaths {
                 args += ["--bind", path, path]
             }
+            for path in toolchains.readOnlyRoots {
+                args += ["--ro-bind", path, path]
+            }
             args += ["--", launchPath] + launchArgs
             return BuilderSandboxPreparedLaunch(
                 launchPath: binaryPath, launchArgs: args, cwd: cwd, environment: env,
@@ -600,11 +625,11 @@ private struct BuilderSandboxBackend: Sendable {
         }
     }
 
-    private static func fixedEnvironment(
+    func fixedEnvironment(
         privatePaths: BuilderSandboxPrivatePaths
     ) -> [String: String] {
-        [
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+        var environment = toolchains.values
+        environment.merge([
             "HOME": privatePaths.home,
             "CFFIXED_USER_HOME": privatePaths.home,
             "TMPDIR": privatePaths.temp + "/",
@@ -618,7 +643,8 @@ private struct BuilderSandboxBackend: Sendable {
             "LANG": "C",
             "LC_ALL": "C",
             "TZ": "UTC",
-        ]
+        ]) { _, privateValue in privateValue }
+        return environment
     }
 
     static func environmentDigest(_ environment: [String: String]) -> String {
@@ -678,7 +704,8 @@ private struct BuilderSandboxBackend: Sendable {
     private static func seatbeltPolicy(stagedRoot: String, stagedWritable: Bool,
                                        writableGeneratedPaths: [String],
                                        writablePrivatePaths: [String],
-                                       forbiddenReadPaths: [String]) throws -> String {
+                                       forbiddenReadPaths: [String],
+                                       readOnlyToolchainRoots: [String]) throws -> String {
         let staged = try seatbeltString(stagedRoot)
         var lines = [
         """
@@ -710,6 +737,24 @@ private struct BuilderSandboxBackend: Sendable {
         lines.append("(allow file-read* (literal \"\(staged)\"))")
         lines.append("(allow file-read* (subpath \"\(staged)\"))")
         for path in writablePrivatePaths {
+            let escaped = try seatbeltString(path)
+            lines.append("(allow file-read* (literal \"\(escaped)\"))")
+            lines.append("(allow file-read* (subpath \"\(escaped)\"))")
+        }
+        // Node's realpath walks each ancestor with lstat before loading an approved compiler.
+        // Grant only metadata for that exact traversal, never directory listings or sibling data.
+        var toolchainAncestors = Set<String>()
+        for root in readOnlyToolchainRoots {
+            var ancestor = (root as NSString).deletingLastPathComponent
+            while !ancestor.isEmpty, ancestor != "/" {
+                toolchainAncestors.insert(ancestor)
+                ancestor = (ancestor as NSString).deletingLastPathComponent
+            }
+        }
+        for path in toolchainAncestors.sorted() {
+            lines.append("(allow file-read-metadata (literal \"\(try seatbeltString(path))\"))")
+        }
+        for path in readOnlyToolchainRoots {
             let escaped = try seatbeltString(path)
             lines.append("(allow file-read* (literal \"\(escaped)\"))")
             lines.append("(allow file-read* (subpath \"\(escaped)\"))")
