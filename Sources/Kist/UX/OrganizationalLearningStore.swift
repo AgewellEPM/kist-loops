@@ -621,6 +621,9 @@ struct OrganizationalLearningStore: Sendable {
         let eligible = loadJSONLWithOrdinals(
             DiskMemoryRecord.self, path: path
         ).compactMap { row -> OrganizationalTemporalGenericRow? in
+            // LIST is read only through its validated, escaped advisory-data renderer. Reusing the
+            // generic summary/body projection would strip that boundary in Captain prompt context.
+            guard !Self.isListMemory(row.value) else { return nil }
             let record = Self.bounded(row.value)
             guard let temporal = record.temporalProjection,
                   allowedDecayRates.contains(temporal.decayRate) else { return nil }
