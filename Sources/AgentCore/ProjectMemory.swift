@@ -168,6 +168,44 @@ public struct ProjectMemory: Sendable {
         }
     }
 
+    /// Governance forgetting (Q7): remove every episode row whose RAW bytes contain `needle`
+    /// (case-insensitive). Right-to-delete trumps append-only episode semantics; matching on raw
+    /// rows is deliberately over-inclusive — for deletion requests, removing too much is safer
+    /// than leaving residue. The caller writes the deletion receipt. Returns the removed raw
+    /// rows, or nil when the archive could not be safely read (nothing is rewritten then).
+    func forgetEpisodes(containing needle: String) -> [Data]? {
+        let lowered = needle.lowercased()
+        guard !lowered.isEmpty else { return [] }
+        var removed: [Data]?
+        withEpisodeFileLock {
+            guard let existing = boundedEpisodeTail() else { return }
+            let rows = [UInt8](existing)
+                .split(separator: UInt8(0x0A), omittingEmptySubsequences: false)
+                .filter { !$0.isEmpty }
+                .map { Data($0) }
+            var kept: [Data] = []
+            var dropped: [Data] = []
+            for row in rows {
+                if String(decoding: row, as: UTF8.self).lowercased().contains(lowered) {
+                    dropped.append(row)
+                } else {
+                    kept.append(row)
+                }
+            }
+            removed = dropped
+            guard !dropped.isEmpty else { return }
+            var body = Data()
+            for row in kept {
+                body.append(row)
+                body.append(0x0A)
+            }
+            try? body.write(to: URL(fileURLWithPath: episodesPath), options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: episodesPath)
+        }
+        return removed
+    }
+
     /// Reads at most the configured byte budget. If a legacy/hostile file is
     /// larger, retain its newest row-aligned tail; never allocate the whole
     /// file merely to discover that it needs compaction.

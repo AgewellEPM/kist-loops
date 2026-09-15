@@ -74,4 +74,19 @@ context merged, original bytes untouched, event ages never refreshed); the overl
 halves every seven days, so an unrecurred memory sinks back. Reactivated entries are surfaced
 after ranked results because they are query-dissimilar by construction.
 
+## Forgetting
+
+Forgetting is a designed feature with two regimes, both receipted under
+`.kist/memory/forgetting/v1`. **Retention sweeps** (`MemoryForgetting.retentionSweep`) remove
+admission-audit and reactivation-overlay records past their retention window (default 90 days)
+so the bounded governance stores stay live. **Governance forgetting**
+(`MemoryForgetting.forget(term:)`) is right-to-delete: it purges matching episode rows (raw-byte
+match, deliberately over-inclusive), entire procedure version chains, and the reactivation
+overlays bound to the forgotten memories, then runs a residual scan and records whether removal
+is PROVEN in the receipt. Receipts store only the SHA-256 of the request term — never the
+content. Deletion is never blocked on receipt capacity; a missing receipt is reported loudly
+instead. Deliberately out of scope: the agent-history archive (append-only forensic surface;
+purging it is a separate operator-owned decision) and admission audit records (digests and
+reasons, no memory content).
+
 Recalled text and model summaries are advisory data. They grant no permissions and establish no accepted completion, independent review or evolution authority. Training or analysis consumers should retain original timestamps, provenance, failure status and usage labels. Operational model fallback remains available; refusals and access denials are not execution-routing shortcuts.
