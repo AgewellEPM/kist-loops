@@ -75,6 +75,7 @@ final class EvolutionContainmentAuthorityTests: XCTestCase {
     func testProductionIssuerRequiresAndBindsExactContainedBatchDigest() throws {
         let candidate = candidate()
         let benchmarks = [benchmark(for: candidate)]
+        let oracle = try EvolutionHeldOutOracleTestFixture.report(candidate: candidate)
         let diffDigest = EvolutionArchiveAuthorityCodec.sha256Hex(
             Data(candidate.committedDiff.utf8))
         let expected = try EvolutionEvaluationAuthority.containmentExecutionDigest(
@@ -83,10 +84,12 @@ final class EvolutionContainmentAuthorityTests: XCTestCase {
             branch: candidate.branch, changedFiles: candidate.changedFiles,
             committedDiffDigest: diffDigest, hostStateDigest: hostDigest,
             integrityDigest: EvolutionEvaluationAuthority.integrityDigest([]),
-            requiredCommands: ["swift test"], benchmarks: benchmarks)
+            requiredCommands: ["swift test"], benchmarks: benchmarks,
+            capabilityFitness: oracle.fitness)
         let receipt = try EvolutionEvaluationAuthority.issue(
             candidate: candidate, hostStateDigest: hostDigest,
             requiredCommands: ["swift test"], benchmarks: benchmarks,
+            heldOutOracle: oracle,
             containment: validatedContainment(executionDigest: expected))
 
         XCTAssertEqual(receipt.containmentExecutionDigest, expected)
@@ -97,7 +100,8 @@ final class EvolutionContainmentAuthorityTests: XCTestCase {
             commitSHA: candidate.commitSHA, treeSHA: candidate.treeSHA,
             gitControlDigest: candidate.gitControlDigest,
             hostStateDigest: hostDigest, committedDiff: candidate.committedDiff,
-            benchmarkAuthority: receipt, changedFiles: candidate.changedFiles,
+            benchmarkAuthority: receipt, capabilityFitness: oracle.fitness,
+            changedFiles: candidate.changedFiles,
             benchmarks: benchmarks,
             policy: EvolutionPolicy(requiredBenchmarkCommands: ["swift test"]),
             createdAtEpoch: 1)
@@ -105,10 +109,45 @@ final class EvolutionContainmentAuthorityTests: XCTestCase {
         XCTAssertEqual(record.evaluationContainmentExecutionDigest, expected)
         XCTAssertNil(EvolutionEvaluationAuthority.validationError(
             record, allowTestAuthority: false))
+        let sealed = try EvolutionArchiveAuthorityCodec.seal(
+            record, projectIdentity: String(repeating: "a", count: 64),
+            sequence: 0, previousHash: EvolutionArchiveAuthorityCodec.zeroHash)
+        XCTAssertEqual(sealed.capabilityFitness, oracle.fitness)
+        XCTAssertEqual(EvolutionArchiveAuthorityCodec.withoutAuthority(sealed).capabilityFitness,
+                       oracle.fitness)
+        var encoded = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(record)) as? [String: Any])
+        var fitnessJSON = try XCTUnwrap(encoded["capabilityFitness"] as? [String: Any])
+        var planJSON = try XCTUnwrap(fitnessJSON["plan"] as? [String: Any])
+        var frozenJSON = try XCTUnwrap(planJSON["frozenInputs"] as? [String: Any])
+        frozenJSON["corpusDigest"] = String(repeating: "e", count: 64)
+        planJSON["frozenInputs"] = frozenJSON
+        fitnessJSON["plan"] = planJSON
+        encoded["capabilityFitness"] = fitnessJSON
+        let tampered = try JSONDecoder().decode(
+            EvolutionCandidateRecord.self, from: JSONSerialization.data(withJSONObject: encoded))
+        XCTAssertNotNil(EvolutionEvaluationAuthority.validationError(tampered, allowTestAuthority: false),
+                        "valid but replaced paired data must invalidate the execution receipt")
+
+        let withoutFitness = EvolutionEvaluator.evaluate(
+            runID: "run", candidateID: "missing-oracle", parentID: nil,
+            objective: "improve", branch: candidate.branch,
+            worktreePath: "/tmp/candidate", baseSHA: candidate.baseSHA,
+            commitSHA: candidate.commitSHA, treeSHA: candidate.treeSHA,
+            gitControlDigest: candidate.gitControlDigest,
+            hostStateDigest: hostDigest, committedDiff: candidate.committedDiff,
+            benchmarkAuthority: receipt, changedFiles: candidate.changedFiles,
+            benchmarks: benchmarks,
+            policy: EvolutionPolicy(requiredBenchmarkCommands: ["swift test"]), createdAtEpoch: 1)
+        XCTAssertEqual(withoutFitness.status, .blocked,
+                       "a benchmark receipt alone cannot supply paired capability fitness")
+        XCTAssertFalse(EvolutionAutonomyReadinessAssessment.current.ready,
+                       "fixture execution never arms the production readiness gates")
 
         XCTAssertThrowsError(try EvolutionEvaluationAuthority.issue(
             candidate: candidate, hostStateDigest: hostDigest,
             requiredCommands: ["swift test"], benchmarks: benchmarks,
+            heldOutOracle: oracle,
             containment: validatedContainment(
                 executionDigest: String(repeating: "e", count: 64))))
     }

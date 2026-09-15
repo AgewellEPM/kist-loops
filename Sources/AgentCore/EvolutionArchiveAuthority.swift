@@ -106,7 +106,8 @@ enum EvolutionArchiveAuthorityCodec {
             evaluationReceiptID: record.evaluationReceiptID,
             evaluationReceiptDigest: record.evaluationReceiptDigest,
             evaluationReceiptSeal: record.evaluationReceiptSeal,
-            evaluationContainmentExecutionDigest: record.evaluationContainmentExecutionDigest)
+            evaluationContainmentExecutionDigest: record.evaluationContainmentExecutionDigest,
+            capabilityFitness: record.capabilityFitness)
     }
 
     static func genesisCursor(projectIdentity: String) -> String {
@@ -154,6 +155,7 @@ enum EvolutionArchiveAuthorityCodec {
             evaluationReceiptDigest: record.evaluationReceiptDigest,
             evaluationReceiptSeal: record.evaluationReceiptSeal,
             evaluationContainmentExecutionDigest: record.evaluationContainmentExecutionDigest,
+            capabilityFitness: record.capabilityFitness,
             archiveSchema: recordSchema, projectIdentity: projectIdentity, archiveSequence: sequence,
             previousRecordHash: previousHash, recordHash: recordHash, archiveSeal: seal)
     }
@@ -257,8 +259,15 @@ enum EvolutionEvaluationAuthority {
     static func issue(candidate: GitIsolation.EvolutionCommitSnapshot,
                       hostStateDigest: String, requiredCommands: [String],
                       benchmarks: [EvolutionBenchmarkResult],
+                      heldOutOracle: EvolutionHeldOutOracleReport,
                       containment: ValidatedHardProcessContainment) throws
         -> EvolutionBenchmarkAuthorityReceipt {
+        let fitness = heldOutOracle.fitness
+        guard EvolutionHeldOutOracle.validate(
+            fitness, baseSHA: candidate.baseSHA, commitSHA: candidate.commitSHA,
+            treeSHA: candidate.treeSHA, gitControlDigest: candidate.gitControlDigest) else {
+            throw EvolutionHeldOutOracle.Error.candidateMismatch
+        }
         let id = "eval-\(UUID().uuidString.lowercased())"
         let diffDigest = EvolutionArchiveAuthorityCodec.sha256Hex(Data(candidate.committedDiff.utf8))
         let expectedContainmentDigest = try containmentExecutionDigest(
@@ -267,7 +276,7 @@ enum EvolutionEvaluationAuthority {
             branch: candidate.branch, changedFiles: candidate.changedFiles,
             committedDiffDigest: diffDigest, hostStateDigest: hostStateDigest,
             integrityDigest: integrityDigest([]), requiredCommands: requiredCommands,
-            benchmarks: benchmarks)
+            benchmarks: benchmarks, capabilityFitness: fitness)
         guard containment.mechanism.isQualifyingHardBackend,
               containment.executionDigest == expectedContainmentDigest else {
             throw EvolutionArchiveError.invalidRecord(
@@ -279,7 +288,8 @@ enum EvolutionEvaluationAuthority {
             branch: candidate.branch, changedFiles: candidate.changedFiles,
             committedDiffDigest: diffDigest, hostStateDigest: hostStateDigest,
             integrityDigest: integrityDigest([]), requiredCommands: requiredCommands,
-            benchmarks: benchmarks, containmentExecutionDigest: containment.executionDigest)
+            benchmarks: benchmarks, containmentExecutionDigest: containment.executionDigest,
+            capabilityFitness: fitness)
         return try mint(
             id: id, canonical: canonical, testOnly: false,
             containmentExecutionDigest: containment.executionDigest)
@@ -352,6 +362,10 @@ enum EvolutionEvaluationAuthority {
             }
         } else {
             guard id.hasPrefix("eval-"),
+                  let tree = record.treeSHA, let control = record.gitControlDigest,
+                  EvolutionHeldOutOracle.validate(
+                    record.capabilityFitness, baseSHA: record.baseSHA,
+                    commitSHA: record.commitSHA, treeSHA: tree, gitControlDigest: control),
                   EvolutionArchiveAuthorityCodec.isDigest(containmentDigest),
                   let expected = try? containmentExecutionDigest(record: record),
                   expected == containmentDigest else {
@@ -391,9 +405,13 @@ enum EvolutionEvaluationAuthority {
         _ receipt: EvolutionBenchmarkAuthorityReceipt?, baseSHA: String, commitSHA: String,
         treeSHA: String, gitControlDigest: String, branch: String, changedFiles: [String],
         committedDiffDigest: String, hostStateDigest: String, integrityDigest: String,
-        requiredCommands: [String], benchmarks: [EvolutionBenchmarkResult]
+        requiredCommands: [String], benchmarks: [EvolutionBenchmarkResult],
+        capabilityFitness: EvolutionCapabilityFitnessReceiptInput? = nil
     ) -> Bool {
         guard let receipt,
+              EvolutionHeldOutOracle.validate(
+                capabilityFitness, baseSHA: baseSHA, commitSHA: commitSHA,
+                treeSHA: treeSHA, gitControlDigest: gitControlDigest),
               receipt.id.hasPrefix("eval-"),
               EvolutionArchiveAuthorityCodec.isDigest(receipt.containmentExecutionDigest),
               let expectedContainmentDigest = try? containmentExecutionDigest(
@@ -401,7 +419,8 @@ enum EvolutionEvaluationAuthority {
                 gitControlDigest: gitControlDigest, branch: branch,
                 changedFiles: changedFiles, committedDiffDigest: committedDiffDigest,
                 hostStateDigest: hostStateDigest, integrityDigest: integrityDigest,
-                requiredCommands: requiredCommands, benchmarks: benchmarks),
+                requiredCommands: requiredCommands, benchmarks: benchmarks,
+                capabilityFitness: capabilityFitness),
               expectedContainmentDigest == receipt.containmentExecutionDigest,
               let canonical = try? canonical(
                 id: receipt.id, baseSHA: baseSHA, commitSHA: commitSHA,
@@ -409,7 +428,8 @@ enum EvolutionEvaluationAuthority {
                 changedFiles: changedFiles, committedDiffDigest: committedDiffDigest,
                 hostStateDigest: hostStateDigest, integrityDigest: integrityDigest,
                 requiredCommands: requiredCommands, benchmarks: benchmarks,
-                containmentExecutionDigest: receipt.containmentExecutionDigest),
+                containmentExecutionDigest: receipt.containmentExecutionDigest,
+                capabilityFitness: capabilityFitness),
               EvolutionArchiveAuthorityCodec.sha256Hex(Data(canonical.utf8)) == receipt.bindingDigest,
               ForgeSeal.verifyWithoutCreatingKey(
                 receiptSealCanonical(id: receipt.id, digest: receipt.bindingDigest),
@@ -452,7 +472,8 @@ enum EvolutionEvaluationAuthority {
             hostStateDigest: host, integrityDigest: integrity,
             requiredCommands: required,
             benchmarks: record.benchmarks.filter { !$0.isSyntheticAgentLoop },
-            containmentExecutionDigest: containmentExecutionDigest)
+            containmentExecutionDigest: containmentExecutionDigest,
+            capabilityFitness: record.capabilityFitness)
     }
 
     static func containmentExecutionDigest(record: EvolutionCandidateRecord) throws -> String {
@@ -469,14 +490,16 @@ enum EvolutionEvaluationAuthority {
             changedFiles: record.changedFiles, committedDiffDigest: diff,
             hostStateDigest: host, integrityDigest: integrity,
             requiredCommands: required,
-            benchmarks: record.benchmarks.filter { !$0.isSyntheticAgentLoop })
+            benchmarks: record.benchmarks.filter { !$0.isSyntheticAgentLoop },
+            capabilityFitness: record.capabilityFitness)
     }
 
     static func containmentExecutionDigest(
         baseSHA: String, commitSHA: String, treeSHA: String,
         gitControlDigest: String, branch: String, changedFiles: [String],
         committedDiffDigest: String, hostStateDigest: String, integrityDigest: String,
-        requiredCommands: [String], benchmarks: [EvolutionBenchmarkResult]
+        requiredCommands: [String], benchmarks: [EvolutionBenchmarkResult],
+        capabilityFitness: EvolutionCapabilityFitnessReceiptInput? = nil
     ) throws -> String {
         let benchmarkData = try EvolutionArchiveAuthorityCodec.canonicalEncoder().encode(benchmarks)
         let benchmarkDigest = EvolutionArchiveAuthorityCodec.sha256Hex(benchmarkData)
@@ -484,11 +507,14 @@ enum EvolutionEvaluationAuthority {
         let commandDigest = EvolutionArchiveAuthorityCodec.sha256Hex(commandData)
         let changedData = try EvolutionArchiveAuthorityCodec.canonicalEncoder().encode(changedFiles)
         let changedDigest = EvolutionArchiveAuthorityCodec.sha256Hex(changedData)
-        return EvolutionArchiveAuthorityCodec.sha256Hex(Data([
-            "kist.evolution.hard-contained-benchmark-batch.v1", baseSHA, commitSHA, treeSHA,
+        var pieces = [
+            capabilityFitness == nil ? "kist.evolution.hard-contained-benchmark-batch.v1"
+                : "kist.evolution.hard-contained-benchmark-batch.v2", baseSHA, commitSHA, treeSHA,
             gitControlDigest, branch, changedDigest, committedDiffDigest, hostStateDigest,
             integrityDigest, commandDigest, benchmarkDigest,
-        ].joined(separator: "\u{0}").utf8))
+        ]
+        if let capabilityFitness { pieces.append(try capabilityFitness.bindingDigest()) }
+        return EvolutionArchiveAuthorityCodec.sha256Hex(Data(pieces.joined(separator: "\u{0}").utf8))
     }
 
     private static func canonical(
@@ -496,7 +522,8 @@ enum EvolutionEvaluationAuthority {
         gitControlDigest: String, branch: String, changedFiles: [String],
         committedDiffDigest: String, hostStateDigest: String, integrityDigest: String,
         requiredCommands: [String], benchmarks: [EvolutionBenchmarkResult],
-        containmentExecutionDigest: String
+        containmentExecutionDigest: String,
+        capabilityFitness: EvolutionCapabilityFitnessReceiptInput? = nil
     ) throws -> String {
         let benchmarkData = try EvolutionArchiveAuthorityCodec.canonicalEncoder().encode(benchmarks)
         let benchmarkDigest = EvolutionArchiveAuthorityCodec.sha256Hex(benchmarkData)
@@ -504,11 +531,14 @@ enum EvolutionEvaluationAuthority {
         let commandDigest = EvolutionArchiveAuthorityCodec.sha256Hex(commandData)
         let changedData = try EvolutionArchiveAuthorityCodec.canonicalEncoder().encode(changedFiles)
         let changedDigest = EvolutionArchiveAuthorityCodec.sha256Hex(changedData)
-        return [
-            "kist.evolution.evaluation-receipt.v2", id, baseSHA, commitSHA, treeSHA,
+        var pieces = [
+            capabilityFitness == nil ? "kist.evolution.evaluation-receipt.v2"
+                : "kist.evolution.evaluation-receipt.v3", id, baseSHA, commitSHA, treeSHA,
             gitControlDigest, branch, changedDigest, committedDiffDigest, hostStateDigest,
             integrityDigest, commandDigest, benchmarkDigest, containmentExecutionDigest,
-        ].joined(separator: "\u{0}")
+        ]
+        if let capabilityFitness { pieces.append(try capabilityFitness.bindingDigest()) }
+        return pieces.joined(separator: "\u{0}")
     }
 
     private static func receiptSealCanonical(id: String, digest: String) -> String {
@@ -554,6 +584,9 @@ enum EvolutionRecordAuthority {
         let evaluationFieldCount = evaluationEnvelope.filter { $0 != nil }.count
         guard evaluationFieldCount == 0 || evaluationFieldCount == evaluationEnvelope.count else {
             return .invalidRecord("partial evaluation authority envelope")
+        }
+        guard record.capabilityFitness == nil || evaluationFieldCount == evaluationEnvelope.count else {
+            return .invalidRecord("paired capability fitness lacks its complete host evaluation envelope")
         }
 
         let changed = record.changedFiles

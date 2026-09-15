@@ -9,9 +9,10 @@ import AgentCore
 extension KistRunner {
 
     /// Deliberate execution gate. Same-host macOS cannot yet prove hard CPU/memory/process-count
-    /// containment for a daemonizing adversary, the archive lacks an external monotonic rollback anchor,
-    /// and the paired held-out oracle is not wired. Neither manual nor unattended candidate execution may
-    /// spend model budget and then discover those facts only at benchmark time.
+    /// containment for a daemonizing adversary, and the archive lacks an external monotonic rollback anchor.
+    /// The paired held-out referee is connected to benchmark authority, but private-suite execution remains
+    /// unavailable. Neither manual nor unattended candidate execution may spend model budget and discover
+    /// those facts only at benchmark time.
     static var unattendedEvolutionSafetyBlocker: String {
         EvolutionAutonomyReadinessAssessment.current.blockerSummary
     }
@@ -39,6 +40,8 @@ extension KistRunner {
 
     /// `--evolve-status`: render the evolution archive (best, blocked-conscience count, and the open-ended
     /// frontier of who the DGM would breed next) so a human can review the isolated candidate branches.
+    /// Then the self-upgrade readiness checklist: each live-authority gate with its state and honest
+    /// reason, plus the held-out corpus probe — the visible answer to "what is blocking self-evolution".
     /// Read-only; never touches git or spawns anything. Exit 0 (informational).
     static func runEvolutionStatus(root: String) -> Int32 {
         let archive = EvolutionArchiveStore(root: root)
@@ -46,6 +49,15 @@ extension KistRunner {
         print(EvolutionStatusReport.render(records: snapshot.records,
                                            authoritativeRecords: snapshot.authoritativeRecords,
                                            authorityState: snapshot.state))
+        // Informational corpus probe. Location is operator-owned (env override, else co-located with the
+        // archive under .mythos, where the candidate sandbox cannot read it). Presence is necessary, not
+        // sufficient — the backend re-checks candidate-visibility against exact worktrees at run time.
+        let corpusPath = ProcessInfo.processInfo.environment["KIST_EVOLUTION_HELDOUT_CORPUS"]
+            ?? (root as NSString).appendingPathComponent(".mythos/evolution/heldout-corpus")
+        print("")
+        print(EvolutionReadinessReport.render(
+            readiness: EvolutionAutonomyReadinessAssessment.current,
+            corpus: EvolutionHeldOutCorpus.availability(directory: corpusPath)))
         return 0
     }
 
@@ -354,11 +366,13 @@ extension KistRunner {
                 }
                 let benchmarkResults: [EvolutionBenchmarkResult]
                 let benchmarkAuthority: EvolutionBenchmarkAuthorityReceipt?
+                let capabilityFitness: EvolutionCapabilityFitnessReceiptInput?
                 if !policy.protectedFiles(in: changed).isEmpty || !integrityViolations.isEmpty {
                     // Never execute a candidate-authored verifier after it touched its own gate. The
                     // exact durable commit remains reviewable and may be sealed only as BLOCKED.
                     benchmarkResults = []
                     benchmarkAuthority = nil
+                    capabilityFitness = nil
                 } else {
                     do {
                         let batch = try await EvolutionBenchmarkRunner.run(
@@ -370,6 +384,7 @@ extension KistRunner {
                             timeoutSeconds: opts.evolveTimeout)
                         benchmarkResults = batch.results
                         benchmarkAuthority = batch.authorityReceipt
+                        capabilityFitness = batch.capabilityFitness
                     } catch {
                         err("candidate \(candidateID): secure benchmark refused: \(error.localizedDescription)")
                         _ = discardFailedCandidate(wt, candidateID)
@@ -396,6 +411,7 @@ extension KistRunner {
                     hostStateDigest: hostState.evidenceDigest,
                     committedDiff: durable.committedDiff,
                     benchmarkAuthority: benchmarkAuthority,
+                    capabilityFitness: capabilityFitness,
                     changedFiles: changed, benchmarks: benchmarks, policy: policy,
                     integrityViolations: integrityViolations, createdAtEpoch: Date().timeIntervalSince1970)
                 let persisted: EvolutionCandidateRecord

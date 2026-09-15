@@ -103,6 +103,13 @@ public struct EvolutionArchiveStore: Sendable {
                 throw EvolutionArchiveError.invalidRecord(
                     "candidate base \(record.baseSHA) does not match parent \(parentID) commit \(parent.commitSHA)")
             }
+            if let fitness = record.capabilityFitness {
+                guard fitness.plan.parentIdentity.treeSHA == parent.treeSHA,
+                      fitness.plan.parentIdentity.gitControlDigest == parent.gitControlDigest else {
+                    throw EvolutionArchiveError.invalidRecord(
+                        "held-out parent identity differs from the sealed lineage parent")
+                }
+            }
         }
         guard try Self.readArchiveDescriptor(archiveFD, directoryFD: directoryFD) == before,
               try Self.readOptionalFile(directoryFD: directoryFD, name: "archive-head.json",
@@ -191,6 +198,7 @@ public struct EvolutionArchiveStore: Sendable {
             treeSHA: snapshot.treeSHA, gitControlDigest: snapshot.gitControlDigest,
             hostStateDigest: record.hostStateDigest,
             committedDiff: snapshot.committedDiff, benchmarkAuthority: receipt,
+            capabilityFitness: record.capabilityFitness,
             changedFiles: snapshot.changedFiles, benchmarks: record.benchmarks,
             policy: EvolutionPolicy(requiredBenchmarkCommands:
                 record.requiredBenchmarkCommands ?? []),
