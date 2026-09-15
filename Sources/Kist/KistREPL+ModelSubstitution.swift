@@ -28,17 +28,11 @@ extension KistREPL {
     static func modelSubstitutionReason(success: Bool, summary: String) -> String? {
         guard !success else { return nil }
         let lower = summary.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            .replacingOccurrences(of: "’", with: "'")
         guard !lower.isEmpty else { return "empty failed turn" }
-        guard !looksLikeHardSafetyStop(lower) else { return nil }
-
-        let protocolFailures = [
-            "provider error", "bad request", "malformed", "no parseable action",
-            "model did not emit", "invalid request", "unknown variant",
-            "tool protocol", "rejected the request as malformed"
-        ]
-        if protocolFailures.contains(where: { lower.contains($0) }) {
-            return "provider/protocol failure"
-        }
+        // A provider change never turns a refusal or denied permission into execution
+        // authority. Check before transport/protocol wording: wrappers can include both.
+        guard !looksLikeRefusalOrPermissionStop(lower) else { return nil }
 
         // "ratelimited" (one word) is how AIProviderError.rateLimited renders in a turn summary
         // ("provider 'gemini' error: rateLimited") — without it the EXACT live failure string was
@@ -60,14 +54,14 @@ extension KistREPL {
             return "provider/connectivity failure"
         }
 
-        let refusalPhrases = [
-            "i can't", "i cannot", "i’m unable", "i am unable", "unable to comply",
-            "can't comply", "cannot comply", "can't help", "cannot help",
-            "i won't", "i will not", "as an ai", "not able to assist",
-            "not allowed to", "i must refuse", "i have to refuse", "request is not something i can"
+        // Specific wire failures take precedence over a generic provider/protocol wrapper.
+        let protocolFailures = [
+            "provider error", "bad request", "malformed", "no parseable action",
+            "model did not emit", "invalid request", "unknown variant",
+            "tool protocol", "rejected the request as malformed"
         ]
-        if refusalPhrases.contains(where: { lower.contains($0) }) {
-            return "model refusal/non-cooperation"
+        if protocolFailures.contains(where: { lower.contains($0) }) {
+            return "provider/protocol failure"
         }
 
         return nil
@@ -108,8 +102,8 @@ extension KistREPL {
 
     /// True when a failed turn's summary shows a LIVE provider failure that clears with time
     /// (rate limit / outage / connectivity) — the only reasons that cool a provider down
-    /// cross-process. Protocol failures and refusals are the model's fault, not the wire's,
-    /// and stay with the scorecard.
+    /// cross-process. Protocol failures do not indicate an outage. Refusal and permission
+    /// stops neither trigger substitution nor cool a provider down.
     static func transientProviderFailure(summary: String) -> Bool {
         let reason = modelSubstitutionReason(success: false, summary: summary)
         return reason == "provider/transient failure" || reason == "provider/connectivity failure"
@@ -147,18 +141,23 @@ extension KistREPL {
         return MediaSubstitutionDecision(replacement: next, reason: reason)
     }
 
-    private static func looksLikeHardSafetyStop(_ lower: String) -> Bool {
-        let refusalish = lower.contains("can't")
-            || lower.contains("cannot")
-            || lower.contains("unable")
-            || lower.contains("refuse")
-            || lower.contains("not allowed")
-        guard refusalish else { return false }
-        let hardSafetySignals = [
-            "malware", "phishing", "credential theft", "steal credentials", "ransomware",
-            "exploit a real target", "weapon", "bomb", "biological", "terrorist",
-            "child sexual", "sexual content involving minors", "self-harm", "suicide"
+    static func looksLikeRefusalOrPermissionStop(_ summary: String) -> Bool {
+        let lower = summary.lowercased().replacingOccurrences(of: "’", with: "'")
+        // Do not guess which subject makes a refusal legitimate. Unknown refusal
+        // wording already has no fallback reason; these phrases also defeat wrappers
+        // containing otherwise retryable error text. "Connection refused" is a
+        // transport failure and deliberately does not match.
+        let stopSignals = [
+            "i can't", "i cannot", "i'm unable", "i am unable", "unable to comply",
+            "can't comply", "cannot comply", "can't help", "cannot help",
+            "i won't", "i will not", "not able to assist", "not allowed",
+            "i must refuse", "i have to refuse", "request is not something i can",
+            "permission denied", "access denied", "authorization denied", "unauthorized",
+            "operation not permitted", "approval required", "approval is required",
+            "requires approval", "requires permission", "do not have permission",
+            "don't have permission", "forbidden", "blocked by policy", "safety policy",
+            "security policy", "content policy", "safety refusal", "refused for safety"
         ]
-        return hardSafetySignals.contains { lower.contains($0) }
+        return stopSignals.contains { lower.contains($0) }
     }
 }

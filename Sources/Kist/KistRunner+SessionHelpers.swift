@@ -72,7 +72,40 @@ extension KistRunner {
         guard !opts.noMemory else { return nil }
         // Operator-owned project configuration and clocked episodes remain available. Legacy Cortex
         // Markdown is raw audit-only and must never enter a model prompt.
-        return ProjectMemory(root: root).planningContext()
+        return [ProjectMemory(root: root).planningContext(),
+                OrganizationalLearningStore(projectRoot: root).listLearningContext()]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    /// Shared recall uses the existing temporal organizational projection; it does not re-import
+    /// unknown-age Cortex/research files or convert advisory rows into completion authority.
+    static func sharedAgentMemory(root: String, opts: KistOptions,
+                                  projectCatalogRoot: String? = nil) throws -> AgentMemoryAccess? {
+        guard !opts.noMemory else { return nil }
+        let catalogRoot = projectCatalogRoot ?? (KistConfig.path() as NSString).deletingLastPathComponent
+        let originalProject = try BuilderWorkspaceRootIdentity.capture(rootPath: root).canonicalPath
+        return try AgentMemoryAccess(projectRoot: root, authorizedReadRoots: opts.allowReadPaths,
+                                     projectCatalogRoot: catalogRoot) { project, query, now in
+            // Legacy organizational readers are scoped to the original host project. They do not
+            // yet guarantee a no-follow read through every path component. Cross-project event,
+            // curated-context, episode and research reads use AgentCore's confined readers.
+            guard project == originalProject else { return [] }
+            let organizational = OrganizationalLearningStore(projectRoot: project).memoryCandidates(at: now).map {
+                AgentMemoryEntry(id: $0.recordID, title: $0.title, text: $0.excerpt,
+                                 locator: $0.sourcePath.hasPrefix("/") ? $0.sourcePath : project + "/" + $0.sourcePath)
+            }
+            // Global lessons require a source explicitly bound to this project identity. A source-less
+            // or other-project lesson cannot enter cross-project recall through a global store.
+            let identity = try? AcceptedRunReceipt.computeProjectIdentity(projectRoot: project)
+            let lessons = LessonStore().retrieve(forGoal: query, limit: 30, at: now).filter {
+                guard let identity, let source = $0.source else { return false }
+                return source.split(separator: ":").contains(Substring(identity))
+            }.map {
+                AgentMemoryEntry(id: $0.id, title: "Advisory \($0.kind.rawValue) lesson", text: $0.text,
+                                 locator: $0.source ?? "")
+            }
+            return organizational + lessons
+        }
     }
 
     /// Retained as a source-compatible no-op. Legacy Cortex Markdown is raw audit-only; completion

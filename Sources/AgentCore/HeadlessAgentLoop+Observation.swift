@@ -10,12 +10,7 @@ extension HeadlessAgentLoop {
     /// only "exit code 1" — the compiler's stderr was captured in `output` but dropped, so the model
     /// patched blind, tried a denied `2>&1` re-run, and finally reported it "cannot access stderr".)
     static func failureAwareRaw(_ result: ToolResult) -> String {
-        if result.success { return result.output }
-        let error = (result.error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if error.isEmpty { return result.output }
-        if output.isEmpty || output == error { return error }
-        return error + "\n" + result.output
+        result.diagnosticText
     }
 
     static func toolObservationBody(raw: String, metadata: [String: String], maxBytes: Int) -> String {

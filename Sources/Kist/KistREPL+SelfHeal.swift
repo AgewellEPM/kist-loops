@@ -266,7 +266,8 @@ extension KistREPL {
         /// Persist exactly one learning capsule for the submitted turn, after review/repair and the final
         /// deterministic contract have settled. Interim phase summaries remain display-only so a primary
         /// success cannot survive as a false pass when its automatic repair later fails.
-        func recordSubmittedTurnLearning(outcomeSummary: String, success: Bool) async {
+        func recordSubmittedTurnLearning(outcomeSummary: String, success: Bool,
+                                         authoredBy: ProviderBinding? = nil) async {
             let clean = outcomeSummary.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !clean.isEmpty, !lastTurnInterrupted else { return }
             let trajectory = turnEvidenceSnapshot()
@@ -302,15 +303,18 @@ extension KistREPL {
                     diff: KistREPL.workingTreeDiff(projectRoot: projectRoot))
                 verified = strongVerdict.isVerified
             }
+            let author = authoredBy ?? activeBinding
             CaptainLearningStore(projectRoot: projectRoot).record(CaptainLearningSample(
                 taskSignature: EffortController.signature(for: goalText),
                 taskTags: CaptainLearningSample.inferTaskTags(from: goalText),
                 language: nil, role: "turn",
-                providerId: activeBinding.providerId, model: activeBinding.model,
+                providerId: author.providerId, model: author.model,
                 source: .liveEval, success: verified,
                 tokens: UsageCost.summarize(spans: submittedTurnSpans).tokens,
                 toolFailures: toolFails, atEpoch: Date().timeIntervalSince1970,
-                failureReason: verified ? nil
+                failureReason: !success && Self.looksLikeRefusalOrPermissionStop(clean)
+                    ? CaptainLearningSample.refusalOrPermissionStopReason
+                    : verified ? nil
                     : CaptainLearningSample.scorecardReason(
                         providerFault: false, flaky: false, verificationRejected: false,
                         loopKind: report.issues.first?.kind.rawValue, failureRate: failureRate, ungrounded: success),

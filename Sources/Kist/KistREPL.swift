@@ -91,6 +91,8 @@ final class KistREPL {
     var replayRunID: String? = nil
     /// Durable lesson memory: records obstacles from unhealthy/failed turns (advisory, retrieval-only).
     var lessonStore: LessonStore? = nil
+    /// Host option, separate from whether one particular memory service is available.
+    var advisoryMemoryEnabled = true
     /// Read-only operator audit handle for legacy Cortex Markdown; never prompt context.
     var cortex: CortexMemory? = nil
     /// Provider/model health reports. probe=true spends a tiny live completion per configured provider.
@@ -378,7 +380,7 @@ final class KistREPL {
                         ("\u{001B}[36;1m❯ \u{001B}[0m" + input + "\r\n").utf8))
                 }
             }
-            resetTurnEvidence()               // fresh complete evidence ledger per submitted turn
+            prepareTurnEvidence(for: input)   // inspectors retain the completed turn's evidence
 
             // Slash commands: built-ins, /commands, then any custom .kist/commands/<name>.md.
             // Only a command-shaped leading "/" counts — a dragged-in path falls through
@@ -667,6 +669,8 @@ final class KistREPL {
             }
             if routingWasInterrupted.value { continue }
             let turnIntent = turnOutcome.intent
+            let agentMetadataOnly = turnIntent == .build && AgentMetadataRequest.matches(messageText)
+            if agentMetadataOnly { routeProposal = nil }
 
             // AUTO-ROUTE (Increment B): for a plain message, the router may PROPOSE an escalation to a
             // fleet / plan-DAG / research pass / council. It never spends big silently — we confirm first; a no falls through to a
@@ -677,7 +681,7 @@ final class KistREPL {
             // "Dig in deep" / "consult the minds": an explicit ask to hear from EVERY reachable model, not
             // one model answering (and re-answering) alone. Fires only on the narrow phrase set, so a normal
             // message is never hijacked; explicit council intent runs before an inferred route proposal.
-            if turnIntent != .delegate,
+            if turnIntent != .delegate, !agentMetadataOnly,
                let digDeep, !lineFromQueue, AICouncil.looksLikeDigDeep(messageText) {
                 let executionGoal = turnOutcome.executionRequest(currentRequest: messageText)
                 await runHeavyRoute(goal: messageText, intent: turnIntent, mode: turnMode,
@@ -693,7 +697,7 @@ final class KistREPL {
             // plans and never built them. Only for an explicit build intent, not in plan mode, not a
             // team/queued line. The worker's edits stay approval-gated; /plan (or "just plan …") keeps it
             // read-only. This is the main-turn half of the "stop researching, start building" contract.
-            if turnOutcome.allowsMutation, turnIntent == .build, turnMode != .plan,
+            if turnOutcome.allowsMutation, turnIntent == .build, turnMode != .plan, !agentMetadataOnly,
                !armedTeamThisTurn, !lineFromQueue,
                planExecute != nil || planExecuteWithContext != nil {
                 let executionOutcome = turnOutcome.inMode(.planExecute)
@@ -870,7 +874,11 @@ final class KistREPL {
                 turnAuthor = substitution.replacement
                 oc = await runTurnInterruptible(loop: replacementLoop, userInput: enriched,
                                                 rawRequest: messageText, resolvedIntent: turnIntent,
-                                                delegationGrant: turnDelegationGrant)
+                                                delegationGrant: turnDelegationGrant,
+                                                authoredBy: turnAuthor)
+                if !oc.success, !lastTurnInterrupted, Self.transientProviderFailure(summary: oc.summary) {
+                    recordProviderCooldown?(turnAuthor.providerId)
+                }
             }
             rememberModelTurn(user: messageText, assistantSummary: oc.summary,
                               outcomeContract: turnOutcome)
@@ -882,7 +890,8 @@ final class KistREPL {
             let completedTurn = recordVerificationAndFinal(outcome: oc, intent: turnIntent)
             selfMonitor(goal: messageText, intent: turnIntent, success: completedTurn)
             await printTurnUsage()
-            await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+            await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn,
+                                              authoredBy: turnAuthor)
         }
     }
 }

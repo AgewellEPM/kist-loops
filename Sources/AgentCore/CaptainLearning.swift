@@ -16,6 +16,10 @@ public enum CaptainLearningSource: String, Codable, Sendable, Equatable {
 /// Samples are evidence, not authority. The assignment engine treats sparse records as shadow data and
 /// promotes only repeated, verified wins for the same role/task shape.
 public struct CaptainLearningSample: Codable, Sendable, Equatable {
+    /// Retained as labeled audit data, excluded from performance routing. A denied
+    /// action is not evidence that another model should be selected to perform it.
+    public static let refusalOrPermissionStopReason = "refusalOrPermissionStop"
+
     public let taskSignature: String
     public let taskTags: [String]
     public let language: String?
@@ -481,6 +485,7 @@ public final class CaptainLearningStore {
         let oldest = now - CaptainLearningRecencyPolicy.maximumAgeSeconds
         var buckets: [BucketKey: [IndexedSample]] = [:]
         for (offset, sample) in samples.enumerated() {
+            guard sample.failureReason != CaptainLearningSample.refusalOrPermissionStopReason else { continue }
             guard sample.atEpoch.isFinite,
                   sample.atEpoch >= oldest,
                   sample.atEpoch <= now + CaptainLearningRecencyPolicy.maximumFutureSkewSeconds,

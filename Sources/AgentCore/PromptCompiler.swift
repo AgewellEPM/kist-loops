@@ -739,6 +739,7 @@ public enum PromptCompiler {
         if isDelegationDirective(lower) {
             return .delegate
         }
+        if !explicitlyReadOnly, AgentMetadataRequest.matches(lower) { return .build }
         if !explicitlyReadOnly, isBuildDirective(lower) { return .build }
         // Multi-clause repair requests often orient first ("inspect/diagnose") and place the explicit
         // mutation second. Keep this deliberately phrase-bound instead of treating any occurrence of
@@ -1235,11 +1236,26 @@ public enum PromptCompiler {
                                        resolvedOutcome: OutcomeContract? = nil) -> DelegationGrant? {
         let original = normalized(request)
         guard var task = delegationTask(from: original) else { return nil }
+        // A recipient is not the child operation. Preserve the operation when the user says
+        // "delegate to one helper to write ..."; otherwise the leading "to" hides the verb and
+        // incorrectly gives the child a chat-only grant. Match only explicit, bounded role phrases.
+        let toolRecipient = #"(?:using|with)\s+spawn_(?:specialist|agent)(?:\(\s*background\s*=\s*(?:true|false)\s*\))?"#
+        let recipientPatterns = [
+            #"^to\s+(?:a|an|one|the)\s+(?:agent|helper|worker|coder|builder|reviewer|researcher|specialist)(?:\s+(?:(?:named|called)\s+)?[a-z0-9_-]{1,80})?(?:\s+"# + toolRecipient + #")?(?:\s+to\s+|\s*:\s*)"#,
+            #"^to\s+[a-z0-9_-]{1,80}\s+"# + toolRecipient + #"(?:\s+to\s+|\s*:\s*)"#,
+        ]
+        for pattern in recipientPatterns {
+            if let recipient = task.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
+                task.removeSubrange(recipient)
+                break
+            }
+        }
         let roleLeadIns = [
             "a coder to ", "the coder to ", "a builder to ", "the builder to ",
             "a worker to ", "the worker to ", "an agent to ", "the agent to ",
             "a specialist to ", "the specialist to ", "someone to ",
             "a reviewer to ", "the reviewer to ", "a researcher to ", "the researcher to ",
+            "a helper to ", "one helper to ", "the helper to ", "one agent to ",
         ]
         while let prefix = roleLeadIns.first(where: { task.lowercased().hasPrefix($0) }) {
             task.removeFirst(prefix.count)

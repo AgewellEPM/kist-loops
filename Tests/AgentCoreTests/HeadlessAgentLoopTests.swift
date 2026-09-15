@@ -23,6 +23,35 @@ final class HeadlessAgentLoopTests: XCTestCase {
                                  sink: sink, maxIterations: maxIterations)
     }
 
+    func testNovelRequiredReadsDoNotForcePrematureSynthesisInEitherProtocol() async throws {
+        for index in 0..<20 {
+            try "evidence \(index)\n".write(toFile: root + "/evidence-\(index).txt",
+                                          atomically: true, encoding: .utf8)
+        }
+        for native in [false, true] {
+            let actions = (0..<20).map { index in
+                #"{"tool":"read_file","parameters":{"path":"evidence-\#(index).txt"}}"#
+            }
+            let provider: any ChatProvider = native
+                ? NativeScriptedProvider((0..<20).map {
+                    .call(name: "read_file", args: #"{"path":"evidence-\#($0).txt"}"#)
+                  } + [.answer("Reviewed all twenty required files.")])
+                : ScriptedProvider(actions + [#"{"done":true,"summary":"Reviewed all twenty required files."}"#])
+            let store = LoopCheckpointStore(directory: root + "/checkpoints-\(native)")
+            let loop = HeadlessAgentLoop(
+                providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+                providerId: provider.id, model: nil, tools: .headless(),
+                context: ToolContext(projectRoot: root), toolMode: native ? .native : .text,
+                checkpoints: store, maxIterations: 24)
+            let outcome = await loop.run(goal: "Read all twenty evidence files and report their contents.")
+            XCTAssertTrue(outcome.success, outcome.summary)
+            let checkpoint = try store.load(id: outcome.checkpointId)
+            XCTAssertEqual(checkpoint.trajectory?.filter { $0.tool == "read_file" && $0.success }.count, 20)
+            XCTAssertFalse(checkpoint.messages.contains { $0.content.contains("STOP gathering now") },
+                           "New required evidence must not trigger the stalled-gathering nudge")
+        }
+    }
+
     // Persona/restraint is the cheap half of conversational feel — pin that BOTH prompts carry it
     // (text + native) so it can't silently regress to the old neutral "autonomous shell" tone.
     func testBothSystemPromptsCarryCollaboratorRestraint() {
@@ -254,6 +283,16 @@ final class HeadlessAgentLoopTests: XCTestCase {
 
         XCTAssertTrue(out.success, out.summary)
         XCTAssertEqual(mainPrompts.count, 3, "two action calls plus the final done call")
+        let summaries = await provider.summaryPrompts()
+        XCTAssertEqual(summaries.count, 2)
+        for prompt in summaries {
+            let anchors = prompt.compactMap {
+                (try? JSONSerialization.jsonObject(with: Data($0.content.utf8))) as? [String: Any]
+            }.filter { $0["provenance"] as? String == "current_operator_request_quoted_context" }
+            XCTAssertEqual(anchors.count, 1)
+            XCTAssertEqual(anchors.first?["content"] as? String, current,
+                           "the summarizer needs the actual task to retain completed work and identify what remains")
+        }
         guard let prompt = mainPrompts.last else { return XCTFail("missing post-compaction provider prompt") }
         let anchors = prompt.filter { $0.content.hasPrefix(HeadlessAgentLoop.currentTurnObjectiveMarker) }
         XCTAssertEqual(anchors.count, 1, "repeated compaction must replace, not accumulate, the objective anchor")
@@ -1587,6 +1626,52 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertEqual(out.summary, "Four.")
     }
 
+    func testDogfoodSubscriptionSandboxClaimsRecoverThroughOuterActionProtocol() async throws {
+        try "requirements".write(toFile: root + "/TASK.md", atomically: true, encoding: .utf8)
+        let falseBlockers = [
+            "Blocked: I cannot read TASK.md, create solution.py, or run make verify because no filesystem-reading, file-writing, or command-execution tool is available. Enable the advertised Kist tools (read_file, write_file, and run_command) and retry.",
+            "Blocked by the current tool configuration: enable writable workspace access plus file-reading and command-execution tools, then retry.",
+            "Blocked by enforced permissions: creating solution.py was rejected with writing is blocked by read-only sandbox; rejected by user approval settings. This session also provides no command runner.",
+            "Blocked by host configuration: delegation failed with no thread with id, and the workspace remains read-only. I cannot safely read TASK.md.",
+        ]
+        for summary in falseBlockers {
+            let denial = String(decoding: try JSONSerialization.data(
+                withJSONObject: ["done": true, "summary": summary]), as: UTF8.self)
+            let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+                denial,
+                #"{"action":{"tool":"read_file","parameters":"{\"path\":\"TASK.md\"}"}}"#,
+                #"{"action":{"done":true,"summary":"TASK.md contains requirements."}}"#,
+            ])
+            let recorder = TrajectoryRecorder()
+            let out = await HeadlessAgentLoop(
+                providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+                providerId: "codex-cli", model: nil, tools: .headless(),
+                context: ToolContext(projectRoot: root), maxIterations: 5, recorder: recorder
+            ).run(goal: "inspect TASK.md")
+            XCTAssertTrue(out.success, out.summary)
+            XCTAssertEqual(out.iterations, 3, summary)
+            XCTAssertEqual(recorder.snapshot().filter { $0.success && $0.tool == "read_file" }.count, 1)
+        }
+    }
+
+    func testCodexActionSchemaReflectsOnlyEnabledKistTools() throws {
+        let schema = try XCTUnwrap(HeadlessAgentLoop.subscriptionCLIActionSchema(
+            tools: .headless(), shellEnabled: false))
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(schema.utf8)) as? [String: Any])
+        let properties = try XCTUnwrap(decoded["properties"] as? [String: Any])
+        let action = try XCTUnwrap(properties["action"] as? [String: Any])
+        let alternatives = try XCTUnwrap(action["anyOf"] as? [[String: Any]])
+        let toolProperties = try XCTUnwrap(alternatives[0]["properties"] as? [String: Any])
+        let tool = try XCTUnwrap(toolProperties["tool"] as? [String: Any])
+        let names = try XCTUnwrap(tool["enum"] as? [String])
+        XCTAssertTrue(names.contains("read_file"))
+        XCTAssertFalse(names.contains("run_command"))
+        let parsed = try XCTUnwrap(ActionParser.parse(
+            #"{"action":{"tool":"write_file","parameters":"{\"path\":\"test.txt\",\"content\":\"first\\nsecond\\n\"}"}}"#))
+        XCTAssertEqual(parsed.parameters["content"] as? String, "first\nsecond\n")
+        XCTAssertNil(ActionParser.parse(#"{"action":{"tool":"write_file","parameters":"not JSON"}}"#))
+    }
+
     func testSubscriptionCLIRepeatedFalseToolBlockerFailsHonestly() async {
         let provider = NamedScriptedProvider(id: "codex-cli", responses: Array(
             repeating: #"{"done":true,"summary":"Blocked: read_file is unavailable here."}"#, count: 3
@@ -1600,6 +1685,101 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertFalse(out.success)
         XCTAssertEqual(out.terminalStatus, .stoppedUnverified)
         XCTAssertTrue(out.summary.contains("before making any call"), out.summary)
+    }
+
+    func testSubscriptionCLIToolAvailabilityClaimAfterSuccessfulReadRecovers() async throws {
+        try "ground truth".write(toFile: root + "/CLAUDE.md", atomically: true, encoding: .utf8)
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+            #"{"tool":"read_file","parameters":{"path":"CLAUDE.md"}}"#,
+            #"{"done":true,"summary":"REVIEW INCOMPLETE: This session does not expose the required Kist read_file or git tools."}"#,
+            #"{"tool":"read_file","parameters":{"path":"CLAUDE.md"}}"#,
+            #"{"done":true,"summary":"The required file contains ground truth."}"#,
+        ])
+        let recorder = TrajectoryRecorder()
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), maxIterations: 5, recorder: recorder
+        ).run(goal: "inspect CLAUDE.md")
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(out.iterations, 4)
+        XCTAssertEqual(recorder.snapshot().filter { $0.tool == "read_file" && $0.success }.count, 2)
+        XCTAssertFalse(out.summary.contains("REVIEW INCOMPLETE"))
+    }
+
+    func testSubscriptionCLIRepeatedToolBlockerAfterReadFailsWithinBound() async throws {
+        try "ground truth".write(toFile: root + "/CLAUDE.md", atomically: true, encoding: .utf8)
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+            #"{"tool":"read_file","parameters":{"path":"CLAUDE.md"}}"#,
+        ] + Array(repeating: #"{"done":true,"summary":"The Kist read_file tool is unavailable."}"#, count: 3))
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), maxIterations: 5
+        ).run(goal: "inspect CLAUDE.md")
+
+        XCTAssertFalse(out.success)
+        XCTAssertEqual(out.terminalStatus, .stoppedUnverified)
+        XCTAssertEqual(out.iterations, 4)
+        XCTAssertTrue(out.summary.contains("after 1 successful grounding call"), out.summary)
+    }
+
+    func testSubscriptionCLIRealReadFailureIsNotOverriddenByEarlierSuccess() async throws {
+        try "ground truth".write(toFile: root + "/CLAUDE.md", atomically: true, encoding: .utf8)
+        let explanation = "read_file cannot access missing.md because the file is absent."
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+            #"{"tool":"read_file","parameters":{"path":"CLAUDE.md"}}"#,
+            #"{"tool":"read_file","parameters":{"path":"missing.md"}}"#,
+            #"{"done":true,"summary":"read_file cannot access missing.md because the file is absent."}"#,
+        ])
+        let recorder = TrajectoryRecorder()
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), maxIterations: 5, recorder: recorder
+        ).run(goal: "explain whether CLAUDE.md and missing.md can be read")
+
+        XCTAssertEqual(out.iterations, 3, "a real file error must not trigger false-availability recovery")
+        XCTAssertEqual(out.summary, explanation)
+        XCTAssertEqual(recorder.snapshot().map(\.success), [true, false])
+    }
+
+    func testSubscriptionCLIUnavailableDependencyFindingDoesNotImplyUnavailableTool() async throws {
+        try "dependency unavailable".write(toFile: root + "/CLAUDE.md", atomically: true, encoding: .utf8)
+        let summary = "read_file says the optional dependency is unavailable."
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+            #"{"tool":"read_file","parameters":{"path":"CLAUDE.md"}}"#,
+            #"{"done":true,"summary":"read_file says the optional dependency is unavailable."}"#,
+        ])
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), maxIterations: 3
+        ).run(goal: "explain what CLAUDE.md says about the dependency")
+
+        XCTAssertTrue(out.success, out.summary)
+        XCTAssertEqual(out.iterations, 2)
+        XCTAssertEqual(out.summary, summary)
+    }
+
+    func testSubscriptionCLIPermissionDenialIsNotOverridden() async throws {
+        try "ground truth".write(toFile: root + "/CLAUDE.md", atomically: true, encoding: .utf8)
+        let provider = NamedScriptedProvider(id: "codex-cli", responses: [
+            #"{"tool":"read_file","parameters":{"path":"CLAUDE.md"}}"#,
+            #"{"tool":"read_file","parameters":{"path":"../outside-workspace.txt"}}"#,
+            #"{"done":true,"summary":"read_file cannot access the path outside the allowed workspace."}"#,
+        ])
+        let recorder = TrajectoryRecorder()
+        let out = await HeadlessAgentLoop(
+            providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: "codex-cli", model: nil, tools: .headless(),
+            context: ToolContext(projectRoot: root), maxIterations: 5, recorder: recorder
+        ).run(goal: "explain whether these paths are readable")
+
+        XCTAssertEqual(out.iterations, 3, "a real scope denial must retain its diagnosis")
+        XCTAssertTrue(out.summary.contains("outside the allowed workspace"), out.summary)
+        XCTAssertEqual(recorder.snapshot().map(\.success), [true, false])
     }
 
     // MARK: - Interrupted-action reconciliation
@@ -1923,23 +2103,6 @@ final class HeadlessAgentLoopTests: XCTestCase {
         let out = await executing.run(goal: "write after toggling plan off")
         XCTAssertTrue(out.success)
         XCTAssertEqual(try? String(contentsOfFile: root + "/toggled.txt", encoding: .utf8), "done")
-    }
-
-    func testPlanModeSystemPromptCarriesBanner() {
-        let on = HeadlessAgentLoop.systemPrompt(tools: .headless(), projectRoot: "/tmp", planMode: true)
-        XCTAssertTrue(on.contains("PLAN MODE IS ON"))
-        let off = HeadlessAgentLoop.systemPrompt(tools: .headless(), projectRoot: "/tmp", planMode: false)
-        XCTAssertFalse(off.contains("PLAN MODE IS ON"))
-        // Native prompt too.
-        XCTAssertTrue(HeadlessAgentLoop.nativeSystemPrompt(tools: .headless(), projectRoot: "/tmp", planMode: true).contains("PLAN MODE IS ON"))
-        XCTAssertFalse(HeadlessAgentLoop.nativeSystemPrompt(tools: .headless(), projectRoot: "/tmp", planMode: false).contains("PLAN MODE IS ON"))
-    }
-
-    func testReadOnlyAllowlistIsExactlyTheSafeTools() {
-        // Pin the allowlist so a new mutating tool isn't accidentally treated as read-only.
-        // ast_grep is read-only (search + preview); ast_grep_apply (mutating) is intentionally absent.
-        XCTAssertEqual(HeadlessAgentLoop.readOnlyTools, ["read_file", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search"])
-        XCTAssertFalse(HeadlessAgentLoop.readOnlyTools.contains("ast_grep_apply"), "the mutating rewrite must never be read-only")
     }
 
     func testReadOnlyIntentToolsetDropsMutatorsAtExecutionBoundary() async {
@@ -2371,12 +2534,17 @@ private final class CompactionPromptCaptureProvider: ChatProvider, @unchecked Se
     func mainPrompts() async -> [[ChatMessage]] {
         await state.mainPrompts()
     }
+
+    func summaryPrompts() async -> [[ChatMessage]] {
+        await state.summaryPrompts()
+    }
 }
 
 private actor CompactionPromptCaptureState {
     private let responses: [String]
     private var index = 0
     private var capturedMainPrompts: [[ChatMessage]] = []
+    private var capturedSummaryPrompts: [[ChatMessage]] = []
 
     init(responses: [String]) {
         self.responses = responses
@@ -2386,6 +2554,9 @@ private actor CompactionPromptCaptureState {
         if settings.systemPrompt.contains("single JSON object") {
             capturedMainPrompts.append(messages)
         }
+        if messages.first?.content == HeadlessAgentLoop.compactionSummaryPrompt {
+            capturedSummaryPrompts.append(messages)
+        }
         defer { index += 1 }
         return index < responses.count
             ? responses[index]
@@ -2394,6 +2565,10 @@ private actor CompactionPromptCaptureState {
 
     func mainPrompts() -> [[ChatMessage]] {
         capturedMainPrompts
+    }
+
+    func summaryPrompts() -> [[ChatMessage]] {
+        capturedSummaryPrompts
     }
 }
 

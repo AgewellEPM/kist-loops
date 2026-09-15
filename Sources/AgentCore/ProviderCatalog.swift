@@ -519,10 +519,12 @@ public final class ProviderRegistry: Sendable {
                     for try await event in stream {
                         try Task.checkCancellation()
                         switch event {
-                        case .delta(let d): text += d
+                        case .delta(let d): text += d; attemptText = text
                         case .reasoning: sawReasoning = true
                         case .finish(let r): finishReason = r
-                        case .usage(let p, let c): usage = TokenUsage(promptTokens: p, completionTokens: c)
+                        case .usage(let p, let c):
+                            usage = TokenUsage(promptTokens: p, completionTokens: c)
+                            attemptUsage = usage
                         default: break
                         }
                     }
@@ -596,7 +598,8 @@ public final class ProviderRegistry: Sendable {
                         attemptRecorded = true
                     }
                     if Task.isCancelled { throw AIProviderError.transport("completion cancelled") }
-                    lastError = error
+                    lastError = ProviderRouteFailure.annotate(
+                        error, requested: provider.id, provider: candidate.provider.id, model: currentModel)
                     // Layer B: a model-not-found (dead/renamed id like grok-2-latest) is healed by resolving
                     // a VALID id on the SAME provider and retrying — NOT by silently switching providers.
                     // Once per candidate, reactive (only fetches /models on this error path).
@@ -610,7 +613,7 @@ public final class ProviderRegistry: Sendable {
                     }
                     guard Self.shouldRetry(error) else {
                         if candidateIndex < candidates.count - 1, Self.shouldFallback(error) { break }
-                        throw error
+                        throw lastError ?? error
                     }
                     guard attempt < delays.count else { break }
                     let delay = delays[attempt]
@@ -780,6 +783,7 @@ public final class ProviderRegistry: Sendable {
                         var outputByteUpperBound = 0
                         var promptTokens = 0
                         var completionTokens = 0
+                        var usageReported = false
                         do {
                             do {
                                 admittedOrdinal = try await requestBudget?.admit()
@@ -800,11 +804,16 @@ public final class ProviderRegistry: Sendable {
                                 switch event {
                                 case .usage(let prompt, let completion):
                                     promptTokens = prompt; completionTokens = completion
+                                    usageReported = true
                                 default: break
                                 }
                                 continuation.yield(event)
                             }
                             let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
+                            ProviderAttemptObservation.record(
+                                provider: candidate.provider.id, model: currentModel, mechanism: mechanism,
+                                usage: TokenUsage(promptTokens: promptTokens, completionTokens: completionTokens),
+                                usageReported: usageReported, elapsedNanoseconds: elapsed, success: true)
                             let digest = telemetryHasher.finalize().map {
                                 String(format: "%02x", $0)
                             }.joined()
@@ -822,6 +831,10 @@ public final class ProviderRegistry: Sendable {
                         } catch is CancellationError {
                             let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
                             if admittedOrdinal != nil || requestBudget == nil {
+                                ProviderAttemptObservation.record(
+                                    provider: candidate.provider.id, model: currentModel, mechanism: mechanism,
+                                    usage: TokenUsage(promptTokens: promptTokens, completionTokens: completionTokens),
+                                    usageReported: usageReported, elapsedNanoseconds: elapsed, success: false)
                                 let digest = telemetryHasher.finalize().map {
                                     String(format: "%02x", $0)
                                 }.joined()
@@ -840,6 +853,10 @@ public final class ProviderRegistry: Sendable {
                         } catch {
                             let elapsed = DispatchTime.now().uptimeNanoseconds &- telemetryStarted
                             if admittedOrdinal != nil || requestBudget == nil {
+                                ProviderAttemptObservation.record(
+                                    provider: candidate.provider.id, model: currentModel, mechanism: mechanism,
+                                    usage: TokenUsage(promptTokens: promptTokens, completionTokens: completionTokens),
+                                    usageReported: usageReported, elapsedNanoseconds: elapsed, success: false)
                                 let digest = telemetryHasher.finalize().map {
                                     String(format: "%02x", $0)
                                 }.joined()
@@ -857,7 +874,9 @@ public final class ProviderRegistry: Sendable {
                                 continuation.finish(throwing: AIProviderError.transport("stream cancelled"))
                                 return
                             }
-                            lastError = error
+                            lastError = ProviderRouteFailure.annotate(
+                                error, requested: candidates[0].provider.id,
+                                provider: candidate.provider.id, model: currentModel)
                             // Layer B: only safe to re-issue if NOTHING was yielded yet (else we'd double-emit).
                             if routePolicy.allowModelResolution, !yieldedAny, !resolvedModelOnce,
                                ModelResolver.isModelNotFound(error) {
@@ -881,14 +900,14 @@ public final class ProviderRegistry: Sendable {
                             // stream's events to what the consumer already received (duplicate/interleaved
                             // output). After any emission, surface the error outward.
                             if yieldedAny {
-                                continuation.finish(throwing: error)
+                                continuation.finish(throwing: lastError ?? error)
                                 return
                             }
                             guard Self.shouldRetry(error) else {
                                 if candidateIndex < candidates.count - 1, Self.shouldFallback(error) {
                                     break
                                 }
-                                continuation.finish(throwing: error)
+                                continuation.finish(throwing: lastError ?? error)
                                 return
                             }
                             guard attempt < delays.count else { break }
@@ -916,6 +935,9 @@ public final class ProviderRegistry: Sendable {
         success: Bool, started: UInt64, errorType: String? = nil
     ) {
         let elapsed = DispatchTime.now().uptimeNanoseconds &- started
+        ProviderAttemptObservation.record(
+            provider: candidate.provider.id, model: model, mechanism: mechanism, usage: usage,
+            usageReported: !usage.isZero, elapsedNanoseconds: elapsed, success: success)
         let input = usage.promptTokens > 0 ? usage.promptTokens : tokenUpperBound(messages)
         let output = usage.completionTokens > 0 ? usage.completionTokens : text.utf8.count
         BuilderTrustedTelemetry.recordProvider(

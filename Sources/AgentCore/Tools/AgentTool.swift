@@ -59,6 +59,17 @@ public struct ToolResult: Sendable, Equatable {
     public static func failure(_ message: String) -> ToolResult {
         ToolResult(success: false, output: "", error: message)
     }
+
+    /// Keep a failed command's verdict together with its compiler/test diagnostics. Consumers must
+    /// redact this untrusted text before displaying or persisting it; it carries no success authority.
+    public var diagnosticText: String {
+        if success { return output }
+        let verdict = (error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if verdict.isEmpty { return output }
+        if body.isEmpty || body == verdict { return verdict }
+        return verdict + "\n" + output
+    }
 }
 
 /// Declarative parameter description used to build the tool JSON schema sent to models.
@@ -220,15 +231,25 @@ public struct ShellPolicy: Sendable {
     /// `dd if=`) actually fire — matching the binary path alone would let
     /// `curl https://exfil` through. Returns nil if permitted, else a reason.
     public func binaryRefusalReason(resolvedPath: String, args: [String]) async -> String? {
+        await binaryRefusalReason(resolvedPath: resolvedPath, args: args, trustedToolchainAlias: nil)
+    }
+
+    /// Only the attested Builder resolver may supply an alias (for example python3 -> python3.9).
+    /// Both spellings still pass the deny rules, and approval always shows the actual executable.
+    func binaryRefusalReason(resolvedPath: String, args: [String],
+                             trustedToolchainAlias: String?) async -> String? {
         guard enabled else { return "shell is disabled in this context" }
         let fullLine = ([resolvedPath] + args).joined(separator: " ")
         let lower = fullLine.lowercased()
-        for bad in deny where lower.contains(bad.lowercased()) {
+        let aliasLine = trustedToolchainAlias.map { ([$0] + args).joined(separator: " ").lowercased() }
+        for bad in deny where lower.contains(bad.lowercased()) || aliasLine?.contains(bad.lowercased()) == true {
             return "command '\(fullLine)' matches deny-list entry '\(bad)'"
         }
         if !allow.isEmpty {
             let base = (resolvedPath as NSString).lastPathComponent
-            if !allow.contains(base) { return "'\(base)' is not on the allow-list" }
+            if !allow.contains(base) && !(trustedToolchainAlias.map({ allow.contains($0) }) ?? false) {
+                return "'\(base)' is not on the allow-list"
+            }
         }
         if !autoApprove, let approval = approval {
             let ok = await approval(fullLine)
@@ -304,13 +325,16 @@ public struct ToolContext: Sendable {
     public let correlationID: String?
     /// Optional host-owned recorder used by ToolRegistry to emit measured tool-call spans.
     public let traceRecorder: TraceRecorder?
+    /// Host-authorized shared recall and history root, independent of an isolated write root.
+    public let agentMemory: AgentMemoryAccess?
 
     public init(projectRoot: String, shell: ShellPolicy = .denied, sandbox: SandboxPolicy = .confined(),
                 authorizationScope: ScopeDecision? = nil, scopeOverrideApproved: Bool = false,
                 skillLocations: [String: String] = [:], skillTracker: SkillTracker? = nil,
                 auditLog: AuditLog? = nil, externalReadRoots: [String] = [],
                 allowMediaDropInbox: Bool = true,
-                correlationID: String? = nil, traceRecorder: TraceRecorder? = nil) {
+                correlationID: String? = nil, traceRecorder: TraceRecorder? = nil,
+                agentMemory: AgentMemoryAccess? = nil) {
         precondition(correlationID == nil || traceRecorder == nil || traceRecorder?.traceId == correlationID,
                      "a correlated ToolContext and TraceRecorder must share one root id")
         self.projectRoot = projectRoot
@@ -323,6 +347,7 @@ public struct ToolContext: Sendable {
         self.auditLog = auditLog
         self.correlationID = correlationID
         self.traceRecorder = traceRecorder
+        self.agentMemory = agentMemory
         self.allowMediaDropInbox = allowMediaDropInbox
         // Canonicalize once, drop non-existent entries (fail-closed: a bogus root grants nothing).
         // "/" is refused outright — it would un-confine every read; arm specific trees instead.
@@ -337,7 +362,7 @@ public struct ToolContext: Sendable {
                     skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
                     externalReadRoots: externalReadRoots,
                     allowMediaDropInbox: allowMediaDropInbox,
-                    correlationID: correlationID, traceRecorder: traceRecorder)
+                    correlationID: correlationID, traceRecorder: traceRecorder, agentMemory: agentMemory)
     }
 
     public func withScopeOverrideApproved(_ approved: Bool) -> ToolContext {
@@ -346,7 +371,7 @@ public struct ToolContext: Sendable {
                     skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
                     externalReadRoots: externalReadRoots,
                     allowMediaDropInbox: allowMediaDropInbox,
-                    correlationID: correlationID, traceRecorder: traceRecorder)
+                    correlationID: correlationID, traceRecorder: traceRecorder, agentMemory: agentMemory)
     }
 
     /// Attach a discovered skill set to this context (used by the loop after discovery).
@@ -356,7 +381,7 @@ public struct ToolContext: Sendable {
                     skillLocations: locations, skillTracker: tracker, auditLog: auditLog,
                     externalReadRoots: externalReadRoots,
                     allowMediaDropInbox: allowMediaDropInbox,
-                    correlationID: correlationID, traceRecorder: traceRecorder)
+                    correlationID: correlationID, traceRecorder: traceRecorder, agentMemory: agentMemory)
     }
 
     /// Attach an audit log (used by the CLI when constructing the run's context).
@@ -366,7 +391,23 @@ public struct ToolContext: Sendable {
                     skillLocations: skillLocations, skillTracker: skillTracker, auditLog: log,
                     externalReadRoots: externalReadRoots,
                     allowMediaDropInbox: allowMediaDropInbox,
-                    correlationID: correlationID, traceRecorder: traceRecorder)
+                    correlationID: correlationID, traceRecorder: traceRecorder, agentMemory: agentMemory)
+    }
+
+    /// Attach an exact host-owned correlation identifier to one external dispatch. A recorder is
+    /// optional because durable runtimes may correlate their append-only tool audit directly to a
+    /// separate receipt ledger. Supplying one requires the same root identifier by construction.
+    public func withCorrelationID(
+        _ correlationID: String,
+        traceRecorder: TraceRecorder? = nil
+    ) -> ToolContext {
+        ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
+                    authorizationScope: authorizationScope,
+                    scopeOverrideApproved: scopeOverrideApproved,
+                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
+                    externalReadRoots: externalReadRoots,
+                    allowMediaDropInbox: allowMediaDropInbox,
+                    correlationID: correlationID, traceRecorder: traceRecorder, agentMemory: agentMemory)
     }
 
     /// Bind the runtime-owned PlanExecute identity to every tool call. The typed mission id and the
@@ -379,7 +420,15 @@ public struct ToolContext: Sendable {
                     skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
                     externalReadRoots: externalReadRoots,
                     allowMediaDropInbox: allowMediaDropInbox,
-                    correlationID: missionID.rawValue, traceRecorder: traceRecorder)
+                    correlationID: missionID.rawValue, traceRecorder: traceRecorder, agentMemory: agentMemory)
+    }
+
+    public func withAgentMemory(_ memory: AgentMemoryAccess?) -> ToolContext {
+        ToolContext(projectRoot: projectRoot, shell: shell, sandbox: sandbox,
+                    authorizationScope: authorizationScope, scopeOverrideApproved: scopeOverrideApproved,
+                    skillLocations: skillLocations, skillTracker: skillTracker, auditLog: auditLog,
+                    externalReadRoots: externalReadRoots, allowMediaDropInbox: allowMediaDropInbox,
+                    correlationID: correlationID, traceRecorder: traceRecorder, agentMemory: memory)
     }
 
     /// TOCTOU-safe filesystem confinement for this context's root (Codex HIGH#2). File

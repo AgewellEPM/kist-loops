@@ -7,6 +7,17 @@ import AgentCore
 /// dashboard dogfood where ask-mode and vm-agent one-shots died 4× on a
 /// live-rate-limited provider the router kept re-picking.
 final class OneShotResilienceTests: XCTestCase {
+    func testChangingProviderDoesNotInheritAnotherProvidersConfiguredModel() {
+        XCTAssertNil(KistRunner.startupModel(explicit: nil, selectedProvider: "openai",
+            configProvider: "ollama", configModel: "llama3.1"))
+        XCTAssertEqual(KistRunner.startupModel(explicit: nil, selectedProvider: "ollama",
+            configProvider: "ollama", configModel: "llama3.1"), "llama3.1")
+        XCTAssertEqual(KistRunner.startupModel(explicit: "explicit", selectedProvider: "openai",
+            configProvider: "ollama", configModel: "llama3.1", goalModel: "goal-model"), "explicit")
+        XCTAssertEqual(KistRunner.startupModel(explicit: nil, selectedProvider: "openai",
+            configProvider: "ollama", configModel: "llama3.1", goalModel: "goal-model"), "goal-model")
+    }
+
     private let aliases = ["claude": "claude-cli", "claude-cli": "claude-cli",
                            "deepseek": "deepseek", "gemini": "gemini"]
 

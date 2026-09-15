@@ -65,6 +65,18 @@ public struct GenerateTool: AgentTool {
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let prompt = try requireString("prompt", from: arguments)
+        let messages = [ChatMessage(role: .user, content: prompt)]
+        if let access = context.agentMemory {
+            return try await access.withModelCall(role: "coder", executionRoot: context.projectRoot,
+                                                 messages: messages, summarize: { $0.output }) { supplied in
+                await executeCore(messages: supplied)
+            }
+        }
+        return await executeCore(messages: messages)
+    }
+
+    private func executeCore(messages: [ChatMessage]) async -> ToolResult {
+        let prompt = messages.map(\.content).joined(separator: "\n")
         let settings = ModelSettings(temperature: 0.3, maxTokens: maxTokens)
         // Atomic reserve BEFORE the call (Codex C2 #3): account-after let two parallel fleet workers
         // both pass and both overspend on coder calls. Reserve the estimate; denied ⇒ refuse.
@@ -79,7 +91,7 @@ public struct GenerateTool: AgentTool {
         let started = Date()
         do {
             let (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
-                                                                      messages: [ChatMessage(role: .user, content: prompt)],
+                                                                      messages: messages,
                                                                       settings: settings)
             // Strip a sole surrounding markdown code fence: models return ```lang\n<code>\n``` and a
             // later write_file wrote the backticks verbatim → the file was corrupt (2026-08-04: nasm

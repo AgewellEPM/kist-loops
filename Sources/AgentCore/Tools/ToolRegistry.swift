@@ -38,6 +38,7 @@ public struct ToolRegistry: Sendable {
     public static func headless() -> ToolRegistry {
         ToolRegistry([
             ReadFileTool(),
+            ReadFilesTool(),
             WriteFileTool(),
             EditFileTool(),
             NotebookEditTool(),

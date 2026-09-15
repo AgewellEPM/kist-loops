@@ -55,7 +55,25 @@ public enum EffortController {
         "grep", "find the", "look up", "format", "lint", "bump version",
     ]
     // Words that demand verification rigor regardless of size.
-    static let rigorWords: Set<String> = ["production", "enterprise", "security", "payment", "auth", "migration", "deploy"]
+    static let rigorWords: Set<String> = [
+        "production", "enterprise", "security", "payment", "payments",
+        "auth", "authn", "authz", "oauth", "oauth2", "authentication", "authorization",
+        "authorisation", "authenticate", "authenticates", "authenticated", "authenticating",
+        "authenticator", "authenticators", "migration", "migrations", "migrate", "migrating",
+        "deploy", "deploys", "deployed", "deploying", "deployment", "deployments",
+        "redeploy", "redeployed", "redeploying", "redeployment",
+    ]
+
+    /// Match task words and identifier components, not arbitrary substrings: "authorized" and
+    /// "author" do not request authentication work. Keep the same signal at both routing sites.
+    public static func requiresRigor(goal: String) -> Bool {
+        let components = goal
+            .replacingOccurrences(of: #"([A-Z]+)([A-Z][a-z])"#, with: "$1 $2", options: .regularExpression)
+            .replacingOccurrences(of: #"([a-z0-9])([A-Z])"#, with: "$1 $2", options: .regularExpression)
+            .lowercased().split { !$0.isLetter && !$0.isNumber }
+        let words = goal.lowercased().split { !$0.isLetter && !$0.isNumber }
+        return (words + components).contains { rigorWords.contains(String($0)) }
+    }
 
     /// A learned correction from history: how much to nudge the predicted complexity for goals like this
     /// one, based on how similar past runs ACTUALLY went (see EffortMemory). `bias` is already
@@ -93,7 +111,7 @@ public enum EffortController {
         // 2) Keyword signals.
         score += 12 * heavyWords.filter { text.contains($0) }.count
         score -= 10 * trivialWords.filter { text.contains($0) }.count
-        let needsRigor = rigorWords.contains { text.contains($0) }
+        let needsRigor = requiresRigor(goal: goal)
         if needsRigor { score += 10 }
 
         // 3) Mid-run escalation: a struggling run earns more effort (bounded).

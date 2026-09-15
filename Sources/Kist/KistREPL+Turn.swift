@@ -89,7 +89,10 @@ extension KistREPL {
                                   attachments: [MediaAttachment] = [],
                                   rawRequest: String? = nil,
                                   resolvedIntent: TaskBrief.Intent? = nil,
-                                  delegationGrant: DelegationGrant? = nil) async -> HeadlessAgentLoop.Outcome {
+                                  delegationGrant: DelegationGrant? = nil,
+                                  authoredBy: ProviderBinding? = nil) async -> HeadlessAgentLoop.Outcome {
+            let facts = runtimeCapabilityReport(loop: l, binding: authoredBy ?? activeBinding).render()
+            proofStore?.record(.init(kind: .runtimeFacts, tool: nil, success: nil, text: facts))
             let preTurnTranscript = transcript
             let tBox = MutableBox(transcript)
             lastTurnInterrupted = false   // fresh turn; post-turn guards read it, next turn resets it
@@ -110,9 +113,9 @@ extension KistREPL {
                 }
             }) {
                 var t = tBox.value
-                let outcome = await l.turn(transcript: &t, userInput: userInput,
+                let outcome = await l.turn(transcript: &t, userInput: facts + "\n\n" + userInput,
                                            attachments: attachments,
-                                           rawRequest: rawRequest,
+                                           rawRequest: rawRequest ?? userInput,
                                            resolvedIntent: resolvedIntent,
                                            delegationGrant: delegationGrant)
                 tBox.value = t
@@ -140,6 +143,7 @@ extension KistREPL {
         }
 
         func retrievalContext(for objective: String) -> CaptainRetrievalContext? {
+            guard advisoryMemoryEnabled else { return nil }
             let clean = objective.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !clean.isEmpty else { return nil }
             let evidence = CaptainProjectEvidence.capture(projectRoot: projectRoot)
@@ -174,18 +178,21 @@ extension KistREPL {
         func kistSelfContext() -> String {
             """
             [WHO YOU ARE — read before answering]
-            You are Kist: an autonomous coding + research Captain that orchestrates models, tools, a \
-            research/discovery loop, an AI council of specialists, durable memory, and a worker fleet. \
+            You are Kist: a coding + research Captain with bounded execution and verification gates. \
+            The host supplies current Runtime capabilities for each model attempt. Use those facts \
+            when describing this session; a wired feature is not a tested or independently verified result. \
             You are NOT a generic chat assistant. Your OWN source code (Swift) lives at \
             /Volumes/PRO-G40/kist-loops. Right now you are operating in the project: \(projectRoot).
             When the operator says "this system", "yourself", "you", "your code", "the captain", or \
             "kist", they mean YOU — Kist. Never answer a question about yourself with "what system do \
             you mean". To assess or improve yourself, READ your own source under /Volumes/PRO-G40/kist-loops \
             (list_files / read_file), take stock of your capabilities (/code, /research, /council, \
-            /fleet, /model, local Qwen + cloud models, memory/retrieval), then give a concrete grounded \
+            /fleet, /model, memory/retrieval), then give a concrete grounded \
             verdict — real strengths, honest gaps, and the single highest-value next move. Operator TASKS \
             (build/fix/edit) still act on the current project above; only questions about YOURSELF read \
-            your own source.
+            your own source. Read AGENTS.md before proposing self-evolution changes. Do not claim \
+            unattended evolution, automatic promotion, benchmark improvement, or independent review \
+            without the applicable host evidence. Model providers cannot enable missing runtime authority.
             """
         }
 
@@ -264,7 +271,8 @@ extension KistREPL {
                 turnAuthor = ProviderBinding(providerId: vid)
                 let visionLoop = perm.arm(loopFactory(turnAuthor, roleSelection.bindings, perm.mode.isPlan, showReasoning, extendedThinking))
                 oc = await runTurnInterruptible(loop: visionLoop, userInput: compiled, attachments: atts,
-                                                rawRequest: text, resolvedIntent: mediaIntent)
+                                                rawRequest: text, resolvedIntent: mediaIntent,
+                                                authoredBy: turnAuthor)
             } else {
                 print("\u{001B}[31m↳ no vision-capable provider configured (add a Gemini key) — sending text only\u{001B}[0m")
                 oc = await runTurnInterruptible(loop: loop, userInput: compiled,
@@ -289,7 +297,11 @@ extension KistREPL {
                     turnAuthor = ProviderBinding(providerId: sub.replacement)
                     let retryLoop = perm.arm(loopFactory(turnAuthor, roleSelection.bindings, perm.mode.isPlan, showReasoning, extendedThinking))
                     oc = await runTurnInterruptible(loop: retryLoop, userInput: compiled, attachments: atts,
-                                                    rawRequest: text, resolvedIntent: mediaIntent)
+                                                    rawRequest: text, resolvedIntent: mediaIntent,
+                                                    authoredBy: turnAuthor)
+                    if !oc.success, !lastTurnInterrupted, Self.transientProviderFailure(summary: oc.summary) {
+                        recordProviderCooldown?(turnAuthor.providerId)
+                    }
                 }
             }
             rememberModelTurn(user: text, assistantSummary: oc.summary,
@@ -302,7 +314,8 @@ extension KistREPL {
             let completedTurn = recordVerificationAndFinal(outcome: oc, intent: mediaIntent)
             selfMonitor(goal: text, intent: mediaIntent, success: completedTurn)
             await printTurnUsage()
-            await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn)
+            await recordSubmittedTurnLearning(outcomeSummary: oc.summary, success: completedTurn,
+                                              authoredBy: turnAuthor)
         }
 
         // SELF-MONITOR: analyze the just-finished turn's trajectory for reliability issues (runaway
@@ -502,9 +515,13 @@ extension KistREPL {
             // "I will apply the patch" vs "the patch is applied and verified" impossible to confuse —
             // the exact gap Luke hit where a plan was laundered into a done summary.
             if expected == .mutation {
-                let status = BuildStatusReport(
-                    trajectory: trajectory, finalSuccess: finalSuccess)
-                print(status.render(color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
+                if AgentMetadataRequest.isRegistrationOnly(trajectory) {
+                    print("Agent registration: \(finalSuccess ? "completed" : "failed")")
+                } else {
+                    let status = BuildStatusReport(
+                        trajectory: trajectory, finalSuccess: finalSuccess)
+                    print(status.render(color: Self.stdoutColorEnabled(projectRoot: projectRoot)))
+                }
             }
             return finalSuccess
         }

@@ -151,7 +151,7 @@ extension KistRunner {
                     let wtCtx = ToolContext(projectRoot: wtPath, shell: context.shell, sandbox: context.sandbox,
                                             externalReadRoots: context.externalReadRoots,
                                             correlationID: context.correlationID,
-                                            traceRecorder: context.traceRecorder)
+                                            traceRecorder: context.traceRecorder, agentMemory: context.agentMemory)
                     let rec = TrajectoryRecorder()
                     let wtLoop = makeLoop(registry: registry, providerId: cycleProvider, model: cycleModel, context: wtCtx,
                                           tools: loopTools, checkpoints: checkpoints, maxIterations: effort.iterationBudget,

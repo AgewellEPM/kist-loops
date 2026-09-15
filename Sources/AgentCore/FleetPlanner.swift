@@ -11,9 +11,11 @@ import Foundation
 public struct FleetPlanner: Sendable {
     private let providers: ProviderRegistry
     private let binding: ProviderBinding
+    private let agentMemory: AgentMemoryAccess?
 
-    public init(providers: ProviderRegistry, binding: ProviderBinding) {
+    public init(providers: ProviderRegistry, binding: ProviderBinding, agentMemory: AgentMemoryAccess? = nil) {
         self.providers = providers; self.binding = binding
+        self.agentMemory = agentMemory
     }
 
     /// Decompose `goal` into at most `maxAgents` disjoint subtasks, choosing scopes from `scopeContext`
@@ -33,10 +35,21 @@ public struct FleetPlanner: Sendable {
         ]
         let text: String
         do {
-            text = try await providers.complete(providerId: binding.providerId, model: binding.model, messages: messages)
+            let generated: (String, Int)
+            if let agentMemory {
+                generated = try await agentMemory.withModelCall(role: "fleet-planner", executionRoot: agentMemory.project.canonicalPath,
+                                                               messages: messages, summarize: { $0.0 }) { supplied in
+                    (try await providers.complete(providerId: binding.providerId, model: binding.model, messages: supplied),
+                     supplied.reduce(0) { $0 + $1.content.count })
+                }
+            } else {
+                generated = (try await providers.complete(providerId: binding.providerId, model: binding.model, messages: messages),
+                             messages.reduce(0) { $0 + $1.content.count })
+            }
+            text = generated.0
             // `complete` exposes no usage; account the planner call by estimate (tokens + $) so both
             // caps still bound it.
-            let promptChars = messages.reduce(0) { $0 + $1.content.count }
+            let promptChars = generated.1
             let est = TokenUsage.estimate(promptChars: promptChars, completionChars: text.count)
             let usd = CompetitiveBenchmark.priceUSD(vendor: binding.providerId,
                                                     promptTokens: est.promptTokens,

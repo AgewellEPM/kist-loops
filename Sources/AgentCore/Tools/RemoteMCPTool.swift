@@ -49,6 +49,12 @@ public struct RemoteMCPTool: AgentTool {
                            correlationID: context.correlationID)
     }
 
+    /// Exact, non-display identity used by host admission. The model-facing name is sanitized and
+    /// capped, so it must never be reverse-parsed to decide which remote implementation was bound.
+    public func matches(server: String, tool: String) -> Bool {
+        serverName == server && remoteToolName == tool
+    }
+
     // MARK: - JSON Schema -> [ToolParameter]
 
     /// Flatten a JSON Schema `inputSchema` into AgentCore's `[ToolParameter]` for the

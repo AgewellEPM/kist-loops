@@ -1,159 +1,185 @@
 import Foundation
 
-/// Runs a command in the BACKGROUND and lets the agent poll its output / kill it by id — the
-/// equivalent of Claude Code's `run_in_background` + `BashOutput` + `KillShell`. `run_command` with
-/// `background:true` starts a job here and returns immediately; the `job` tool reads new output, checks
-/// status, and stops it. This closes the "start the dev server, run tests against it, watch logs" gap:
-/// `run_command` alone is synchronous fire-and-timeout.
-///
-/// Each job streams stdout+stderr into a lock-protected buffer via a readability handler; a read returns
-/// only the bytes since the previous read (a cursor), so polling is incremental. Process lifecycle is
-/// Foundation `Process` (terminate on kill / on store shutdown).
+/// Background commands share the foreground process-group lifecycle. Output is a bounded queue of
+/// unread bytes; a slow reader sees an explicit dropped-byte notice and the newest retained output.
 public final class BackgroundJobStore: @unchecked Sendable {
     public static let shared = BackgroundJobStore()
+    public static let maxConcurrentRunning = 16
+    public static let maxOutputBytes = 256 * 1_024
+    public static let maxFinishedJobs = 64
+    public static let defaultTimeoutSeconds = 3_600
 
     public final class Job: @unchecked Sendable {
         let id: String
         let command: String
-        let process: Process
-        /// The workspace (projectRoot) that launched this job — the ownership key. In a fleet each
-        /// agent runs in its own worktree, so scoping visibility/kill by owner stops one agent from
-        /// reading or killing another's jobs. Empty = unowned (visible to unowned queries only).
         let owner: String
+        let cancellation = ProcessCancellationToken()
+        let launchReady = DispatchSemaphore(value: 0)
+        let completion = DispatchGroup()
         private let lock = NSLock()
         private var buffer = Data()
-        private var cursor = 0
-        private(set) var exitCode: Int32?
-        private(set) var finished = false
+        private var droppedBytes: UInt64 = 0
+        private var didStart = false
+        private var didFinish = false
+        private var code: Int32?
 
-        init(id: String, command: String, process: Process, owner: String) {
-            self.id = id; self.command = command; self.process = process; self.owner = owner
+        init(id: String, command: String, owner: String) {
+            self.id = id; self.command = command; self.owner = owner
+            completion.enter()
         }
-        func append(_ d: Data) { lock.lock(); buffer.append(d); lock.unlock() }
-        func markExit(_ code: Int32) { lock.lock(); exitCode = code; finished = true; lock.unlock() }
-        /// New output since the last read (advances the cursor). Bounded to `maxBytes` per read.
-        func readNew(maxBytes: Int = 60_000) -> String {
+
+        func append(_ data: Data) {
             lock.lock(); defer { lock.unlock() }
-            guard cursor < buffer.count else { return "" }
-            let end = min(buffer.count, cursor + maxBytes)
-            let slice = buffer.subdata(in: cursor..<end)
-            cursor = end
-            return String(decoding: slice, as: UTF8.self)
+            let limit = BackgroundJobStore.maxOutputBytes
+            let overflow = max(0, buffer.count + data.count - limit)
+            if overflow > 0 {
+                let (sum, wrapped) = droppedBytes.addingReportingOverflow(UInt64(overflow))
+                droppedBytes = wrapped ? UInt64.max : sum
+            }
+            if data.count >= limit {
+                buffer = Data(data.suffix(limit))
+            } else {
+                if overflow > 0 { buffer = Data(buffer.dropFirst(overflow)) }
+                buffer.append(data)
+            }
         }
-        var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return !finished }
-    }
 
-    /// Hard ceiling on concurrently-RUNNING background jobs. A hijacked agent could otherwise spawn
-    /// unbounded processes (resource-exhaustion / fork-bomb-lite); refusing past this cap bounds the
-    /// blast radius. Finished jobs don't count — the agent can always kill one to make room.
-    public static let maxConcurrentRunning = 16
+        func markStarted() {
+            lock.lock(); didStart = true; lock.unlock()
+            launchReady.signal()
+        }
+
+        func markExit(_ exitCode: Int32) {
+            lock.lock()
+            code = exitCode; didFinish = true
+            let failedBeforeLaunch = !didStart
+            lock.unlock()
+            if failedBeforeLaunch { launchReady.signal() }
+        }
+
+        /// Read and release consumed bytes. The notice is part of the returned byte budget.
+        func readNew(maxBytes: Int = 60_000) -> String {
+            guard maxBytes > 0 else { return "" }
+            lock.lock(); defer { lock.unlock() }
+            let notice = droppedBytes > 0 ? "[background output truncated: \(droppedBytes) unread bytes dropped]\n" : ""
+            droppedBytes = 0
+            let boundedNotice = ProcessGroupRunner.truncateUTF8(notice, toByteBudget: maxBytes, marker: "")
+            let count = min(buffer.count, max(0, maxBytes - boundedNotice.utf8.count))
+            let data = buffer.prefix(count)
+            let output = boundedNotice + String(decoding: data, as: UTF8.self)
+            buffer = Data(buffer.dropFirst(count))
+            return ProcessGroupRunner.truncateUTF8(output, toByteBudget: maxBytes, marker: "")
+        }
+
+        var started: Bool { lock.lock(); defer { lock.unlock() }; return didStart }
+        var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return !didFinish }
+        var finished: Bool { !isRunning }
+        var exitCode: Int32? { lock.lock(); defer { lock.unlock() }; return code }
+        var retainedOutputBytes: Int { lock.lock(); defer { lock.unlock() }; return buffer.count }
+    }
 
     private let lock = NSLock()
     private var jobs: [String: Job] = [:]
+    private var completed: [String] = []
     private var counter = 0
-    /// Slots RESERVED for currently-live jobs. Incremented under `lock` at reservation time (BEFORE
-    /// spawn) and decremented in the termination handler (or on launch failure). This is the single
-    /// source of truth for the cap — an explicit integer avoids counting via each job's own lock
-    /// (no nested locking) and makes the check-and-reserve ATOMIC, so N concurrent `start` calls
-    /// (e.g. a plan executor's task group) can never collectively exceed the ceiling.
     private var activeCount = 0
+    private var drainsInProgress = 0
 
-    /// Number of live (reserved/running) jobs. Authoritative — read straight off `activeCount`.
+    public init() {}
+
     public func runningCount() -> Int { lock.lock(); defer { lock.unlock() }; return activeCount }
 
-    /// Start a background job. `launchPath`+`args` are already resolved (no shell unless caller wrapped it).
-    /// `owner` is the launching workspace (projectRoot) — the ownership key for later job/kill/list scoping.
-    /// Returns the job id, or nil if the process couldn't launch OR the concurrent-job cap is reached.
-    public func start(launchPath: String, args: [String], cwd: String, env: [String: String], command: String,
-                      owner: String = "") -> String? {
-        // ATOMIC reserve-or-refuse: the cap check AND the reservation happen under one lock hold, so
-        // concurrent starts can't all observe "< cap" and then all spawn (Codex-caught race).
+    /// Reserve and publish before dispatch so shutdown can also cancel a pending launch. Return only
+    /// once posix_spawn succeeds; failed launches release their reservation and return nil.
+    public func start(launchPath: String, args: [String], cwd: String, env: [String: String],
+                      command: String, owner: String = "",
+                      timeoutSeconds: Int = BackgroundJobStore.defaultTimeoutSeconds) -> String? {
+        guard (1...86_400).contains(timeoutSeconds) else { return nil }
         lock.lock()
-        guard activeCount < Self.maxConcurrentRunning else { lock.unlock(); return nil }
-        activeCount += 1                                  // reserve the slot before spawning
-        counter += 1; let id = "job_\(counter)"
+        guard drainsInProgress == 0, activeCount < Self.maxConcurrentRunning else {
+            lock.unlock(); return nil
+        }
+        activeCount += 1
+        counter += 1
+        let id = "job_\(counter)"
+        let job = Job(id: id, command: String(command.prefix(4_096)), owner: owner)
+        jobs[id] = job
         lock.unlock()
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: launchPath)
-        proc.arguments = args
-        proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        proc.environment = env
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-
-        let job = Job(id: id, command: command, process: proc, owner: owner)
-
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let d = handle.availableData
-            if d.isEmpty { handle.readabilityHandler = nil } else { job.append(d) }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let outcome = ProcessGroupRunner.run(
+                launchPath: launchPath, launchArgs: args, cwd: cwd, env: env,
+                timeoutSeconds: timeoutSeconds, capPerStream: 1_024, graceSeconds: 1,
+                cancellationCheck: { job.cancellation.isCancelled },
+                terminateOnOutputCap: false,
+                onSpawn: { job.markStarted() },
+                onOutput: { job.append($0) })
+            if !job.started, !outcome.combined.isEmpty { job.append(Data(outcome.combined.utf8)) }
+            if outcome.timedOut {
+                job.append(Data("\n[background job timed out after \(timeoutSeconds)s]\n".utf8))
+            } else if outcome.cancelled {
+                job.append(Data("\n[background job cancelled]\n".utf8))
+            }
+            job.markExit(outcome.exitCode)
+            finish(id)
+            job.completion.leave()
         }
-        proc.terminationHandler = { [weak self] p in
-            job.markExit(p.terminationStatus)
-            pipe.fileHandleForReading.readabilityHandler = nil
-            self?.releaseSlot()                            // free the reservation exactly once
-        }
-        do { try proc.run() } catch {
-            releaseSlot()                                  // roll back the reservation on launch failure
+
+        guard job.launchReady.wait(timeout: .now() + .seconds(10)) == .success, job.started else {
+            job.cancellation.cancel()
+            // Keep a launch still pending on the worker queue visible to killAll until it finishes.
+            if job.completion.wait(timeout: .now()) == .success {
+                lock.lock(); jobs.removeValue(forKey: id); completed.removeAll { $0 == id }; lock.unlock()
+            }
             return nil
         }
-        lock.lock(); jobs[id] = job; lock.unlock()
         return id
     }
 
-    /// Release one reserved slot (never below zero). Called from the termination handler or on a
-    /// launch failure.
-    private func releaseSlot() {
-        lock.lock(); if activeCount > 0 { activeCount -= 1 }; lock.unlock()
+    private func finish(_ id: String) {
+        lock.lock(); defer { lock.unlock() }
+        activeCount -= 1
+        guard jobs[id] != nil else { return }
+        completed.append(id)
+        while completed.count > Self.maxFinishedJobs {
+            jobs.removeValue(forKey: completed.removeFirst())
+        }
     }
 
-    /// Fetch a job by id, scoped to `owner`: a job launched by a different workspace is invisible
-    /// (returns nil) so one agent can't read another's output. `owner: nil` = unscoped (internal use).
     public func job(_ id: String, owner: String? = nil) -> Job? {
         lock.lock(); defer { lock.unlock() }
-        guard let j = jobs[id] else { return nil }
-        if let owner, j.owner != owner { return nil }   // cross-owner access denied
-        return j
+        guard let job = jobs[id], owner == nil || job.owner == owner else { return nil }
+        return job
     }
 
-    /// Kill a job by id, scoped to `owner` (a mismatched owner can't kill someone else's job).
+    /// A successful stop means the runner has completed its group sweep and reaped the leader.
     public func kill(_ id: String, owner: String? = nil) -> Bool {
         guard let job = job(id, owner: owner) else { return false }
-        if job.isRunning { job.process.terminate() }
-        return true
+        job.cancellation.cancel()
+        return job.completion.wait(timeout: .now() + .seconds(8)) == .success
     }
 
-    /// One-line status per job: id · running|exit N · command. Scoped to `owner` (nil = all jobs).
     public func list(owner: String? = nil) -> [String] {
         lock.lock()
         let snapshot = jobs.values.filter { owner == nil || $0.owner == owner }.sorted { $0.id < $1.id }
         lock.unlock()
-        return snapshot.map { j in
-            let state = j.isRunning ? "running" : "exit \(j.exitCode ?? -1)"
-            return "\(j.id) · \(state) · \(j.command.prefix(80))"
+        return snapshot.map { job in
+            let state = job.isRunning ? "running" : "exit \(job.exitCode ?? -1)"
+            return "\(job.id) · \(state) · \(job.command.prefix(80))"
         }
     }
 
-    /// Terminate every still-running job — call on process shutdown so background jobs don't orphan.
-    /// ESCALATES: SIGTERM first (graceful), then, for any job that ignores it (e.g. a child that traps
-    /// TERM), SIGKILL after a short bounded grace. Bounded so the exit path stays fast when jobs die
-    /// promptly (the common case), but a stubborn child can't survive to be reparented/orphaned.
-    public func killAll(graceSeconds: Double = 0.3) {
-        lock.lock(); let all = Array(jobs.values); lock.unlock()
-        let running = all.filter { $0.isRunning }
-        guard !running.isEmpty else { return }
-        for j in running { j.process.terminate() }                    // SIGTERM
-        // Poll briefly; exit as soon as everything is gone.
-        let deadline = Date().addingTimeInterval(graceSeconds)
-        while Date() < deadline && running.contains(where: { $0.isRunning }) { usleep(20_000) }
-        for j in running where j.isRunning {                          // SIGKILL survivors
-            let pid = j.process.processIdentifier
-            if pid > 0 { posixKill(pid, SIGKILL) }
-        }
+    /// Reject launches during the drain, cancel every published job, and join cleanup with one common
+    /// deadline. Descendants that deliberately leave their process group remain a documented limit.
+    @discardableResult
+    public func killAll(graceSeconds: Double = 0.3) -> Bool {
+        lock.lock(); drainsInProgress += 1; let snapshot = Array(jobs.values); lock.unlock()
+        defer { lock.lock(); drainsInProgress -= 1; lock.unlock() }
+        for job in snapshot { job.cancellation.cancel() }
+        let extraGrace = graceSeconds.isFinite ? min(max(0, graceSeconds), 10) : 0
+        let deadline = DispatchTime.now() + .milliseconds(Int((8 + extraGrace) * 1_000))
+        var drained = true
+        for job in snapshot where job.completion.wait(timeout: deadline) != .success { drained = false }
+        return drained
     }
 }
-
-/// Free-function wrapper for the POSIX `kill(2)` — avoids colliding with `BackgroundJobStore.kill(_:)`
-/// (the by-id method) when resolving the name inside the type.
-private func posixKill(_ pid: pid_t, _ signal: Int32) { _ = kill(pid, signal) }

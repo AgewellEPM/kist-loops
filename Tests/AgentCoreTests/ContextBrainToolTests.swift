@@ -93,6 +93,21 @@ final class ContextBrainToolTests: XCTestCase {
         XCTAssertTrue((result.error ?? "").contains("not in the current context index"), result.error ?? "")
     }
 
+    func testSearchRanksCompleteEvidenceAndShowsItsMatchingPassage() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try write(root, "noise.txt", String(repeating: "provider ", count: 500))
+        try write(root, "Sources/Events.swift", String(repeating: "// routine setup\n", count: 80)
+                  + "func providerAttemptReplayCanary() {}\n")
+        let result = try await ContextBrainTool().execute(arguments: [
+            "action": "search", "query": "provider attempt replay", "limit": 1
+        ], context: ToolContext(projectRoot: root))
+        XCTAssertTrue(result.success)
+        XCTAssertTrue(result.output.contains("Sources/Events.swift:L1-"), result.output)
+        XCTAssertTrue(result.output.contains("providerAttemptReplayCanary"), result.output)
+        XCTAssertFalse(result.output.contains("noise.txt"), result.output)
+    }
+
     func testCacheInvalidatesWhenSourceTreeChanges() async throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }

@@ -144,10 +144,7 @@ extension KistREPL {
                     print(loop.renderToolContract())
                     return .handled
                 case "summary", "status":
-                    let spans = await traceRecorder?.all() ?? []
-                    let trajectory = recorder?.snapshot() ?? []
-                    print(Self.renderSimpleSummary(projectRoot: projectRoot, spans: spans,
-                                                   trajectory: trajectory, sessionStartedAt: sessionStart))
+                    print(renderSubmittedTurnSummary())
                     return .handled
                 case "confidence", "why":
                     // Explain the exact report the panel showed for the last completed turn. Do not

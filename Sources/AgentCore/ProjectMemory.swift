@@ -99,7 +99,14 @@ public struct ProjectMemory: Sendable {
     /// reinforces a memory.
     public func recentEpisodes(limit: Int = 5, now: Date = Date()) -> [Episode] {
         guard limit > 0, Self.isWireDate(now) else { return [] }
-        guard let data = boundedEpisodeTail(),
+        guard let data = boundedEpisodeTail() else { return [] }
+        return recentEpisodes(from: data, limit: limit, now: now)
+    }
+
+    /// Shared cross-project recall supplies a confined, stable byte snapshot. Decode it using the
+    /// same temporal projection as ordinary episodic recall without reopening any source path.
+    func recentEpisodes(from data: Data, limit: Int, now: Date) -> [Episode] {
+        guard limit > 0, Self.isWireDate(now), data.count <= maxEpisodeBytes,
               let text = String(data: data, encoding: .utf8) else { return [] }
 
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)

@@ -118,6 +118,7 @@ public enum ToolGate {
     private static func valueMatchesSchema(_ value: Any, type: String) -> Bool {
         switch type {
         case "string": return value is String
+        case "object": return value is [String: Any]
         case "array": return value is [Any]
         case "boolean": return isBooleanValue(value)
         case "integer":

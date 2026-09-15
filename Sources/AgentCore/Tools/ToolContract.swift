@@ -113,7 +113,7 @@ public enum ToolContractBook {
 /// planner the quick "what kind of work is possible here?" map before it commits to a plan.
 public enum CapabilityRegistry {
     private static let domains: [(name: String, tools: [String])] = [
-        ("Filesystem", ["list_files", "glob_files", "read_file", "write_file", "edit_file", "move_file", "make_dir"]),
+        ("Filesystem", ["list_files", "glob_files", "read_file", "read_files", "write_file", "edit_file", "move_file", "make_dir"]),
         ("Context/RAG", ["context_brain", "search_code", "read_file", "remember", "recall"]),
         ("Code Search", ["search_code"]),
         ("Shell/Git", ["run_command"]),

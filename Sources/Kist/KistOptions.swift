@@ -105,6 +105,10 @@ struct KistOptions {
     var maxCostUSD: Double?         // --max-cost <usd>: hard DOLLAR ceiling (priced per provider); either
                                     // cap halts the run (aplus C-series cost governance).
     var noMemory = false            // --no-memory: disable cross-run memory (facts + episode log)
+    var listLearningSync = false    // one bounded LIST MCP import, no model or task execution
+    var listLearningStatus = false  // read-only local advisory memory status
+    var operatorAction = false     // one host-authorized JSON action; no model or MCP discovery
+    var operatorActionArgumentsValid = true
     var fast = false                // --fast: lean solo dev tool — core code tools only (drop media/vision/
                                     // browse/pentest/research/workflow extras) → far smaller prompt, cheaper, faster.
     var toolMode: String = "auto"   // tool acquisition: auto (capability-routed) | native | text
@@ -176,6 +180,11 @@ struct KistOptions {
     var smlRuntimeDurable = false   // --sml-runtime-durable: REPL/API verbs use the persistent project store, real clock, and .kist/sml authority/catalog files instead of the ephemeral rubber-stamp export host
     var smlRuntimeServe: String?    // --sml-runtime-serve <source.json>: long-lived durable harness — loopback HTTP + approval-gated capability pump
     var smlRuntimeServePort: UInt16? // --sml-port <port>: exact loopback port for --sml-runtime-serve (default: first free in 8850...8880)
+    var smlStoreAction: String?
+    var smlBackupPath: String?
+    var smlArchiveBefore: String?
+    var smlArchiveMaximum: Int?
+    var smlReplaceSHA256: String?
     var smlRuntimeREPL: String?     // --sml-runtime-repl <source.json>: run one generated workflow REPL line offline
     var smlRuntimeREPLScript: String? // --sml-runtime-repl-script <source.json>: run a generated workflow REPL script offline
     var smlRuntimeWorkflowID: String? // --sml-workflow <id>: select workflow for --sml-runtime-repl/runbook/attachments
@@ -214,6 +223,13 @@ struct KistOptions {
 
     static func parse(_ args: [String]) -> KistOptions {
         var o = KistOptions(project: FileManager.default.currentDirectoryPath)
+        // The host action protocol has one exclusive switch. Do not allow generic options,
+        // positional model instructions, help, or nested-shell defaults to alter its authority.
+        if args.contains("--operator-action") {
+            o.operatorAction = true
+            o.operatorActionArgumentsValid = args == ["--operator-action"]
+            return o
+        }
         var positional: [String] = []
         var sawCobolMaxRevisions = false
         var sawSMLRuntimeAPIMethod = false
@@ -291,6 +307,25 @@ struct KistOptions {
                                             if let v = next() { o.smlRuntimeAttachments = v }
                                             else { o.optionErrors.append("\(flag) requires <source.json>") }
             case "--sml-runtime-durable":   o.smlRuntimeDurable = true
+            case "--sml-store":
+                                            if let v = next(), ["verify", "backup", "restore", "archive"].contains(v) {
+                                                o.smlStoreAction = v
+                                            } else { o.optionErrors.append("--sml-store requires verify, backup, restore, or archive") }
+            case "--sml-backup":
+                                            if let v = next(), !v.isEmpty { o.smlBackupPath = v }
+                                            else { o.optionErrors.append("--sml-backup requires <path>") }
+            case "--sml-archive-before":
+                                            if let v = next() { o.smlArchiveBefore = v }
+                                            else { o.optionErrors.append("--sml-archive-before requires an ISO8601 timestamp") }
+            case "--sml-archive-max":
+                                            if let v = next(), let count = Int(v), (1...10_000).contains(count) {
+                                                o.smlArchiveMaximum = count
+                                            } else { o.optionErrors.append("--sml-archive-max requires an integer in 1...10000") }
+            case "--sml-replace-sha256":
+                                            if let v = next(), v.count == 64,
+                                               v.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) {
+                                                o.smlReplaceSHA256 = v
+                                            } else { o.optionErrors.append("--sml-replace-sha256 requires 64 lowercase hexadecimal characters") }
             case "--sml-runtime-serve":
                                             if let v = next() { o.smlRuntimeServe = v }
                                             else { o.optionErrors.append("--sml-runtime-serve requires <source.json>") }
@@ -536,6 +571,8 @@ struct KistOptions {
                     else { FileHandle.standardError.write(Data("error: --max-cost must be a positive dollar amount (got '\(v)') — ignoring; run is UNCAPPED unless --budget is set\n".utf8)) }
                 }
             case "--no-memory":             o.noMemory = true
+            case "--list-learning-sync":     o.listLearningSync = true
+            case "--list-learning-status":   o.listLearningStatus = true
             case "--fast", "--solo":        o.fast = true
             case "--tui":                   o.tui = true
             case "--no-pinned-bar":         o.pinnedBar = false
@@ -620,6 +657,7 @@ struct KistOptions {
             o.optionErrors.append("--cobol-max-revisions requires --cobolo or --cobol-loop")
         }
         let smlRuntimeModes: [(flag: String, active: Bool)] = [
+            ("--sml-store", o.smlStoreAction != nil),
             ("--sml-import-openapi", o.smlOpenAPIImport != nil),
             ("--sml-runtime-export", o.smlRuntimeExport != nil),
             ("--sml-runtime-launch", o.smlRuntimeLaunch != nil),
@@ -653,6 +691,24 @@ struct KistOptions {
         }
         if o.smlRuntimeServe == nil, o.smlRuntimeServePort != nil {
             o.optionErrors.append("--sml-port requires --sml-runtime-serve <source.json>")
+        }
+        if let action = o.smlStoreAction {
+            if ["backup", "restore"].contains(action) {
+                if o.smlBackupPath == nil { o.optionErrors.append("--sml-store \(action) requires --sml-backup <path>") }
+            } else if o.smlBackupPath != nil {
+                o.optionErrors.append("--sml-backup requires --sml-store backup or restore")
+            }
+            if action == "archive" {
+                if o.smlArchiveBefore == nil { o.optionErrors.append("--sml-store archive requires --sml-archive-before <ISO8601>") }
+            } else if o.smlArchiveBefore != nil || o.smlArchiveMaximum != nil {
+                o.optionErrors.append("--sml-archive-before and --sml-archive-max require --sml-store archive")
+            }
+            if action != "restore", o.smlReplaceSHA256 != nil {
+                o.optionErrors.append("--sml-replace-sha256 requires --sml-store restore")
+            }
+        } else if o.smlBackupPath != nil || o.smlArchiveBefore != nil
+            || o.smlArchiveMaximum != nil || o.smlReplaceSHA256 != nil {
+            o.optionErrors.append("SML maintenance options require --sml-store <action>")
         }
         if o.smlRuntimeREPL != nil {
             // No --sml-line means the INTERACTIVE loop (reads lines from stdin until exit/EOF).
@@ -765,6 +821,7 @@ struct KistOptions {
       kist --plan-execute-resume <mission-id> "<same goal>"
                                     Resume exactly one PlanExecute mission; no latest/goal lookup.
       kist --list                   List resumable runs.
+      kist --inspect-builder-evidence <sealed-run.json>  Inspect historical training evidence offline.
       kist --list-providers         Show providers and which have a key configured.
       kist --gemini-test            Live smoke-test of the Gemini clients (needs a Gemini key).
       kist --ship "<goal>"          Build hands-free in the autopilot sandbox, then the council of
@@ -914,6 +971,9 @@ struct KistOptions {
           --max-cost <usd>          Hard DOLLAR ceiling (e.g. --max-cost 0.50), priced per provider
                                     (a 1M-token Gemini call ≠ Claude). Either cap halts the run.
                                     Combine with --budget. Unpriced providers count toward tokens only.
+          --list-learning-sync      Import recent project observations from LIST MCP; no model or execution.
+          --list-learning-status    Show dated LIST advisory memory and review-only proposal counts.
+          --operator-action         One bounded JSON action on stdin; requires an existing host grant.
           --no-memory               Disable cross-run memory (otherwise plan→execute ingests
                                     AGENTS.md/CLAUDE.md + recent run outcomes as planning context,
                                     and logs each run to .mythos/memory/).
@@ -1017,6 +1077,13 @@ struct KistOptions {
                                     human gates; approving through the generated task routes
                                     triggers the single-flight capability pump. Requires the
                                     human-owned .kist/sml/authority.json + catalog.json.
+          --sml-store <verify|backup|restore|archive> --project <root>
+                                    Offline durable-store maintenance; fails while a host owns
+                                    the project. JSON report includes counts and runtime digest.
+              --sml-backup <path>       New backup destination, or existing bundle to restore.
+              --sml-archive-before <ISO8601>  Preserve older terminal tasks in queryable archives.
+              --sml-archive-max <N>     Maximum tasks per archive operation (default 1000).
+              --sml-replace-sha256 <digest>  Exact current runtime digest for existing-store restore.
               --sml-runtime-durable     REPL/API verbs use the persistent project store
                                         (.kist/sml/runtime.json), the real clock, and the
                                         human-owned .kist/sml/authority.json + catalog.json

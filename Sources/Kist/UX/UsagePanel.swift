@@ -16,6 +16,11 @@ enum UsageLedger {
 
     @discardableResult
     static func append(projectRoot: String, spans: [AgentSpan]) -> Bool {
+        // The encompassing Builder audit records every concrete request. Worker/compaction trace
+        // rollups overlap those requests; retain their tool spans without charging the calls twice.
+        let spans = ProviderAttemptObservation.observer == nil ? spans : spans.filter {
+            $0.kind != .llmCall || $0.attributes?["accounting.source"] == "provider_attempt"
+        }
         guard !spans.isEmpty else { return true }
         let root = ToolContext.canonicalize(projectRoot) ?? projectRoot
         let dir = root + "/.kist"
@@ -201,6 +206,10 @@ struct UsagePanel {
             }
 
             b.blank(); b.heading("This week (local kist usage)", "94;1")
+            let unreported = week.filter { $0.kind == .llmCall && $0.attributes?["usage.reported"] == "false" }.count
+            if unreported > 0 {
+                b.row("\(unreported) provider attempt(s) omitted usage; token and cost totals are incomplete.")
+            }
             if week.isEmpty || weekSummary.tokens == 0 {
                 b.row(b.c("2", "No local traced token usage this week."))
             } else {

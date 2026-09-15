@@ -4,6 +4,14 @@ import Foundation
 // extended thinking, approval tier), status accessors, and operator-request scope
 // extraction. Extracted verbatim from HeadlessAgentLoop.swift — behavior unchanged.
 extension HeadlessAgentLoop {
+    /// Tools that never modify state — the only ones permitted while plan mode is ON.
+    /// An ALLOWLIST (not a denylist) so unknown/MCP tools are blocked by default in plan mode.
+    public static let readOnlyTools: Set<String> = ["read_file", "read_files", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "list_agents", "shared_memory", "fetch_url", "web_search"]
+    static let conversationalReadOnlyTools = readOnlyTools.union([
+        "ask_user", "delegation_updates", "read_spreadsheet", "query_data", "view_image",
+        "browse", "tasks",
+    ])
+
     /// Value-type copy with plan mode flipped — lets the REPL toggle `/plan` on a held loop.
     public func planModeEnabled(_ on: Bool) -> HeadlessAgentLoop {
         var copy = self

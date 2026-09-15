@@ -34,7 +34,8 @@ extension KistRunner {
             missionID: missionID,
             recorder: recorder,
             runReplay: RunReplayStore(projectRoot: projectRoot, provider: providerID,
-                                      model: model, runID: missionID.rawValue),
+                                      model: model, runID: missionID.rawValue,
+                                      executionRoot: context.projectRoot),
             context: context.withPlanExecuteMission(missionID, traceRecorder: recorder))
     }
 
@@ -60,6 +61,7 @@ extension KistRunner {
                                        canonicalFunctionalObjective: String? = nil,
                                        hostContractID: String? = nil,
                                        memoryRoot: String? = nil,
+                                       auditRoot: String? = nil,
                                        persistMemoryEpisode: Bool = true,
                                        outcomeCapture: (@Sendable (PlanOutcome) -> Void)? = nil) async -> Int32 {
         guard let roles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else { return 2 }
@@ -67,6 +69,7 @@ extension KistRunner {
         // caller-owned host root, but do not let the nested loop append an episode before the outer
         // Builder receipt is accepted; that hidden `.mythos` write would be undeclared output.
         let memoryReadRoot = memoryRoot ?? root
+        let auditProjectRoot = auditRoot ?? root
         let memory = opts.noMemory || !persistMemoryEpisode
             ? nil
             : ProjectMemory(root: memoryReadRoot)
@@ -106,7 +109,7 @@ extension KistRunner {
         let correlation = makePlanExecuteCorrelation(
             launchMode: launchMode,
             freshMissionInstanceID: freshMissionInstanceID,
-            projectRoot: root,
+            projectRoot: auditProjectRoot,
             providerID: providerId,
             model: model,
             context: context)
@@ -159,7 +162,7 @@ extension KistRunner {
         for line in await recorder.summary().terminalLines() { note(line) }
         // Persist both LLM and tool spans. Their traceId is the mission/run root, so the dashboard can
         // join usage activity to the matching `.kist/runs/<mission>/` replay without a second id.
-        printUsageDelta(from: [], to: missionSpans, label: "plan-execute usage", projectRoot: root)
+        printUsageDelta(from: [], to: missionSpans, label: "plan-execute usage", projectRoot: auditProjectRoot)
         note(pOut.success ? "✓ \(pOut.message)" : "✗ \(pOut.message)")
         note("replay · kist --replay \(runReplay.manifest.runID)")
         // Learn from the VERIFIED outcome: plan-execute success is critic-verified, so it's a PROVEN

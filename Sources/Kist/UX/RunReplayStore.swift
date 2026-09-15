@@ -12,6 +12,8 @@ final class RunReplayStore: @unchecked Sendable {
         let provider: String
         let model: String?
         let createdAt: Double
+        let executionRoot: String?
+        let parentContractID: String?
     }
 
     struct Event: Codable, Equatable {
@@ -34,15 +36,38 @@ final class RunReplayStore: @unchecked Sendable {
     let eventsPath: String
 
     init(projectRoot: String, provider: String, model: String?, runID: String? = nil,
+         executionRoot: String? = nil, parentContractID: String? = nil,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.now = now
+        try? FileManager.default.createDirectory(atPath: projectRoot, withIntermediateDirectories: true)
         let root = ToolContext.canonicalize(projectRoot) ?? projectRoot
-        self.manifest = Manifest(runID: runID ?? RunReplayStore.makeRunID(), projectRoot: root, provider: provider, model: model,
-                                 createdAt: now().timeIntervalSince1970)
+        var selectedID = runID.flatMap { Self.isValidRunID($0) ? $0 : nil } ?? Self.makeRunID()
+        let existingPath = Self.manifestPath(projectRoot: root, runID: selectedID)
+        let existing = (try? Data(contentsOf: URL(fileURLWithPath: existingPath)))
+            .flatMap { try? JSONDecoder().decode(Manifest.self, from: $0) }
+        let resumed = existing.flatMap { stored -> Manifest? in
+            guard stored.runID == selectedID,
+                  (ToolContext.canonicalize(stored.projectRoot) ?? stored.projectRoot) == root else { return nil }
+            return stored
+        }
+        if resumed == nil, FileManager.default.fileExists(atPath: Self.runsRoot(projectRoot: root) + "/" + selectedID) {
+            selectedID = Self.makeRunID() // preserve corrupt/colliding audit data for inspection
+        }
+        self.manifest = resumed ?? Manifest(
+            runID: selectedID, projectRoot: root, provider: provider, model: model,
+            createdAt: now().timeIntervalSince1970,
+            executionRoot: executionRoot, parentContractID: parentContractID)
         self.runDirectory = Self.runsRoot(projectRoot: root) + "/" + manifest.runID
         self.eventsPath = runDirectory + "/events.jsonl"
         try? FileManager.default.createDirectory(atPath: runDirectory, withIntermediateDirectories: true)
-        persistManifest()
+        if resumed != nil {
+            sequence = Self.loadEvents(projectRoot: root, runID: manifest.runID).map(\.sequence).max() ?? 0
+            recordEvent(kind: "runResumed", text: "Resumed with \(provider)\(model.map { ":" + $0 } ?? "").")
+        } else {
+            persistManifest()
+        }
+        BuilderRunAudit.current?.replay.recordEvent(
+            kind: "childRun", text: "Replay \(manifest.runID) · project \(root)")
     }
 
     func startTurn(goal: String) {
@@ -54,6 +79,10 @@ final class RunReplayStore: @unchecked Sendable {
 
     func record(_ entry: TurnProofStore.Entry) {
         append(kind: entry.kind.rawValue, tool: entry.tool, success: entry.success, text: entry.text)
+    }
+
+    func recordEvent(kind: String, success: Bool? = nil, text: String) {
+        append(kind: kind, tool: nil, success: success, text: text)
     }
 
     private func append(kind: String, tool: String?, success: Bool?, text: String) {
@@ -90,37 +119,55 @@ final class RunReplayStore: @unchecked Sendable {
     }
 
     static func render(projectRoot: String, id: String? = nil, limit: Int = 120) -> String {
+        read(projectRoot: projectRoot, id: id, limit: limit).text
+    }
+
+    struct ReadResult {
+        let text: String
+        let exitCode: Int32
+    }
+
+    static func read(projectRoot: String, id: String? = nil, limit: Int = 120) -> ReadResult {
         let root = ToolContext.canonicalize(projectRoot) ?? projectRoot
         let selected: String
         if let id, !id.isEmpty, id != "latest" {
-            guard isValidRunID(id) else { return "Invalid replay id '\(id)'." }
+            guard isValidRunID(id) else {
+                return ReadResult(text: "Invalid replay id '\(oneLine(id, max: 100))'.", exitCode: 2)
+            }
             selected = id
         } else {
             selected = latestRunID(projectRoot: root) ?? ""
         }
-        guard !selected.isEmpty else { return "No replay runs found in .kist/runs yet." }
+        guard !selected.isEmpty else {
+            return ReadResult(text: "No replay runs found in .kist/runs yet.", exitCode: 1)
+        }
         let manifestPath = manifestPath(projectRoot: root, runID: selected)
         guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
-              let manifest = try? JSONDecoder().decode(Manifest.self, from: manifestData) else {
-            return "Replay '\(selected)' not found."
+              let manifest = try? JSONDecoder().decode(Manifest.self, from: manifestData),
+              manifest.runID == selected,
+              (ToolContext.canonicalize(manifest.projectRoot) ?? manifest.projectRoot) == root else {
+            return ReadResult(text: "Replay '\(selected)' not found or invalid.", exitCode: 1)
         }
         let events = loadEvents(projectRoot: root, runID: selected)
         var lines: [String] = []
         lines.append("Replay \(manifest.runID)")
         lines.append("Project: \(manifest.projectRoot)")
         lines.append("Model: \(manifest.provider)\(manifest.model.map { ":\($0)" } ?? "")")
+        if let contract = manifest.parentContractID { lines.append("Builder contract: \(contract)") }
+        if let execution = manifest.executionRoot { lines.append("Execution workspace: \(execution)") }
         lines.append("Path: \(runsRoot(projectRoot: root))/\(manifest.runID)")
         lines.append("Events: \(events.count)")
-        for event in events.prefix(limit) {
+        let count = max(0, limit)
+        if events.count > count { lines.append("... \(events.count - count) earlier event(s); full events in events.jsonl") }
+        for event in events.suffix(count) {
             let mark: String
             if let success = event.success { mark = success ? "ok" : "failed" }
             else { mark = event.kind }
             let tool = event.tool.map { " \($0)" } ?? ""
             lines.append(String(format: "%04d %@%@ - %@", event.sequence, mark, tool,
-                                oneLine(event.text, max: 260)))
+                                oneLine(event.text, max: event.success == false ? 2_000 : 500)))
         }
-        if events.count > limit { lines.append("... \(events.count - limit) more event(s)") }
-        return lines.joined(separator: "\n")
+        return ReadResult(text: lines.joined(separator: "\n"), exitCode: 0)
     }
 
     static func latestRunID(projectRoot: String) -> String? {
@@ -132,7 +179,9 @@ final class RunReplayStore: @unchecked Sendable {
             let path = manifestPath(projectRoot: root, runID: name)
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
                   let modified = attrs[.modificationDate] as? Date else { return nil }
-            return (name, modified)
+            let eventAttributes = try? FileManager.default.attributesOfItem(atPath: dir + "/" + name + "/events.jsonl")
+            let eventModified = eventAttributes?[.modificationDate] as? Date ?? modified
+            return (name, max(modified, eventModified))
         }.sorted { $0.1 > $1.1 }.first?.0
     }
 

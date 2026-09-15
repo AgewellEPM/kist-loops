@@ -860,6 +860,28 @@ public final class ConfinedRoot: Sendable {
         }
     }
 
+    /// Pin a private runtime directory with the same no-follow walk as tool I/O. The caller owns
+    /// the returned fd and must close it. Used by checkpoint stores rooted in untrusted projects.
+    func openPrivateDirectoryDescriptor(_ path: String, create: Bool) throws -> Int32 {
+        if create { try requireWritable("create private runtime directory", path) }
+        let components = try relativeComponents(path)
+        let (parent, leaf) = try openParentDir(components, createIntermediates: create)
+        defer { close(parent) }
+        guard let leaf else { throw ToolError.execution("runtime directory must be below the confinement root") }
+        if create, mkdirat(parent, leaf, 0o700) != 0, errno != EEXIST {
+            throw Self.openError(path: path, root: rootPath)
+        }
+        let fd = openat(parent, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw Self.openError(path: path, root: rootPath) }
+        var status = stat()
+        guard fstat(fd, &status) == 0, status.st_uid == geteuid(),
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), status.st_mode & 0o022 == 0,
+              (!create || fchmod(fd, 0o700) == 0) else {
+            close(fd); throw ToolError.execution("unsafe private runtime directory: \(path)")
+        }
+        return fd
+    }
+
     /// (exists, isDir) via `fstatat` with `AT_SYMLINK_NOFOLLOW` — a symlinked leaf reports
     /// as itself (and isDir=false), never as its target.
     public func fileType(_ path: String) throws -> (exists: Bool, isDir: Bool) {

@@ -22,7 +22,7 @@ extension KistRunner {
     struct OneShotSubstitution: Equatable {
         var decision: KistREPL.ModelSubstitutionDecision
         /// Rate limits and outages clear with time — those cool the provider down
-        /// CROSS-PROCESS. Protocol failures / refusals don't (the scorecard owns those).
+        /// CROSS-PROCESS. Protocol failures do not; refusal/permission stops never substitute.
         var shouldCooldown: Bool
     }
 

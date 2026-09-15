@@ -26,6 +26,7 @@ extension KistRunner {
         if opts.headless || opts.mission || opts.fleet || opts.greatLoop || opts.ship
             || opts.planExecute { return true }
         if opts.planMode { return false }
+        if intent == .build && AgentMetadataRequest.matches(goal) { return false }
         if builderCompletionMode(for: goal) == .verificationOnly { return true }
 
         switch intent {
@@ -36,9 +37,9 @@ extension KistRunner {
         }
     }
 
-    /// Direct one-shot path for answer/evidence work. Its tool registry is capability-reduced to the
-    /// canonical read-only set, but every retained outbound tool still traverses ToolGate, authorization,
-    /// exfiltration detection, fetch host policy, and the SSRF guard.
+    /// Direct ordinary agent path for answer/evidence work and fixed-path agent registration.
+    /// The headless loop narrows registration turns to metadata actions; other non-delegation runs
+    /// use the canonical read-only registry. Every retained tool still traverses its ordinary gates.
     static func runReadOnlyOneShot(
         _ opts: KistOptions,
         goal: String,
@@ -61,7 +62,8 @@ extension KistRunner {
         }
         let mode: PromptCompiler.Mode = opts.planMode ? .plan : .inline
         let intent = PromptCompiler.inferIntent(goal, mode: mode)
-        guard !intent.expectsMutation else {
+        let agentMetadataOnly = intent == .build && AgentMetadataRequest.matches(goal)
+        guard !intent.expectsMutation || agentMetadataOnly else {
             err("read-only route refused mutation intent")
             return 2
         }
@@ -69,7 +71,9 @@ extension KistRunner {
         // Delegation keeps the full SESSION ceiling inside SpawnAgentTool, while HeadlessAgentLoop
         // projects the PARENT to read + trusted orchestration tools. Pre-filtering here would also
         // cripple an explicitly authorized implementation child.
-        let routeTools = intent == .delegate ? tools : readOnlyOneShotTools(
+        // The headless loop restricts metadata requests to fixed-path agent registration and reads.
+        // Keep the host ceiling here so a stored role may request tools for a later authorized task.
+        let routeTools = intent == .delegate || agentMetadataOnly ? tools : readOnlyOneShotTools(
             from: tools, fetchAllowedHosts: fetchAllowedHosts)
         let recorder = TrajectoryRecorder()
         let traceRecorder = TraceRecorder(traceId: TraceID.make())

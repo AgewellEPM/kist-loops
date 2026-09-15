@@ -25,8 +25,8 @@ public enum ReversibilityClassifier {
         // (see the `case "fetch_url", "web_search"` below). Adding them back makes the gate dead code.
         // analyze_media / media_clip are also NOT here — they UPLOAD to the Gemini Files API (remote side
         // effect + cost), so they're `.mutating` (default) and pinned active by ReversibilityClassifierTests.
-        "read_file", "list_files", "glob_files", "search_code",
-        "context_brain", "read_spreadsheet", "query_data",
+        "read_file", "read_files", "list_files", "glob_files", "search_code",
+        "context_brain", "list_agents", "shared_memory", "read_spreadsheet", "query_data",
     ]
 
     /// FIRST-token verbs that mark a namespaced MCP tool leaf as READ-ONLY. Strict ALLOWLIST —
@@ -214,7 +214,7 @@ public enum ReversibilityClassifier {
             let target = [args["url"] as? String, args["query"] as? String, args["site"] as? String]
                 .compactMap { $0 }.joined(separator: " ")
             return urlLooksLikeExfil(target) ? .dangerous : .safe
-        case "make_dir":
+        case "make_dir", "create_agent":
             return .mutating
         case "apply_patch":
             if let patch = args["patch"] as? String, ApplyPatch.touchesEscapingPath(patch, projectRoot: projectRoot) {

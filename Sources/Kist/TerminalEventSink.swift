@@ -231,7 +231,8 @@ struct TerminalEventSink: RuntimeEventSink {
             // Attribute to the tool that STARTED this action index (parallel-wave safe); fall back to
             // the most-recent tool only if the start wasn't seen. Clear the entry to bound the map.
             let finishedTool = state.toolByIndex.removeValue(forKey: index) ?? state.lastTool
-            proofStore?.record(.init(kind: .actionFinished, tool: finishedTool, success: ok, text: ok ? output : (error ?? output)))
+            let diagnostics = ToolResult(success: ok, output: output, error: error).diagnosticText
+            proofStore?.record(.init(kind: .actionFinished, tool: finishedTool, success: ok, text: diagnostics))
             if ok {
                 if style == .calm {
                     // Show what web research actually looked at: the query + the source URLs it found.
@@ -251,6 +252,11 @@ struct TerminalEventSink: RuntimeEventSink {
                 // Recovery language, not a raw status code (#11): say what failed + the next move.
                 let raw = (error ?? output).trimmingCharacters(in: .whitespacesAndNewlines)
                 print(c("2", "│ ") + c("31;1", "✗ ") + c("31", truncate(ErrorHumanizer.humanize(raw, tool: finishedTool), 220)))
+                if !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let preview = SecretScanner.redactSecrets(in: output)
+                        .split(whereSeparator: { $0.isNewline }).prefix(2).joined(separator: " ")
+                    print(c("2", "│ " + truncate(preview, 240) + " · /logs for diagnostics"))
+                }
             }
         case .replanStarted(let reason):
             finishLiveStatus(clearOnly: true)

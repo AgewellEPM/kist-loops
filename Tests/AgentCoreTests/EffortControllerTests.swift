@@ -43,6 +43,19 @@ final class EffortControllerTests: XCTestCase {
         XCTAssertGreaterThan(rigor.complexity, plain.complexity)
     }
 
+    func testRigorMatchesSecurityWorkWithoutMatchingAuthorOrAuthorized() {
+        for goal in ["create the authorized parser", "read the author field", "fix a reproduction"] {
+            XCTAssertFalse(EffortController.requiresRigor(goal: goal), goal)
+            XCTAssertFalse(EffortController.assess(goal: goal).rationale.contains(", rigor"), goal)
+        }
+        for goal in ["update auth", "fix authentication", "check authorization", "AUTH_TOKEN",
+                     "fix OAuth2", "update AuthMiddleware.swift", "check paymentService",
+                     "production config", "database migrations", "redeploy the service"] {
+            XCTAssertTrue(EffortController.requiresRigor(goal: goal), goal)
+            XCTAssertTrue(EffortController.assess(goal: goal).rationale.contains(", rigor"), goal)
+        }
+    }
+
     func testScoreAndBudgetAreBounded() {
         let huge = EffortController.assess(goal: String(repeating: "build and integrate and migrate a system ", count: 50),
                                            signals: .init(failureRate: 1, iterationsUsed: 999, isStuck: true, replansUsed: 5))

@@ -52,10 +52,38 @@ extension KistRunner {
         // whole parallel fleet, planning included (the fleet path doesn't go through makeLoop, so this
         // is where --budget reaches it). Created BEFORE planning so the planner call counts too.
         let fleetBudget = opts.makeBudget()
+        let agentMemory: AgentMemoryAccess?
+        do { agentMemory = try Self.sharedAgentMemory(root: root, opts: opts) }
+        catch { err("fleet shared memory setup failed: \(error)"); return 2 }
+
+        let fleetID = UUID()
+        func executeFleet() async -> Int32 {
+            await runFleetBody(opts, registry: registry, root: root, tools: tools, roles: roles,
+                               goal: goal, agents: agents, fleetBudget: fleetBudget,
+                               agentMemory: agentMemory, fleetID: fleetID)
+        }
+        guard let agentMemory else { return await executeFleet() }
+        do {
+            // One host-created ID binds planner, detached workers, board and signoff history.
+            let identity = try agentMemory.identity(runID: fleetID.uuidString, role: "fleet", executionRoot: root)
+            return try await AgentExecutionScope.$current.withValue(identity) {
+                try agentMemory.history.append(agent: identity, kind: "run_started", detail: goal)
+                let code = await executeFleet()
+                try agentMemory.history.append(agent: identity, kind: "run_finished",
+                                               detail: "fleet=\(fleetID.uuidString); exit=\(code)")
+                return code
+            }
+        } catch { err("fleet shared history failed: \(error)"); return 2 }
+    }
+
+    private static func runFleetBody(_ opts: KistOptions, registry: ProviderRegistry, root: String,
+                                     tools: ToolRegistry, roles: RoleBindings, goal: String, agents: Int,
+                                     fleetBudget: BudgetLedger?, agentMemory: AgentMemoryAccess?,
+                                     fleetID: UUID) async -> Int32 {
 
         // 1. DECOMPOSE — the planner vendor proposes disjoint subtasks from the repo's real dir tree.
         let scopeContext = CaptainOrchestrator.deriveScopeContext(fromFiles: GitIsolation.trackedFiles(repo: root)).snapshot
-        let subtasks = await FleetPlanner(providers: registry, binding: roles.binding(for: .planner))
+        let subtasks = await FleetPlanner(providers: registry, binding: roles.binding(for: .planner), agentMemory: agentMemory)
             .plan(goal: goal, scopeContext: scopeContext, maxAgents: agents, budget: fleetBudget)
         guard !subtasks.isEmpty else { err("the planner returned no subtasks for that goal."); return 1 }
         note("planned \(subtasks.count) subtask(s): " + subtasks.map(\.title).joined(separator: ", "))
@@ -64,10 +92,11 @@ extension KistRunner {
         let fleetRoot = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".mythos/fleet", isDirectory: true)
         let spawner = PlanExecuteFleetSpawner.make(providers: registry, roles: roles, tools: tools,
                                                    budget: fleetBudget,
-                                                   externalReadRoots: opts.allowReadPaths)
+                                                   externalReadRoots: opts.allowReadPaths, agentMemory: agentMemory)
         let orch = CaptainOrchestrator(spawner: spawner)
         let launch = await orch.launchFleet(goal: goal, repo: root, subtasks: subtasks, maxAgents: agents,
-                                            baseDir: fleetRoot, nowEpoch: Date().timeIntervalSince1970)
+                                            baseDir: fleetRoot, nowEpoch: Date().timeIntervalSince1970,
+                                            fleetID: fleetID)
         for issue in launch.scopeIssues { note("scope · \(issue)") }
         note(launch.summary)
         guard launch.launchedCount > 0 else { return 1 }

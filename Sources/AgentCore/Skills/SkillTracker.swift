@@ -11,7 +11,8 @@ public actor SkillTracker {
     /// investigate and to LOAD MORE SKILLS (read_file is how a skill body is loaded), or a single
     /// scoped skill would brick the session. Scoping only ever restricts mutating/powerful tools.
     public static let alwaysSafe: Set<String> = [
-        "read_file", "list_files", "glob_files", "search_code", "context_brain", "ask_user",
+        "read_file", "read_files", "list_files", "glob_files", "search_code", "context_brain", "ask_user",
+        "shared_memory", "list_agents",
     ]
 
     /// The capability scope proven from a skill's LOAD-TIME verified bytes. TRI-STATE so an absent
