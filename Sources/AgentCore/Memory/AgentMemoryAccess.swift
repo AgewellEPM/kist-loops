@@ -209,14 +209,15 @@ public struct AgentMemoryAccess: Sendable {
             // Procedures: retrieved by task applicability, lifecycle-filtered only — the gate
             // owns the salience floor, so a dormant procedure can still reactivate on a
             // recurring failure ("this bit me before" for how-tos).
-            candidates += ProcedureStore(projectRoot: selected.canonicalPath)
-                .retrieve(applicability: query, limit: 10, at: now).map { procedure in
+            let procedures = ProcedureStore(projectRoot: selected.canonicalPath)
+                .retrieveWithIssues(applicability: query, limit: 10, at: now)
+            issues += procedures.issues.map { selected.canonicalPath + ": " + $0 }
+            candidates += procedures.procedures.map { procedure in
                 MemoryAdmissionCandidate(
                     entry: AgentMemoryEntry(id: "procedure-\(procedure.id)-v\(procedure.version)",
                                             title: "Procedure: \(procedure.title)",
                                             text: "Applies to: \(procedure.task)\n" + procedure.steps,
-                                            locator: selected.canonicalPath + "/"
-                                                + ProcedureStore.directory + "/\(procedure.id)",
+                                            locator: selected.canonicalPath + "/" + procedure.relativePath,
                                             observedAt: procedure.temporal.createdAt,
                                             temporal: procedure.temporal),
                     provenance: .procedure, sourceProject: selected.canonicalPath)
@@ -274,15 +275,15 @@ public struct AgentMemoryAccess: Sendable {
                 let alreadyListed = Set(candidates.compactMap {
                     $0.provenance == .procedure ? $0.entry.id : nil
                 })
-                candidates += ProcedureStore(projectRoot: project.canonicalPath)
-                    .retrieve(applicability: situation, limit: 10, at: now)
-                    .map { procedure in
+                let procedures = ProcedureStore(projectRoot: project.canonicalPath)
+                    .retrieveWithIssues(applicability: situation, limit: 10, at: now)
+                issues += procedures.issues.map { project.canonicalPath + ": " + $0 }
+                candidates += procedures.procedures.map { procedure in
                         MemoryAdmissionCandidate(
                             entry: AgentMemoryEntry(id: "procedure-\(procedure.id)-v\(procedure.version)",
                                                     title: "Procedure: \(procedure.title)",
                                                     text: "Applies to: \(procedure.task)\n" + procedure.steps,
-                                                    locator: project.canonicalPath + "/"
-                                                        + ProcedureStore.directory + "/\(procedure.id)",
+                                                    locator: project.canonicalPath + "/" + procedure.relativePath,
                                                     observedAt: procedure.temporal.createdAt,
                                                     temporal: procedure.temporal),
                             provenance: .procedure, sourceProject: project.canonicalPath)

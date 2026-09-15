@@ -8,6 +8,7 @@ import Foundation
 public struct Procedure: Codable, Sendable, Equatable {
     public static let maximumTextUTF8Bytes = 16 * 1_024
     public static let maximumSources = 16
+    public static let maximumRecordBytes = 64 * 1_024
 
     public let id: String
     public let version: Int
@@ -17,8 +18,8 @@ public struct Procedure: Codable, Sendable, Equatable {
     public let task: String
     public let steps: String
     public let keywords: [String]
-    /// Evidence locators (run ids, signoffs) this procedure was proven or re-proven by. A
-    /// procedure without a source cannot exist — an unproven how-to is a guess, not memory.
+    /// Required provenance references supplied by the host. A source string does not
+    /// authenticate a receipt; this store only governs advisory relevance.
     public let sources: [String]
     public let temporal: MemoryTemporalEnvelope
 
@@ -29,7 +30,9 @@ public struct Procedure: Codable, Sendable, Equatable {
         let cleanSteps = steps.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanSources = sources.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard version >= 1, !cleanTitle.isEmpty, !cleanTask.isEmpty, !cleanSteps.isEmpty,
+        guard version >= 1, version <= ProcedureStore.maximumVersionsPerProcedure,
+              id == Self.identity(title: cleanTitle, task: cleanTask),
+              !cleanTitle.isEmpty, !cleanTask.isEmpty, !cleanSteps.isEmpty,
               !cleanSources.isEmpty, cleanSources.count <= Self.maximumSources,
               cleanTitle.utf8.count <= 512, cleanTask.utf8.count <= 1_024,
               cleanSteps.utf8.count <= Self.maximumTextUTF8Bytes,
@@ -45,8 +48,14 @@ public struct Procedure: Codable, Sendable, Equatable {
     }
 
     static func identity(title: String, task: String) -> String {
-        String(BuilderEvidenceDigest.sha256(
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let task = task.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(BuilderEvidenceDigest.sha256(
             "\(title.utf8.count):\(title)\(task.utf8.count):\(task)").prefix(16))
+    }
+
+    public var relativePath: String {
+        ProcedureStore.directory + "/" + ProcedureStore.fileName(id: id, version: version)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -83,17 +92,17 @@ public struct ProcedureStore {
     public static let maximumVersionsPerProcedure = 1_024
     public static let defaultDecay = MemoryDecayRate.slow
 
-    private let projectRoot: String
+    let projectRoot: String
 
     public init(projectRoot: String) {
         self.projectRoot = projectRoot
     }
 
-    private static func fileName(id: String, version: Int) -> String {
+    static func fileName(id: String, version: Int) -> String {
         String(format: "%@-v%06d.json", id, version)
     }
 
-    /// Create a new procedure proven by `source`. Returns the stored procedure, or an issue
+    /// Create an advisory procedure with a host-supplied source reference. Returns it, or an issue
     /// string explaining the refusal — never a silent drop.
     public func deposit(title: String, task: String, steps: String, source: String,
                         at now: Date) -> (procedure: Procedure?, issue: String?) {
@@ -104,21 +113,36 @@ public struct ProcedureStore {
                                         steps: steps, sources: [source], temporal: envelope) else {
             return (nil, "procedure rejected: missing or oversized title/task/steps/source")
         }
-        if latest(id: id) != nil {
+        let snapshot = inventory()
+        guard snapshot.issues.isEmpty else {
+            return (nil, "procedure inventory is incomplete; resolve it before deposition")
+        }
+        if snapshot.latest[id] != nil {
             return (nil, "procedure already exists (\(id)); reinforce or supersede it instead")
         }
         return publish(procedure)
     }
 
-    /// Record a verified re-use. Moves the decay anchor and increments the reinforcement count
-    /// via the temporal kernel, which refuses unverified or retired/superseded reinforcement.
+    /// Record an externally verified reuse. The host must authenticate the source before calling;
+    /// this store rejects blank and replayed references without granting completion authority.
     public func reinforce(id: String, verifiedSource: String,
                           at now: Date) -> (procedure: Procedure?, issue: String?) {
-        guard let current = latest(id: id) else { return (nil, "unknown procedure: \(id)") }
+        let source = verifiedSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, source.utf8.count <= 1_024 else {
+            return (nil, "reinforcement requires a bounded, nonempty new source")
+        }
+        let inventory = inventory()
+        guard inventory.issues.isEmpty else {
+            return (nil, "procedure version conflict or unreadable inventory; resolve it before reinforcement")
+        }
+        guard let current = inventory.latest[id] else { return (nil, "unknown procedure: \(id)") }
+        guard inventory.sourceDigests[id]?.contains(BuilderEvidenceDigest.sha256(source)) != true else {
+            return (nil, "reinforcement refused: source evidence was already recorded")
+        }
         var envelope = current.temporal
         do { try envelope.reinforce(verified: true, confirmedAt: now, now: now) }
         catch { return (nil, "reinforcement refused: \(error)") }
-        let sources = Array((current.sources + [verifiedSource]).suffix(Procedure.maximumSources))
+        let sources = Array((current.sources + [source]).suffix(Procedure.maximumSources))
         guard let next = Procedure(id: id, version: current.version + 1, title: current.title,
                                    task: current.task, steps: current.steps, sources: sources,
                                    temporal: envelope) else {
@@ -144,42 +168,15 @@ public struct ProcedureStore {
     }
 
     public func latest(id: String) -> Procedure? {
-        latestByID()[id]
+        // A forensic last-valid record can remain inspectable when a newer record is damaged.
+        // Retrieval uses the inventory's stricter lifecycle and incompleteness checks.
+        inventory().latest[id]
     }
 
     /// Applicability-ranked, lifecycle-eligible procedures. Deliberately does NOT apply the
     /// salience floor — that is the admission gate's decision, made once, with reactivation.
     public func retrieve(applicability task: String, limit: Int = 10, at now: Date) -> [Procedure] {
-        guard limit > 0 else { return [] }
-        let eligible = latestByID().values.filter {
-            $0.temporal.evaluate(at: now).isRetrievalEligible
-        }
-        guard !eligible.isEmpty else { return [] }
-        let byID = Dictionary(uniqueKeysWithValues: eligible.map { ($0.id, $0) })
-        let documents = eligible.map {
-            LexicalSearch.Document(id: $0.id, title: $0.title + " " + $0.task,
-                                   text: $0.keywords.joined(separator: " ") + "\n" + $0.steps)
-        }
-        return LexicalSearch.rank(documents, query: task, limit: limit)
-            .compactMap { byID[$0.id] }
-    }
-
-    private func latestByID() -> [String: Procedure] {
-        guard let confined = try? ConfinedRoot(root: projectRoot, readOnly: true) else { return [:] }
-        let names: [String]
-        do { names = try confined.entries(Self.directory).filter { !$0.isDir }.map(\.name) }
-        catch { return [:] }
-        var best: [String: Procedure] = [:]
-        for name in names.sorted().prefix(Self.maximumRecords) {
-            guard let data = try? confined.readStableData(Self.directory + "/" + name,
-                                                          maxBytes: Procedure.maximumTextUTF8Bytes + 8_192),
-                  let decoded = try? JSONDecoder().decode(Procedure.self, from: data),
-                  name == Self.fileName(id: decoded.id, version: decoded.version),
-                  decoded.id == Procedure.identity(title: decoded.title, task: decoded.task) else { continue }
-            if let existing = best[decoded.id], existing.version >= decoded.version { continue }
-            best[decoded.id] = decoded
-        }
-        return best
+        retrieveWithIssues(applicability: task, limit: limit, at: now).procedures
     }
 
     private func publish(_ procedure: Procedure) -> (procedure: Procedure?, issue: String?) {
@@ -197,6 +194,9 @@ public struct ProcedureStore {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(procedure)
+            guard data.count <= Procedure.maximumRecordBytes else {
+                return (nil, "encoded procedure exceeds the bounded record size")
+            }
             let path = Self.directory + "/" + Self.fileName(id: procedure.id, version: procedure.version)
             do {
                 // `false` means identical bytes were already published (an idempotent concurrent
