@@ -14,12 +14,12 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
         "Delegate a focused, SELF-CONTAINED subtask to a fresh sub-agent. " +
         "It has the same file/search tools and the same project, runs independently, and returns " +
         "only its final summary. Use it to isolate or parallelize a chunk of work. " +
-        "Provide the full subtask in 'task' — the sub-agent cannot see this conversation. " +
+        "Provide the full subtask in 'task'; the child receives authorized shared recall and its own context window. " +
         "Optionally set role to planner, worker/researcher, coder/builder, or critic/reviewer; " +
         "current role bindings: \(roleBindings.summary). You may also set provider/model directly " +
         "to spawn any configured AI for this subtask. " +
         "Set background=true to receive a typed handle immediately; use join_agent, steer_agent, " +
-        "or cancel_agent to control that isolated run. " +
+        "or cancel_agent to control that isolated run. Join background work before ending your turn; unfinished children are cancelled and drained. " +
         (delegationDepthRemaining > 0
             ? "This sub-agent may delegate \(delegationDepthRemaining) more level(s) to teammates if it gets stuck."
             : "This sub-agent cannot delegate further.")
@@ -46,6 +46,8 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
     /// Shared token ledger — the SAME instance the parent loop uses, so every delegated/fleet agent
     /// draws from ONE global budget (BudgetLedger is an actor). nil = uncapped.
     private let budget: BudgetLedger?
+    private let childToolsFactory: AgentTeamTools.ChildFactory?
+    private let checkpoints: LoopCheckpointStore?
     public let delegationRegistry: AsyncDelegationRegistry
 
     public init(providers: ProviderRegistry, providerId: String, model: String?,
@@ -56,7 +58,9 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
                 delegationDepth: Int = 0,
                 extendedThinking: Bool = false,
                 budget: BudgetLedger? = nil,
-                delegationRegistry: AsyncDelegationRegistry = .shared) {
+                delegationRegistry: AsyncDelegationRegistry = .shared,
+                childToolsFactory: AgentTeamTools.ChildFactory? = nil,
+                checkpoints: LoopCheckpointStore? = nil) {
         self.providers = providers
         self.providerId = providerId
         self.model = model
@@ -70,9 +74,12 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
         self.extendedThinking = extendedThinking
         self.budget = budget
         self.delegationRegistry = delegationRegistry
+        self.childToolsFactory = childToolsFactory
+        self.checkpoints = checkpoints
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        guard maxIterations > 0 else { return .failure("the inherited agent turn budget is exhausted") }
         let task = try requireString("task", from: arguments)
         let role = Self.parseRole(arguments["role"] as? String)
         if arguments["role"] != nil, role == nil {
@@ -108,7 +115,8 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
         // that writes. Scope the child's tools to the parent's active allow-list (intersection-only,
         // so the child can only ever be narrower).
         let parentCeiling = await context.skillTracker?.activeToolAllowlist()
-        let childTools = parentCeiling.map { subTools(for: selected).scoped(to: Array($0)) } ?? subTools(for: selected)
+        let available = childToolsFactory?(selected, context, parentCeiling.map(Array.init), maxIterations) ?? subTools(for: selected)
+        let childTools = parentCeiling.map { available.scoped(to: Array($0)) } ?? available
         let background = optionalBool("background", from: arguments) ?? false
         if background {
             return await spawnBackground(task: task, compiledTask: compiledTask, role: role,
@@ -119,12 +127,14 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
             providers: providers, providerId: selected.providerId, model: selected.model,
             tools: childTools, context: context, sink: sink,
             interactor: interactor, approvalTools: approvalTools,
+            injectAskUser: childToolsFactory == nil ? (parentCeiling?.contains("ask_user") ?? true) : childTools.names.contains("ask_user"),
+            checkpoints: checkpoints,
             maxIterations: maxIterations,
             extendedThinking: extendedThinking,
             budget: budget,   // SAME ledger as the parent → one global cap across the whole agent tree
             contextWindow: ContextWindowManager.forModel(
                 capabilities: providers.capabilities(providerId: selected.providerId, model: selected.model)
-            )
+            ), traceRecorder: context.traceRecorder, traceRole: role?.rawValue ?? "worker"
         )
         let outcome = await sub.run(goal: compiledTask, rawRequest: task,
                                     resolvedIntent: taskBrief.intent)
@@ -167,7 +177,7 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
             delegationDepth: delegationDepthRemaining - 1,
             extendedThinking: extendedThinking,
             budget: budget,   // propagate the shared ledger down the whole delegation tree
-            delegationRegistry: delegationRegistry
+            delegationRegistry: delegationRegistry, checkpoints: checkpoints
         )
         return ToolRegistry(baseTools.all() + [nestedSpawn])
     }
@@ -189,7 +199,8 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
             scopeOverrideApproved: context.scopeOverrideApproved,
             skillLocations: context.skillLocations, skillTracker: context.skillTracker,
             auditLog: context.auditLog, externalReadRoots: context.externalReadRoots,
-            correlationID: context.correlationID, traceRecorder: context.traceRecorder)
+            correlationID: context.correlationID, traceRecorder: context.traceRecorder,
+            agentMemory: context.agentMemory)
         let inboxName = DelegationInboxTool(mailbox: DelegationSteeringMailbox()).name
         let childNames = Set(childTools.names + [inboxName])
         let mcpServers = Set(childNames.compactMap { name -> String? in
@@ -197,14 +208,15 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
             return name.components(separatedBy: MCPClientManager.namespaceSeparator).first
         })
         let remainingTokens = await budget?.remaining()
+        let metadataPaths = AgentTeamTools.registryDirectories(in: childTools)
         let childCeiling = DelegationCapabilityCeiling(
             allowedToolNames: childNames, allowedMCPServers: mcpServers,
-            allowedProjectPaths: [worktree.path], maxIterations: maxIterations,
+            allowedProjectPaths: [worktree.path] + metadataPaths, maxIterations: maxIterations,
             maxTokens: remainingTokens, maxDelegationDepth: delegationDepthRemaining,
             requiresMutationApproval: true)
         let parentCapability = DelegationCapabilityCeiling(
             allowedToolNames: childNames, allowedMCPServers: mcpServers,
-            allowedProjectPaths: [context.projectRoot, worktree.path], maxIterations: maxIterations,
+            allowedProjectPaths: [context.projectRoot, worktree.path] + metadataPaths, maxIterations: maxIterations,
             maxTokens: remainingTokens, maxDelegationDepth: delegationDepthRemaining,
             requiresMutationApproval: true)
         let request = DelegationRequest(role: role?.rawValue ?? "worker", task: task,
@@ -223,11 +235,14 @@ public struct SpawnAgentTool: AgentTool, DelegationAgentTool, AsyncDelegationReg
                     providers: self.providers, providerId: selected.providerId, model: selected.model,
                     tools: tools, context: runContext, sink: self.sink,
                     interactor: self.interactor, approvalTools: self.approvalTools,
+                    injectAskUser: self.childToolsFactory == nil ? (await context.skillTracker?.activeToolAllowlist()?.contains("ask_user") ?? true) : childTools.names.contains("ask_user"),
+                    checkpoints: self.checkpoints,
                     maxIterations: self.maxIterations, extendedThinking: self.extendedThinking,
                     budget: self.budget,
                     contextWindow: ContextWindowManager.forModel(
                         capabilities: self.providers.capabilities(providerId: selected.providerId,
-                                                                  model: selected.model)))
+                                                                  model: selected.model)),
+                    traceRecorder: context.traceRecorder, traceRole: role?.rawValue ?? "worker")
                 let outcome = await loop.run(goal: backgroundGoal, rawRequest: task,
                                              resolvedIntent: intent)
                 let committed = GitIsolation.commit(worktree, message: "background agent: \(task.prefix(60))")

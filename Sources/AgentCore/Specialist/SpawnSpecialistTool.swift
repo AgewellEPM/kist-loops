@@ -6,20 +6,23 @@ import Foundation
 /// runs HARD-isolated via `SpecialistSpawner` (own context, scoped tools, own model, maxTurns, permission)
 /// and only its summary returns.
 ///
-/// Bounded by construction: the spawned specialist's tool ceiling is `baseTools`, which the caller builds
-/// WITHOUT `spawn_specialist`/`spawn_agent` — so a named specialist cannot recursively fan out.
+/// Bounded by construction: the host child factory narrows tools, turns and remaining delegation
+/// depth on each hop. Legacy callers without that factory do not grant recursive delegation.
 public struct SpawnSpecialistTool: AgentTool, DelegationAgentTool, AsyncDelegationRegistryProviding {
     public let name = "spawn_specialist"
     public var description: String {
+        let specialists = currentSpecialists()
         guard !specialists.isEmpty else {
             return "Delegate a self-contained subtask to a named specialist agent. (No specialists are " +
-                   "configured yet — create one with `/agent new` or a .kist/agents file.)"
+                   "configured yet — call create_agent, then spawn_specialist in this same session.)"
         }
-        let roster = specialists.map { "- \($0.name): \($0.description)" }.joined(separator: "\n")
+        let roster = specialists.prefix(20).map { "- \($0.name): \($0.description)" }.joined(separator: "\n")
         return "Delegate a self-contained subtask to a NAMED specialist agent that is purpose-built for it. " +
                "The specialist runs in its own context with its own tools/model and returns only a summary — " +
                "use it when a task squarely matches one of these. Provide the full subtask in 'task' (the " +
-               "specialist cannot see this conversation).\nAvailable specialists:\n\(roster)"
+               "specialist receives authorized shared recall). Use list_agents to search the complete current registry. " +
+               "Join background work before ending your turn; unfinished children are cancelled and drained."
+               + "\nAvailable specialists (showing up to 20 of \(specialists.count)):\n\(roster)"
     }
     public let parameters = [
         ToolParameter(name: "agent", type: "string", description: "The specialist's name (exact).", required: true),
@@ -28,24 +31,31 @@ public struct SpawnSpecialistTool: AgentTool, DelegationAgentTool, AsyncDelegati
     ]
 
     private let specialists: [SpecialistDefinition]
+    private let registry: SpecialistRegistry?
     private let spawner: SpecialistSpawner
     private let approvalTools: Set<String>   // inherited from the parent — a specialist can't widen consent
     public let delegationRegistry: AsyncDelegationRegistry
 
     public init(specialists: [SpecialistDefinition], spawner: SpecialistSpawner,
                 approvalTools: Set<String> = [],
-                delegationRegistry: AsyncDelegationRegistry = .shared) {
+                delegationRegistry: AsyncDelegationRegistry = .shared,
+                registry: SpecialistRegistry? = nil) {
         self.specialists = specialists
+        self.registry = registry
         self.spawner = spawner
         self.approvalTools = approvalTools
         self.delegationRegistry = delegationRegistry
     }
 
+    private func currentSpecialists() -> [SpecialistDefinition] { registry?.load() ?? specialists }
+
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        guard spawner.defaultMaxIterations > 0 else { return .failure("the inherited specialist turn budget is exhausted") }
         let agent = try requireString("agent", from: arguments).trimmingCharacters(in: .whitespacesAndNewlines)
         let task = try requireString("task", from: arguments)
+        let specialists = currentSpecialists()
         guard let def = specialists.first(where: { $0.name == agent }) else {
-            let names = specialists.map(\.name).joined(separator: ", ")
+            let names = specialists.prefix(20).map(\.name).joined(separator: ", ")
             return .failure("no specialist named '\(agent)'. Available: \(names.isEmpty ? "(none)" : names)")
         }
         // permissionMode "plan" ⇒ read-only run; other modes keep the inherited approval set (the REPL's
@@ -70,7 +80,8 @@ public struct SpawnSpecialistTool: AgentTool, DelegationAgentTool, AsyncDelegati
         }
         let outcome = await spawner.run(specialist: def, task: task, resolvedIntent: childIntent,
                                         advisoryContext: hostPriorContext,
-                                        approvalTools: approvalTools, planMode: planMode)
+                                        approvalTools: approvalTools, planMode: planMode,
+                                        parentContext: context)
         var metadata = [
             "specialist": def.name,
             "specialist_iterations": String(outcome.iterations),
@@ -98,9 +109,17 @@ public struct SpawnSpecialistTool: AgentTool, DelegationAgentTool, AsyncDelegati
             nowEpoch: Date().timeIntervalSince1970) else {
             return .failure("background specialist requires worktree isolation, but no worktree could be created; refusing live-tree execution")
         }
-        let inherited = SpecialistSpawner.mcpScopedCeiling(
-            spawner.baseTools.names + ["ask_user"], mcpServers: def.mcpServers)
-        let childNames = Set(def.resolvedTools(ceiling: inherited) + ["delegation_updates"])
+        let available = SpecialistSpawner.mcpScopedCeiling(
+            spawner.baseTools.names + spawner.additionalToolNames + ["ask_user"], mcpServers: def.mcpServers)
+        let active = await context.skillTracker?.activeToolAllowlist()
+        let inherited = active.map { allowed in available.filter { allowed.contains($0) } } ?? available
+        let requestedNames = def.resolvedTools(ceiling: inherited)
+        let binding = def.resolvedModel(aliasTable: spawner.aliasTable, roleDefault: spawner.roleDefault)
+            ?? spawner.roleDefault ?? ProviderBinding(providerId: "")
+        let preview = spawner.childToolsFactory?(binding, context, requestedNames,
+                                                min(def.maxTurns ?? spawner.defaultMaxIterations, spawner.defaultMaxIterations))
+            ?? spawner.baseTools.scoped(to: requestedNames)
+        let childNames = Set(preview.names + (requestedNames.contains("ask_user") ? ["ask_user"] : []) + ["delegation_updates"])
         let parentNames = Set(inherited + ["delegation_updates"])
         func servers(_ names: Set<String>) -> Set<String> {
             Set(names.compactMap { name -> String? in
@@ -111,14 +130,17 @@ public struct SpawnSpecialistTool: AgentTool, DelegationAgentTool, AsyncDelegati
         let iterations = max(1, min(def.maxTurns ?? spawner.defaultMaxIterations,
                                     spawner.defaultMaxIterations))
         let remainingTokens = await spawner.budget?.remaining()
+        let metadataPaths = AgentTeamTools.registryDirectories(in: preview)
         let childCeiling = DelegationCapabilityCeiling(
             allowedToolNames: childNames, allowedMCPServers: servers(childNames),
-            allowedProjectPaths: [worktree.path], maxIterations: iterations,
-            maxTokens: remainingTokens, requiresMutationApproval: true)
+            allowedProjectPaths: [worktree.path] + metadataPaths, maxIterations: iterations,
+            maxTokens: remainingTokens, maxDelegationDepth: spawner.delegationDepthRemaining,
+            requiresMutationApproval: true)
         let parentCeiling = DelegationCapabilityCeiling(
             allowedToolNames: parentNames, allowedMCPServers: servers(parentNames),
-            allowedProjectPaths: [context.projectRoot, worktree.path],
+            allowedProjectPaths: [context.projectRoot, worktree.path] + metadataPaths,
             maxIterations: spawner.defaultMaxIterations, maxTokens: remainingTokens,
+            maxDelegationDepth: spawner.delegationDepthRemaining,
             requiresMutationApproval: true)
         let request = DelegationRequest(role: def.name, task: task, capabilityCeiling: childCeiling)
         do {
@@ -129,7 +151,7 @@ public struct SpawnSpecialistTool: AgentTool, DelegationAgentTool, AsyncDelegati
                     advisoryContext: advisoryContext,
                     approvalTools: approvalTools, planMode: planMode,
                     forceWorktreeIsolation: true, preparedWorktree: worktree,
-                    steeringMailbox: execution.steering)
+                    steeringMailbox: execution.steering, parentContext: context)
                 let evidence = ReasoningEvidenceReference(
                     id: execution.handle.id + ":summary", kind: .delegation,
                     locator: def.name, summary: outcome.summary)
