@@ -206,6 +206,21 @@ public struct AgentMemoryAccess: Sendable {
                                             observedAt: episode.at, temporal: episode.temporal),
                     provenance: .episode, sourceProject: selected.canonicalPath)
             }
+            // Procedures: retrieved by task applicability, lifecycle-filtered only — the gate
+            // owns the salience floor, so a dormant procedure can still reactivate on a
+            // recurring failure ("this bit me before" for how-tos).
+            candidates += ProcedureStore(projectRoot: selected.canonicalPath)
+                .retrieve(applicability: query, limit: 10, at: now).map { procedure in
+                MemoryAdmissionCandidate(
+                    entry: AgentMemoryEntry(id: "procedure-\(procedure.id)-v\(procedure.version)",
+                                            title: "Procedure: \(procedure.title)",
+                                            text: "Applies to: \(procedure.task)\n" + procedure.steps,
+                                            locator: selected.canonicalPath + "/"
+                                                + ProcedureStore.directory + "/\(procedure.id)",
+                                            observedAt: procedure.temporal.createdAt,
+                                            temporal: procedure.temporal),
+                    provenance: .procedure, sourceProject: selected.canonicalPath)
+            }
             candidates += (supplementalRecall?(selected.canonicalPath, query, now) ?? []).map { entry in
                 MemoryAdmissionCandidate(entry: entry,
                                          provenance: entry.provenanceHint ?? .hostProjectedLesson,
@@ -250,6 +265,29 @@ public struct AgentMemoryAccess: Sendable {
                                                 observedAt: episode.at, temporal: episode.temporal),
                         provenance: .episode, sourceProject: project.canonicalPath)
                 }
+            }
+            // Dormant procedures: the regular lane retrieves by query applicability, which a
+            // query-dissimilar recall cannot reach. Retrieve by the failure signatures instead so
+            // a decayed how-to whose SITUATION recurred is presented to the gate.
+            if !recurrenceContext.isEmpty {
+                let situation = recurrenceContext.signatures.sorted().joined(separator: " ")
+                let alreadyListed = Set(candidates.compactMap {
+                    $0.provenance == .procedure ? $0.entry.id : nil
+                })
+                candidates += ProcedureStore(projectRoot: project.canonicalPath)
+                    .retrieve(applicability: situation, limit: 10, at: now)
+                    .map { procedure in
+                        MemoryAdmissionCandidate(
+                            entry: AgentMemoryEntry(id: "procedure-\(procedure.id)-v\(procedure.version)",
+                                                    title: "Procedure: \(procedure.title)",
+                                                    text: "Applies to: \(procedure.task)\n" + procedure.steps,
+                                                    locator: project.canonicalPath + "/"
+                                                        + ProcedureStore.directory + "/\(procedure.id)",
+                                                    observedAt: procedure.temporal.createdAt,
+                                                    temporal: procedure.temporal),
+                            provenance: .procedure, sourceProject: project.canonicalPath)
+                    }
+                    .filter { !alreadyListed.contains($0.entry.id) }
             }
         }
         // Q9 admission gate: the single seam between recall and influence. Every candidate from

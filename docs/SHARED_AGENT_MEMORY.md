@@ -36,6 +36,21 @@ Tool responses also fit a 6,000-byte JSON window, below the CLI's default observ
 
 History lives in `.kist/runs/agent-history/v1` as immutable owner-private files. Appends use confined, no-replace publication and fsync. Concurrent processes write distinct records; restart and worktree removal leave original-project history intact. Events sort by original time and a stable ID tie-break, not an invented causal order between simultaneous processes. The archive excludes hidden reasoning and token fragments. It masks common secrets and clips oversized event details with their original byte count and digest recorded. Directory enumeration currently scales with archive size; page file reads are bounded.
 
+## Typed memory schema
+
+Every recall candidate instantiates one of four record types with distinct policies. **Facts**
+(curated project context) persist until superseded — edited or deleted, never decayed.
+**Episodes** (history events, episodic records, fetched research) decay by age and are
+append-only; a later episode never overwrites an earlier one. **Procedures** (the ProcedureStore
+plus advisory lessons) are reinforced how-tos: persistence grows with verified reuse, decays by
+disuse (slow half-life anchored on the last verified confirmation), retrieval is by task
+applicability, and updates are reinforcement or supersession — deposits require a proven source,
+reinforcement requires verified evidence, and every version is an immutable audit record under
+`.kist/memory/procedures/v1`. **Working state** is task-scoped scratch; the gate denies it
+unconditionally (`working_state_leak`) so finished-task residue can never poison durable recall.
+A dormant procedure whose failure situation recurs is re-presented to the gate by signature
+applicability, so "this bit me before" works for how-tos, not just episodes.
+
 ## Admission gate and reactivation
 
 Every `search`-mode candidate — history events, curated project context, episodes, research

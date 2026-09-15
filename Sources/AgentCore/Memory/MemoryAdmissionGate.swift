@@ -1,5 +1,22 @@
 import Foundation
 
+/// The unified typed schema (Q5): four memory types with mutually incompatible correct
+/// policies. Every provenance class maps onto exactly one type; the gate's per-class policy is
+/// the per-type policy applied at the admission seam.
+///
+/// | Type          | Persistence            | Decay                    | Update semantics        |
+/// |---------------|------------------------|--------------------------|-------------------------|
+/// | fact          | long; timeless         | supersession only        | replacement             |
+/// | episode       | relevance window       | by age                   | append-only, never overwritten |
+/// | procedure     | grows with verified reuse | by disuse; supersession | reinforcement           |
+/// | working_state | task-scoped only       | discarded at task end    | never enters durable recall |
+public enum MemoryRecordType: String, Codable, Sendable, CaseIterable {
+    case fact
+    case episode
+    case procedure
+    case workingState = "working_state"
+}
+
 /// The provenance class of a recall candidate. Admission policy is per-class because the four
 /// memory types have incompatible correct policies: a curated fact is governed by supersession,
 /// an episode by age, research evidence by fast decay, and a lesson by its recorded envelope.
@@ -20,6 +37,23 @@ public enum MemoryProvenanceClass: String, Codable, Sendable, CaseIterable {
     /// admission as upstream-projected instead of silently trusting it. Follow-up: thread the
     /// projection through when OrganizationalLearningStore is split per the monolith rule.
     case hostProjectedLesson = "host_projected_lesson"
+    /// A reinforced how-to from the ProcedureStore: slow disuse decay anchored on the last
+    /// verified confirmation, retrieved by task applicability.
+    case procedure
+    /// Task-scoped scratch state. Must NEVER become durable recall; the gate denies it
+    /// unconditionally so no future source can leak finished-task residue into the corpus.
+    case workingState = "working_state"
+
+    /// The Q5 type this provenance class instantiates. Lessons are procedure-typed: reinforced
+    /// advisory know-how (a proven win or an obstacle to avoid re-attempting).
+    public var recordType: MemoryRecordType {
+        switch self {
+        case .curatedFact: return .fact
+        case .historyEvent, .episode, .researchEvidence: return .episode
+        case .supplementalLesson, .hostProjectedLesson, .procedure: return .procedure
+        case .workingState: return .workingState
+        }
+    }
 }
 
 /// One recall candidate presented to the admission gate. `sourceProject` is the canonical path of
@@ -43,6 +77,7 @@ public enum MemoryAdmissionDenialReason: String, Codable, Sendable, CaseIterable
     case belowSalienceFloor = "below_salience_floor"
     case emptyContent = "empty_content"
     case evaluationFailure = "evaluation_failure"
+    case workingStateLeak = "working_state_leak"
 }
 
 /// The gate's ruling on one candidate. Admission carries the evaluated salience and an explicit
@@ -175,6 +210,19 @@ public struct MemoryAdmissionGate: Sendable {
         case .supplementalLesson:
             return temporalVerdict(entry, defaultDecay: .medium, at: now, advisor: advisor,
                                    note: "supplemental lesson; temporal governance")
+
+        case .procedure:
+            // Procedure type: slow disuse decay anchored on the last verified confirmation;
+            // reinforcement (via the temporal kernel) is what keeps a procedure retrievable.
+            return temporalVerdict(entry, defaultDecay: ProcedureStore.defaultDecay, at: now,
+                                   advisor: advisor, note: "procedure; reinforcement-governed")
+
+        case .workingState:
+            // Working state is task-scoped by definition. Admitting it would poison future
+            // retrieval with finished-task residue; there is no envelope that makes it durable.
+            return (.denied(.workingStateLeak,
+                            detail: "working state is task-scoped and never enters durable recall"),
+                    false, false)
         }
     }
 
