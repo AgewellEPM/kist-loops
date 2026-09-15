@@ -16,6 +16,29 @@ import Glibc
 final class KistSMLRuntimeServeTests: XCTestCase {
     private var projectRoot: URL!
     private var serveProcess: Process?
+    private var serveExit: ProcessExit?
+
+    private final class ProcessExit: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int32?
+        let completed = DispatchSemaphore(value: 0)
+        var status: Int32? {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+        func record(_ status: Int32) {
+            lock.lock(); value = status; lock.unlock()
+            completed.signal()
+        }
+        func wait() async throws -> Int32 {
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                if let status { return status }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            throw ServeSocketTestError.processTimeout
+        }
+    }
 
     private var kistExecutableURL: URL {
         URL(fileURLWithPath: #filePath)
@@ -37,9 +60,13 @@ final class KistSMLRuntimeServeTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        if let process = serveProcess, process.isRunning {
+        if let process = serveProcess, serveExit?.status == nil, process.isRunning {
             process.terminate()
-            process.waitUntilExit()
+            if serveExit?.completed.wait(timeout: .now() + .seconds(5)) != .success {
+                _ = kill(process.processIdentifier, SIGKILL)
+                XCTAssertEqual(serveExit?.completed.wait(timeout: .now() + .seconds(5)), .success,
+                               "fixture host must be reaped even after failed assertions")
+            }
         }
         try? FileManager.default.removeItem(at: projectRoot)
     }
@@ -185,8 +212,11 @@ final class KistSMLRuntimeServeTests: XCTestCase {
         let stdout = Pipe()
         process.standardOutput = stdout
         process.standardError = stdout
+        let exit = ProcessExit()
+        process.terminationHandler = { exit.record($0.terminationStatus) }
         try process.run()
         serveProcess = process
+        serveExit = exit
 
         // Wait for the host to announce readiness (bounded).
         let base = URL(string: "http://127.0.0.1:\(port)")!
@@ -304,8 +334,8 @@ final class KistSMLRuntimeServeTests: XCTestCase {
 
         // 5) Graceful shutdown releases the lock and preserves state for the next host.
         process.terminate()
-        process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 0,
+        let exitStatus = try await exit.wait()
+        XCTAssertEqual(exitStatus, 0,
                        "SIGTERM must drain and exit 0")
         serveProcess = nil
         XCTAssertFalse(FileManager.default.fileExists(atPath: tokenURL.path),
@@ -337,10 +367,13 @@ final class KistSMLRuntimeServeTests: XCTestCase {
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
-
+        let exit = ProcessExit()
+        process.terminationHandler = { exit.record($0.terminationStatus) }
         try process.run()
-        process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 2)
+        serveProcess = process
+        serveExit = exit
+        let exitStatus = try await exit.wait()
+        XCTAssertEqual(exitStatus, 2)
         let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         XCTAssertTrue(text.contains("no free loopback port"), "unexpected output: \(text)")
 
@@ -355,6 +388,7 @@ final class KistSMLRuntimeServeTests: XCTestCase {
 }
 
 private enum ServeSocketTestError: Error {
+    case processTimeout
     case socket
     case closeOnExec
     case bind

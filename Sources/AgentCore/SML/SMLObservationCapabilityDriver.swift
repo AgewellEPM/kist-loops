@@ -27,7 +27,10 @@ public struct SMLObservationCapabilityDriver: SMLInstructionDriver {
     }
 
     public func supports(_ request: SMLCapabilityRequest) -> Bool {
+        // Missing or non-observational implementations cannot acquire a dispatch claim. Keep the
+        // execute-time type check too, for callers outside the router.
         request.operation == .observe && allowedSources.contains(request.reference)
+            && registry.tool(named: request.reference) is ReadOnlyAgentTool
     }
 
     public func execute(
@@ -51,7 +54,7 @@ public struct SMLObservationCapabilityDriver: SMLInstructionDriver {
         let result = await registry.execute(
             name: request.reference,
             arguments: SMLCapabilityDriverSupport.foundationArguments(arguments),
-            context: context
+            context: context.withCorrelationID(invocation.dispatchID)
         )
 
         var statePatch: SMLObject = [:]

@@ -133,6 +133,14 @@ enum SMLHostConfigurationFile {
         return integer
     }
 
+    static func optionalBool(_ value: SMLValue?, path: String) throws -> Bool? {
+        guard let value else { return nil }
+        guard case .bool(let bool) = value else {
+            throw SchemaError(reason: "\(path) must be a boolean")
+        }
+        return bool
+    }
+
     static func boundedText(
         _ value: String,
         path: String,

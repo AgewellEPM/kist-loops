@@ -205,6 +205,21 @@ public struct SMLWorkflowAPICatalog: Sendable, Codable, Equatable {
                         summary: "Roll the task back using the latest task revision."
                     ),
                   ]),
+            .init(method: .post, pathTemplate: "\(taskPath)/reconcile",
+                  operationID: "reconcile_workflow_task", action: .reconcile,
+                  summary: "Close an interrupted earlier-session dispatch as failed without replay",
+                  bodyKind: .expectedState,
+                  bodyFields: [
+                    .init(.init(name: "task_revision", type: .integer)),
+                    .init(.init(name: "dispatch_id", type: .string)),
+                    .init(.init(name: "note", type: .string)),
+                  ],
+                  examples: [
+                    .init(method: .post, path: "\(exampleTaskPath)/reconcile", body: [
+                        "task_revision": .number(2), "dispatch_id": .string("DISPATCH-ID"),
+                        "note": .string("Stopped previous host; retiring interrupted task"),
+                    ], summary: "After restarting the host, retire a claim with its outcome still unknown."),
+                  ]),
             .init(method: .get, pathTemplate: "\(taskPath)/receipts",
                   operationID: "list_workflow_task_receipts", action: .receipts,
                   summary: "List task receipts",
@@ -398,6 +413,8 @@ public struct SMLWorkflowAPICompiler: Sendable {
             action = .refuse
         case (.post, ["rollback"]):
             action = .rollback
+        case (.post, ["reconcile"]):
+            action = .reconcile
         case (.get, ["receipts"]):
             try requireEmptyBody(request.body)
             action = .receipts
@@ -408,7 +425,7 @@ public struct SMLWorkflowAPICompiler: Sendable {
         }
         let expectedState: SMLObject
         switch action {
-        case .approve, .refuse, .rollback:
+        case .approve, .refuse, .rollback, .reconcile:
             expectedState = try expectedStateObject(
                 from: request.body,
                 fallback: request.expectedState

@@ -113,7 +113,8 @@ public struct SMLRetrievalSourceBindings: Sendable {
                         reason: "\(entryPath).top_k must be within 1...50")
                 }
                 sources[source] = Binding(
-                    storePath: storePath,
+                    storePath: storePath.hasPrefix("/") ? storePath
+                        : URL(fileURLWithPath: projectRoot).appendingPathComponent(storePath).standardizedFileURL.path,
                     embeddingSpace: embeddingSpace,
                     topK: topK
                 )
@@ -136,7 +137,7 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
     public let id = "kist-retrieval-driver"
 
     private let bindings: SMLRetrievalSourceBindings
-    private let embed: @Sendable (String) async throws -> [Float]
+    private let embed: @Sendable (String, String) async throws -> [Float]
     private let clock: @Sendable () -> Double
 
     public init(
@@ -145,8 +146,31 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
         self.bindings = bindings
-        self.embed = embed
+        self.embed = { query, _ in try await embed(query) }
         self.clock = clock
+    }
+
+    /// Production embeddings must belong to the exact space named by the reviewed source binding.
+    /// Check on both sides of generation because a mutable model tag can change during a request.
+    public init(
+        bindings: SMLRetrievalSourceBindings,
+        provider: any EmbeddingProviding,
+        clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
+    ) {
+        self.bindings = bindings
+        self.clock = clock
+        embed = { query, expectedSpace in
+            let before = try await provider.embeddingSpaceID()
+            guard before == expectedSpace else {
+                throw SMLRetrievalEmbeddingError.spaceMismatch(expected: expectedSpace, actual: before)
+            }
+            let vector = try await provider.embedding(for: query)
+            let after = try await provider.embeddingSpaceID()
+            guard after == expectedSpace else {
+                throw SMLRetrievalEmbeddingError.spaceMismatch(expected: expectedSpace, actual: after)
+            }
+            return vector
+        }
     }
 
     public func supports(_ request: SMLCapabilityRequest) -> Bool {
@@ -166,7 +190,7 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
         var hits: [VectorHit] = []
         var failure: String?
         do {
-            let vector = try await embed(query)
+            let vector = try await embed(query, binding.embeddingSpace)
             let store = FileBackedVectorStore(path: binding.storePath)
             hits = try store.query(
                 vector,
@@ -215,5 +239,16 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
             return value
         }
         return request.reference
+    }
+}
+
+public enum SMLRetrievalEmbeddingError: Error, CustomStringConvertible {
+    case spaceMismatch(expected: String, actual: String)
+
+    public var description: String {
+        switch self {
+        case .spaceMismatch(let expected, let actual):
+            return "SML retrieval embedding space mismatch: configured '\(expected)', provider '\(actual)'"
+        }
     }
 }

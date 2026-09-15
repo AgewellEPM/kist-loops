@@ -164,7 +164,7 @@ final class KistSMLOpenAPIImportTests: XCTestCase {
             mode: .durable,
             actor: "sml-runtime-exporter"
         ) { host in
-            let stack = try KistRunner.makeSMLRuntimeCapabilityStack(
+            let stack = try await KistRunner.makeSMLRuntimeCapabilityStack(
                 host: host, projectRoot: root.path, actor: "sml-runtime-exporter")
             let workflowID = try XCTUnwrap(host.runtimePackage.workflowIDs.first)
             let session = try host.launch.app.replSession(workflowID: workflowID)

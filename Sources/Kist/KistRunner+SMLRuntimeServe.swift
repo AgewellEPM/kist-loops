@@ -45,11 +45,28 @@ extension KistRunner {
         let projectRoot = opts.project
         let actor = opts.smlRuntimeActor ?? "sml-runtime-exporter"
 
-        let capabilityStack = try makeSMLRuntimeCapabilityStack(
+        return try await withSMLRuntimeCapabilityStack(
             host: host,
             projectRoot: projectRoot,
-            actor: actor
-        )
+            actor: actor,
+            enableComputerUse: opts.enableComputerUse
+        ) { capabilityStack in
+            try await serveLaunchedRuntime(
+                host,
+                environment: environment,
+                capabilityStack: capabilityStack,
+                opts: opts
+            )
+        }
+    }
+
+    private static func serveLaunchedRuntime(
+        _ host: SMLRuntimeHostLaunch,
+        environment: SMLRuntimeDurableHostEnvironment,
+        capabilityStack: SMLRuntimeCapabilityStack,
+        opts: KistOptions
+    ) async throws -> Int32 {
+        let projectRoot = opts.project
         let gateway = capabilityStack.gateway
         let pump = capabilityStack.pump
 
@@ -85,6 +102,8 @@ extension KistRunner {
             sessionToken: token,
             configuration: SMLRuntimeHTTPCore.Configuration(portRange: portRange)
         )
+        let termination = SMLRuntimeTerminationSignal()
+        defer { termination.close() }
         guard let url = core.start() else {
             err("error: no free loopback port in \(portRange)")
             return 2
@@ -98,25 +117,27 @@ extension KistRunner {
         print("  pending work: GET /approvals · approve: POST <api>/tasks/<id>/approve")
         print("  stop: ctrl-c (drains in-flight work, releases the host lock)")
 
-        // Drain anything already dispatchable (resumed store), then park until a signal.
-        reportSMLRuntimeDrain(await pump.drain())
+        // Install signal handling before dispatching resumed work, and keep observation responsive.
+        await pump.requestDrain()
         let ticker = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled else { break }
-                reportSMLRuntimeDrain(await pump.drain())
+                await pump.requestDrain()
             }
         }
-        await Self.parkUntilTerminationSignal()
+        await termination.wait()
+        termination.close() // Further Ctrl-C/SIGTERM can interrupt a slow shutdown.
         ticker.cancel()
         core.stop()
-        // One final drain so an approval accepted moments before shutdown completes its dispatch.
-        reportSMLRuntimeDrain(await pump.drain())
+        if !(await pump.shutdown()) {
+            err("warning: SML dispatch did not finish within the shutdown grace; its claim remains pending")
+        }
         print("sml runtime stopped")
         return 0
     }
 
-    private static func reportSMLRuntimeDrain(_ report: SMLRuntimeCapabilityPump.DrainReport) {
+    static func reportSMLRuntimeDrain(_ report: SMLRuntimeCapabilityPump.DrainReport) {
         if report.hostFailure != nil {
             err("warning: SML capability pump could not read the durable store")
         }
@@ -125,35 +146,58 @@ extension KistRunner {
         }
     }
 
-    /// Parks until SIGINT or SIGTERM. Dispatch signal sources fire on a queue; the latch makes
-    /// double-delivery (ctrl-c mashing) resume the continuation exactly once.
-    private static func parkUntilTerminationSignal() async {
-        final class Latch: @unchecked Sendable {
-            private let lock = NSLock()
-            private var fired = false
-            func fireOnce(_ body: () -> Void) {
-                lock.lock()
-                defer { lock.unlock() }
-                guard !fired else { return }
-                fired = true
-                body()
-            }
-        }
-        let latch = Latch()
+}
+
+/// The signal can arrive before wait() begins; retain it until the host starts waiting.
+private final class SMLRuntimeTerminationSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    private var closed = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var sources: [DispatchSourceSignal] = []
+
+    init() {
         let queue = DispatchQueue(label: "sml-serve-signals")
-        signal(SIGINT, SIG_IGN)
-        signal(SIGTERM, SIG_IGN)
-        let sources = [SIGINT, SIGTERM].map { number in
-            DispatchSource.makeSignalSource(signal: number, queue: queue)
+        for number in [SIGINT, SIGTERM] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: queue)
+            source.setEventHandler { [weak self] in self?.fire() }
+            sources.append(source)
+            source.resume()
         }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            for source in sources {
-                source.setEventHandler {
-                    latch.fireOnce { continuation.resume() }
-                }
-                source.resume()
+    }
+
+    private func fire() {
+        lock.lock()
+        fired = true
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume()
+    }
+
+    func wait() async {
+        await withCheckedContinuation { pending in
+            lock.lock()
+            if fired {
+                lock.unlock()
+                pending.resume()
+            } else {
+                continuation = pending
+                lock.unlock()
             }
         }
-        for source in sources { source.cancel() }
+    }
+
+    func close() {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        closed = true
+        let active = sources
+        sources = []
+        lock.unlock()
+        for source in active { source.cancel() }
+        signal(SIGINT, SIG_DFL)
+        signal(SIGTERM, SIG_DFL)
     }
 }

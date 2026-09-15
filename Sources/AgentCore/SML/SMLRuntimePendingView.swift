@@ -119,7 +119,7 @@ public struct SMLRuntimePendingView: Sendable, Codable, Equatable {
                         taskRevision: task.revision
                     ))
                 }
-            case .ready, .completed, .escalated, .rolledBack, .refused:
+            case .ready, .completed, .failed, .escalated, .rolledBack, .refused:
                 continue
             }
         }

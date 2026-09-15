@@ -34,17 +34,58 @@ final class SMLRuntimeLeaseRegistryTests: XCTestCase {
             roles: ["workflow-agent"],
             tasks: tasks,
             operations: SMLRuntimeCommandOperation.all,
-            scope: [:]
+            scope: [:],
+            taskLease: lease
         )
     }
 
-    func testCreatingOperationBindsTheCommandsOwnTask() async {
+    func testCreatingOperationOnlyGrantsItsTaskForThatCommand() async {
         let lease = SMLRuntimeLeaseRegistry.Session()
         let run = envelope(task: "TASK-NEW", op: SMLRuntimeCommandOperation.workflowRun)
         let tasks = await lease.authorizedTasks(for: run)
         XCTAssertTrue(tasks.contains("TASK-NEW"))
         let owns = await lease.ownsTask("TASK-NEW")
-        XCTAssertTrue(owns, "creating op must durably bind the task to the lease")
+        XCTAssertFalse(owns, "only successful creation may bind the task to the lease")
+        let watch = envelope(task: "TASK-NEW", op: SMLRuntimeCommandOperation.taskWatch)
+        let followingTasks = await lease.authorizedTasks(for: watch)
+        XCTAssertFalse(followingTasks.contains("TASK-NEW"))
+    }
+
+    func testGatewayBindsOnlyAfterSuccessfulCreation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("sml-lease-create-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SMLRuntimeStore(fileURL: directory.appendingPathComponent("runtime.json"), clock: { 1_000 })
+        let runtime = SMLRuntime(store: store, clock: { 1_000 })
+        let workflow = SMLWorkflow(
+            id: "lease.test", version: "1.0.0", name: "Lease test",
+            source: .init(kind: .native, reference: "tests://lease"), trigger: .init(kind: .manual),
+            stateSchema: [], interface: .init(), entrypoint: "done",
+            instructions: [.init(id: "done", op: .complete)]
+        )
+        let admitted = try SMLWorkflowAdmission.admitForExecution(
+            SMLWorkflowValidator.requireValidForImport(workflow), catalog: SMLExecutionAdmissionCatalog())
+        _ = try await runtime.installWorkflow(admitted, role: "workflow-agent")
+        let gateway = SMLCommandGateway(runtime: runtime, replayGuard: store)
+        let creator = SMLRuntimeLeaseRegistry.Session()
+        let other = SMLRuntimeLeaseRegistry.Session()
+        for (index, lease) in [creator, other].enumerated() {
+            let command = SMLCommandEnvelope(
+                commandID: "create-\(index)", actor: "operator-alice", role: "workflow-agent",
+                task: "TASK-EXISTS", op: SMLRuntimeCommandOperation.workflowRun,
+                arguments: ["workflow_id": .string(workflow.id), "workflow_version": .string(workflow.version)],
+                issuedAtEpoch: 1_000)
+            let tasks = await lease.authorizedTasks(for: command)
+            do {
+                _ = try await gateway.submit(command, authority: authority(tasks: tasks, lease: lease), nowEpoch: 1_000)
+                XCTAssertEqual(index, 0, "duplicate creation must fail")
+            } catch {
+                XCTAssertEqual(index, 1, "first creation must succeed: \(error)")
+            }
+        }
+        let creatorOwns = await creator.ownsTask("TASK-EXISTS")
+        let otherOwns = await other.ownsTask("TASK-EXISTS")
+        XCTAssertTrue(creatorOwns)
+        XCTAssertFalse(otherOwns, "failed duplicate creation cannot change the lease")
     }
 
     func testNonCreatingOperationDoesNotAdoptForeignTasks() async {
@@ -73,6 +114,7 @@ final class SMLRuntimeLeaseRegistryTests: XCTestCase {
 
         let run = envelope(task: "TASK-OWNED", op: SMLRuntimeCommandOperation.workflowRun)
         _ = await creator.authorizedTasks(for: run)
+        await creator.adopt(taskID: "TASK-OWNED") // Represents a successfully created task.
 
         let foreignApprove = envelope(
             task: "TASK-OWNED",

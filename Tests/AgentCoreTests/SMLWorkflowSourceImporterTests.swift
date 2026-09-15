@@ -77,7 +77,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(launch.mountContract.workflowMounts.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(
             try launch.app.resolveWorkflowMount(workflowID: "langgraph.review").apiRoutes.count,
-            7
+            8
         )
 
         let started = try await launch.app.handleRuntimeAPI(
@@ -139,7 +139,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.mountContract.workflowMounts.map(\.workflowID), [
             "langgraph.review",
         ])
-        XCTAssertEqual(package.runtime.mountContract.workflowMounts.map(\.apiRoutes.count), [7])
+        XCTAssertEqual(package.runtime.mountContract.workflowMounts.map(\.apiRoutes.count), [8])
         XCTAssertEqual(package.runtime.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(package.runtime.modelRouter.workflowIDs, ["langgraph.review"])
         XCTAssertTrue(package.runtime.modelRouter.examples.contains {
@@ -163,7 +163,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertEqual(package.runtime.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
         XCTAssertEqual(package.runtime.hostWiring.apiBasePaths, ["/source"])
         let workflowWiring = try XCTUnwrap(package.runtime.hostWiring.workflows.first)
-        XCTAssertEqual(workflowWiring.apiRoutes.count, 7)
+        XCTAssertEqual(workflowWiring.apiRoutes.count, 8)
         let workflowStartRoute = try XCTUnwrap(workflowWiring.apiRoutes.first {
             $0.action == .start
         })
@@ -440,7 +440,7 @@ final class SMLWorkflowSourceImporterTests: XCTestCase {
         XCTAssertTrue(launchedWorkflow.installed)
         XCTAssertEqual(launchedWorkflow.installedInstructionCount, 3)
         XCTAssertEqual(launchedWorkflow.replMount.workflowID, "langgraph.review")
-        XCTAssertEqual(launchedWorkflow.apiRoutes.count, 7)
+        XCTAssertEqual(launchedWorkflow.apiRoutes.count, 8)
         XCTAssertEqual(launchedWorkflow.modelToolName, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(launchedWorkflow.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(launchedWorkflow.planningWorkflowID, "langgraph.review")

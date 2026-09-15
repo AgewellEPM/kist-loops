@@ -93,6 +93,28 @@ final class SMLHTTPCapabilityDriverTests: XCTestCase {
         XCTAssertFalse(outcome.evidence.receiptID.contains(secret))
     }
 
+    func testPathDotSegmentsAreRefusedBeforeTransportButOrdinaryDotsWork() async throws {
+        let endpoint = SMLHTTPEndpointSpec(
+            capability: "public.details", method: .get, pathTemplate: "/public/{id}/details",
+            servers: [.init(scheme: "https", host: "example.com")],
+            parameters: [.init(name: "id", location: .path, required: true,
+                               stateField: "path_id", valueType: .string)])
+        let transport = RecordingHTTPTransport(response: .init(statusCode: 200, body: Data("ok".utf8)))
+        let driver = try SMLHTTPCapabilityDriver(registry: registry(endpoint), authentication: .init(), transport: transport)
+        for value in [".", ".."] {
+            let request = capabilityRequest(reference: endpoint.capability, state: ["path_id": .string(value)])
+            let outcome = try await driver.execute(invocation(request, driverID: driver.id))
+            XCTAssertEqual(outcome.status, .failed)
+        }
+        let deniedRequestCount = await transport.requestCount()
+        XCTAssertEqual(deniedRequestCount, 0)
+        let safe = capabilityRequest(reference: endpoint.capability, state: ["path_id": .string("v1.2")])
+        let accepted = try await driver.execute(invocation(safe, driverID: driver.id))
+        XCTAssertEqual(accepted.status, .passed)
+        let sent = await transport.lastRequest()
+        XCTAssertEqual(sent?.url?.path, "/public/v1.2/details")
+    }
+
     func testUnknownArgumentFailsBeforeTransportAndCannotOverrideURL() async throws {
         let endpoint = simpleEndpoint(serverPort: 8_443, scheme: "https", host: "example.com")
         let transport = RecordingHTTPTransport(response: .init(statusCode: 200, body: Data()))

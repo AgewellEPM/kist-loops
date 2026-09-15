@@ -7,7 +7,7 @@ import Glibc
 
 /// Loopback-only HTTP host for a launched SML workflow runtime — the transport half of "runs in
 /// its own harness". Adapted from the proven single-user ChainServer pattern: 127.0.0.1 ONLY,
-/// one request at a time on a background thread, minimal HTTP/1.1 parsing with hard size caps.
+/// bounded concurrent connections, minimal HTTP/1.1 parsing with hard size caps and deadlines.
 /// Lives in AgentCore (not Kist) so the generated standalone runtime binary links the exact same
 /// serving core the kist CLI uses.
 ///
@@ -32,6 +32,7 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
         public let maximumResponseBytes: Int
         public let socketTimeoutMilliseconds: Int
         public let shutdownGraceMilliseconds: Int
+        public let maximumConcurrentConnections: Int
 
         public init(
             portRange: ClosedRange<UInt16> = 8850...8880,
@@ -39,7 +40,8 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
             maximumBodyBytes: Int = 1_048_576,
             maximumResponseBytes: Int = 4_194_304,
             socketTimeoutMilliseconds: Int = 5_000,
-            shutdownGraceMilliseconds: Int = 30_000
+            shutdownGraceMilliseconds: Int = 30_000,
+            maximumConcurrentConnections: Int = 32
         ) {
             self.portRange = portRange
             self.maximumHeaderBytes = max(1_024, maximumHeaderBytes)
@@ -47,6 +49,7 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
             self.maximumResponseBytes = max(1_024, maximumResponseBytes)
             self.socketTimeoutMilliseconds = max(1, socketTimeoutMilliseconds)
             self.shutdownGraceMilliseconds = max(1, shutdownGraceMilliseconds)
+            self.maximumConcurrentConnections = min(128, max(1, maximumConcurrentConnections))
         }
     }
 
@@ -57,9 +60,10 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
     private let configuration: Configuration
     private let lifecycleLock = NSLock()
     private let workerGroup = DispatchGroup()
+    private let connectionQueue = DispatchQueue(label: "kist.sml.http.connections", attributes: .concurrent)
     private var storedPort: UInt16 = 0
     private var listenFD: Int32 = -1
-    private var activeConnectionFD: Int32 = -1
+    private var activeConnectionFDs: Set<Int32> = []
     private var running = false
     private var started = false
 
@@ -221,9 +225,10 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
         let deadline = DispatchTime.now() + .milliseconds(configuration.shutdownGraceMilliseconds)
         if workerGroup.wait(timeout: deadline) == .timedOut {
             lifecycleLock.lock()
-            let active = activeConnectionFD
+            // Keep the lock through shutdown: handlers remove and close descriptors under the
+            // same lock, so a recycled descriptor can never target an unrelated host socket.
+            for active in activeConnectionFDs { _ = shutdown(active, SHUT_RDWR) }
             lifecycleLock.unlock()
-            if active >= 0 { _ = shutdown(active, SHUT_RDWR) }
             // Give a socket unblocked above one bounded opportunity to unwind its handler. A
             // capability implementation may ignore cancellation, so stop never waits forever.
             _ = workerGroup.wait(
@@ -246,7 +251,7 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
                 Foundation.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard bound == 0, listen(fd, 8) == 0 else {
+        guard bound == 0, listen(fd, Int32(configuration.maximumConcurrentConnections)) == 0 else {
             close(fd)
             return nil
         }
@@ -264,8 +269,8 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
         storedPort = candidate
         running = true
         started = true
-        lifecycleLock.unlock()
         workerGroup.enter()
+        lifecycleLock.unlock()
         Thread.detachNewThread { self.acceptLoop(listenerFD: fd) }
         return URL(string: "http://127.0.0.1:\(candidate)/")
     }
@@ -295,13 +300,31 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
                 continue
             }
             lifecycleLock.lock()
-            activeConnectionFD = conn
+            guard running,
+                  activeConnectionFDs.count < configuration.maximumConcurrentConnections else {
+                lifecycleLock.unlock()
+                // Do not queue unbounded work or block the accept loop on a saturated client.
+                _ = Self.setNonBlocking(conn)
+                let busy = Data("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n".utf8)
+                busy.withUnsafeBytes { bytes in
+                    if let base = bytes.baseAddress { _ = send(conn, base, bytes.count, 0) }
+                }
+                _ = close(conn)
+                continue
+            }
+            activeConnectionFDs.insert(conn)
+            workerGroup.enter()
             lifecycleLock.unlock()
-            handle(conn)
-            lifecycleLock.lock()
-            if activeConnectionFD == conn { activeConnectionFD = -1 }
-            lifecycleLock.unlock()
-            close(conn)
+            connectionQueue.async {
+                defer {
+                    self.lifecycleLock.lock()
+                    self.activeConnectionFDs.remove(conn)
+                    _ = close(conn)
+                    self.lifecycleLock.unlock()
+                    self.workerGroup.leave()
+                }
+                self.handle(conn)
+            }
         }
     }
 
@@ -336,8 +359,8 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
         writeResponse(conn, status: status, body: payload)
     }
 
-    /// Bridges the async runtime router onto the single-connection thread. Fine at this scale:
-    /// local, one request in flight, and the pump keeps dispatch single-flight anyway.
+    /// Each bounded connection worker bridges to the actor-based router independently. Runtime
+    /// transactions and the capability pump retain their own serialization and revision fences.
     private func routeSynchronously(
         method: String, path: String, body: Data
     ) -> (Int, Data) {
@@ -366,10 +389,28 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
     }
 
     private func route(method: String, path: String, body: Data) async -> (Int, Data) {
+        if method == "GET", path == "/health" {
+            do {
+                let snapshot = try await store.load()
+                let admission = try await store.admissionStatus()
+                let claims = snapshot.tasks.values.compactMap(\.capabilityClaim)
+                let failed = snapshot.tasks.values.filter { $0.status == .failed }.count
+                let oldest = claims.map(\.claimedAtEpoch).min().map { max(0, Date().timeIntervalSince1970 - $0) }
+                let health = HealthResponse(
+                    status: admission.acceptingNewTasks ? "ready" : "capacity_limited",
+                    admission: admission, archivedTaskCount: snapshot.archivedTaskCount,
+                    failedTaskCount: failed, inFlightOrUnresolvedClaimCount: claims.count,
+                    oldestClaimAgeSeconds: oldest
+                )
+                return (200, try JSONEncoder().encode(health))
+            } catch {
+                return (503, errorJSON("runtime store is unavailable; inspect the host and verify the store before resuming work"))
+            }
+        }
         if method == "GET", path == "/approvals" {
             do {
                 let snapshot = try await store.load()
-                let view = SMLRuntimePendingView.build(from: snapshot)
+                let view = await api.pendingView(from: snapshot)
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 return (200, try encoder.encode(view))
@@ -402,7 +443,7 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
         do {
             let response = try await api.handleRuntime(request)
             if apiMethod == .post, let pump {
-                await pump.drain()
+                await pump.requestDrain()
             }
             return try encodeRuntimeResponse(response)
         } catch let error as SMLWorkflowRuntimeRegistryError {
@@ -415,6 +456,8 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
                 return (404, errorJSON("route not found"))
             }
             return (422, errorJSON("request rejected"))
+        } catch let error as SMLRuntimeCapacityError {
+            return (503, errorJSON(error.description))
         } catch let error as SMLRuntimeError {
             // Optimistic-concurrency conflicts surface as 409 so an operator retries with the
             // fresh revision instead of reading a generic failure.
@@ -425,6 +468,17 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
         } catch {
             return (422, errorJSON("request rejected"))
         }
+    }
+
+    /// Local store and queue health. A retained claim can be either active or interrupted; this
+    /// endpoint never infers an external outcome, provider health, or successful completion.
+    private struct HealthResponse: Encodable {
+        let status: String
+        let admission: SMLRuntimeAdmissionStatus
+        let archivedTaskCount: Int
+        let failedTaskCount: Int
+        let inFlightOrUnresolvedClaimCount: Int
+        let oldestClaimAgeSeconds: Double?
     }
 
     private func encodeRuntimeResponse(
@@ -780,6 +834,7 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
             + "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n"
             + "Referrer-Policy: no-referrer\r\n"
             + "X-Content-Type-Options: nosniff\r\n"
+            + (status == 503 ? "Retry-After: 5\r\n" : "")
             + "Connection: close\r\n\r\n"
         var out = Data(head.utf8)
         out.append(body)
@@ -824,6 +879,7 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
         case 409: return "Conflict"
         case 422: return "Unprocessable Entity"
         case 500: return "Internal Server Error"
+        case 503: return "Service Unavailable"
         default: return "Error"
         }
     }

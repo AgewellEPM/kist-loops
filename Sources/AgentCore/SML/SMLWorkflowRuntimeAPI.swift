@@ -132,6 +132,27 @@ public struct SMLWorkflowRuntimeAPI: Sendable {
         return SMLWorkflowAPIResponse(statusCode: status, command: command, result: result)
     }
 
+    /// The operator queue exposes the same tasks as the generated watch command.
+    public func pendingView(from snapshot: SMLRuntimeSnapshot) async -> SMLRuntimePendingView {
+        var visible = snapshot
+        visible.tasks = [:]
+        let now = clock()
+        for task in snapshot.tasks.values {
+            do {
+                let bundle = try registry.bundle(workflowID: task.workflowID)
+                let command = try SMLWorkflowCommandCompiler(surface: bundle.surface, actor: bundle.actor)
+                    .compile(action: .watch, task: task.taskID, issuedAtEpoch: now)
+                guard command.role == task.role else { continue }
+                let authority = try await authorityResolver(command)
+                try SMLCommandAdmission.preflight(command, authority: authority, nowEpoch: now)
+                visible.tasks[task.taskID] = task
+            } catch {
+                continue
+            }
+        }
+        return SMLRuntimePendingView.build(from: visible)
+    }
+
     private func metadataPayload(
         for resource: SMLWorkflowRuntimeMetadataResource,
         pathParameters: [String: String] = [:]

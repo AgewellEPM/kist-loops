@@ -237,7 +237,9 @@ public actor SMLRuntime {
             )
 
             let outcome = routed.outcome
-            try Self.validateStatePatch(outcome.statePatch, workflow: workflow)
+            // A definite unsuccessful result completes this dispatch. It must not be confused
+            // with a driver exception, whose external result remains unknown and keeps its claim.
+            let terminalFailure = outcome.status == .failed && instruction.op != .verify
             let target: String?
             switch (instruction.op, outcome.status) {
             case (.verify, .passed): target = instruction.onPass
@@ -246,11 +248,14 @@ public actor SMLRuntime {
             case (_, .passed): target = instruction.next
             default: target = nil
             }
-            guard let target else {
+            guard terminalFailure || target != nil else {
                 throw SMLRuntimeError.currentInstructionCannotBeAdvanced(instruction.id)
             }
-            for (key, value) in outcome.statePatch {
-                task.state[key] = value
+            if !terminalFailure {
+                try Self.validateStatePatch(outcome.statePatch, workflow: workflow)
+                for (key, value) in outcome.statePatch {
+                    task.state[key] = value
+                }
             }
             let evidence = Self.capabilityEvidenceObject(outcome)
             Self.appendReceipt(
@@ -269,19 +274,23 @@ public actor SMLRuntime {
                 snapshot: &snapshot,
                 now: now
             )
-            task.currentInstructionID = target
             task.waitingApprovalOwner = nil
             task.capabilityClaim = nil
             task.updatedAtEpoch = now
-            try Self.driveUntilBlocked(
-                task: &task, workflow: workflow,
-                command: admitted, snapshot: &snapshot, now: now
-            )
+            if terminalFailure {
+                task.status = .failed
+            } else if let target {
+                task.currentInstructionID = target
+                try Self.driveUntilBlocked(
+                    task: &task, workflow: workflow,
+                    command: admitted, snapshot: &snapshot, now: now
+                )
+            }
             try Self.incrementRevision(&task)
             snapshot.tasks[task.taskID] = task
             return SMLCommandResult(
                 kind: .task,
-                message: "task capability completed",
+                message: terminalFailure ? "task capability failed" : "task capability completed",
                 task: Self.projectTask(task, workflow: workflow)
             )
         }
@@ -309,6 +318,8 @@ public actor SMLRuntime {
             return try await refuseTask(command: admitted)
         case SMLRuntimeCommandOperation.taskRollback, "rollback":
             return try await rollbackTask(command: admitted)
+        case SMLRuntimeCommandOperation.taskReconcile:
+            return try await reconcileTask(command: admitted)
         case SMLRuntimeCommandOperation.receiptsList, "receipts":
             return try await listReceipts(command: admitted.command)
         default:
@@ -401,82 +412,113 @@ public actor SMLRuntime {
         )
     }
 
-    private func createTask(
-        command admitted: SMLAdmittedCommand,
-        workflowID: String,
-        workflowVersion: String?
-    ) async throws -> SMLCommandResult {
-        guard admitted.command.expectedState.isEmpty else {
-            throw SMLRuntimeError.invalidArgument(
-                "expected_state must be empty when creating a task"
-            )
-        }
-        let now = clock()
+    /// Runs the same pure state transition before replay admission. It invokes no driver and
+    /// writes no store state, so bounded admission failures cannot consume replay capacity.
+    public func preflightAdmission(_ command: SMLCommandEnvelope, authority: SMLCommandAuthority,
+        nowEpoch: Double) async throws {
+        guard SMLRuntimeLeaseRegistry.taskCreatingOperations.contains(command.op) else { return }
+        let admitted = SMLAdmittedCommand(command: command, leaseID: authority.leaseID,
+            approvalAuthorities: authority.approvalAuthorities, admittedAtEpoch: nowEpoch)
         let admissions = activeAdmissions.mapValues(\.workflow)
-        return try await store.update { snapshot in
-            let record = workflowVersion.flatMap {
-                snapshot.workflows[Self.workflowStorageKey(id: workflowID, version: $0)]
-            } ?? Self.activeWorkflowRecord(id: workflowID, snapshot: snapshot)
-            guard let record,
-                  workflowVersion == nil || record.workflow.version == workflowVersion else {
-                throw SMLRuntimeError.workflowNotInstalled(workflowID)
+        try await store.preflightTaskCreation(command: command, authority: authority, nowEpoch: nowEpoch) { snapshot in
+            let workflowID: String
+            if command.op == SMLRuntimeCommandOperation.workflowRunMatching {
+                if let roleID = Self.stringValue(command.arguments["role_id"]), roleID != command.role {
+                    throw SMLRuntimeError.invalidArgument("role_id must match the command role")
+                }
+                let candidates = Self.matchingWorkflows(command: command, snapshot: snapshot)
+                guard !candidates.isEmpty else { throw SMLRuntimeError.workflowNotInstalled(command.role) }
+                guard candidates.count == 1, let selected = candidates.first else {
+                    throw SMLRuntimeError.ambiguousWorkflowMatch(candidates.map(\.workflow.id).sorted())
+                }
+                workflowID = selected.workflow.id
+            } else {
+                workflowID = try Self.workflowID(from: command)
             }
-            let workflowKey = Self.workflowStorageKey(
-                id: record.workflow.id, version: record.workflow.version
-            )
-            guard admissions[workflowKey] == record.workflow else {
-                throw SMLRuntimeError.workflowAdmissionNotBound(
-                    id: record.workflow.id, version: record.workflow.version
-                )
-            }
-            guard record.role == admitted.command.role else {
-                throw SMLRuntimeError.commandRoleMismatch(
-                    expected: record.role, actual: admitted.command.role
-                )
-            }
-            guard snapshot.tasks[admitted.task] == nil else {
-                throw SMLRuntimeError.taskAlreadyExists(admitted.task)
-            }
-            let initialState = try Self.objectArgument(
-                "initial_state", in: admitted.command.arguments, default: [:]
-            )
-            try Self.validateInitialState(initialState, workflow: record.workflow)
-            var task = SMLRuntimeTask(
-                taskID: admitted.task,
-                role: admitted.command.role,
-                workflowID: record.workflow.id,
-                workflowVersion: record.workflow.version,
-                currentInstructionID: record.workflow.entrypoint,
-                createdAtEpoch: now,
-                updatedAtEpoch: now,
-                state: initialState
-            )
-            Self.appendReceipt(
-                kind: .taskCreated,
-                task: &task,
-                workflow: record.workflow,
-                command: admitted,
-                instructionID: nil,
-                payload: ["workflow_id": .string(record.workflow.id)],
-                snapshot: &snapshot,
-                now: now
-            )
-            try Self.driveUntilBlocked(
-                task: &task, workflow: record.workflow,
-                command: admitted, snapshot: &snapshot, now: now
-            )
-            try Self.incrementRevision(&task)
-            snapshot.tasks[task.taskID] = task
-            return SMLCommandResult(
-                kind: .task,
-                message: "task \(task.taskID) created",
-                task: Self.projectTask(task, workflow: record.workflow)
-            )
+            _ = try Self.prepareTaskCreation(command: admitted, workflowID: workflowID,
+                workflowVersion: Self.workflowVersion(from: command), admissions: admissions,
+                snapshot: &snapshot, now: nowEpoch)
         }
     }
 
+    private func createTask(command admitted: SMLAdmittedCommand, workflowID: String,
+        workflowVersion: String?) async throws -> SMLCommandResult {
+        let now = clock()
+        let admissions = activeAdmissions.mapValues(\.workflow)
+        return try await store.update { snapshot in
+            try Self.prepareTaskCreation(command: admitted, workflowID: workflowID,
+                workflowVersion: workflowVersion, admissions: admissions, snapshot: &snapshot, now: now)
+        }
+    }
+
+    private static func prepareTaskCreation(command admitted: SMLAdmittedCommand, workflowID: String,
+        workflowVersion: String?, admissions: [String: SMLWorkflow], snapshot: inout SMLRuntimeSnapshot,
+        now: Double) throws -> SMLCommandResult {
+        guard admitted.command.expectedState.isEmpty else {
+            throw SMLRuntimeError.invalidArgument("expected_state must be empty when creating a task")
+        }
+        let record = workflowVersion.flatMap {
+            snapshot.workflows[Self.workflowStorageKey(id: workflowID, version: $0)]
+        } ?? Self.activeWorkflowRecord(id: workflowID, snapshot: snapshot)
+        guard let record,
+              workflowVersion == nil || record.workflow.version == workflowVersion else {
+            throw SMLRuntimeError.workflowNotInstalled(workflowID)
+        }
+        let workflowKey = Self.workflowStorageKey(
+            id: record.workflow.id, version: record.workflow.version
+        )
+        guard admissions[workflowKey] == record.workflow else {
+            throw SMLRuntimeError.workflowAdmissionNotBound(
+                id: record.workflow.id, version: record.workflow.version
+            )
+        }
+        guard record.role == admitted.command.role else {
+            throw SMLRuntimeError.commandRoleMismatch(
+                expected: record.role, actual: admitted.command.role
+            )
+        }
+        guard snapshot.tasks[admitted.task] == nil else {
+            throw SMLRuntimeError.taskAlreadyExists(admitted.task)
+        }
+        let initialState = try Self.objectArgument(
+            "initial_state", in: admitted.command.arguments, default: [:]
+        )
+        try Self.validateInitialState(initialState, workflow: record.workflow)
+        var task = SMLRuntimeTask(
+            taskID: admitted.task,
+            role: admitted.command.role,
+            workflowID: record.workflow.id,
+            workflowVersion: record.workflow.version,
+            currentInstructionID: record.workflow.entrypoint,
+            createdAtEpoch: now,
+            updatedAtEpoch: now,
+            state: initialState
+        )
+        Self.appendReceipt(
+            kind: .taskCreated,
+            task: &task,
+            workflow: record.workflow,
+            command: admitted,
+            instructionID: nil,
+            payload: ["workflow_id": .string(record.workflow.id)],
+            snapshot: &snapshot,
+            now: now
+        )
+        try Self.driveUntilBlocked(
+            task: &task, workflow: record.workflow,
+            command: admitted, snapshot: &snapshot, now: now
+        )
+        try Self.incrementRevision(&task)
+        snapshot.tasks[task.taskID] = task
+        return SMLCommandResult(
+            kind: .task,
+            message: "task \(task.taskID) created",
+            task: Self.projectTask(task, workflow: record.workflow)
+        )
+    }
+
     private func watchTask(command: SMLCommandEnvelope) async throws -> SMLCommandResult {
-        let snapshot = try await store.load()
+        let snapshot = try await snapshotIncludingArchivedHistory(taskID: command.task)
         let task = try Self.task(command.task, snapshot: snapshot)
         let workflow = try Self.workflow(for: task, snapshot: snapshot)
         guard task.role == command.role else {
@@ -601,7 +643,7 @@ public actor SMLRuntime {
             try Self.assertExpectedState(
                 admitted.command.expectedState, task: task, workflow: workflow
             )
-            guard ![SMLTaskStatus.completed, .escalated, .rolledBack, .refused]
+            guard ![SMLTaskStatus.completed, .failed, .escalated, .rolledBack, .refused]
                 .contains(task.status) else {
                 throw SMLRuntimeError.invalidTaskState(
                     "terminal task cannot be rolled back again"
@@ -636,8 +678,66 @@ public actor SMLRuntime {
         }
     }
 
+    /// Close an interrupted earlier-session dispatch without retrying or claiming its effect succeeded.
+    private func reconcileTask(command admitted: SMLAdmittedCommand) async throws -> SMLCommandResult {
+        let now = clock()
+        return try await store.update { snapshot in
+            var task = try Self.task(admitted.task, snapshot: snapshot)
+            guard task.role == admitted.command.role else {
+                throw SMLRuntimeError.commandRoleMismatch(expected: task.role, actual: admitted.command.role)
+            }
+            let workflow = try Self.workflow(for: task, snapshot: snapshot)
+            try Self.assertWorkflowBinding(admitted.command, task: task)
+            try Self.assertRequiredTaskRevision(admitted.command.expectedState, task: task)
+            try Self.assertExpectedState(admitted.command.expectedState, task: task, workflow: workflow)
+            guard task.status == .waitingCapability, let claim = task.capabilityClaim else {
+                throw SMLRuntimeError.invalidTaskState("task has no interrupted capability claim")
+            }
+            guard claim.leaseID != admitted.leaseID else {
+                throw SMLRuntimeError.invalidTaskState(
+                    "stop and restart this host before reconciling a claim from its current session"
+                )
+            }
+            let dispatchID = try Self.requiredStringArgument("dispatch_id", in: admitted.command.arguments)
+            guard dispatchID == claim.dispatchID else {
+                throw SMLRuntimeError.capabilityClaimMismatch
+            }
+            let note = try Self.requiredStringArgument("note", in: admitted.command.arguments)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !note.isEmpty, note.utf8.count <= 4_096 else {
+                throw SMLRuntimeError.invalidArgument("reconciliation note must contain 1...4096 UTF-8 bytes")
+            }
+            Self.appendReceipt(
+                kind: .reconciled, task: &task, workflow: workflow, command: admitted,
+                instructionID: claim.instructionID,
+                payload: [
+                    "dispatch_id": .string(claim.dispatchID),
+                    "driver_id": .string(claim.driverID),
+                    "original_lease_id": .string(claim.leaseID),
+                    "request_state_digest": .string(claim.stateDigest),
+                    "outcome": .string("abandoned"),
+                    "external_outcome": .string("unknown"),
+                    "note": .string(note),
+                ],
+                snapshot: &snapshot, now: now
+            )
+            task.capabilityClaim = nil
+            task.waitingApprovalOwner = nil
+            task.status = .failed
+            task.updatedAtEpoch = now
+            try Self.incrementRevision(&task)
+            snapshot.tasks[task.taskID] = task
+            return SMLCommandResult(
+                kind: .task,
+                message: "interrupted task closed as failed; external outcome remains unknown",
+                task: Self.projectTask(task, workflow: workflow)
+            )
+        }
+    }
+
     private func listReceipts(command: SMLCommandEnvelope) async throws -> SMLCommandResult {
-        let snapshot = try await store.load()
+        let snapshot = try await snapshotIncludingArchivedHistory(
+            taskID: command.task == "runtime" ? nil : command.task)
         let allowedTaskIDs: Set<String>
         if command.task == "runtime" {
             guard command.arguments["workflow_id"] == nil,
@@ -668,6 +768,24 @@ public actor SMLRuntime {
             message: "receipts",
             receipts: receipts
         )
+    }
+
+    private func snapshotIncludingArchivedHistory(taskID: String?) async throws -> SMLRuntimeSnapshot {
+        var snapshot = try await store.load()
+        let archived: [SMLRuntimeArchivedTask]
+        if let taskID {
+            if snapshot.tasks[taskID] != nil { return snapshot }
+            archived = try await store.archivedTask(id: taskID).map { [$0] } ?? []
+        } else {
+            archived = try await store.archivedTasks()
+        }
+        for entry in archived {
+            snapshot.tasks[entry.task.taskID] = entry.task
+            snapshot.workflows[SMLRuntimeSnapshot.workflowStorageKey(
+                id: entry.task.workflowID, version: entry.task.workflowVersion)] = entry.workflow
+            for receipt in entry.receipts { snapshot.receipts[receipt.id] = receipt }
+        }
+        return snapshot
     }
 
     private func roleFilter(from command: SMLCommandEnvelope) throws -> String? {
@@ -830,7 +948,7 @@ public actor SMLRuntime {
         snapshot: inout SMLRuntimeSnapshot,
         now: Double
     ) {
-        let id = nextReceiptID(taskID: task.taskID, snapshot: snapshot)
+        let id = nextReceiptID(task: task, snapshot: snapshot)
         let receipt = SMLRuntimeReceipt(
             id: id,
             kind: kind,
@@ -848,9 +966,14 @@ public actor SMLRuntime {
         task.receiptIDs.append(id)
     }
 
-    private static func nextReceiptID(taskID: String, snapshot: SMLRuntimeSnapshot) -> String {
-        let ordinal = snapshot.receipts.values.filter { $0.taskID == taskID }.count + 1
-        return "\(taskID).receipt-\(ordinal)"
+    private static func nextReceiptID(task: SMLRuntimeTask, snapshot: SMLRuntimeSnapshot) -> String {
+        var ordinal = task.receiptIDs.count + 1
+        var id = "\(task.taskID).receipt-\(ordinal)"
+        while snapshot.receipts[id] != nil {
+            ordinal += 1
+            id = "\(task.taskID).receipt-\(ordinal)"
+        }
+        return id
     }
 
     private static func receiptPayload(
@@ -1349,7 +1472,7 @@ public actor SMLRuntime {
         let tasks = snapshot.tasks.values.filter { role == nil || $0.role == role }
         let taskIDs = Set(tasks.map(\.taskID))
         let active = tasks.filter {
-            ![SMLTaskStatus.completed, .escalated, .rolledBack, .refused].contains($0.status)
+            ![SMLTaskStatus.completed, .failed, .escalated, .rolledBack, .refused].contains($0.status)
         }.count
         return SMLRuntimeStatusSummary(
             workflowCount: activeWorkflows.count,

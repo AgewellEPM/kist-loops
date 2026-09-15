@@ -252,7 +252,8 @@ public struct SMLRuntimeAuthorityConfig: Sendable {
             tasks: tasks,
             operations: grant.operations,
             approvalAuthorities: grant.approvalAuthorities,
-            scope: grant.scopeTemplate
+            scope: grant.scopeTemplate,
+            taskLease: lease
         )
     }
 }

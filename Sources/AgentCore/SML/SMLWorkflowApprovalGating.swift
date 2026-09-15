@@ -221,7 +221,7 @@ public enum SMLWorkflowApprovalGating {
         }
     }
 
-    private static func shouldGate(_ instruction: SMLInstruction, policy: SMLApprovalPolicy) -> Bool {
+    static func shouldGate(_ instruction: SMLInstruction, policy: SMLApprovalPolicy) -> Bool {
         guard externallyAdvancedOperations.contains(instruction.op) else { return false }
         switch policy.mode(for: instruction) {
         case .approveAlways: return true

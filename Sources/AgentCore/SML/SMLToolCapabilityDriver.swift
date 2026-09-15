@@ -29,7 +29,10 @@ public struct SMLToolCapabilityDriver: SMLInstructionDriver {
     }
 
     public func supports(_ request: SMLCapabilityRequest) -> Bool {
+        // Admission names a permitted capability, not an installed implementation. Resolve before
+        // the coordinator claims dispatch; an absent tool must remain parked and restartable.
         request.operation == .callTool && allowedCapabilities.contains(request.reference)
+            && registry.tool(named: request.reference) != nil
     }
 
     public func execute(
@@ -49,7 +52,7 @@ public struct SMLToolCapabilityDriver: SMLInstructionDriver {
         let result = await registry.execute(
             name: request.reference,
             arguments: SMLCapabilityDriverSupport.foundationArguments(arguments),
-            context: context
+            context: context.withCorrelationID(invocation.dispatchID)
         )
 
         var statePatch: SMLObject = [:]

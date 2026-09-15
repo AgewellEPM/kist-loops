@@ -47,22 +47,45 @@ extension KistRunner {
         let session = try host.launch.app.replSession(workflowID: workflowID)
 
         // Durable interactive mode gets the full dispatch stack behind the prompt.
-        var pump: SMLRuntimeCapabilityPump?
         if host.durableEnvironment != nil {
             let actor = opts.smlRuntimeActor ?? "sml-runtime-exporter"
-            pump = try makeSMLRuntimeCapabilityStack(
+            return try await withSMLRuntimeCapabilityStack(
                 host: host,
                 projectRoot: opts.project,
-                actor: actor
-            )
-            .pump
+                actor: actor,
+                enableComputerUse: opts.enableComputerUse
+            ) { stack in
+                try await runInteractiveREPLSession(
+                    host: host,
+                    workflowID: workflowID,
+                    session: session,
+                    pump: stack.pump,
+                    projectRoot: opts.project
+                )
+            }
         }
 
+        return try await runInteractiveREPLSession(
+            host: host,
+            workflowID: workflowID,
+            session: session,
+            pump: nil,
+            projectRoot: opts.project
+        )
+    }
+
+    private static func runInteractiveREPLSession(
+        host: SMLRuntimeHostLaunch,
+        workflowID: String,
+        session: SMLWorkflowREPLSession,
+        pump: SMLRuntimeCapabilityPump?,
+        projectRoot: String
+    ) async throws -> Int32 {
         print("sml workflow repl · \(workflowID) · type 'help' for verbs, 'exit' to leave")
         if host.durableEnvironment == nil {
             print("(ephemeral sandbox — no drivers; use --sml-runtime-durable for live dispatch)")
         } else {
-            print("tool audit · \(AuditLog.forProject(root: opts.project).path)")
+            print("tool audit · \(AuditLog.forProject(root: projectRoot).path)")
         }
         if let pump {
             try reportInteractiveSMLRuntimeDrain(await pump.drain())

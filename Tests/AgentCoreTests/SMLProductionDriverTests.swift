@@ -70,7 +70,8 @@ final class SMLProductionDriverTests: XCTestCase {
         operation: SMLInstructionOperation,
         reference: String,
         arguments: SMLObject = [:],
-        state: SMLObject = [:]
+        state: SMLObject = [:],
+        outputSchema: String? = nil
     ) -> SMLCapabilityRequest {
         SMLCapabilityRequest(
             taskID: "TASK-D1",
@@ -81,6 +82,7 @@ final class SMLProductionDriverTests: XCTestCase {
             instructionID: "step-1",
             operation: operation,
             reference: reference,
+            outputSchema: operation == .callModel ? (outputSchema ?? "text") : nil,
             arguments: arguments,
             scope: [:],
             expectedState: [:],
@@ -325,6 +327,56 @@ final class SMLProductionDriverTests: XCTestCase {
         XCTAssertTrue(prompt.contains("drivers"))
     }
 
+    func testModelDriverPreservesTypedObjectAndRejectsInvalidResponses() async throws {
+        for response in [#"{"count":2,"ready":true}"#, "plain prose", #"{"count":1,"count":2}"#, "[]"] {
+            let provider = ScriptedTextProvider(responses: [response])
+            let driver = SMLModelCapabilityDriver(
+                bindings: SMLModelPurposeBindings(purposes: [
+                    "summary": .init(providerId: provider.id, model: provider.defaultModel)
+                ], outputSchemas: ["summary.v1": .object]),
+                providers: ProviderRegistry(providers: [provider], retryDelaysNanoseconds: []))
+            let request = request(operation: .callModel, reference: "summary",
+                arguments: ["output_field": .string("result")], outputSchema: "summary.v1")
+            let outcome = try await driver.execute(invocation(request, driverID: driver.id))
+            if response == #"{"count":2,"ready":true}"# {
+                XCTAssertEqual(outcome.status, .passed)
+                XCTAssertEqual(outcome.statePatch["result"], .object(["count": .number(2), "ready": .bool(true)]))
+            } else {
+                XCTAssertEqual(outcome.status, .failed)
+                XCTAssertTrue(outcome.statePatch.isEmpty)
+            }
+            XCTAssertTrue(provider.lastPrompt.contains("valid JSON object"))
+        }
+    }
+
+    func testModelDriverRejectsUnknownSchemaBeforeProviderCall() async throws {
+        let provider = ScriptedTextProvider(responses: ["not called"])
+        let driver = SMLModelCapabilityDriver(
+            bindings: .init(purposes: ["summary": .init(providerId: provider.id, model: provider.defaultModel)]),
+            providers: ProviderRegistry(providers: [provider], retryDelaysNanoseconds: []))
+        do {
+            _ = try await driver.execute(invocation(request(operation: .callModel,
+                reference: "summary", outputSchema: "unbound.schema"), driverID: driver.id))
+            XCTFail("an unbound schema cannot be credited with validation")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("output_schemas"))
+        }
+        XCTAssertEqual(provider.lastPrompt, "")
+    }
+
+    func testModelOutputValidatesPrimitiveTypesAndSizeBound() async throws {
+        XCTAssertEqual(try SMLModelCapabilityDriver.decodeOutput("true", type: .boolean), .bool(true))
+        XCTAssertEqual(try SMLModelCapabilityDriver.decodeOutput("2", type: .integer), .number(2))
+        XCTAssertThrowsError(try SMLModelCapabilityDriver.decodeOutput("2.5", type: .integer))
+        XCTAssertThrowsError(try SMLModelCapabilityDriver.decodeOutput("true", type: .integer))
+        let provider = ScriptedTextProvider(responses: [String(repeating: "x", count: 65_537)])
+        let driver = SMLModelCapabilityDriver(
+            bindings: .init(purposes: ["summary": .init(providerId: provider.id, model: provider.defaultModel)]),
+            providers: ProviderRegistry(providers: [provider], retryDelaysNanoseconds: []))
+        let outcome = try await driver.execute(invocation(request(operation: .callModel, reference: "summary"), driverID: driver.id))
+        XCTAssertEqual(outcome.status, .failed)
+    }
+
     func testModelDriverTreatsEmptyResponseAsFailure() async throws {
         let provider = ScriptedTextProvider(responses: ["   \n"])
         let driver = SMLModelCapabilityDriver(
@@ -350,6 +402,46 @@ final class SMLProductionDriverTests: XCTestCase {
     }
 
     // MARK: - Retrieval driver
+
+    func testRetrievalProviderFindsPersistedEvidenceInMatchingSpace() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sml-retrieve-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("vectors.json").path
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let text = "matching project note"
+        let store = FileBackedVectorStore(path: path)
+        try store.upsertOperational(id: "note", logicalID: SemanticMemoryService.id(for: text),
+            vector: [1, 0], text: text, metadata: [:],
+            temporal: try MemoryTemporalEnvelope(createdAt: now),
+            provenance: SemanticMemoryProvenance(kind: .manualObservation, contentDigest: SemanticMemoryService.id(for: text)),
+            embeddingSpace: "test:retrieval")
+        let provider = RetrievalTestEmbedder(spaces: ["test:retrieval", "test:retrieval"])
+        let driver = SMLRetrievalCapabilityDriver(
+            bindings: .init(sources: ["notes": .init(storePath: path, embeddingSpace: "test:retrieval")]),
+            provider: provider, clock: { now.timeIntervalSince1970 })
+        let outcome = try await driver.execute(invocation(request(operation: .retrieve,
+            reference: "notes", arguments: ["output_field": .string("hits")]), driverID: driver.id))
+        XCTAssertEqual(outcome.status, .passed)
+        guard case .array(let hits)? = outcome.statePatch["hits"], case .object(let first)? = hits.first else {
+            return XCTFail("retrieval must return typed hits")
+        }
+        XCTAssertEqual(first["text"], .string(text))
+        let calls = await provider.embeddingCalls
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testRetrievalRejectsWrongAndChangedEmbeddingSpaces() async throws {
+        for spaces in [["wrong"], ["expected", "changed"]] {
+            let provider = RetrievalTestEmbedder(spaces: spaces)
+            let driver = SMLRetrievalCapabilityDriver(
+                bindings: .init(sources: ["notes": .init(storePath: "/unused.json", embeddingSpace: "expected")]),
+                provider: provider)
+            let outcome = try await driver.execute(invocation(request(operation: .retrieve, reference: "notes"), driverID: driver.id))
+            XCTAssertEqual(outcome.status, .failed)
+            let calls = await provider.embeddingCalls
+            XCTAssertEqual(calls, spaces.count == 1 ? 0 : 1)
+        }
+    }
 
     func testRetrievalDriverFailsClosedOnBrokenEmbedder() async throws {
         let driver = SMLRetrievalCapabilityDriver(
@@ -447,5 +539,79 @@ private final class ScriptedTextProvider: ChatProvider, @unchecked Sendable {
             continuation.yield(.finish(reason: "stop"))
             continuation.finish()
         }
+    }
+}
+
+private actor RetrievalTestEmbedder: EmbeddingProviding {
+    private var spaces: [String]
+    private(set) var embeddingCalls = 0
+    init(spaces: [String]) { self.spaces = spaces }
+    func embeddingSpaceID() async throws -> String {
+        spaces.count > 1 ? spaces.removeFirst() : spaces[0]
+    }
+    func embeddings(for texts: [String]) async throws -> [[Float]] {
+        embeddingCalls += 1
+        return texts.map { _ in [1, 0] }
+    }
+}
+
+
+extension SMLProductionDriverTests {
+    func testModelDriverEnforcesNestedContractBeforeSuccessfulEvidence() async throws {
+        let contract = try SMLModelOutputContract(schema: [
+            "type": .string("object"), "required": .array([.string("items")]),
+            "additionalProperties": .bool(false),
+            "properties": .object(["items": .object([
+                "type": .string("array"), "minItems": .number(1), "maxItems": .number(2),
+                "items": .object(["type": .string("object"),
+                    "required": .array([.string("score")]), "additionalProperties": .bool(false),
+                    "properties": .object(["score": .object([
+                        "type": .string("integer"), "minimum": .number(1), "maximum": .number(5)
+                    ])])])
+            ])])
+        ])
+        for response in [#"{"items":[{"score":5}]}"#, #"{"items":[{"score":"5"}]}"#,
+                         #"{"items":[{"score":6}]}"#, #"{"items":[]}"#, #"{"items":[{}]}"#,
+                         #"{"items":[{"score":5,"extra":true}]}"#] {
+            let provider = ScriptedTextProvider(responses: [response])
+            let driver = SMLModelCapabilityDriver(
+                bindings: .init(purposes: ["summary": .init(providerId: provider.id, model: provider.defaultModel)],
+                                outputContracts: ["report.v2": contract]),
+                providers: ProviderRegistry(providers: [provider], retryDelaysNanoseconds: []),
+                clock: { 2_000 })
+            let request = request(operation: .callModel, reference: "summary",
+                                  arguments: ["output_field": .string("result")], outputSchema: "report.v2")
+            let outcome = try await driver.execute(invocation(request, driverID: driver.id))
+            if response == #"{"items":[{"score":5}]}"# {
+                XCTAssertEqual(outcome.status, .passed)
+                XCTAssertEqual(outcome.statePatch["result"], .object(["items": .array([.object(["score": .number(5)])])]))
+            } else {
+                XCTAssertEqual(outcome.status, .failed, response)
+                XCTAssertTrue(outcome.statePatch.isEmpty, response)
+                XCTAssertTrue(outcome.evidence.receiptID.hasSuffix(".failed"))
+            }
+            XCTAssertTrue(provider.lastPrompt.contains(contract.compactJSON))
+            XCTAssertTrue(provider.lastPrompt.contains("valid JSON object"))
+        }
+    }
+
+    func testModelEvidenceDigestBindsExactOutputContract() async throws {
+        var digests: [String] = []
+        for maximum in [10, 20] {
+            let contract = try SMLModelOutputContract(schema: [
+                "type": .string("integer"), "maximum": .number(Decimal(maximum))])
+            let provider = ScriptedTextProvider(responses: ["5"])
+            let driver = SMLModelCapabilityDriver(
+                bindings: .init(purposes: ["summary": .init(providerId: provider.id, model: provider.defaultModel)],
+                                outputContracts: ["report.v2": contract]),
+                providers: ProviderRegistry(providers: [provider], retryDelaysNanoseconds: []),
+                clock: { 2_000 })
+            let request = request(operation: .callModel, reference: "summary",
+                                  arguments: ["output_field": .string("result")], outputSchema: "report.v2")
+            let outcome = try await driver.execute(invocation(request, driverID: driver.id))
+            XCTAssertEqual(outcome.status, .passed)
+            digests.append(outcome.evidence.digest)
+        }
+        XCTAssertNotEqual(digests[0], digests[1])
     }
 }

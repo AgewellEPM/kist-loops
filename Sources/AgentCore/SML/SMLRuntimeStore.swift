@@ -10,6 +10,7 @@ public enum SMLTaskStatus: String, Sendable, Codable, Equatable {
     case waitingCapability = "waiting_capability"
     case waitingApproval = "waiting_approval"
     case completed
+    case failed
     case escalated
     case rolledBack = "rolled_back"
     case refused
@@ -27,6 +28,8 @@ public enum SMLRuntimeReceiptKind: String, Sendable, Codable, Equatable {
     case escalated
     case completed
     case receiptEmitted = "receipt_emitted"
+    case reconciled
+    case restored
 }
 
 public struct SMLRuntimeWorkflowRecord: Sendable, Codable, Equatable {
@@ -277,7 +280,7 @@ public struct SMLRuntimeReceipt: Sendable, Codable, Equatable {
 }
 
 public struct SMLRuntimeSnapshot: Sendable, Codable, Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public var schemaVersion: Int
     /// Exact workflow revisions, keyed by `workflowStorageKey(id:version:)`.
@@ -287,6 +290,9 @@ public struct SMLRuntimeSnapshot: Sendable, Codable, Equatable {
     public var tasks: [String: SMLRuntimeTask]
     public var receipts: [String: SMLRuntimeReceipt]
     public var replayClaims: [String: Double]
+    /// Content-addressed immutable archive tree; constant-size metadata on the hot write path.
+    public var archiveRoot: String?
+    public var archivedTaskCount: Int
 
     public init(
         schemaVersion: Int = SMLRuntimeSnapshot.currentSchemaVersion,
@@ -294,7 +300,9 @@ public struct SMLRuntimeSnapshot: Sendable, Codable, Equatable {
         activeWorkflowVersions: [String: String] = [:],
         tasks: [String: SMLRuntimeTask] = [:],
         receipts: [String: SMLRuntimeReceipt] = [:],
-        replayClaims: [String: Double] = [:]
+        replayClaims: [String: Double] = [:],
+        archiveRoot: String? = nil,
+        archivedTaskCount: Int = 0
     ) {
         self.schemaVersion = schemaVersion
         self.workflows = workflows
@@ -302,6 +310,8 @@ public struct SMLRuntimeSnapshot: Sendable, Codable, Equatable {
         self.tasks = tasks
         self.receipts = receipts
         self.replayClaims = replayClaims
+        self.archiveRoot = archiveRoot
+        self.archivedTaskCount = archivedTaskCount
     }
 
     enum CodingKeys: String, CodingKey {
@@ -309,12 +319,14 @@ public struct SMLRuntimeSnapshot: Sendable, Codable, Equatable {
         case workflows, tasks, receipts
         case activeWorkflowVersions = "active_workflow_versions"
         case replayClaims = "replay_claims"
+        case archiveRoot = "archive_root"
+        case archivedTaskCount = "archived_task_count"
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
-        guard schemaVersion == 1 || schemaVersion == Self.currentSchemaVersion else {
+        guard (1...Self.currentSchemaVersion).contains(schemaVersion) else {
             throw SMLRuntimeStoreError.unsupportedSchema(schemaVersion)
         }
         workflows = try container.decode(
@@ -324,7 +336,17 @@ public struct SMLRuntimeSnapshot: Sendable, Codable, Equatable {
         replayClaims = try container.decode(
             [String: Double].self, forKey: .replayClaims
         )
-        if schemaVersion == Self.currentSchemaVersion {
+        if schemaVersion >= 3 {
+            archiveRoot = try container.decodeIfPresent(String.self, forKey: .archiveRoot)
+            archivedTaskCount = try container.decode(Int.self, forKey: .archivedTaskCount)
+            guard archivedTaskCount >= 0, (archiveRoot == nil) == (archivedTaskCount == 0) else {
+                throw SMLRuntimeStoreError.decoding("invalid archive root/count")
+            }
+        } else {
+            archiveRoot = nil
+            archivedTaskCount = 0
+        }
+        if schemaVersion >= 2 {
             activeWorkflowVersions = try container.decode(
                 [String: String].self, forKey: .activeWorkflowVersions
             )
@@ -364,8 +386,15 @@ public enum SMLRuntimeStoreError: Error, Sendable, Equatable, CustomStringConver
 }
 
 public actor SMLRuntimeStore: SMLCommandReplayGuard {
-    private let fileURL: URL
-    private let clock: @Sendable () -> Double
+    let fileURL: URL
+    let clock: @Sendable () -> Double
+    public nonisolated let admissionLimits: SMLRuntimeAdmissionLimits
+    /// Reuse only a fully decoded snapshot whose exact bytes match a fresh, descriptor-validated
+    /// read. Every load still checks ownership and path identity, so a replacement, in-place edit,
+    /// restore, or substituted symlink cannot be hidden by this single-entry cache.
+    private var decodedSnapshotCache: (bytes: Data, snapshot: SMLRuntimeSnapshot)?
+    /// Valid only after loadUnlocked has checked the current descriptor and exact bytes.
+    var validatedCurrentSnapshotByteCount: Int { decodedSnapshotCache?.bytes.count ?? 0 }
     /// Exact schema-v1 bytes retained before this store first publishes schema v2.
     ///
     /// Rollback tooling can restore this deterministic sibling and then launch a schema-v1-only
@@ -374,16 +403,17 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
 
     public init(fileURL: URL, clock: @escaping @Sendable () -> Double = {
         Date().timeIntervalSince1970
-    }) {
+    }, admissionLimits: SMLRuntimeAdmissionLimits = .init()) {
         self.fileURL = fileURL
+        self.admissionLimits = admissionLimits
         self.clock = clock
         self.schemaV1BackupURL = Self.schemaV1BackupURL(forRuntimeURL: fileURL)
     }
 
     public init(path: String, clock: @escaping @Sendable () -> Double = {
         Date().timeIntervalSince1970
-    }) {
-        self.init(fileURL: URL(fileURLWithPath: path), clock: clock)
+    }, admissionLimits: SMLRuntimeAdmissionLimits = .init()) {
+        self.init(fileURL: URL(fileURLWithPath: path), clock: clock, admissionLimits: admissionLimits)
     }
 
     public static func defaultURL(projectRoot: String) -> URL {
@@ -406,15 +436,20 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         }
     }
 
-    private func loadUnlocked() throws -> SMLRuntimeSnapshot {
+    func loadUnlocked() throws -> SMLRuntimeSnapshot {
         guard let data = try readRuntimeFileIfPresentUnlocked() else {
+            decodedSnapshotCache = nil
             return SMLRuntimeSnapshot()
         }
         do {
-            let decoded = try JSONDecoder().decode(SMLRuntimeSnapshot.self, from: data)
+            let decoded = try decodedSnapshot(for: data)
             switch decoded.schemaVersion {
             case SMLRuntimeSnapshot.currentSchemaVersion:
                 return decoded
+            case 2:
+                var upgraded = decoded
+                upgraded.schemaVersion = SMLRuntimeSnapshot.currentSchemaVersion
+                return upgraded
             case 1:
                 var workflows: [String: SMLRuntimeWorkflowRecord] = [:]
                 var active: [String: String] = [:]
@@ -443,10 +478,19 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         }
     }
 
+    private func decodedSnapshot(for data: Data) throws -> SMLRuntimeSnapshot {
+        if let cached = decodedSnapshotCache, cached.bytes == data {
+            return cached.snapshot
+        }
+        let decoded = try JSONDecoder().decode(SMLRuntimeSnapshot.self, from: data)
+        decodedSnapshotCache = (data, decoded)
+        return decoded
+    }
+
     /// Read through an owner-bound descriptor and verify that the pathname still names that exact
     /// regular file. This keeps ordinary loads on the same fail-closed path as migration/restore;
     /// `Data(contentsOf:)` would follow a substituted runtime.json symlink.
-    private func readRuntimeFileIfPresentUnlocked() throws -> Data? {
+    func readRuntimeFileIfPresentUnlocked() throws -> Data? {
         let directory = fileURL.deletingLastPathComponent()
         let directoryDescriptor = try Self.openStoreDirectory(directory)
         defer { _ = close(directoryDescriptor) }
@@ -498,6 +542,11 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
 
     public func save(_ snapshot: SMLRuntimeSnapshot) throws {
         try withSidecarLock(exclusive: true) {
+            let current = try loadUnlocked()
+            guard snapshot.archiveRoot == current.archiveRoot,
+                  snapshot.archivedTaskCount == current.archivedTaskCount else {
+                throw SMLRuntimeStoreError.io("archive identity history may change only through offline maintenance")
+            }
             try saveUnlocked(snapshot)
         }
     }
@@ -507,13 +556,20 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
     /// This does not remove or rewrite the backup. Callers must stop all runtime users before
     /// switching binaries; the sidecar lock only serializes cooperating store instances.
     public func restoreSchemaV1Backup() throws {
-        try withSidecarLock(exclusive: true) {
+        try withOfflineMaintenance {
             let backup = try readSchemaV1BackupUnlocked()
+            let original = try JSONDecoder().decode(SMLRuntimeSnapshot.self, from: backup)
+            let current = try loadUnlocked()
+            guard current.archiveRoot == nil, current.tasks == original.tasks,
+                  current.receipts == original.receipts else {
+                throw SMLRuntimeStoreError.io(
+                    "schema-v1 rollback would discard task history; use a verified current-schema backup restore")
+            }
             try Self.writeDurableAtomic(backup, to: fileURL)
         }
     }
 
-    private func saveUnlocked(_ snapshot: SMLRuntimeSnapshot) throws {
+    func saveUnlocked(_ snapshot: SMLRuntimeSnapshot) throws {
         guard snapshot.schemaVersion == SMLRuntimeSnapshot.currentSchemaVersion else {
             throw SMLRuntimeStoreError.unsupportedSchema(snapshot.schemaVersion)
         }
@@ -526,10 +582,13 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         }
         do {
             let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            // The durable hot store is machine data; human-facing exports format their own JSON.
+            // Compact encoding reduces every atomic rewrite without changing ordering or fsync.
+            encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(snapshot)
             try preserveSchemaV1BackupIfNeededUnlocked()
             try Self.writeDurableAtomic(data, to: fileURL)
+            decodedSnapshotCache = (data, snapshot)
         } catch let error as EncodingError {
             throw SMLRuntimeStoreError.decoding(String(describing: error))
         } catch let error as SMLRuntimeStoreError {
@@ -542,7 +601,26 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
     public func update<T>(_ body: (inout SMLRuntimeSnapshot) throws -> T) throws -> T {
         try withSidecarLock(exclusive: true) {
             var snapshot = try loadUnlocked()
+            let originalTaskIDs = Set(snapshot.tasks.keys)
+            let originalArchiveRoot = snapshot.archiveRoot
+            let originalArchiveCount = snapshot.archivedTaskCount
+            let originalSnapshot = snapshot
+            let originalByteCount = validatedCurrentSnapshotByteCount
             let result = try body(&snapshot)
+            guard snapshot.archiveRoot == originalArchiveRoot,
+                  snapshot.archivedTaskCount == originalArchiveCount else {
+                throw SMLRuntimeStoreError.io("archive identity history may change only through offline maintenance")
+            }
+            if snapshot.tasks.keys.contains(where: { !originalTaskIDs.contains($0) }) {
+                try admissionLimits.requireHeadroom(snapshot: originalSnapshot,
+                    hotBytes: originalByteCount)
+                try admissionLimits.requireFits(snapshot: snapshot)
+            }
+            for taskID in snapshot.tasks.keys where !originalTaskIDs.contains(taskID) {
+                if try archivedTaskUnlocked(id: taskID, root: snapshot.archiveRoot) != nil {
+                    throw SMLRuntimeError.taskAlreadyExists(taskID)
+                }
+            }
             try saveUnlocked(snapshot)
             return result
         }
@@ -600,9 +678,17 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         }
 
         let runtimeBytes = try Self.readAll(runtimeDescriptor)
-        let sourceSchema = try Self.decodeSnapshotSchema(
-            runtimeBytes, context: "runtime store before schema migration"
-        )
+        // Usually these are the exact bytes just validated by loadUnlocked (or saved by this
+        // actor). Preserve the original source schema in the cache; a v1 read is upgraded only
+        // in the returned projection, so its mandatory write-once backup still happens.
+        let sourceSchema: Int
+        do {
+            sourceSchema = try decodedSnapshot(for: runtimeBytes).schemaVersion
+        } catch {
+            throw SMLRuntimeStoreError.decoding(
+                "runtime store before schema migration: \(String(describing: error))"
+            )
+        }
         guard sourceSchema == 1 else { return }
 
         if try Self.validateExistingSchemaV1Backup(
@@ -752,7 +838,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         }
     }
 
-    private static func openStoreDirectory(_ directory: URL) throws -> Int32 {
+    static func openStoreDirectory(_ directory: URL) throws -> Int32 {
         var descriptor: Int32
         repeat {
             descriptor = open(
@@ -775,7 +861,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino
     }
 
-    private static func readAll(_ descriptor: Int32) throws -> Data {
+    static func readAll(_ descriptor: Int32) throws -> Data {
         var result = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
         while true {
@@ -791,7 +877,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
 
     /// A stable sidecar coordinates the whole read-modify-write transaction across store actors and
     /// processes. Locking runtime.json itself would be ineffective because atomic saves replace it.
-    private func withSidecarLock<T>(
+    func withSidecarLock<T>(
         exclusive: Bool,
         _ body: () throws -> T
     ) throws -> T {
@@ -840,7 +926,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
 
     /// APFS/noowners volumes can transiently report ENOENT during concurrent O_CREAT opens. Open
     /// existing first, race an exclusive create, and retry the EEXIST/ENOENT handoff fail-closed.
-    private static func openOrCreateLock(path: String, flags: Int32) -> Int32 {
+    static func openOrCreateLock(path: String, flags: Int32) -> Int32 {
         for _ in 0..<128 {
             var existing: Int32
             repeat { existing = open(path, flags) }
@@ -866,7 +952,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
     /// Publish a complete replacement before returning from a durable mutation. The temporary file
     /// lives beside the destination so `renameat` is atomic, and the parent directory sync makes the
     /// new directory entry survive a host crash after a capability claim has been acknowledged.
-    private static func writeDurableAtomic(_ data: Data, to url: URL) throws {
+    static func writeDurableAtomic(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         let basename = url.lastPathComponent
 
@@ -935,7 +1021,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         try synchronizeDirectory(directoryDescriptor)
     }
 
-    private static func writeAll(_ data: Data, descriptor: Int32) throws {
+    static func writeAll(_ data: Data, descriptor: Int32) throws {
         try data.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return }
             var offset = 0
@@ -959,7 +1045,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         }
     }
 
-    private static func synchronizeFile(_ descriptor: Int32) throws {
+    static func synchronizeFile(_ descriptor: Int32) throws {
         var result: Int32
         repeat { result = fsync(descriptor) }
         while result < 0 && errno == EINTR
@@ -981,7 +1067,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         #endif
     }
 
-    private static func synchronizeDirectory(_ descriptor: Int32) throws {
+    static func synchronizeDirectory(_ descriptor: Int32) throws {
         var result: Int32
         repeat { result = fsync(descriptor) }
         while result < 0 && errno == EINTR
@@ -990,7 +1076,7 @@ public actor SMLRuntimeStore: SMLCommandReplayGuard {
         }
     }
 
-    private static func posixIOError(
+    static func posixIOError(
         _ operation: String,
         code: Int32 = errno
     ) -> SMLRuntimeStoreError {

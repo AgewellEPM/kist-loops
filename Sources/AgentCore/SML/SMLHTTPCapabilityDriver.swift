@@ -321,7 +321,8 @@ private extension SMLHTTPCapabilityDriver {
             let encodedValues = try Self.scalarStrings(value, expectedType: parameter.valueType)
             switch parameter.location {
             case .path:
-                guard encodedValues.count == 1 else {
+                guard encodedValues.count == 1,
+                      encodedValues[0] != ".", encodedValues[0] != ".." else {
                     throw SMLHTTPRequestRefusal.invalidParameter
                 }
                 expandedPath = expandedPath.replacingOccurrences(

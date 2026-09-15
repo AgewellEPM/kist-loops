@@ -119,6 +119,41 @@ final class KistSMLRuntimeDriverWiringTests: XCTestCase {
         ))
     }
 
+    func testConfiguredRetrievalRequiresAndUsesARealEmbeddingProvider() throws {
+        let root = try makeProjectRoot(endpoint: endpoint(capability: "unused.http"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent(SMLRetrievalSourceBindings.relativePath)
+        try Data(#"{"schema_version":1,"sources":{"notes":{"store_path":"vectors.json","embedding_space":"test:host","top_k":5}}}"#.utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: url.path)
+        let catalog = SMLExecutionAdmissionCatalog(retrievalSources: ["notes"])
+        XCTAssertThrowsError(try KistRunner.buildSMLCapabilityDrivers(projectRoot: root.path, catalog: catalog)) { error in
+            XCTAssertTrue(String(describing: error).contains("configured embedding provider"))
+        }
+        let drivers = try KistRunner.buildSMLCapabilityDrivers(projectRoot: root.path,
+            catalog: catalog, embeddingProvider: HostTestEmbedder())
+        XCTAssertEqual(try SMLCapabilityRouter(drivers: drivers).driverID(for:
+            SMLCapabilityRouter.probeRequest(operation: .retrieve, reference: "notes")), "kist-retrieval-driver")
+        let loaded = try SMLRetrievalSourceBindings.load(projectRoot: root.path)
+        XCTAssertEqual(loaded.sources["notes"]?.storePath, root.appendingPathComponent("vectors.json").path)
+    }
+
+    func testModelTypeMappingsLoadAndUnknownAdmittedSchemaAbortsLaunch() throws {
+        let root = try makeProjectRoot(endpoint: endpoint(capability: "unused.http"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent(SMLModelPurposeBindings.relativePath)
+        try Data(#"{"schema_version":1,"purposes":{"summary":{"provider":"codex-cli","model":"test-model"}},"output_schemas":{"summary.v1":"object"}}"#.utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: url.path)
+        let bindings = try SMLModelPurposeBindings.load(projectRoot: root.path)
+        XCTAssertEqual(bindings.outputSchemas["summary.v1"], .object)
+        XCTAssertEqual(bindings.outputSchemas["text"], .string)
+        XCTAssertNoThrow(try KistRunner.buildSMLCapabilityDrivers(projectRoot: root.path,
+            catalog: SMLExecutionAdmissionCatalog(modelPurposes: ["summary"], modelOutputSchemas: ["summary.v1"])))
+        XCTAssertThrowsError(try KistRunner.buildSMLCapabilityDrivers(projectRoot: root.path,
+            catalog: SMLExecutionAdmissionCatalog(modelPurposes: ["summary"], modelOutputSchemas: ["missing.v1"]))) { error in
+            XCTAssertTrue(String(describing: error).contains("output_schemas"))
+        }
+    }
+
     private func endpoint(capability: String) -> SMLHTTPEndpointSpec {
         SMLHTTPEndpointSpec(
             capability: capability,
@@ -168,4 +203,9 @@ private struct ProbeDriver: SMLInstructionDriver {
 
 private enum ProbeDriverError: Error {
     case executionMustNotBeCalledByLaunchProbe
+}
+
+private struct HostTestEmbedder: EmbeddingProviding {
+    func embeddingSpaceID() async throws -> String { "test:host" }
+    func embeddings(for texts: [String]) async throws -> [[Float]] { texts.map { _ in [1, 0] } }
 }

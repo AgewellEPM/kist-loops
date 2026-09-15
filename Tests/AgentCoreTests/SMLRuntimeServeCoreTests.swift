@@ -80,6 +80,51 @@ final class SMLRuntimeServeCoreTests: XCTestCase {
 
     // MARK: - Pump
 
+    func testOperatorQueueIncludesOnlyTasksTheActorCanWatch() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-pending-scope-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let workflow = SMLWorkflow(
+            id: "queue.wf", version: "1.0.0", name: "Queue",
+            source: .init(kind: .native, reference: "tests://queue"),
+            trigger: .init(kind: .manual), stateSchema: [], interface: .init(),
+            entrypoint: "gate", instructions: [
+                .init(id: "gate", op: .waitApproval, reason: "review",
+                      owner: "operator", next: "done", onFailure: "refused"),
+                .init(id: "done", op: .complete),
+                .init(id: "refused", op: .escalate, reason: "refused", owner: "operator"),
+            ])
+        let registry = try SMLWorkflowRuntimeRegistry.compile(candidateMounts: [
+            SMLWorkflowRuntimeCandidateMount(
+                workflow: workflow, admissionCatalog: .init(approvalAuthorities: ["operator"]), role: "operator-role",
+                actor: "operator.luke", replActions: [], apiBasePath: "/sml", apiWorkflowPath: nil,
+                modelMaximumCommandRounds: 4)
+        ])
+        let store = SMLRuntimeStore(fileURL: directory.appendingPathComponent("runtime.json"))
+        let runtime = SMLRuntime(store: store)
+        let api = registry.makeAPI(
+            gateway: .init(runtime: runtime, replayGuard: store),
+            authorityResolver: { command in
+                SMLCommandAuthority(
+                    authenticatedActor: command.actor, leaseID: "queue-lease",
+                    roles: ["operator-role"], tasks: ["TASK-OWNED"],
+                    operations: [SMLRuntimeCommandOperation.taskWatch], scope: [:])
+            }, clock: { 1_000 })
+        var snapshot = SMLRuntimeSnapshot()
+        snapshot.workflows[SMLRuntimeSnapshot.workflowStorageKey(id: workflow.id, version: workflow.version)] =
+            .init(role: "operator-role", workflow: workflow, installedAtEpoch: 1_000)
+        for taskID in ["TASK-OWNED", "TASK-OTHER"] {
+            snapshot.tasks[taskID] = SMLRuntimeTask(
+                taskID: taskID, role: "operator-role", workflowID: workflow.id,
+                workflowVersion: workflow.version, revision: 1, currentInstructionID: "gate",
+                status: .waitingApproval, createdAtEpoch: 1_000, updatedAtEpoch: 1_000,
+                waitingApprovalOwner: "operator")
+        }
+        let view = await api.pendingView(from: snapshot)
+        XCTAssertEqual(view.approvals.map(\.taskID), ["TASK-OWNED"])
+    }
+
     private actor CountingCoordinatorProbe {
         private(set) var executed: [String] = []
         func record(_ taskID: String) { executed.append(taskID) }
@@ -165,11 +210,12 @@ final class SMLRuntimeServeCoreTests: XCTestCase {
         directory: URL,
         configuration: SMLRuntimeHTTPCore.Configuration = .init(
             portRange: 18_850...18_899
-        )
+        ),
+        admissionLimits: SMLRuntimeAdmissionLimits = .init()
     ) async throws -> (core: SMLRuntimeHTTPCore, token: String) {
         let store = SMLRuntimeStore(
             fileURL: directory.appendingPathComponent("runtime.json"),
-            clock: { 1_000 }
+            clock: { 1_000 }, admissionLimits: admissionLimits
         )
         let runtime = SMLRuntime(store: store, clock: { 1_000 })
         let workflow = SMLWorkflow(
@@ -336,6 +382,18 @@ final class SMLRuntimeServeCoreTests: XCTestCase {
         let view = try JSONDecoder().decode(SMLRuntimePendingView.self, from: approvalsBody)
         XCTAssertTrue(view.isEmpty)
 
+        let (healthStatus, healthBody) = try await httpGet(
+            base.appendingPathComponent("health"), token: token
+        )
+        XCTAssertEqual(healthStatus, 200)
+        let health = try XCTUnwrap(JSONSerialization.jsonObject(with: healthBody) as? [String: Any])
+        XCTAssertEqual(health["status"] as? String, "ready")
+        XCTAssertEqual(health["inFlightOrUnresolvedClaimCount"] as? Int, 0)
+        let capacity = try XCTUnwrap(health["admission"] as? [String: Any])
+        XCTAssertEqual(capacity["acceptingNewTasks"] as? Bool, true)
+        let (privateHealth, _) = try await httpGet(base.appendingPathComponent("health"), token: nil)
+        XCTAssertEqual(privateHealth, 401)
+
         let (catalogStatus, catalogBody) = try await httpGet(
             base.appendingPathComponent("sml/runtime/catalog"), token: token
         )
@@ -354,6 +412,69 @@ final class SMLRuntimeServeCoreTests: XCTestCase {
         core.stop()
         XCTAssertEqual(core.port, 0, "a stopped core must not advertise a stale port")
         XCTAssertNil(core.start(), "an HTTP core owns exactly one session token and is single-use")
+    }
+
+    func testHTTPAdmissionBackpressureKeepsStatusAvailableAndReturnsRetryAfter() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("sml-http-capacity-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (core, token) = try await makeServableHost(directory: directory,
+            admissionLimits: .init(maximumHotTasks: 1))
+        guard let base = core.start() else { return XCTFail("no free loopback test port") }
+        defer { core.stop() }
+        func start(_ id: String) throws -> (status: Int, headers: String, body: Data) {
+            let body = "{\"task_id\":\"\(id)\",\"input\":{}}"
+            return try rawHTTPRequest(port: core.port, request:
+                "POST /sml/workflows/http.wf/tasks HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Length: \(body.utf8.count)\r\n\r\n" + body)
+        }
+        XCTAssertTrue((200...299).contains(try start("TASK-ONE").status))
+        let full = try start("TASK-TWO")
+        XCTAssertEqual(full.status, 503)
+        XCTAssertTrue(full.headers.contains("Retry-After: 5"))
+        let (status, _) = try await httpGet(base.appendingPathComponent("approvals"), token: token)
+        XCTAssertEqual(status, 200)
+    }
+
+    func testIncompleteClientDoesNotBlockStatusAndShutdownClosesClients() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sml-http-concurrent-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (core, token) = try await makeServableHost(directory: directory, configuration: .init(
+            socketTimeoutMilliseconds: 5_000, shutdownGraceMilliseconds: 200,
+            maximumConcurrentConnections: 2
+        ))
+        guard let base = core.start() else { return XCTFail("no free loopback test port") }
+        defer { core.stop() }
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw POSIXTestError(operation: "socket") }
+        defer { _ = close(descriptor) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = core.port.bigEndian
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(connected, 0)
+        let partial = Data("GET /approvals HTTP/1.1\r\nHost: localhost\r\n".utf8)
+        let sent = partial.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
+        XCTAssertEqual(sent, partial.count)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let start = Date()
+        let (status, _) = try await httpGet(base.appendingPathComponent("approvals"), token: token)
+        XCTAssertEqual(status, 200)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.5,
+                          "an incomplete client must not monopolize the accept loop")
+        let stopStart = Date()
+        core.stop()
+        XCTAssertLessThan(Date().timeIntervalSince(stopStart), 1.5)
+        var socketState = pollfd(fd: descriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
+        XCTAssertGreaterThan(poll(&socketState, 1, 500), 0, "stop must close incomplete clients")
+        var byte: UInt8 = 0
+        XCTAssertEqual(read(descriptor, &byte, 1), 0)
     }
 
     func testSessionTokenPublicationIsOwnerOnlyAtomicAndDoesNotFollowSymlinks() throws {
