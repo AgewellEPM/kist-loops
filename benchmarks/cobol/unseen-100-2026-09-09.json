@@ -1,0 +1,206 @@
+{
+  "audit_passed": true,
+  "evidence_scope": "Local executable benchmark evidence; not sealed mission acceptance or model-weight learning.",
+  "corpus_sha256": "c12fbefa62c240df62086ef68d19dfa942d5a02d52dcdf32dc16dc2628e1ff7c",
+  "pinned_files_unchanged": 21,
+  "counts": {
+    "scored_requests": 600,
+    "recorded_mcp_calls": 300,
+    "stopped_mcp_sessions": 1200,
+    "reconciled_behavioral_checks": 3270,
+    "compiled_programs": 210,
+    "refused": 390,
+    "standalone_calls": 300,
+    "model_calls": 3,
+    "reconciled_process_records": 4685
+  },
+  "scores": {
+    "kist-a": {
+      "runs": 100,
+      "correct": 56,
+      "classifications": {
+        "correct_build": 56,
+        "refused": 44
+      },
+      "supported_family": {
+        "runs": 56,
+        "correct": 56
+      },
+      "unsupported_family": {
+        "runs": 44,
+        "correct": 0
+      },
+      "compiled_programs": 56,
+      "behavioral_checks": 872,
+      "behavioral_passes": 872
+    },
+    "kist-b-warm": {
+      "runs": 100,
+      "correct": 56,
+      "classifications": {
+        "refused": 44,
+        "correct_build": 56
+      },
+      "supported_family": {
+        "runs": 56,
+        "correct": 56
+      },
+      "unsupported_family": {
+        "runs": 44,
+        "correct": 0
+      },
+      "compiled_programs": 56,
+      "behavioral_checks": 872,
+      "behavioral_passes": 872
+    },
+    "kist-b-cold": {
+      "runs": 100,
+      "correct": 56,
+      "classifications": {
+        "refused": 44,
+        "correct_build": 56
+      },
+      "supported_family": {
+        "runs": 56,
+        "correct": 56
+      },
+      "unsupported_family": {
+        "runs": 44,
+        "correct": 0
+      },
+      "compiled_programs": 56,
+      "behavioral_checks": 872,
+      "behavioral_passes": 872
+    },
+    "direct-a": {
+      "runs": 100,
+      "correct": 14,
+      "classifications": {
+        "refused": 86,
+        "correct_build": 14
+      },
+      "supported_family": {
+        "runs": 56,
+        "correct": 14
+      },
+      "unsupported_family": {
+        "runs": 44,
+        "correct": 0
+      },
+      "compiled_programs": 14,
+      "behavioral_checks": 218,
+      "behavioral_passes": 218
+    },
+    "direct-b-warm": {
+      "runs": 100,
+      "correct": 14,
+      "classifications": {
+        "refused": 86,
+        "correct_build": 14
+      },
+      "supported_family": {
+        "runs": 56,
+        "correct": 14
+      },
+      "unsupported_family": {
+        "runs": 44,
+        "correct": 0
+      },
+      "compiled_programs": 14,
+      "behavioral_checks": 218,
+      "behavioral_passes": 218
+    },
+    "direct-b-cold": {
+      "runs": 100,
+      "correct": 14,
+      "classifications": {
+        "refused": 86,
+        "correct_build": 14
+      },
+      "supported_family": {
+        "runs": 56,
+        "correct": 14
+      },
+      "unsupported_family": {
+        "runs": 44,
+        "correct": 0
+      },
+      "compiled_programs": 14,
+      "behavioral_checks": 218,
+      "behavioral_passes": 218
+    }
+  },
+  "memory": {
+    "kist": {
+      "warm_minus_cold_correct": 0,
+      "warm_helped_cases": [],
+      "warm_hurt_cases": [],
+      "warm_cold_same_classification": 100,
+      "warm_cold_same_source_for_builds": 56,
+      "first_to_rephrased_transitions": {
+        "correct_build -> correct_build": 56,
+        "refused -> refused": 44
+      },
+      "warm_cold_identical_normalizations": 100
+    },
+    "direct": {
+      "warm_minus_cold_correct": 0,
+      "warm_helped_cases": [],
+      "warm_hurt_cases": [],
+      "warm_cold_same_classification": 100,
+      "warm_cold_same_source_for_builds": 14,
+      "first_to_rephrased_transitions": {
+        "refused -> correct_build": 14,
+        "refused -> refused": 72,
+        "correct_build -> refused": 14
+      },
+      "warm_cold_identical_full_responses": 100
+    }
+  },
+  "model_provenance": [
+    {
+      "provider": "codex-cli",
+      "model": "gpt-5.6-sol",
+      "model_calls": 1,
+      "tasks": 100,
+      "round": "a",
+      "prior_context": false,
+      "grading_feedback_provided": false,
+      "binary_sha256": "aedd218d1b9e598da9d370df4220fc055aa430dcf5b30ca69be992d7f4e03b0e",
+      "corpus_sha256": "c12fbefa62c240df62086ef68d19dfa942d5a02d52dcdf32dc16dc2628e1ff7c",
+      "elapsed_seconds": 76.00709954199999,
+      "token_usage": null,
+      "limitation": "Batched interpretation through Kist; not unrestricted model code generation or weight training."
+    },
+    {
+      "provider": "codex-cli",
+      "model": "gpt-5.6-sol",
+      "model_calls": 1,
+      "tasks": 100,
+      "round": "b-warm",
+      "prior_context": true,
+      "grading_feedback_provided": false,
+      "binary_sha256": "aedd218d1b9e598da9d370df4220fc055aa430dcf5b30ca69be992d7f4e03b0e",
+      "corpus_sha256": "c12fbefa62c240df62086ef68d19dfa942d5a02d52dcdf32dc16dc2628e1ff7c",
+      "elapsed_seconds": 82.90721404199999,
+      "token_usage": null,
+      "limitation": "Batched interpretation through Kist; not unrestricted model code generation or weight training."
+    },
+    {
+      "provider": "codex-cli",
+      "model": "gpt-5.6-sol",
+      "model_calls": 1,
+      "tasks": 100,
+      "round": "b-cold",
+      "prior_context": false,
+      "grading_feedback_provided": false,
+      "binary_sha256": "aedd218d1b9e598da9d370df4220fc055aa430dcf5b30ca69be992d7f4e03b0e",
+      "corpus_sha256": "c12fbefa62c240df62086ef68d19dfa942d5a02d52dcdf32dc16dc2628e1ff7c",
+      "elapsed_seconds": 91.171092459,
+      "token_usage": null,
+      "limitation": "Batched interpretation through Kist; not unrestricted model code generation or weight training."
+    }
+  ],
+  "benchmark_processes_remaining": [],
+  "autonomy_remains_disabled": true
+}

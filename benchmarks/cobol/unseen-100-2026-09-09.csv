@@ -1,0 +1,151 @@
+id,paraphrase_id,operation,size,supported_family_before_run,prompt_a,prompt_b,kist-a,kist-b-warm,kist-b-cold,direct-a,direct-b-warm,direct-b-cold
+T001,R080,count-over,47,True,Please implement a routine that computes the number of entries strictly greater than one hundred among 47 integers.,count values over 100 of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T002,R063,count-pos,47,True,Please implement a routine that computes the number of strictly positive entries among 47 integers.,count positive of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T003,R001,sum-negative,149,False,sum only the negative entries in one hundred forty-nine values,Build a COBOL routine: sum only the negative entries in 149 values.,refused,refused,refused,refused,refused,refused
+T004,R057,ksds-sorted,83,True,"{""request"":""write keys one through 83 in descending insertion order, then display every key in ascending order from an indexed file"",""capacity"":83}","I need a COBOL routine for write keys one through eighty-three in descending insertion order, then display every key in ascending order from an indexed file.",correct_build,correct_build,correct_build,refused,refused,refused
+T005,R070,count-odd,47,False,Please implement a routine that computes how many of 47 signed integers are not divisible by two.,count odd integers in 47 values,refused,refused,refused,refused,refused,refused
+T006,R092,count-over,149,True,count values over 100 of one hundred forty-nine values,Build a COBOL routine: count values over 100 of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T007,R017,reduce-min,83,True,"{""request"":""the least reading in 83 signed integers"",""capacity"":83}",I need a COBOL routine for the least reading in eighty-three signed integers.,correct_build,correct_build,correct_build,refused,refused,refused
+T008,R003,max-abs,23,False,find the maximum absolute value among 23 integers,"SPECIFICATION
+Input capacity: 23
+Required result: return the largest magnitude in a list of 23 signed numbers.",refused,refused,refused,refused,refused,refused
+T009,R015,count-uppercase,149,False,count uppercase ASCII letters in a one hundred forty-nine-character string,Build a COBOL routine: count uppercase ASCII letters in a 149-character string.,refused,refused,refused,refused,refused,refused
+T010,R086,sum-squares,47,False,Please implement a routine that computes multiply each of 47 integers by itself and add those products.,sum the squares of 47 integer values,refused,refused,refused,refused,refused,refused
+T011,R100,count-even,23,False,"count even integers in 23 values, including zero","SPECIFICATION
+Input capacity: 23
+Required result: how many of 23 integers are divisible by two, treating zero as even.",refused,refused,refused,refused,refused,refused
+T012,R007,count-pos,149,True,count positive of one hundred forty-nine values,Build a COBOL routine: count positive of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T013,R089,count-spaces,47,False,Please implement a routine that computes the number of ASCII space characters in the complete padded field of width 47.,"count spaces in a 47-character string, including fixed-width padding",refused,refused,refused,refused,refused,refused
+T014,R076,count-above-50,23,False,count values strictly above 50 in a list of 23 integers,"SPECIFICATION
+Input capacity: 23
+Required result: the number of entries greater than fifty among 23 integers.",refused,refused,refused,refused,refused,refused
+T015,R083,weighted-sum,83,False,"{""request"":""multiply the first of 83 integers by one, the second by two, and so on; return the sum"",""capacity"":83}","I need a COBOL routine for multiply the first of eighty-three integers by one, the second by two, and so on; return the sum.",refused,refused,refused,refused,refused,refused
+T016,R064,count-spaces,23,False,"count spaces in a 23-character string, including fixed-width padding","SPECIFICATION
+Input capacity: 23
+Required result: the number of ASCII space characters in the complete padded field of width 23.",refused,refused,refused,refused,refused,refused
+T017,R081,count-pos,83,True,"{""request"":""the number of strictly positive entries among 83 integers"",""capacity"":83}",I need a COBOL routine for the number of strictly positive entries among eighty-three integers.,correct_build,correct_build,correct_build,refused,refused,refused
+T018,R022,count-above-50,149,False,count values strictly above 50 in a list of one hundred forty-nine integers,Build a COBOL routine: count values strictly above 50 in a list of 149 integers.,refused,refused,refused,refused,refused,refused
+T019,R013,weighted-sum,23,False,sum each of 23 integer values multiplied by its one-based position,"SPECIFICATION
+Input capacity: 23
+Required result: multiply the first of 23 integers by one, the second by two, and so on; return the sum.",refused,refused,refused,refused,refused,refused
+T020,R020,vowel-count,83,True,"{""request"":""the number of ASCII vowels, ignoring case, in a field of width 83"",""capacity"":83}","I need a COBOL routine for the number of ASCII vowels, ignoring case, in a field of width eighty-three.",correct_build,correct_build,correct_build,refused,refused,refused
+T021,R016,reduce-min,149,True,minimum of one hundred forty-nine values,Build a COBOL routine: minimum of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T022,R006,sum-abs,149,True,sum of absolute values of one hundred forty-nine values,Build a COBOL routine: sum of absolute values of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T023,R012,vowel-count,23,True,count vowels in a 23-character string,"SPECIFICATION
+Input capacity: 23
+Required result: the number of ASCII vowels, ignoring case, in a field of width 23.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T024,R091,count-spaces,83,False,"{""request"":""the number of ASCII space characters in the complete padded field of width 83"",""capacity"":83}",I need a COBOL routine for the number of ASCII space characters in the complete padded field of width eighty-three.,refused,refused,refused,refused,refused,refused
+T025,R088,digit-count,149,True,count digits in a one hundred forty-nine-character string,Build a COBOL routine: count digits in a 149-character string.,correct_build,correct_build,correct_build,refused,refused,refused
+T026,R098,count-spaces,149,False,"count spaces in a one hundred forty-nine-character string, including fixed-width padding","Build a COBOL routine: count spaces in a 149-character string, including fixed-width padding.",refused,refused,refused,refused,refused,refused
+T027,R054,count-even,83,False,"{""request"":""how many of 83 integers are divisible by two, treating zero as even"",""capacity"":83}","I need a COBOL routine for how many of eighty-three integers are divisible by two, treating zero as even.",refused,refused,refused,refused,refused,refused
+T028,R037,count-above-50,47,False,Please implement a routine that computes the number of entries greater than fifty among 47 integers.,count values strictly above 50 in a list of 47 integers,refused,refused,refused,refused,refused,refused
+T029,R073,sum-negative,23,False,sum only the negative entries in 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: add every strictly negative value in a list of 23 integers.",refused,refused,refused,refused,refused,refused
+T030,R050,count-distinct,23,False,count distinct integer values in a list of 23 entries,"SPECIFICATION
+Input capacity: 23
+Required result: how many different numeric values occur among 23 integers, counting each value once.",refused,refused,refused,refused,refused,refused
+T031,R075,digit-count,83,True,"{""request"":""the number of ASCII decimal digit characters in a field of width 83"",""capacity"":83}",I need a COBOL routine for the number of ASCII decimal digit characters in a field of width eighty-three.,correct_build,correct_build,correct_build,refused,refused,refused
+T032,R038,range,23,True,range of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: largest minus smallest across 23 signed integers.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T033,R019,sum-positive,23,True,sum 23 positive values,"SPECIFICATION
+Input capacity: 23
+Required result: add only entries strictly greater than zero in a list of 23 integers.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T034,R078,weighted-sum,149,False,sum each of one hundred forty-nine integer values multiplied by its one-based position,Build a COBOL routine: sum each of 149 integer values multiplied by its one-based position.,refused,refused,refused,refused,refused,refused
+T035,R044,sum-abs,83,True,"{""request"":""add the magnitudes of 83 signed numbers"",""capacity"":83}",I need a COBOL routine for add the magnitudes of eighty-three signed numbers.,correct_build,correct_build,correct_build,refused,refused,refused
+T036,R090,sum-squares,23,False,sum the squares of 23 integer values,"SPECIFICATION
+Input capacity: 23
+Required result: multiply each of 23 integers by itself and add those products.",refused,refused,refused,refused,refused,refused
+T037,R032,count-odd,149,False,count odd integers in one hundred forty-nine values,Build a COBOL routine: count odd integers in 149 values.,refused,refused,refused,refused,refused,refused
+T038,R047,sum-positive,83,True,"{""request"":""add only entries strictly greater than zero in a list of 83 integers"",""capacity"":83}",I need a COBOL routine for add only entries strictly greater than zero in a list of eighty-three integers.,correct_build,correct_build,correct_build,refused,refused,refused
+T039,R056,count-below-minus20,23,False,count values strictly below -20 in a list of 23 integers,"SPECIFICATION
+Input capacity: 23
+Required result: how many entries are less than negative twenty among 23 integers.",refused,refused,refused,refused,refused,refused
+T040,R052,count-zero,47,True,Please implement a routine that computes how many of 47 integer entries equal zero.,count zeros of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T041,R059,count-zero,83,True,"{""request"":""how many of 83 integer entries equal zero"",""capacity"":83}",I need a COBOL routine for how many of eighty-three integer entries equal zero.,correct_build,correct_build,correct_build,refused,refused,refused
+T042,R039,average,149,True,average of one hundred forty-nine values,Build a COBOL routine: average of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T043,R087,sum-negative,83,False,"{""request"":""add every strictly negative value in a list of 83 integers"",""capacity"":83}",I need a COBOL routine for add every strictly negative value in a list of eighty-three integers.,refused,refused,refused,refused,refused,refused
+T044,R018,reduce-min,47,True,Please implement a routine that computes the least reading in 47 signed integers.,minimum of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T045,R041,count-neg,149,True,count negative of one hundred forty-nine values,Build a COBOL routine: count negative of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T046,R060,count-uppercase,23,False,count uppercase ASCII letters in a 23-character string,"SPECIFICATION
+Input capacity: 23
+Required result: the number of characters from A through Z in a text field of width 23.",refused,refused,refused,refused,refused,refused
+T047,R055,count-distinct,47,False,"Please implement a routine that computes how many different numeric values occur among 47 integers, counting each value once.",count distinct integer values in a list of 47 entries,refused,refused,refused,refused,refused,refused
+T048,R046,average,23,True,average of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: the arithmetic mean of 23 integers, truncating toward zero.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T049,R040,reduce-max,83,True,"{""request"":""the largest reading in 83 signed integers"",""capacity"":83}",I need a COBOL routine for the largest reading in eighty-three signed integers.,correct_build,correct_build,correct_build,refused,refused,refused
+T050,R029,count-neg,23,True,count negative of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: how many entries are strictly below zero among 23 integers.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T051,R042,count-uppercase,47,False,Please implement a routine that computes the number of characters from A through Z in a text field of width 47.,count uppercase ASCII letters in a 47-character string,refused,refused,refused,refused,refused,refused
+T052,R008,count-uppercase,83,False,"{""request"":""the number of characters from A through Z in a text field of width 83"",""capacity"":83}",I need a COBOL routine for the number of characters from A through Z in a text field of width eighty-three.,refused,refused,refused,refused,refused,refused
+T053,R011,reduce-max,23,True,maximum of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: the largest reading in 23 signed integers.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T054,R026,count-above-50,83,False,"{""request"":""the number of entries greater than fifty among 83 integers"",""capacity"":83}",I need a COBOL routine for the number of entries greater than fifty among eighty-three integers.,refused,refused,refused,refused,refused,refused
+T055,R053,count-even,149,False,"count even integers in one hundred forty-nine values, including zero","Build a COBOL routine: count even integers in 149 values, including zero.",refused,refused,refused,refused,refused,refused
+T056,R097,range,47,True,Please implement a routine that computes largest minus smallest across 47 signed integers.,range of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T057,R043,count-zero,149,True,count zeros of one hundred forty-nine values,Build a COBOL routine: count zeros of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T058,R004,count-neg,47,True,Please implement a routine that computes how many entries are strictly below zero among 47 integers.,count negative of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T059,R002,reduce-sum,47,True,Please implement a routine that computes add together all 47 integer entries.,sum of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T060,R027,sum-squares,149,False,sum the squares of one hundred forty-nine integer values,Build a COBOL routine: sum the squares of 149 integer values.,refused,refused,refused,refused,refused,refused
+T061,R036,reduce-sum,23,True,sum of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: add together all 23 integer entries.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T062,R093,count-below-minus20,149,False,count values strictly below -20 in a list of one hundred forty-nine integers,Build a COBOL routine: count values strictly below -20 in a list of 149 integers.,refused,refused,refused,refused,refused,refused
+T063,R071,sum-positive,47,True,Please implement a routine that computes add only entries strictly greater than zero in a list of 47 integers.,sum 47 positive values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T064,R067,vowel-count,47,True,"Please implement a routine that computes the number of ASCII vowels, ignoring case, in a field of width 47.",count vowels in a 47-character string,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T065,R074,vowel-count,149,True,count vowels in a one hundred forty-nine-character string,Build a COBOL routine: count vowels in a 149-character string.,correct_build,correct_build,correct_build,refused,refused,refused
+T066,R085,max-abs,47,False,Please implement a routine that computes return the largest magnitude in a list of 47 signed numbers.,find the maximum absolute value among 47 integers,refused,refused,refused,refused,refused,refused
+T067,R096,reduce-min,23,True,minimum of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: the least reading in 23 signed integers.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T068,R010,reduce-sum,83,True,"{""request"":""add together all 83 integer entries"",""capacity"":83}",I need a COBOL routine for add together all eighty-three integer entries.,correct_build,correct_build,correct_build,refused,refused,refused
+T069,R025,sum-abs,23,True,sum of absolute values of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: add the magnitudes of 23 signed numbers.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T070,R024,ksds-sorted,23,True,write 23 keyed records to an indexed file and read them back in key order,"SPECIFICATION
+Input capacity: 23
+Required result: write keys one through 23 in descending insertion order, then display every key in ascending order from an indexed file.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T071,R028,weighted-sum,47,False,"Please implement a routine that computes multiply the first of 47 integers by one, the second by two, and so on; return the sum.",sum each of 47 integer values multiplied by its one-based position,refused,refused,refused,refused,refused,refused
+T072,R068,digit-count,23,True,count digits in a 23-character string,"SPECIFICATION
+Input capacity: 23
+Required result: the number of ASCII decimal digit characters in a field of width 23.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T073,R072,sum-abs,47,True,Please implement a routine that computes add the magnitudes of 47 signed numbers.,sum of absolute values of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T074,R014,count-odd,83,False,"{""request"":""how many of 83 signed integers are not divisible by two"",""capacity"":83}",I need a COBOL routine for how many of eighty-three signed integers are not divisible by two.,refused,refused,refused,refused,refused,refused
+T075,R049,reduce-max,47,True,Please implement a routine that computes the largest reading in 47 signed integers.,maximum of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T076,R082,ksds-sorted,149,True,write one hundred forty-nine keyed records to an indexed file and read them back in key order,Build a COBOL routine: write 149 keyed records to an indexed file and read them back in key order.,correct_build,correct_build,correct_build,refused,refused,refused
+T077,R077,sum-squares,83,False,"{""request"":""multiply each of 83 integers by itself and add those products"",""capacity"":83}",I need a COBOL routine for multiply each of eighty-three integers by itself and add those products.,refused,refused,refused,refused,refused,refused
+T078,R084,count-below-minus20,83,False,"{""request"":""how many entries are less than negative twenty among 83 integers"",""capacity"":83}",I need a COBOL routine for how many entries are less than negative twenty among eighty-three integers.,refused,refused,refused,refused,refused,refused
+T079,R095,sum-negative,47,False,Please implement a routine that computes add every strictly negative value in a list of 47 integers.,sum only the negative entries in 47 values,refused,refused,refused,refused,refused,refused
+T080,R031,count-over,83,True,"{""request"":""the number of entries strictly greater than one hundred among 83 integers"",""capacity"":83}",I need a COBOL routine for the number of entries strictly greater than one hundred among eighty-three integers.,correct_build,correct_build,correct_build,refused,refused,refused
+T081,R069,count-pos,23,True,count positive of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: the number of strictly positive entries among 23 integers.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T082,R099,ksds-sorted,47,True,"Please implement a routine that computes write keys one through 47 in descending insertion order, then display every key in ascending order from an indexed file.",write 47 keyed records to an indexed file and read them back in key order,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T083,R058,count-distinct,149,False,count distinct integer values in a list of one hundred forty-nine entries,Build a COBOL routine: count distinct integer values in a list of 149 entries.,refused,refused,refused,refused,refused,refused
+T084,R034,reduce-max,149,True,maximum of one hundred forty-nine values,Build a COBOL routine: maximum of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T085,R033,average,47,True,"Please implement a routine that computes the arithmetic mean of 47 integers, truncating toward zero.",average of 47 values,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T086,R045,count-neg,83,True,"{""request"":""how many entries are strictly below zero among 83 integers"",""capacity"":83}",I need a COBOL routine for how many entries are strictly below zero among eighty-three integers.,correct_build,correct_build,correct_build,refused,refused,refused
+T087,R094,range,83,True,"{""request"":""largest minus smallest across 83 signed integers"",""capacity"":83}",I need a COBOL routine for largest minus smallest across eighty-three signed integers.,correct_build,correct_build,correct_build,refused,refused,refused
+T088,R061,count-even,47,False,"Please implement a routine that computes how many of 47 integers are divisible by two, treating zero as even.","count even integers in 47 values, including zero",refused,refused,refused,refused,refused,refused
+T089,R023,count-distinct,83,False,"{""request"":""how many different numeric values occur among 83 integers, counting each value once"",""capacity"":83}","I need a COBOL routine for how many different numeric values occur among eighty-three integers, counting each value once.",refused,refused,refused,refused,refused,refused
+T090,R030,count-below-minus20,47,False,Please implement a routine that computes how many entries are less than negative twenty among 47 integers.,count values strictly below -20 in a list of 47 integers,refused,refused,refused,refused,refused,refused
+T091,R005,range,149,True,range of one hundred forty-nine values,Build a COBOL routine: range of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T092,R051,sum-positive,149,True,sum one hundred forty-nine positive values,Build a COBOL routine: sum 149 positive values.,correct_build,correct_build,correct_build,refused,refused,refused
+T093,R035,max-abs,83,False,"{""request"":""return the largest magnitude in a list of 83 signed numbers"",""capacity"":83}",I need a COBOL routine for return the largest magnitude in a list of eighty-three signed numbers.,refused,refused,refused,refused,refused,refused
+T094,R009,max-abs,149,False,find the maximum absolute value among one hundred forty-nine integers,Build a COBOL routine: find the maximum absolute value among 149 integers.,refused,refused,refused,refused,refused,refused
+T095,R079,count-zero,23,True,count zeros of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: how many of 23 integer entries equal zero.",correct_build,correct_build,correct_build,correct_build,refused,refused
+T096,R048,reduce-sum,149,True,sum of one hundred forty-nine values,Build a COBOL routine: sum of 149 values.,correct_build,correct_build,correct_build,refused,refused,refused
+T097,R066,count-odd,23,False,count odd integers in 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: how many of 23 signed integers are not divisible by two.",refused,refused,refused,refused,refused,refused
+T098,R021,average,83,True,"{""request"":""the arithmetic mean of 83 integers, truncating toward zero"",""capacity"":83}","I need a COBOL routine for the arithmetic mean of eighty-three integers, truncating toward zero.",correct_build,correct_build,correct_build,refused,refused,refused
+T099,R062,digit-count,47,True,Please implement a routine that computes the number of ASCII decimal digit characters in a field of width 47.,count digits in a 47-character string,correct_build,correct_build,correct_build,refused,correct_build,correct_build
+T100,R065,count-over,23,True,count values over 100 of 23 values,"SPECIFICATION
+Input capacity: 23
+Required result: the number of entries strictly greater than one hundred among 23 integers.",correct_build,correct_build,correct_build,correct_build,refused,refused

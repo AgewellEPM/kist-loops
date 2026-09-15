@@ -1,0 +1,1073 @@
+{
+  "schema_version": 1,
+  "id": "kist-cobol-v1",
+  "seed": 9082026,
+  "random_cases": 4,
+  "repetitions": 2,
+  "case_timeout_seconds": 60,
+  "expected_families": 13,
+  "case_count": 101,
+  "oracle_contract": "numeric PIC S9(5), result S9(9); integer average truncates toward zero; vowel counting is ASCII case-insensitive; indexed keys ascend; unsupported intent may refuse explicitly",
+  "cases": [
+    {
+      "id": "reduce-min-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 1 values"
+      },
+      "operation": "reduce-min",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-min-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 2 values"
+      },
+      "operation": "reduce-min",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-min-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 7 values"
+      },
+      "operation": "reduce-min",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-min-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 31 values"
+      },
+      "operation": "reduce-min",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-min-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 100 values"
+      },
+      "operation": "reduce-min",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-min-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 999 values"
+      },
+      "operation": "reduce-min",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-max-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 1 values"
+      },
+      "operation": "reduce-max",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-max-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 2 values"
+      },
+      "operation": "reduce-max",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-max-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 7 values"
+      },
+      "operation": "reduce-max",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-max-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 31 values"
+      },
+      "operation": "reduce-max",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-max-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 100 values"
+      },
+      "operation": "reduce-max",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-max-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 999 values"
+      },
+      "operation": "reduce-max",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-sum-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 1 values"
+      },
+      "operation": "reduce-sum",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-sum-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 2 values"
+      },
+      "operation": "reduce-sum",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-sum-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 7 values"
+      },
+      "operation": "reduce-sum",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-sum-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 31 values"
+      },
+      "operation": "reduce-sum",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-sum-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 100 values"
+      },
+      "operation": "reduce-sum",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "reduce-sum-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 999 values"
+      },
+      "operation": "reduce-sum",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "range-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 1 values"
+      },
+      "operation": "range",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "range-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 2 values"
+      },
+      "operation": "range",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "range-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 7 values"
+      },
+      "operation": "range",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "range-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 31 values"
+      },
+      "operation": "range",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "range-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 100 values"
+      },
+      "operation": "range",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "range-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 999 values"
+      },
+      "operation": "range",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "average-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 1 values"
+      },
+      "operation": "average",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "average-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 2 values"
+      },
+      "operation": "average",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "average-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 7 values"
+      },
+      "operation": "average",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "average-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 31 values"
+      },
+      "operation": "average",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "average-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 100 values"
+      },
+      "operation": "average",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "average-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 999 values"
+      },
+      "operation": "average",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "sum-abs-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 1 values"
+      },
+      "operation": "sum-abs",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "sum-abs-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 2 values"
+      },
+      "operation": "sum-abs",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "sum-abs-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 7 values"
+      },
+      "operation": "sum-abs",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "sum-abs-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 31 values"
+      },
+      "operation": "sum-abs",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "sum-abs-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 100 values"
+      },
+      "operation": "sum-abs",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "sum-abs-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 999 values"
+      },
+      "operation": "sum-abs",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-neg-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 1 values"
+      },
+      "operation": "count-neg",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-neg-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 2 values"
+      },
+      "operation": "count-neg",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-neg-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 7 values"
+      },
+      "operation": "count-neg",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-neg-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 31 values"
+      },
+      "operation": "count-neg",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-neg-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 100 values"
+      },
+      "operation": "count-neg",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-neg-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 999 values"
+      },
+      "operation": "count-neg",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-pos-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 1 values"
+      },
+      "operation": "count-pos",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-pos-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 2 values"
+      },
+      "operation": "count-pos",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-pos-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 7 values"
+      },
+      "operation": "count-pos",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-pos-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 31 values"
+      },
+      "operation": "count-pos",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-pos-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 100 values"
+      },
+      "operation": "count-pos",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-pos-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 999 values"
+      },
+      "operation": "count-pos",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-zero-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 1 values"
+      },
+      "operation": "count-zero",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-zero-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 2 values"
+      },
+      "operation": "count-zero",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-zero-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 7 values"
+      },
+      "operation": "count-zero",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-zero-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 31 values"
+      },
+      "operation": "count-zero",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-zero-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 100 values"
+      },
+      "operation": "count-zero",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-zero-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 999 values"
+      },
+      "operation": "count-zero",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-over-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 1 values"
+      },
+      "operation": "count-over",
+      "size": 1,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-over-2",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 2 values"
+      },
+      "operation": "count-over",
+      "size": 2,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-over-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 7 values"
+      },
+      "operation": "count-over",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-over-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 31 values"
+      },
+      "operation": "count-over",
+      "size": 31,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-over-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 100 values"
+      },
+      "operation": "count-over",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "count-over-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 999 values"
+      },
+      "operation": "count-over",
+      "size": 999,
+      "shape": "numeric"
+    },
+    {
+      "id": "vowel-count-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count vowels in a 1-character string"
+      },
+      "operation": "vowel-count",
+      "size": 1,
+      "shape": "string"
+    },
+    {
+      "id": "vowel-count-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count vowels in a 7-character string"
+      },
+      "operation": "vowel-count",
+      "size": 7,
+      "shape": "string"
+    },
+    {
+      "id": "vowel-count-40",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count vowels in a 40-character string"
+      },
+      "operation": "vowel-count",
+      "size": 40,
+      "shape": "string"
+    },
+    {
+      "id": "vowel-count-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count vowels in a 999-character string"
+      },
+      "operation": "vowel-count",
+      "size": 999,
+      "shape": "string"
+    },
+    {
+      "id": "digit-count-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count digits in a 1-character string"
+      },
+      "operation": "digit-count",
+      "size": 1,
+      "shape": "string"
+    },
+    {
+      "id": "digit-count-7",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count digits in a 7-character string"
+      },
+      "operation": "digit-count",
+      "size": 7,
+      "shape": "string"
+    },
+    {
+      "id": "digit-count-40",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count digits in a 40-character string"
+      },
+      "operation": "digit-count",
+      "size": 40,
+      "shape": "string"
+    },
+    {
+      "id": "digit-count-999",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count digits in a 999-character string"
+      },
+      "operation": "digit-count",
+      "size": 999,
+      "shape": "string"
+    },
+    {
+      "id": "indexed-1",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "write 1 keyed records to an indexed file and read them back in key order"
+      },
+      "operation": "ksds-sorted",
+      "size": 1,
+      "shape": "indexed"
+    },
+    {
+      "id": "indexed-3",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "write 3 keyed records to an indexed file and read them back in key order"
+      },
+      "operation": "ksds-sorted",
+      "size": 3,
+      "shape": "indexed"
+    },
+    {
+      "id": "indexed-31",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "write 31 keyed records to an indexed file and read them back in key order"
+      },
+      "operation": "ksds-sorted",
+      "size": 31,
+      "shape": "indexed"
+    },
+    {
+      "id": "indexed-100",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "write 100 keyed records to an indexed file and read them back in key order"
+      },
+      "operation": "ksds-sorted",
+      "size": 100,
+      "shape": "indexed"
+    },
+    {
+      "id": "paraphrase-min-short",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "min of 7"
+      },
+      "operation": "reduce-min",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-max-short",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "max of 7"
+      },
+      "operation": "reduce-max",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-largest",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "give the largest of 7 signed values"
+      },
+      "operation": "reduce-max",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-smallest",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "find the smallest of 7 values"
+      },
+      "operation": "reduce-min",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-add-up",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "add up 7 numbers"
+      },
+      "operation": "reduce-sum",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-mean",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "mean of 7 values"
+      },
+      "operation": "average",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-spread",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "spread of 7 values"
+      },
+      "operation": "range",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-allcaps",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "SUM OF 7 VALUES"
+      },
+      "operation": "reduce-sum",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-threshold-size100",
+      "category": "intent",
+      "mode": "build",
+      "arguments": {
+        "prompt": "how many of 100 values are above 100"
+      },
+      "operation": "count-over",
+      "size": 100,
+      "shape": "numeric"
+    },
+    {
+      "id": "paraphrase-size1001",
+      "category": "intent",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "count values over 100 in a table of 1001 values"
+      }
+    },
+    {
+      "id": "filtered-sum",
+      "category": "unsupported-intent",
+      "mode": "build_or_refuse",
+      "arguments": {
+        "prompt": "sum 7 positive values"
+      },
+      "operation": "sum-positive",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "threshold50",
+      "category": "unsupported-intent",
+      "mode": "build_or_refuse",
+      "arguments": {
+        "prompt": "count how many of 7 values are over 50"
+      },
+      "operation": "count-over-50",
+      "size": 7,
+      "shape": "numeric"
+    },
+    {
+      "id": "refusal-00",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sort 7 values in descending order"
+      }
+    },
+    {
+      "id": "refusal-01",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "reverse a linked list"
+      }
+    },
+    {
+      "id": "refusal-02",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "product of 7 values"
+      }
+    },
+    {
+      "id": "refusal-03",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "find the minimum and maximum of 7 values"
+      }
+    },
+    {
+      "id": "refusal-04",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum of 0 values"
+      }
+    },
+    {
+      "id": "refusal-05",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum of -3 values"
+      }
+    },
+    {
+      "id": "refusal-06",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum of 1000 values"
+      }
+    },
+    {
+      "id": "refusal-07",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum of values"
+      }
+    },
+    {
+      "id": "refusal-08",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": ""
+      }
+    },
+    {
+      "id": "refusal-09",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "create an HTTP server"
+      }
+    },
+    {
+      "id": "schema-absent",
+      "category": "schema",
+      "mode": "reject_before_mcp",
+      "arguments": {}
+    },
+    {
+      "id": "schema-null",
+      "category": "schema",
+      "mode": "reject_before_mcp",
+      "arguments": {
+        "prompt": null
+      }
+    },
+    {
+      "id": "schema-number",
+      "category": "schema",
+      "mode": "reject_before_mcp",
+      "arguments": {
+        "prompt": 42
+      }
+    },
+    {
+      "id": "schema-boolean",
+      "category": "schema",
+      "mode": "reject_before_mcp",
+      "arguments": {
+        "prompt": true
+      }
+    },
+    {
+      "id": "schema-array",
+      "category": "schema",
+      "mode": "reject_before_mcp",
+      "arguments": {
+        "prompt": [
+          "sum of 7 values"
+        ]
+      }
+    },
+    {
+      "id": "schema-object",
+      "category": "schema",
+      "mode": "reject_before_mcp",
+      "arguments": {
+        "prompt": {
+          "text": "sum of 7 values"
+        }
+      }
+    },
+    {
+      "id": "schema-extra-key",
+      "category": "schema",
+      "mode": "reject_before_mcp",
+      "arguments": {
+        "prompt": "sum of 7 values",
+        "unused": true
+      }
+    }
+  ]
+}
