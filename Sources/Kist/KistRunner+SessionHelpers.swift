@@ -90,12 +90,12 @@ extension KistRunner {
             // yet guarantee a no-follow read through every path component. Cross-project event,
             // curated-context, episode and research reads use AgentCore's confined readers.
             guard project == originalProject else { return [] }
-            // Organizational rows are temporally projected inside the store before this closure
-            // returns them; the admission gate records them as host_projected_lesson rather than
-            // silently trusting unlabeled entries.
+            // Carry the original projected envelope so admission independently evaluates age,
+            // decay, validity, lifecycle and explicit season at the recall clock.
             let organizational = OrganizationalLearningStore(projectRoot: project).memoryCandidates(at: now).map {
                 AgentMemoryEntry(id: $0.recordID, title: $0.title, text: $0.excerpt,
                                  locator: $0.sourcePath.hasPrefix("/") ? $0.sourcePath : project + "/" + $0.sourcePath,
+                                 observedAt: $0.temporal?.createdAt, temporal: $0.temporal,
                                  provenanceHint: .hostProjectedLesson)
             }
             // Global lessons require a source explicitly bound to this project identity. A source-less

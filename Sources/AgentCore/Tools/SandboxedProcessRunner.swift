@@ -44,7 +44,11 @@ public enum SandboxedProcessRunner {
         case .wrapped(let path, let args):
             finalPath = path
             finalArgs = args
+            #if os(macOS)
             sandboxName = "macOS Seatbelt"
+            #else
+            sandboxName = "Linux bubblewrap"
+            #endif
         case .unavailable(let reason):
             return Outcome(combined: "OS sandbox required but unavailable: \(reason)",
                            exitCode: 126,

@@ -77,8 +77,9 @@ Because it executes tools, confinement is first-class (engine threat model:
   group on timeout/return; no orphaned grandchildren.
 - **Shell off by default** — `run_command` is disabled unless you pass `--allow-shell`; a deny-list
   still blocks the worst shapes; raw shell needs approval.
-- **Opt-in OS sandbox** — `--sandbox` wraps commands in macOS Seatbelt (kernel-enforced network-deny
-  + write-confinement). Linux bubblewrap is on the roadmap.
+- **Opt-in OS sandbox** — `--sandbox` wraps commands in macOS Seatbelt or Linux bubblewrap
+  (kernel-enforced network-deny + write-confinement). If the platform sandbox is unavailable,
+  execution fails closed instead of running unsandboxed.
 - **Tool approval** — the REPL prompts y/n before sensitive tools; sub-agents inherit the policy.
 - **Spend ceiling** — `--budget <tokens>` hard-stops a run at the cap (honest-fail, no surprise bill).
 
@@ -109,8 +110,12 @@ A macOS SwiftUI app shares the same `AgentCore` engine.
 
 PILOT-quality and honestly labeled — built and reviewed, not yet 1.0. Known gaps:
 
-- Linux builds (Foundation-only) but is CI-verified only on macOS so far.
-- macOS has the production OS sandbox; Linux sandbox parity and per-domain network allowlists remain.
+- Linux and macOS builds/tests are covered by the CI matrix. Linux bubblewrap enforcement is
+  additionally exercised by a real-kernel integration check in CI; the first remote run is still
+  required before calling the gate green.
+- OS sandbox parity is available for the common deny-network/write-confinement policy. Exact
+  loopback proxy allowlists remain unsupported by bubblewrap and fail closed; per-domain egress
+  policy is still a future hardening tier.
 - The native-scrollback REPL's response-bar behavior is unchanged: pinned while idle, with
   during-turn sticky capture remaining explicit opt-in (`--sticky-turns`) while terminal/resize
   coverage continues to mature.

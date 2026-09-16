@@ -93,19 +93,20 @@ threat model those choices assume. Labels follow the project bar; see the bottom
 - Live Seatbelt kernel checks are opt-in so normal harness runs do not emit nested
   `sandbox-exec` false positives. Run them explicitly outside the harness with
   `KIST_LIVE_SEATBELT=1 swift test --disable-sandbox --filter "SeatbeltSandboxTests|CustomToolTests"`.
-- **Fails closed:** on a platform without Seatbelt (Linux), a *requested* sandbox returns
-  unavailable and the command is **refused** — it never silently runs unsandboxed.
+- **Fails closed:** if the platform sandbox is unavailable, a *requested* sandbox returns
+  unavailable and the command is **refused** — it never silently runs unsandboxed. macOS uses
+  Seatbelt; Linux uses bubblewrap with user/PID/network namespaces and read-only host mounts.
 
 ## NOT yet provided (roadmap — do not assume these)
 
 | Gap | Status |
 |---|---|
-| **Network egress control** | **macOS: available** (opt-in Seatbelt `denyNetwork`). **Linux: not yet** (bubblewrap tier — fails closed). `fetch_url` supports configured exact/wildcard host allowlists via Kist `--fetch-host` / config, plus per-call narrowing. |
-| **OS-level sandbox** | **macOS: available** (opt-in Seatbelt write-confinement + egress-deny). **Linux: not yet** (fails closed; bubblewrap+seccomp planned). |
+| **Network egress control** | **macOS: available** (opt-in Seatbelt `denyNetwork`). **Linux: available** through bubblewrap `--unshare-net`; exact loopback proxy exceptions fail closed. `fetch_url` supports configured exact/wildcard host allowlists via Kist `--fetch-host` / config, plus per-call narrowing. |
+| **OS-level sandbox** | **macOS: available** (opt-in Seatbelt write-confinement + egress-deny). **Linux: available** through bubblewrap user/PID/network namespaces with read-only host mounts and a writable project root; missing bwrap fails closed. |
 | **Resource limits** (`setrlimit` CPU/AS/FSIZE) | **Absent.** Timeout + output cap only. (Roadmap P4) |
 | **Secret output masking** | **Present, best-effort.** Tool outputs/errors/metadata are redacted at the `ToolRegistry` boundary for common API key/token/password shapes before they reach transcripts, terminal output, hooks, or later model context. This is not a full DLP system. |
 | **Audit log** | **Absent.** (Roadmap P4) |
-| **Linux CI** | Configured (GitHub Actions, `swift:5.10` container); not yet run against a remote. |
+| **Linux CI** | Configured in `.github/workflows/ci.yml`; includes Swift build/tests and the real-kernel bubblewrap enforcement script. |
 
 ## Reporting
 
@@ -114,9 +115,9 @@ not file exploit details in a public tracker.
 
 ## Label
 
-**PILOT-READY** (security infrastructure). A kernel-enforced sandbox tier now exists on
-**macOS** (opt-in egress-deny + write-confinement). Enterprise-blocked by: no Linux sandbox
-parity (fails closed there), no resource limits, no Linux CI *run* (configured, unrun), no
-path-parser fuzzing, no per-domain egress allowlist. On macOS with the sandbox enabled it is
-suitable for more autonomous use; on Linux it remains trusted-local until the bubblewrap tier
-lands.
+**PILOT-READY** (security infrastructure). Kernel-enforced sandbox tiers now exist on **macOS**
+(Seatbelt) and **Linux** (bubblewrap), with a CI gate configured and fail-closed activation.
+Enterprise hardening remains blocked by the lack of exact per-domain egress enforcement in the
+bubblewrap path, resource limits, path-parser fuzzing, and the documented evolution
+containment/rollback authority gaps. The sandbox is defense in depth, not proof that an arbitrary
+host or external service is safe.

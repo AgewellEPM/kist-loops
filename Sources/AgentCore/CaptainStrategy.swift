@@ -359,50 +359,6 @@ public struct CaptainMemoryArchitecture: Codable, Sendable, Equatable {
     }
 }
 
-public struct CaptainMemoryCandidate: Codable, Sendable, Equatable {
-    public let layerID: CaptainMemoryLayerID
-    public let recordID: String
-    public let title: String
-    public let excerpt: String
-    public let sourcePath: String
-    public let baseRelevance: Int
-
-    public init(layerID: CaptainMemoryLayerID, recordID: String, title: String,
-                excerpt: String, sourcePath: String, baseRelevance: Int = 0) {
-        self.layerID = layerID
-        self.recordID = recordID
-        self.title = title
-        self.excerpt = excerpt
-        self.sourcePath = sourcePath
-        self.baseRelevance = min(100, max(0, baseRelevance))
-    }
-}
-
-public struct CaptainRetrievedMemory: Codable, Sendable, Equatable {
-    public let layerID: CaptainMemoryLayerID
-    public let recordID: String
-    public let title: String
-    public let excerpt: String
-    public let sourcePath: String
-    public let relevance: Int
-    public let reason: String
-
-    public init(layerID: CaptainMemoryLayerID, recordID: String, title: String,
-                excerpt: String, sourcePath: String, relevance: Int, reason: String) {
-        self.layerID = layerID
-        self.recordID = recordID
-        self.title = title
-        self.excerpt = excerpt
-        self.sourcePath = sourcePath
-        self.relevance = min(100, max(0, relevance))
-        self.reason = reason
-    }
-
-    public var evidenceID: String {
-        "\(layerID.rawValue):\(recordID)"
-    }
-}
-
 public enum CaptainDecisionCardKind: String, Codable, Sendable, Equatable {
     case contextRetrieval
     case ruleApplication

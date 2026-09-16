@@ -1,0 +1,15 @@
+{
+  "kist-rebuild": [
+    "rebuild/bootstrap.sh",
+    "rebuild/validation.sh",
+    "rebuild/transaction.sh",
+    "rebuild/registry.sh",
+    "rebuild/commands.sh",
+    "rebuild/promotion.sh"
+  ],
+  "kist-dashboard": [
+    "dashboard/bootstrap.sh",
+    "dashboard/provenance.sh",
+    "dashboard/launch.sh"
+  ]
+}

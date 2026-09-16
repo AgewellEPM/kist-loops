@@ -162,11 +162,13 @@ public struct CaptainLearningSummary: Sendable, Equatable {
     public let averageLatencyMs: Int
     public let toolFailures: Int
     public let latestEpoch: Double
+    /// Oldest observation included in this aggregate; bounds the lifetime of its exact contents.
+    public let earliestEpoch: Double
 
     public init(role: String, providerId: String, taskTags: [String], language: String?,
                 samples: Int, successes: Int, averageJudgeScore: Double?,
                 averageTokens: Int, averageLatencyMs: Int, toolFailures: Int,
-                latestEpoch: Double) {
+                latestEpoch: Double, earliestEpoch: Double? = nil) {
         self.role = role
         self.providerId = providerId
         self.taskTags = taskTags
@@ -178,6 +180,7 @@ public struct CaptainLearningSummary: Sendable, Equatable {
         self.averageLatencyMs = averageLatencyMs
         self.toolFailures = toolFailures
         self.latestEpoch = latestEpoch
+        self.earliestEpoch = earliestEpoch ?? latestEpoch
     }
 
     public var successRate: Double { samples == 0 ? 0 : Double(successes) / Double(samples) }
@@ -551,7 +554,8 @@ public final class CaptainLearningStore {
             averageTokens: boundedAverage(samples.map(\.tokens)),
             averageLatencyMs: boundedAverage(samples.map(\.latencyMs)),
             toolFailures: saturatingSum(samples.map(\.toolFailures)),
-            latestEpoch: samples.map(\.atEpoch).max() ?? 0)
+            latestEpoch: samples.map(\.atEpoch).max() ?? 0,
+            earliestEpoch: samples.map(\.atEpoch).min() ?? 0)
     }
 
     private static func boundedAverage(_ values: [Int]) -> Int {

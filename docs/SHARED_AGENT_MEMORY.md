@@ -44,9 +44,14 @@ Every recall candidate instantiates one of four record types with distinct polic
 append-only; a later episode never overwrites an earlier one. **Procedures** (the ProcedureStore
 plus advisory lessons) are reinforced how-tos: persistence grows with verified reuse, decays by
 disuse (slow half-life anchored on the last verified confirmation), retrieval is by task
-applicability, and updates are reinforcement or supersession — deposits require a proven source,
-reinforcement requires verified evidence, and every version is an immutable audit record under
-`.kist/memory/procedures/v1`. **Working state** is task-scoped scratch; the gate denies it
+applicability, and updates are reinforcement or supersession. Deposits and reinforcement require
+host-supplied source references; these strings are advisory and do not authenticate verification
+receipts. The caller must authenticate any claimed verified reuse. Blank or previously used
+references cannot refresh a procedure, including references in older retained versions. Every
+version is an immutable record under `.kist/memory/procedures/v1`, and recall locators resolve to
+that exact version file. Incomplete inventories and unreadable newer versions are reported;
+ordinary retrieval cannot revive an older active version whose newer lifecycle is unknown.
+`latest(id:)` remains a forensic last-valid-record lookup. **Working state** is task-scoped scratch; the gate denies it
 unconditionally (`working_state_leak`) so finished-task residue can never poison durable recall.
 A dormant procedure whose failure situation recurs is re-presented to the gate by signature
 applicability, so "this bit me before" works for how-tos, not just episodes.
@@ -76,17 +81,25 @@ after ranked results because they are query-dissimilar by construction.
 
 ## Forgetting
 
-Forgetting is a designed feature with two regimes, both receipted under
+Forgetting has two host APIs, with local audit records under
 `.kist/memory/forgetting/v1`. **Retention sweeps** (`MemoryForgetting.retentionSweep`) remove
 admission-audit and reactivation-overlay records past their retention window (default 90 days)
 so the bounded governance stores stay live. **Governance forgetting**
-(`MemoryForgetting.forget(term:)`) is right-to-delete: it purges matching episode rows (raw-byte
-match, deliberately over-inclusive), entire procedure version chains, and the reactivation
-overlays bound to the forgotten memories, then runs a residual scan and records whether removal
-is PROVEN in the receipt. Receipts store only the SHA-256 of the request term — never the
-content. Deletion is never blocked on receipt capacity; a missing receipt is reported loudly
-instead. Deliberately out of scope: the agent-history archive (append-only forensic surface;
-purging it is a separate operator-owned decision) and admission audit records (digests and
-reasons, no memory content).
+(`MemoryForgetting.forget(term:)`) purges matching episode rows, whole procedure version chains,
+and their version-bound reactivation overlays. Matching checks raw text and decoded JSON strings.
+Deletion requires an exclusive workspace lease; episode replacement also takes the episode lock.
+Reads must cover a complete confined snapshot, and writes/removals compare the exact source digest.
+Oversized archives are preserved; deletion never uses the compacting recall tail. Unreadable,
+linked, malformed, changing or over-limit data produces an explicit incomplete result. The
+residual result is true only for a complete scan with no matching content, false for known residue,
+and null for incomplete coverage. These observations apply at scan time to the three named stores;
+they are not sealed completion receipts or a system-wide erasure guarantee. Audit records contain
+digests of the request and removed payloads, without repersisting those payloads. Receipt-capacity
+failure is reported without undoing completed removals.
+
+These APIs are not wired to a model tool, CLI command or automatic maintenance scheduler.
+Agent history, facts, other projects, backups and exports are outside this purge scope. Retained
+history may still be recalled and requires a separate explicit operator decision for deletion.
+No new cross-project deletion authority is implied by a cross-project recall grant.
 
 Recalled text and model summaries are advisory data. They grant no permissions and establish no accepted completion, independent review or evolution authority. Training or analysis consumers should retain original timestamps, provenance, failure status and usage labels. Operational model fallback remains available; refusals and access denials are not execution-routing shortcuts.

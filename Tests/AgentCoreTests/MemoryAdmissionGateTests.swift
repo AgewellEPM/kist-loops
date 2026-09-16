@@ -99,25 +99,35 @@ final class MemoryAdmissionGateTests: XCTestCase {
         }
     }
 
-    func testHostProjectedLessonIsHostOnlyAndAnAttachedEnvelopeWins() throws {
+    func testHostProjectedLessonRequiresHostScopeAndFullTemporalEnvelope() throws {
         let now = Date()
         let foreign = gate().decide(MemoryAdmissionCandidate(
             entry: entry(), provenance: .hostProjectedLesson, sourceProject: other), at: now)
         guard case .denied(.outOfScope, _) = foreign else {
             return XCTFail("host-projected lessons must be host-project only, got \(foreign)")
         }
-        let trusted = gate().decide(MemoryAdmissionCandidate(
-            entry: entry(), provenance: .hostProjectedLesson, sourceProject: host), at: now)
-        guard case .admitted(_, let note) = trusted, note.contains("upstream") else {
-            return XCTFail("host lesson admission must be labeled upstream-projected, got \(trusted)")
+        for unclocked in [entry(), entry(observedAt: now)] {
+            let verdict = gate().decide(MemoryAdmissionCandidate(
+                entry: unclocked, provenance: .hostProjectedLesson, sourceProject: host), at: now)
+            guard case .denied(.unknownAge, _) = verdict else {
+                return XCTFail("host projection requires the full envelope, got \(verdict)")
+            }
         }
+        let envelope = try MemoryTemporalEnvelope(createdAt: days(1, before: now), decayRate: .slow)
+        let clocked = gate().decide(MemoryAdmissionCandidate(
+            entry: entry(temporal: envelope), provenance: .hostProjectedLesson, sourceProject: host), at: now)
+        guard case .admitted(let salience, let note) = clocked else {
+            return XCTFail("clocked host lesson should admit, got \(clocked)")
+        }
+        XCTAssertEqual(salience, envelope.evaluate(at: now).salience)
+        XCTAssertTrue(note.contains("envelope-checked"))
         var superseded = try MemoryTemporalEnvelope(createdAt: days(1, before: now))
         try superseded.markSuperseded(by: "newer", now: days(0.5, before: now))
         let contradicted = gate().decide(MemoryAdmissionCandidate(
             entry: entry(temporal: superseded), provenance: .hostProjectedLesson,
             sourceProject: host), at: now)
         XCTAssertEqual(contradicted, .denied(.temporalIneligible, detail: "superseded"),
-                       "an attached ineligible envelope must override the upstream-projection contract")
+                       "an ineligible envelope must deny regardless of upstream filtering")
     }
 
     func testOutOfScopeSourceProjectIsDeniedForEveryProvenanceClass() {
@@ -260,6 +270,22 @@ final class MemoryAdmissionGateTests: XCTestCase {
         XCTAssertTrue(recall.entries.contains { $0.id == "clocked" },
                       "supplemental site: clocked lessons must pass temporal governance")
         XCTAssertGreaterThanOrEqual(recall.denialReasons["unknown_age"] ?? 0, 1)
+    }
+
+    func testRecallDeniesClocklessHostProjectionIncludingUntaggedSupplier() throws {
+        let now = Date()
+        let temporal = try MemoryTemporalEnvelope(createdAt: now, decayRate: .fast)
+        let access = try AgentMemoryAccess(projectRoot: root) { _, _, _ in
+            [AgentMemoryEntry(id: "missing", title: "hostGateMarker", text: "hostGateMarker claim",
+                              locator: "/x", provenanceHint: .hostProjectedLesson),
+             AgentMemoryEntry(id: "untagged", title: "hostGateMarker", text: "hostGateMarker claim",
+                              locator: "/y"),
+             AgentMemoryEntry(id: "clocked", title: "hostGateMarker", text: "hostGateMarker observation",
+                              locator: "/z", temporal: temporal, provenanceHint: .hostProjectedLesson)]
+        }
+        let recall = try access.recall(query: "hostGateMarker", at: now)
+        XCTAssertEqual(recall.entries.map(\.id), ["clocked"])
+        XCTAssertEqual(recall.denialReasons["unknown_age"], 2)
     }
 
     func testRecallRoutesProvenanceHintsToPerClassDecayEndToEnd() throws {

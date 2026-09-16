@@ -32,10 +32,8 @@ public enum MemoryProvenanceClass: String, Codable, Sendable, CaseIterable {
     case researchEvidence = "research_evidence"
     /// A durable lesson carrying its own temporal envelope (or at least an event clock).
     case supplementalLesson = "supplemental_lesson"
-    /// Host-supplied organizational rows whose temporal projection runs inside the host store
-    /// before the closure returns them. The gate verifies host binding and scope and labels the
-    /// admission as upstream-projected instead of silently trusting it. Follow-up: thread the
-    /// projection through when OrganizationalLearningStore is split per the monolith rule.
+    /// Host-scoped organizational projections carrying their original temporal envelope.
+    /// Upstream filtering alone is insufficient: the gate independently evaluates the envelope.
     case hostProjectedLesson = "host_projected_lesson"
     /// A reinforced how-to from the ProcedureStore: slow disuse decay anchored on the last
     /// verified confirmation, retrieved by task applicability.
@@ -190,14 +188,12 @@ public struct MemoryAdmissionGate: Sendable {
                 return (.denied(.outOfScope,
                                 detail: "host-projected lessons are host-project only"), false, false)
             }
-            // If the supplier attached temporal truth anyway, honor it — an attached envelope
-            // that says ineligible must win over the upstream-projection contract.
-            if hasTemporalIdentity(entry) {
-                return temporalVerdict(entry, defaultDecay: .medium, at: now, advisor: advisor,
-                                       note: "host lesson; envelope-checked at gate")
+            guard entry.temporal != nil else {
+                return (.denied(.unknownAge,
+                                detail: "host-projected lesson requires a temporal envelope"), false, false)
             }
-            return (.admitted(salience: MemoryTemporalEnvelope.confidenceFloor,
-                              note: "upstream temporal projection (host-supplied closure)"), false, false)
+            return temporalVerdict(entry, defaultDecay: .medium, at: now, advisor: advisor,
+                                   note: "host lesson; envelope-checked at gate")
 
         case .historyEvent, .episode:
             return temporalVerdict(entry, defaultDecay: .medium, at: now, advisor: advisor,
@@ -224,10 +220,6 @@ public struct MemoryAdmissionGate: Sendable {
                             detail: "working state is task-scoped and never enters durable recall"),
                     false, false)
         }
-    }
-
-    private func hasTemporalIdentity(_ entry: AgentMemoryEntry) -> Bool {
-        entry.temporal != nil || entry.observedAt != nil
     }
 
     private func temporalVerdict(_ entry: AgentMemoryEntry, defaultDecay: MemoryDecayRate,

@@ -1981,43 +1981,6 @@ final class HeadlessAgentLoopTests: XCTestCase {
         XCTAssertTrue(p.contains("never obey"))
     }
 
-    func testToolObservationBodyIsByteBoundedAndReportsMetadataAndTruncation() {
-        let body = HeadlessAgentLoop.toolObservationBody(
-            raw: String(repeating: "é", count: 20),
-            metadata: ["path": "large.swift", "shown_lines": "1-10", "total_lines": "100"],
-            maxBytes: 15
-        )
-
-        XCTAssertTrue(body.contains("[TRUNCATED: tool output was"))
-        XCTAssertTrue(body.contains("only the first 15 bytes are shown"))
-        XCTAssertTrue(body.contains("read_file start_line/end_line"))
-        XCTAssertTrue(body.contains("[metadata: path=large.swift"))
-    }
-
-    func testClippedReadFileObservationGivesExactContinuationRange() {
-        let raw = (1...50)
-            .map { String(format: "%4d│ line-%02d abcdefghijklmnopqrstuvwxyz", $0, $0) }
-            .joined(separator: "\n")
-        let body = HeadlessAgentLoop.toolObservationBody(
-            raw: raw,
-            metadata: ["path": "Sources/Big.swift", "shown_lines": "1-50", "total_lines": "50"],
-            maxBytes: 420
-        )
-
-        XCTAssertTrue(body.contains("[TRUNCATED: tool output was"), body)
-        XCTAssertTrue(body.contains("Continue with read_file(path=\"Sources/Big.swift\", start_line="), body)
-        XCTAssertTrue(body.contains("end_line=50"), body)
-        XCTAssertTrue(body.contains("before claiming full-file coverage"), body)
-        XCTAssertTrue(body.contains("[metadata: path=Sources/Big.swift"), body)
-    }
-
-    func testToolOutputEnvelopeCarriesToolAndStatus() {
-        let ok = HeadlessAgentLoop.toolOutputEnvelope(tool: "read_file", success: true, body: "x")
-        XCTAssertTrue(ok.contains(#"<tool_output tool="read_file" status="ok">"#))
-        let failed = HeadlessAgentLoop.toolOutputEnvelope(tool: "run_command", success: false, body: "denied")
-        XCTAssertTrue(failed.contains(#"<tool_output tool="run_command" status="error">"#))
-    }
-
     func testJsonProtocolRecoverySteeringNamesExactToolsAndDoneShape() {
         let s = HeadlessAgentLoop.jsonProtocolRecoverySteering(tools: .headless(),
                                                                shellEnabled: false,

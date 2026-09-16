@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -168,40 +169,43 @@ public struct ProjectMemory: Sendable {
         }
     }
 
-    /// Governance forgetting (Q7): remove every episode row whose RAW bytes contain `needle`
-    /// (case-insensitive). Right-to-delete trumps append-only episode semantics; matching on raw
-    /// rows is deliberately over-inclusive — for deletion requests, removing too much is safer
-    /// than leaving residue. The caller writes the deletion receipt. Returns the removed raw
-    /// rows, or nil when the archive could not be safely read (nothing is rewritten then).
-    func forgetEpisodes(containing needle: String) -> [Data]? {
+    /// Explicit deletion uses a complete confined snapshot, never the compacting recall tail.
+    /// Match raw text and decoded JSON strings, preserve every unrelated physical row, and
+    /// report removals only after a durable conditional replacement succeeds under both locks.
+    func forgetEpisodes(containing needle: String, lease: WorkspaceExecutionLease) -> [Data]? {
         let lowered = needle.lowercased()
         guard !lowered.isEmpty else { return [] }
+        let path = ".mythos/memory/episodes.jsonl"
+        guard let confined = try? ConfinedRoot(root: root) else { return nil }
+        do { _ = try confined.readStableData(path, maxBytes: maxEpisodeBytes) }
+        catch ToolError.notFound { return [] }
+        catch { return nil }
         var removed: [Data]?
-        withEpisodeFileLock {
-            guard let existing = boundedEpisodeTail() else { return }
+        withEpisodeFileLock(required: true) {
+            guard let existing = try? confined.readStableData(path, maxBytes: maxEpisodeBytes),
+                  String(data: existing, encoding: .utf8) != nil else { return }
             let rows = [UInt8](existing)
                 .split(separator: UInt8(0x0A), omittingEmptySubsequences: false)
-                .filter { !$0.isEmpty }
                 .map { Data($0) }
-            var kept: [Data] = []
+            var body = Data()
             var dropped: [Data] = []
-            for row in rows {
-                if String(decoding: row, as: UTF8.self).lowercased().contains(lowered) {
+            for (index, row) in rows.enumerated() {
+                if MemoryForgetting.contentContains(row, term: lowered) {
                     dropped.append(row)
                 } else {
-                    kept.append(row)
+                    body.append(row)
+                    if index < rows.count - 1 { body.append(0x0A) }
                 }
             }
-            removed = dropped
-            guard !dropped.isEmpty else { return }
-            var body = Data()
-            for row in kept {
-                body.append(row)
-                body.append(0x0A)
+            guard !dropped.isEmpty else { removed = []; return }
+            do {
+                _ = try confined.conditionalReplace(path, with: body,
+                    expectedSHA256: .sha256(Data(SHA256.hash(data: existing))), lease: lease)
+                removed = dropped
+            } catch {
+                // A refused or failed write cannot become a claimed removal.
+                removed = nil
             }
-            try? body.write(to: URL(fileURLWithPath: episodesPath), options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600], ofItemAtPath: episodesPath)
         }
         return removed
     }
@@ -236,15 +240,20 @@ public struct ProjectMemory: Sendable {
         }
     }
 
-    private func withEpisodeFileLock(_ body: () -> Void) {
+    private func withEpisodeFileLock(required: Bool = false, _ body: () -> Void) {
         let lockPath = episodesPath + ".lock"
-        let descriptor = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard descriptor >= 0 else { body(); return }
+        let descriptor = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
+                              S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { if !required { body() }; return }
         defer {
             _ = flock(descriptor, LOCK_UN)
             _ = close(descriptor)
         }
-        guard flock(descriptor, LOCK_EX) == 0 else { return }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), status.st_nlink == 1,
+              status.st_uid == geteuid(),
+              flock(descriptor, required ? LOCK_EX | LOCK_NB : LOCK_EX) == 0 else { return }
         body()
     }
 
