@@ -45,3 +45,6 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/linux-sandbox-test.sh
 
+      - name: Validate cgroup-v2 preflight contract
+        if: runner.os == 'Linux'
+        run: bash -n scripts/evolution/check-linux-cgroup-v2.sh
