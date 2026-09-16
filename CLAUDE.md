@@ -80,6 +80,9 @@ rendered-byte agreement, and the generator rejects source modules over 1,000 lin
 - Historical UX roadmap: `docs/CAPTAIN_UX_OVERHAUL_PLAN_2026_07_28.md`. It is a dated planning
   snapshot, not current status. Trust executable tests and `docs/FEATURE_STATUS_MATRIX.md` instead.
 
+For the durable model-facing capability summary and the current, evidence-backed evolution
+readiness truth, read `docs/MODEL_CAPABILITY_MEMORY.md`. It is context, not an authority grant.
+
 ## Rules of the road (inherits ~/.claude/CLAUDE.md)
 - New RuntimeEvent cases: audit EVERY sink/switch (TerminalEventSink previously dropped
   `.planReady` via `default: break` → 78-min silent hang). A dropped event is a UX lie.
