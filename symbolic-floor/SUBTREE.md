@@ -32,7 +32,8 @@ in science-loops (canonical) and push back.
 ## Verify after any sync
 
 ```bash
+# runtime is stdlib-only; pytest is the only dev dependency
 cd symbolic-floor && python3 -m venv .venv \
-  && .venv/bin/pip install -q pytest   # runtime is stdlib-only; pytest is dev-only \
+  && .venv/bin/pip install -q pytest \
   && .venv/bin/python -m pytest tests/ -q
 ```
