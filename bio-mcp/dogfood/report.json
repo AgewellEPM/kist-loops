@@ -1,11 +1,11 @@
 {
   "generated": "2026-09-17",
-  "scenarios": 90,
-  "passes": 90,
+  "scenarios": 117,
+  "passes": 117,
   "findings": 0,
   "finding_points": 0,
-  "server_reconnects": 0,
-  "elapsed_s": 45.0,
+  "server_reconnects": 1,
+  "elapsed_s": 144.9,
   "results": [
     {
       "name": "glossary resource readable",
@@ -34,7 +34,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.19,
+      "elapsed_s": 0.58,
       "notes": ""
     },
     {
@@ -44,7 +44,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.11,
+      "elapsed_s": 2.71,
       "notes": ""
     },
     {
@@ -54,7 +54,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.66,
+      "elapsed_s": 0.63,
       "notes": ""
     },
     {
@@ -64,7 +64,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.8,
+      "elapsed_s": 2.61,
       "notes": ""
     },
     {
@@ -74,7 +74,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.34,
+      "elapsed_s": 0.32,
       "notes": "dict contract: {requested, returned, missing, articles}"
     },
     {
@@ -84,7 +84,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.39,
+      "elapsed_s": 2.37,
       "notes": ""
     },
     {
@@ -94,7 +94,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.09,
+      "elapsed_s": 15.85,
       "notes": ""
     },
     {
@@ -104,7 +104,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.42,
+      "elapsed_s": 0.15,
       "notes": ""
     },
     {
@@ -114,7 +114,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 21.97,
+      "elapsed_s": 73.61,
       "notes": "runner applies special freshness check: are returned dates near the window END or only its start (pagination blindness)?"
     },
     {
@@ -144,7 +144,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.66,
+      "elapsed_s": 0.19,
       "notes": "runner special-check: silently returning [] for a bogus PMID without any note = silent-drop finding"
     },
     {
@@ -194,7 +194,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.34,
+      "elapsed_s": 0.39,
       "notes": ""
     },
     {
@@ -204,7 +204,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.1,
+      "elapsed_s": 0.17,
       "notes": ""
     },
     {
@@ -214,7 +214,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.08,
+      "elapsed_s": 0.1,
       "notes": ""
     },
     {
@@ -224,7 +224,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.09,
+      "elapsed_s": 0.11,
       "notes": ""
     },
     {
@@ -234,7 +234,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.41,
+      "elapsed_s": 0.38,
       "notes": ""
     },
     {
@@ -244,7 +244,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.4,
+      "elapsed_s": 0.48,
       "notes": ""
     },
     {
@@ -254,7 +254,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 2.4,
+      "elapsed_s": 2.28,
       "notes": "suspect: rettype 'gb' vs required 'gp' for protein db"
     },
     {
@@ -264,7 +264,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.4,
+      "elapsed_s": 5.79,
       "notes": ""
     },
     {
@@ -274,7 +274,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.1,
+      "elapsed_s": 5.88,
       "notes": ""
     },
     {
@@ -284,7 +284,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.21,
+      "elapsed_s": 2.69,
       "notes": ""
     },
     {
@@ -294,7 +294,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.09,
+      "elapsed_s": 0.39,
       "notes": ""
     },
     {
@@ -304,7 +304,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.51,
+      "elapsed_s": 0.46,
       "notes": "runner accepts EITHER clean success or clean error; crash/ugly error = finding"
     },
     {
@@ -324,7 +324,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.03,
+      "elapsed_s": 0.11,
       "notes": ""
     },
     {
@@ -354,7 +354,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.66,
+      "elapsed_s": 0.51,
       "notes": "chr1 ~248 Mb: must refuse inline, must NOT try to buffer forever; runner enforces 120s deadline"
     },
     {
@@ -364,7 +364,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.51,
+      "elapsed_s": 0.24,
       "notes": ""
     },
     {
@@ -384,7 +384,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.8,
+      "elapsed_s": 1.42,
       "notes": ""
     },
     {
@@ -394,7 +394,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.64,
+      "elapsed_s": 0.83,
       "notes": ""
     },
     {
@@ -404,7 +404,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.42,
+      "elapsed_s": 0.39,
       "notes": ""
     },
     {
@@ -424,7 +424,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.1,
+      "elapsed_s": 0.15,
       "notes": ""
     },
     {
@@ -434,7 +434,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.15,
+      "elapsed_s": 0.12,
       "notes": "runner special-check: 0 results must be reported as 0, not error/fabrication"
     },
     {
@@ -444,7 +444,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.52,
+      "elapsed_s": 0.9,
       "notes": ""
     },
     {
@@ -454,7 +454,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.08,
+      "elapsed_s": 0.09,
       "notes": "abstract reconstructed from inverted index; must not be an empty string if present"
     },
     {
@@ -504,7 +504,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.43,
+      "elapsed_s": 0.44,
       "notes": ""
     },
     {
@@ -514,7 +514,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.11,
+      "elapsed_s": 1.2,
       "notes": ""
     },
     {
@@ -534,7 +534,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.47,
+      "elapsed_s": 0.51,
       "notes": ""
     },
     {
@@ -554,7 +554,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.31,
+      "elapsed_s": 0.27,
       "notes": ""
     },
     {
@@ -574,7 +574,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.45,
+      "elapsed_s": 2.29,
       "notes": ""
     },
     {
@@ -594,7 +594,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.55,
+      "elapsed_s": 0.37,
       "notes": ""
     },
     {
@@ -604,7 +604,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.07,
+      "elapsed_s": 0.05,
       "notes": "unresolvable name \u2192 PubChem 404 \u2192 clean tool error, not a crash"
     },
     {
@@ -624,7 +624,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.18,
+      "elapsed_s": 1.3,
       "notes": ""
     },
     {
@@ -644,7 +644,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.12,
+      "elapsed_s": 0.09,
       "notes": "RCSB answers zero hits with HTTP 204 empty body; must be returned=0, not an error"
     },
     {
@@ -654,7 +654,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.11,
+      "elapsed_s": 0.26,
       "notes": "live Reactome wraps matches in double-quoted highlighting spans"
     },
     {
@@ -664,7 +664,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.18,
+      "elapsed_s": 0.74,
       "notes": "encoded query must NOT reroute /find to /get: KEGG 404s the literal '..%2F..' term \u2192 clean tool error. The catastrophic outcome this pins against is 200-with-fabricated-hits (pre-fix behavior)"
     },
     {
@@ -704,7 +704,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.08,
+      "elapsed_s": 0.12,
       "notes": ""
     },
     {
@@ -734,7 +734,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.07,
+      "elapsed_s": 0.14,
       "notes": "encoded id must not reroute /works to /authors; upstream 404 surfacing as a clean tool error is the pass condition"
     },
     {
@@ -774,7 +774,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.58,
+      "elapsed_s": 0.13,
       "notes": "PubmedBookArticle (GeneReviews) \u2014 used to vanish into `missing`"
     },
     {
@@ -784,7 +784,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.27,
+      "elapsed_s": 0.35,
       "notes": "nonexistent PMCID used to be reported as 'embargoed' with a pinned source to a nonexistent article"
     },
     {
@@ -794,7 +794,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.25,
+      "elapsed_s": 0.41,
       "notes": ""
     },
     {
@@ -814,7 +814,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.02,
+      "elapsed_s": 0.04,
       "notes": "suspect: text=True strict decode raises inside the tool"
     },
     {
@@ -824,7 +824,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.02,
+      "elapsed_s": 0.03,
       "notes": ""
     },
     {
@@ -898,6 +898,226 @@
       "notes": ""
     },
     {
+      "name": "wetware write file",
+      "tool": "wetware_write_file",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware read back verbatim",
+      "tool": "wetware_read_file",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware append grows file",
+      "tool": "wetware_write_file",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware move within workspace",
+      "tool": "wetware_move",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware content intact after move",
+      "tool": "wetware_read_file",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware remove cleans up chain",
+      "tool": "wetware_remove",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware write absolute path rejected",
+      "tool": "wetware_write_file",
+      "severity": "critical",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware write escape rejected",
+      "tool": "wetware_write_file",
+      "severity": "critical",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware write into job state rejected",
+      "tool": "wetware_write_file",
+      "severity": "high",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": "file ops must not be able to forge job exit records"
+    },
+    {
+      "name": "wetware write empty path rejected",
+      "tool": "wetware_write_file",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware read escape rejected",
+      "tool": "wetware_read_file",
+      "severity": "critical",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware read missing file clean error",
+      "tool": "wetware_read_file",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware move nonexistent rejected",
+      "tool": "wetware_move",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware remove workspace root refused",
+      "tool": "wetware_remove",
+      "severity": "critical",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware remove job state refused",
+      "tool": "wetware_remove",
+      "severity": "high",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware job empty script rejected",
+      "tool": "wetware_job_start",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware job zero timeout rejected",
+      "tool": "wetware_job_start",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware job unknown id clean error",
+      "tool": "wetware_job_status",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware job traversal id rejected",
+      "tool": "wetware_job_status",
+      "severity": "critical",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": "job_id is used to build a path under .wetware/jobs \u2014 traversal must die before touching disk"
+    },
+    {
+      "name": "wetware job cancel unknown id clean error",
+      "tool": "wetware_job_cancel",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware jobs zero max rejected",
+      "tool": "wetware_jobs",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "wetware jobs listing works",
+      "tool": "wetware_jobs",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
       "name": "concurrency: 5 parallel mixed calls",
       "tool": "(multiple)",
       "severity": "high",
@@ -905,7 +1125,57 @@
       "status": "PASS",
       "findings": [],
       "notes": "",
-      "elapsed_s": 0.7
+      "elapsed_s": 5.66
+    },
+    {
+      "name": "wetware job happy lifecycle",
+      "tool": "wetware_job_*",
+      "severity": "critical",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.32,
+      "notes": "start \u2192 finished(0) \u2192 output marker \u2192 artifact written to workspace cwd"
+    },
+    {
+      "name": "wetware job state survives server restart",
+      "tool": "wetware_job_status",
+      "severity": "critical",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.49,
+      "notes": "the disk-backed claim: reconnect a FRESH server process, finished job must still report finished"
+    },
+    {
+      "name": "wetware job cancel recorded",
+      "tool": "wetware_job_cancel",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.71,
+      "notes": ""
+    },
+    {
+      "name": "wetware job timeout enforced by supervisor",
+      "tool": "wetware_job_start",
+      "severity": "critical",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 2.13,
+      "notes": "timeout must hold with zero help from the MCP server process"
+    },
+    {
+      "name": "wetware oversize write rejected cleanly",
+      "tool": "wetware_write_file",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.03,
+      "notes": "10MB+1 through the real stdio wire: clean cap rejection, not a transport death"
     }
   ]
 }

@@ -201,6 +201,7 @@ async def concurrency_probe(handle: ServerHandle) -> dict:
         ("kegg_search", {"query": "citrate cycle"}),
         ("pubmed_search", {"query": "single cell RNA-seq atlas", "max_results": 2}),
         ("run_python", {"script": "print(sum(range(10**6)))"}),
+        ("wetware_write_file", {"path": "dogfood_concurrency.txt", "content": "concurrent-write-ok"}),
     ]
     t0 = time.monotonic()
     try:
@@ -214,6 +215,10 @@ async def concurrency_probe(handle: ServerHandle) -> dict:
             elif _is_error(res):
                 _, text = _parse_payload(res)
                 out["findings"].append(f"{tool} tool-errored under concurrency: {text[:150]}")
+        try:
+            await handle.session.call_tool("wetware_remove", {"path": "dogfood_concurrency.txt"})
+        except Exception:
+            pass  # cleanup only; the write itself was the probe
     except asyncio.TimeoutError:
         out["findings"].append("concurrent batch hung past 180s")
         out["severity"] = "critical"
@@ -281,6 +286,12 @@ async def main() -> None:
         results.append(r)
     results.append(await concurrency_probe(handle))
     print(f"  {'×' if results[-1]['status'] == 'FINDING' else '✓'} {results[-1]['name']}")
+    from .wetware_probe import run_wetware_probes
+
+    for r in await run_wetware_probes(handle):
+        marker = "×" if r["status"] == "FINDING" else "✓"
+        print(f"  {marker} {r['name']} ({r['elapsed_s']}s)" + (f" — {r['findings'][0][:110]}" if r["findings"] else ""))
+        results.append(r)
     await handle.close()
     n, score = write_report(results, handle.reconnects, time.monotonic() - t0)
     print(f"\n{n} findings, {score} points → dogfood/REPORT.md")
