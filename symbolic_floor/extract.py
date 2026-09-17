@@ -182,6 +182,22 @@ def extract_protein(store: Store, accession: str, *,
         else:
             existing += 1
 
+    # Canonical-37 PEEL trace: root + one tile per fact currently stored for
+    # this protein (both newly-written AND already-present edges belong to the
+    # trace — the wheel traces the WHOLE evidence base, idempotently).
+    from .peel_tiles import write_extraction_trace
+    all_edges = [
+        {"edge_id": e["id"], "source": e["subject"],
+         "relation": e["relation_type"], "target": e["object"]}
+        for e in store.get_edges(source=f"protein:{acc}")
+    ] + [
+        {"edge_id": e["id"], "source": e["subject"],
+         "relation": e["relation_type"], "target": e["object"]}
+        for e in store.get_edges(target=f"protein:{acc}")
+        if e["relation_type"] == "encodes"
+    ]
+    trace = write_extraction_trace(store, acc, all_edges, sources)
+
     return {
         "status": "OK",
         "accession": acc,
@@ -192,4 +208,5 @@ def extract_protein(store: Store, accession: str, *,
         "pdb_confirmed": confirmed,
         "pdb_confirm_cap": max_structures,
         "sources_fetched": sources,
+        "peel_trace": trace,
     }

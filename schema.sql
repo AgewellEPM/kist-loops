@@ -75,4 +75,24 @@ CREATE TABLE IF NOT EXISTS handoffs (
     completed_at    TEXT               -- set when the outcome is collected
 );
 
+-- Canonical-37 PEEL tile trace (same shape as the Jeeves `responses` table,
+-- source of truth: kids-brain copy_harvest_to_jeeves_37fields.py). The bio
+-- wheel writes one root tile per protein + one tile per extracted fact, so
+-- the floor's evidence is traced exactly like the wiki wheel traces pages.
+CREATE TABLE IF NOT EXISTS responses (
+    id TEXT PRIMARY KEY, conversation_id TEXT, emoji TEXT,
+    words TEXT, sentence TEXT, verb TEXT, action TEXT,
+    intent TEXT, emotion TEXT, visual_representation TEXT,
+    entities TEXT, svo_triple TEXT, complexity_level TEXT,
+    reading_level TEXT, speech_pattern TEXT, cognitive_load TEXT,
+    confidence_score REAL, learning_objective TEXT, prerequisites TEXT,
+    follow_up_suggestions TEXT, audio_tts_hints TEXT, visual_aids TEXT,
+    pet_motion TEXT, parent TEXT, subcategory TEXT, related_to TEXT,
+    causes TEXT, requires TEXT, part_of TEXT, next_step TEXT,
+    previous_step TEXT, connectors TEXT, depth_level INTEGER,
+    parent_tile_id TEXT, branch_path TEXT, turn_number INTEGER, topic TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_responses_conv ON responses(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_responses_topic ON responses(topic);
+
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');

@@ -95,6 +95,10 @@ def main(argv: list[str] | None = None) -> int:
                            help="everything stored about an accession, with traces")
     p_rec.add_argument("--uniprot", required=True, metavar="ACCESSION")
 
+    p_tr = sub.add_parser("trace",
+                          help="the canonical-37 PEEL tile trace for an accession")
+    p_tr.add_argument("--uniprot", required=True, metavar="ACCESSION")
+
     p_ho = sub.add_parser("handoff",
                           help="terminus: contract -> capability plan -> dispatch to an environment")
     p_ho.add_argument("--uniprot", metavar="ACCESSION",
@@ -150,6 +154,9 @@ def main(argv: list[str] | None = None) -> int:
             _print(extract_protein(store, args.uniprot))
         elif args.command == "recall":
             _print(recall_protein(store, args.uniprot))
+        elif args.command == "trace":
+            from .peel_tiles import tile_trace
+            _print(tile_trace(store, args.uniprot))
         elif args.command == "handoff":
             if bool(args.uniprot) == bool(args.claim):
                 raise ValidationError("provide exactly one of --uniprot / --claim")

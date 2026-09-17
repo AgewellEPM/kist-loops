@@ -477,6 +477,33 @@ def _supported_world(tag):
     return s, contract
 
 
+def sc_tiles_37(findings):
+    """Every extraction tile must carry all 37 canonical fields, non-empty,
+    chained root->facts — the wiki-wheel trace contract, on the bio wheel."""
+    from symbolic_floor.peel_tiles import CANONICAL_37, tile_trace
+    s = _fresh_store("tiles37")
+    try:
+        result = extract_protein(s, "P69905", transport=_fixture_transport())
+        tiles = tile_trace(s, "P69905")
+        if not tiles:
+            findings.append("extraction wrote NO peel tiles")
+            return
+        for column in CANONICAL_37:
+            for t in tiles:
+                v = t[column]
+                if v is None or (not isinstance(v, (int, float)) and not str(v).strip()):
+                    findings.append(f"tile field {column!r} EMPTY on {t['branch_path']}")
+                    break
+        n_children = sum(1 for t in tiles if t["depth_level"] == 1)
+        if result["peel_trace"]["tiles_total"] != 1 + n_children:
+            findings.append("tile count does not match root+facts")
+        again = extract_protein(s, "P69905", transport=_fixture_transport())
+        if again["peel_trace"]["tiles_written"] != 0:
+            findings.append(f"re-extraction wrote {again['peel_trace']['tiles_written']} new tiles")
+    finally:
+        s.close()
+
+
 def sc_rev_malformed_result_files(findings):
     """The human's result file is hostile: not-JSON, a list, a bad verdict.
     Each must be a CLEAN refusal (ValidationError), never a crash, zero edges."""
@@ -734,6 +761,7 @@ SCENARIOS = [
     ("simulation never becomes evidence", "critical", sc_simulation_never_becomes_evidence),
     ("blocked contract refused (no ship)", "critical", sc_blocked_contract_refused),
     ("unplannable intent honest", "high", sc_unplannable_intent_honest),
+    ("canonical-37 tile trace complete", "high", lambda f: sc_tiles_37(f)),
     # reverse round 2 — hostile wave
     ("REV2 malformed result files refused cleanly", "high", sc_rev_malformed_result_files),
     ("REV2 lying environment shapes refused", "high", sc_rev_lying_environment_shapes),

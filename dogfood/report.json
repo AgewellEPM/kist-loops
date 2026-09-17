@@ -1,10 +1,10 @@
 {
   "generated": "2026-09-17",
-  "scenarios": 25,
-  "passes": 25,
+  "scenarios": 26,
+  "passes": 26,
   "findings": 0,
   "finding_points": 0,
-  "elapsed_s": 8.3,
+  "elapsed_s": 14.2,
   "mode": "offline+live",
   "results": [
     {
@@ -12,28 +12,28 @@
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "every edge has provenance",
       "severity": "critical",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "re-extraction idempotent",
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.03
+      "elapsed_s": 0.02
     },
     {
       "name": "recall completeness (recall it all)",
       "severity": "critical",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "recall deterministic",
@@ -47,7 +47,7 @@
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "functional veto fires on rogue prediction",
@@ -61,7 +61,7 @@
       "severity": "medium",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "malformed payload handled honestly",
@@ -82,7 +82,7 @@
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.0
+      "elapsed_s": 0.01
     },
     {
       "name": "terminus full loop (dispatch->collect->ingest)",
@@ -96,7 +96,7 @@
       "severity": "critical",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "blocked contract refused (no ship)",
@@ -110,21 +110,28 @@
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "canonical-37 tile trace complete",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
     },
     {
       "name": "REV2 malformed result files refused cleanly",
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.04
+      "elapsed_s": 0.06
     },
     {
       "name": "REV2 lying environment shapes refused",
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.06
+      "elapsed_s": 0.1
     },
     {
       "name": "REV2 contract tamper detected at collect",
@@ -152,14 +159,14 @@
       "severity": "medium",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.04
+      "elapsed_s": 0.03
     },
     {
       "name": "REV2 reasoner stable after ingestion",
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.02
+      "elapsed_s": 0.04
     },
     {
       "name": "REV2 extreme intent params refused",
@@ -173,14 +180,14 @@
       "severity": "critical",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 4.51
+      "elapsed_s": 6.96
     },
     {
       "name": "LIVE rich extraction P04637 (cap honesty)",
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 3.42
+      "elapsed_s": 6.69
     }
   ]
 }
