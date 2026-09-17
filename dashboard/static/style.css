@@ -91,7 +91,7 @@ canvas { display: block; width: 100%; height: 100%; }
           font-size: 12px; display: flex; flex-wrap: wrap; gap: 8px; max-width: 70%; }
 .lg { display: flex; align-items: center; gap: 5px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; }
-#ledgerview, #notebookview { grid-area: center; overflow-y: auto;
+#ledgerview, #notebookview, #scientistview { grid-area: center; overflow-y: auto;
                              padding: 14px; display: none; }
 .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
            align-items: center; }
@@ -154,6 +154,9 @@ a:hover { text-decoration: underline; }
 .chatrow .rowops { float: right; display: none; }
 .organizing .chatrow .rowops { display: inline; }
 .rowops button { background: none; border: 0; cursor: pointer; font-size: 13px; }
+
+body.focus { grid-template-columns: 0 0 1fr 380px; }
+body.focus #chatscol, body.focus #peelcol { display: none; }
 
 body.light { --bg: #f4f6f8; --panel: #ffffff; --line: #d5dbe2;
              --ink: #1c232b; --dim: #5b6672; }

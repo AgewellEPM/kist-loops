@@ -15,6 +15,7 @@
     <button class="tab active" id="tab-graph">Graph</button>
     <button class="tab" id="tab-ledger">Ledger</button>
     <button class="tab" id="tab-notebook">Notebook</button>
+    <button class="tab" id="tab-scientist">Scientist</button>
   </nav>
   <input type="text" id="nodesearch" placeholder="find node… (e.g. P69905)" list="nodelist">
   <datalist id="nodelist"></datalist>
@@ -119,6 +120,17 @@
   <div id="nbentries"></div>
 </div>
 
+<div id="scientistview">
+  <div class="filters">
+    <span class="sub">the scientist loop — terminal runs feed here; every ledger is
+      chain-verified before display</span>
+    <span style="flex:1"></span>
+    <button class="btn" id="scirefresh">↻ Refresh</button>
+  </div>
+  <div id="sciruns"></div>
+  <div id="scidetail"></div>
+</div>
+
 <!-- column 4: Chat with Lois -->
 <section id="chatcol">
   <div class="colhead">Chat with Lois
@@ -132,11 +144,20 @@
   </div></div>
   <div id="toolrow">
     <button class="tool" id="t-new" title="New conversation">➕</button>
+    <button class="tool" id="t-history" title="Conversation history">🕰</button>
+    <button class="tool" id="t-run" title="Run a research session (live in Notebook)">▶</button>
+    <button class="tool" id="t-report" title="Session report">📖</button>
+    <button class="tool" id="t-diag" title="Diagnostics — integrity invariants">🔧</button>
+    <button class="tool" id="t-teach" title="Teach — add a cited manual edge">✏️</button>
+    <button class="tool" id="t-hypo" title="Hypothesis — claim through the gate">🧪</button>
+    <button class="tool" id="t-doc" title="Document scan — find accessions in pasted text">📄</button>
     <button class="tool" id="t-learn" title="Learnings — what the system has learned">🧠</button>
     <button class="tool" id="t-rules" title="Rules — the floor's law">📜</button>
     <button class="tool" id="t-sources" title="Sources — where the data came from">🌐</button>
     <button class="tool" id="t-notebook" title="Notebook — live journal">📓</button>
     <button class="tool" id="t-raw" title="Raw data of the last reply">&lt;/&gt;</button>
+    <button class="tool" id="t-rec" title="Export this conversation">⏺</button>
+    <button class="tool" id="t-focus" title="Focus mode — graph only">▯▯</button>
     <button class="tool" id="t-theme" title="Toggle theme">🎨</button>
     <button class="tool" id="t-find" title="Find a node">🔍</button>
   </div>

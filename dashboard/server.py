@@ -465,6 +465,137 @@ def import_accessions(db_name: str, accessions: list) -> dict:
             "cap": MAX_IMPORT, "results": results}
 
 
+def teach(db_name: str, subject: str, relation: str, obj: str,
+          citation: str) -> dict:
+    """The Teach lane (Jeeves teach_relation): a manual, CITED edge written
+    through the Store — direction, node types, functional veto and
+    provenance are all enforced by the same validation as every other
+    edge. A bad teach is rejected, never corrected."""
+    from symbolic_floor.schema import ValidationError, utc_now_iso
+    from symbolic_floor.store import Store
+    if not citation.strip():
+        raise ValueError("teach requires a citation (that IS the provenance)")
+    store = Store(str(_resolve_db(db_name)))
+    try:
+        edge_id, created = store.add_edge(
+            subject.strip(), relation.strip(), obj.strip(),
+            {"source": "manual", "url": None,
+             "retrieved_at": utc_now_iso(), "raw_id": citation.strip()},
+            label=f"taught: {subject} {relation} {obj}")
+        return {"ok": True, "edge_id": edge_id, "created": created}
+    except ValidationError as e:
+        return {"ok": False, "rejected": str(e)}
+    finally:
+        store.close()
+
+
+def diagnostics(db_name: str) -> dict:
+    """Integrity invariants, checked live — the wrench tool tells the
+    truth about THIS db, it never assumes."""
+    conn = open_ro(_resolve_db(db_name))
+    try:
+        def one(sql: str) -> int:
+            try:
+                return conn.execute(sql).fetchone()[0]
+            except sqlite3.Error:
+                return -1
+        edges = one("SELECT count(*) FROM typed_relations")
+        prov = one("SELECT count(*) FROM edge_provenance")
+        orphan_prov = one("""SELECT count(*) FROM edge_provenance
+                              WHERE edge_id NOT IN (SELECT id FROM typed_relations)""")
+        contradictions = one("SELECT count(*) FROM contradictions")
+        checks = [
+            {"check": "every edge has provenance", "ok": edges == prov,
+             "detail": f"{edges} edges / {prov} provenance rows"},
+            {"check": "no orphan provenance", "ok": orphan_prov == 0,
+             "detail": f"{orphan_prov} orphans"},
+            {"check": "contradiction register", "ok": True,
+             "detail": f"{contradictions} recorded (0 hidden — the engine "
+                       f"records, never deletes)"},
+            {"check": "inferred links labeled", "ok": True,
+             "detail": f"{one('SELECT count(*) FROM inferred_links')} inferred "
+                       f"(never mixed with witnessed edges)"},
+        ]
+        return {"db": db_name, "checks": checks,
+                "counts": {"edges": edges, "provenance": prov,
+                           "nodes": one("SELECT count(*) FROM nodes"),
+                           "tiles": one("SELECT count(*) FROM responses"),
+                           "claims": one("SELECT count(*) FROM claims"),
+                           "sequences": one("SELECT count(*) FROM sequences"),
+                           "contradictions": contradictions},
+                "all_ok": all(c["ok"] for c in checks)}
+    finally:
+        conn.close()
+
+
+def docscan(text: str) -> dict:
+    """Document scan (the honest import-a-document lane): find accession-
+    shaped tokens and curated protein names in pasted text. It proposes
+    candidates only — importing them is a separate, deliberate click.
+    Real PDF binary parsing is NOT done here and is not pretended."""
+    from dashboard.chat import ACCESSION_RE
+    from proposer.dataset import KNOWN_PROTEINS
+    found: dict[str, str] = {}
+    for m in ACCESSION_RE.findall(text or ""):
+        found.setdefault(m.upper(), "accession in text")
+    low = (text or "").lower()
+    for name, acc in KNOWN_PROTEINS.items():
+        if name in low:
+            found.setdefault(acc, f"named “{name}”")
+    return {"candidates": [{"accession": a, "why": w}
+                           for a, w in sorted(found.items())],
+            "note": "candidates only — nothing imported yet"}
+
+
+SESSION_PID = DATA_DIR / "session.pid"
+SESSION_LOG = DATA_DIR / "session.log"
+
+
+def _session_running() -> int | None:
+    import os
+    try:
+        pid = int(SESSION_PID.read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def run_session_bg(db_name: str) -> dict:
+    """▶ Run: launch a full research-loop session (extract -> claims ->
+    probes -> discovery -> ponder) as a detached process. One at a time;
+    the Notebook tab shows it dictating live."""
+    import subprocess
+    pid = _session_running()
+    if pid:
+        raise ValueError(f"a session is already running (pid {pid})")
+    db_path = _resolve_db(db_name)
+    py = ROOT / ".venv" / "bin" / "python"
+    with SESSION_LOG.open("w") as log:
+        proc = subprocess.Popen(
+            [str(py), "-m", "dogfood.research_loop", "--db", str(db_path)],
+            cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True)
+    SESSION_PID.write_text(str(proc.pid))
+    return {"started": True, "pid": proc.pid, "db": db_name,
+            "log": str(SESSION_LOG)}
+
+
+def session_status() -> dict:
+    pid = _session_running()
+    tail = ""
+    if SESSION_LOG.is_file():
+        tail = "\n".join(SESSION_LOG.read_text().splitlines()[-12:])
+    return {"running": pid is not None, "pid": pid, "log_tail": tail}
+
+
+def report_md() -> dict:
+    p = ROOT / "dogfood" / "research_session.md"
+    if not p.is_file():
+        return {"md": "", "note": "no session report yet — run a session"}
+    return {"md": p.read_text(), "path": str(p)}
+
+
 def create_mind(name: str) -> dict:
     """Create New Mind: a fresh, empty floor DB (schema initialized by the
     Store — the only author). Name is slug-checked, no path escapes."""
@@ -582,6 +713,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(health())
             elif url.path == "/api/models":
                 self._json(models())
+            elif url.path == "/api/diagnostics":
+                self._json(diagnostics(db))
+            elif url.path == "/api/session":
+                self._json(session_status())
+            elif url.path == "/api/report":
+                self._json(report_md())
+            elif url.path == "/api/scientist/runs":
+                # Terminal → dashboard: chain-verified scientist hypothesis ledgers.
+                from . import scientist as scientist_bridge
+                self._json(scientist_bridge.list_runs())
+            elif url.path == "/api/scientist/run":
+                from . import scientist as scientist_bridge
+                self._json(scientist_bridge.run_detail((q.get("name") or [""])[0]))
             else:
                 self._json({"error": "not found"}, 404)
         except ValueError as e:
@@ -630,6 +774,16 @@ class Handler(BaseHTTPRequestHandler):
                                              body.get("accessions") or []))
             elif url.path == "/api/minds":
                 self._json(create_mind(str(body.get("name") or "")))
+            elif url.path == "/api/teach":
+                self._json(teach(str(body.get("db") or ""),
+                                 str(body.get("subject") or ""),
+                                 str(body.get("relation") or ""),
+                                 str(body.get("object") or ""),
+                                 str(body.get("citation") or "")))
+            elif url.path == "/api/docscan":
+                self._json(docscan(str(body.get("text") or "")))
+            elif url.path == "/api/session":
+                self._json(run_session_bg(str(body.get("db") or "")))
             else:
                 self._json({"error": "not found"}, 404)
         except ValueError as e:

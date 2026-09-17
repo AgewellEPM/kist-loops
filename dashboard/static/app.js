@@ -70,7 +70,7 @@ function renderSources(data) {
 }
 
 /* ---------------- center tabs ---------------- */
-const TABS = ["graph", "ledger", "notebook"];
+const TABS = ["graph", "ledger", "notebook", "scientist"];
 function showTab(name) {
   for (const t of TABS) {
     $("tab-" + t).classList.toggle("active", t === name);
@@ -79,6 +79,7 @@ function showTab(name) {
   }
   if (name === "ledger") runLedger(true);
   if (name === "notebook") loadNotebook();
+  if (name === "scientist") loadScientist();
 }
 for (const t of TABS) $("tab-" + t).onclick = () => showTab(t);
 const wantTab = location.hash.slice(1);
@@ -619,6 +620,144 @@ $("t-theme").onclick = () => {
 };
 if (localStorage.getItem("loisTheme") === "light") document.body.classList.add("light");
 $("t-find").onclick = () => $("nodesearch").focus();
+$("t-focus").onclick = () => document.body.classList.toggle("focus");
+
+$("t-history").onclick = async () => {
+  const d = await api("/api/chats", {});
+  openModal(`<h2>🕰 Conversation history</h2>` + (d.chats.length
+    ? d.chats.map(c => `<div class="edge-row" style="cursor:pointer"
+        onclick="openChat('${c.id}');document.getElementById('modal').style.display='none'">
+        ${esc(c.title)}<div class="when">${(c.created_at || "").replace("T", " ").slice(0, 16)}</div>
+      </div>`).join("")
+    : '<div class="empty">no conversations yet</div>'));
+};
+
+$("t-run").onclick = async () => {
+  const s = await api("/api/session", {});
+  if (s.running) {
+    openModal(`<h2>▶ Session running (pid ${s.pid})</h2>
+      <pre style="white-space:pre-wrap;font-size:12px">${esc(s.log_tail)}</pre>
+      <div class="sub">Watch it dictate live in the Notebook tab.</div>`);
+    return;
+  }
+  const r = await fetch("/api/session", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ db: state.db }) }).then(x => x.json());
+  openModal(r.error
+    ? `<h2>▶ Run session</h2><div class="empty">${esc(r.error)}</div>`
+    : `<h2>▶ Session started (pid ${r.pid})</h2>
+       <div class="sub">Full loop on ${esc(state.db)}: extract → claims →
+       probes → discovery → ponder. Open the Notebook tab to watch it
+       dictate in real time.</div>`);
+  showTab("notebook");
+};
+
+$("t-report").onclick = async () => {
+  const r = await api("/api/report", {});
+  openModal(`<h2>📖 Latest session report</h2>` + (r.md
+    ? `<pre style="white-space:pre-wrap;font-size:12px">${esc(r.md)}</pre>`
+    : `<div class="empty">${esc(r.note)}</div>`));
+};
+
+$("t-diag").onclick = async () => {
+  const d = await api("/api/diagnostics", { db: state.db });
+  openModal(`<h2>🔧 Diagnostics — ${esc(state.db)}</h2>` +
+    d.checks.map(c => `<div class="edge-row">${c.ok ? "✅" : "❌"}
+      <b>${esc(c.check)}</b><div class="when">${esc(c.detail)}</div></div>`).join("") +
+    `<div class="sub" style="margin-top:8px">${Object.entries(d.counts)
+      .map(([k, v]) => `${k} ${v}`).join(" · ")}</div>`);
+};
+
+$("t-teach").onclick = async () => {
+  const r = await api("/api/rules", {});
+  const rels = [...r.core_relations, ...r.extraction_relations];
+  openModal(`<h2>✏️ Teach — a cited manual edge</h2>
+    <div class="sub">Same validation as every edge: fixed direction, typed
+    nodes, functional veto. The citation IS the provenance.</div>
+    <div style="display:grid;gap:6px;margin:10px 0">
+      <input type="text" id="tsubj" placeholder="subject, e.g. protein:P69905">
+      <select id="trel">${rels.map(x =>
+        `<option value="${x.relation}">${x.relation} (${x.source} → ${x.target})</option>`).join("")}</select>
+      <input type="text" id="tobj" placeholder="object, e.g. domain:globin">
+      <input type="text" id="tcite" placeholder="citation, e.g. PMID:12345678">
+    </div><button class="btn" id="tgo">Teach</button><div id="tout"></div>`);
+  $("tgo").onclick = async () => {
+    const out = await fetch("/api/teach", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db: state.db, subject: $("tsubj").value,
+        relation: $("trel").value, object: $("tobj").value,
+        citation: $("tcite").value }) }).then(x => x.json());
+    $("tout").innerHTML = out.ok
+      ? `<div class="edge-row">✅ ${out.created ? "written" : "already known"} — edge ${out.edge_id.slice(0, 8)}</div>`
+      : `<div class="edge-row">❌ rejected: ${esc(out.rejected || out.error)}</div>`;
+    if (out.ok) pick(state.db);
+  };
+};
+
+$("t-hypo").onclick = () => {
+  openModal(`<h2>🧪 Hypothesis — a claim through the gate</h2>
+    <div class="sub">Name a protein; the proposer shapes the claim, the floor
+    verdicts it: SUPPORTED / CONFLICTING / UNKNOWN.</div>
+    <input type="text" id="hsubj" placeholder="e.g. P68871 or “myoglobin”"
+      style="width:100%;margin:10px 0">
+    <button class="btn" id="hgo">Ask the floor</button><div id="hout"></div>`);
+  $("hgo").onclick = async () => {
+    $("hgo").disabled = true;
+    const d = await fetch("/api/research", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db: state.db, model: $("modelsel").value,
+        prompt: `Verify the structural consistency of ${$("hsubj").value}.` }) })
+      .then(x => x.json());
+    $("hgo").disabled = false;
+    window.lastReply = d;
+    $("hout").innerHTML = d.admitted === "claim"
+      ? `<div class="edge-row">verdict: <b>${(d.verdict || {}).verdict}</b>
+         (${((d.verdict || {}).trace || []).length} evidence edges)</div>`
+      : `<div class="edge-row">${d.admitted}: ${esc(d.error || (d.proposal || {}).reason || "")}</div>`;
+  };
+};
+
+$("t-doc").onclick = () => {
+  openModal(`<h2>📄 Document scan</h2>
+    <div class="sub">Paste any text (abstract, notes, references). Lois finds
+    accession-shaped tokens and curated protein names — candidates only;
+    importing is your click. Binary PDF parsing is not pretended.</div>
+    <textarea id="dtext" rows="7" style="width:100%;margin:8px 0;background:var(--bg);
+      color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px"></textarea>
+    <button class="btn" id="dscan">Scan</button><div id="dout"></div>`);
+  $("dscan").onclick = async () => {
+    const d = await fetch("/api/docscan", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: $("dtext").value }) }).then(x => x.json());
+    $("dout").innerHTML = d.candidates.length
+      ? d.candidates.map(c => `<div class="edge-row">${c.accession}
+          <span class="when">${esc(c.why)}</span></div>`).join("") +
+        `<button class="btn" id="dimp" style="margin-top:8px">Import all (cap 10)</button>`
+      : '<div class="empty">no candidates found</div>';
+    const b = $("dimp");
+    if (b) b.onclick = async () => {
+      const r = await fetch("/api/import", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ db: state.db,
+          accessions: d.candidates.map(c => c.accession) }) }).then(x => x.json());
+      $("dout").innerHTML = r.results.map(x =>
+        `<div class="edge-row">${x.accession} — <b>${x.status}</b>${
+          x.edges_written != null ? ` · ${x.edges_written} new edges` : ""}</div>`).join("");
+      pick(state.db);
+    };
+  };
+};
+
+$("t-rec").onclick = async () => {
+  if (!state.chatId) { openModal("<h2>⏺ Export</h2><div class='empty'>no conversation open</div>"); return; }
+  const d = await api("/api/chat", { id: state.chatId });
+  const md = d.turns.map(t =>
+    (t.role === "user" ? "**You:** " : `**Lois (${t.kind}):** `) + t.text).join("\n\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown" }));
+  a.download = `lois-chat-${state.chatId}.md`;
+  a.click();
+};
 
 /* ---------------- model switcher ---------------- */
 async function loadModels() {
@@ -634,3 +773,73 @@ loadModels();
 pollHealth();
 loadChats();
 loadDbs();
+
+
+/* ---------------- scientist lane (terminal feeds the dashboard) ---------------- */
+const SCI_STATE_COLORS = { PROPOSED: "#8b949e", TESTABLE: "#58a6ff",
+  EXPERIMENTING: "#d29922", SUPPORTED: "#3fb950", CONTESTED: "#d29922",
+  REJECTED: "#f85149", REVISED: "#a371f7" };
+
+async function loadScientist() {
+  const data = await fetch("/api/scientist/runs").then(r => r.json());
+  const box = $("sciruns");
+  if (!data.runs.length) {
+    box.innerHTML = `<div class="empty" style="padding:14px">no scientist runs found under
+      ${data.roots.join(" · ")} — run one in the terminal
+      (<code>python3 run_live.py</code>) and refresh</div>`;
+    $("scidetail").innerHTML = "";
+    return;
+  }
+  box.innerHTML = data.runs.map(r => `
+    <div class="src sci-run" data-name="${r.name}" style="cursor:pointer">
+      <div class="name">🧪 ${r.name}
+        <b style="float:right;color:${r.integrity === "ok" ? "#3fb950" : "#f85149"}">
+          ${r.integrity === "ok" ? "chain ✓" : "⚠ " + r.integrity}</b></div>
+      <div class="host">${r.integrity === "ok"
+        ? `${r.hypotheses} hypotheses · ${r.experiments} experiments · ` +
+          `${r.credited} credited · ${r.events} chained events`
+        : r.path}</div>
+    </div>`).join("");
+  for (const el of box.querySelectorAll(".sci-run"))
+    el.onclick = () => showScientistRun(el.dataset.name);
+  showScientistRun(data.runs[0].name);
+}
+
+async function showScientistRun(name) {
+  const d = await fetch("/api/scientist/run?name=" + encodeURIComponent(name))
+    .then(r => r.json());
+  const box = $("scidetail");
+  if (d.integrity !== "ok") {
+    box.innerHTML = `<div class="empty" style="padding:14px">⚠ ${name}: ${d.integrity}</div>`;
+    return;
+  }
+  const stateChip = s => `<b style="color:${SCI_STATE_COLORS[s] || "#8b949e"}">${s}</b>`;
+  const hyps = d.hypotheses.map(h => `
+    <tr><td>${stateChip(h.state)}</td>
+      <td>${h.statement}
+        ${h.assumptions.length ? `<div class="sub">assumes: ${h.assumptions.join(" · ")}</div>` : ""}
+      </td>
+      <td class="sub">${h.origin}</td>
+      <td>${h.passed}✓ ${h.refuted}✗ ${h.inconclusive}∅</td></tr>`).join("");
+  const exps = d.experiments.map(e => `
+    <tr><td>${e.question}</td><td class="sub">${e.adapter}</td>
+      <td>${e.verdicts.map(v =>
+        `<div>${v.outcome === "PASSED" ? "✓" : v.outcome === "REFUTED" ? "✗" : "∅"}
+          predicted <code>${JSON.stringify(v.predicted)}</code> · actual
+          <code>${JSON.stringify(v.actual)}</code></div>`).join("")}</td>
+      <td class="sub">${e.receipt ? "receipt " + e.receipt.raw_digest.slice(0, 12) + "…" : "no receipt"}</td></tr>`).join("");
+  const credits = d.knowledge_credits.map(c =>
+    `<div class="sub">${c.credited ? "🟢 CREDITED" : "⚪ withheld"} — ${c.reason}</div>`).join("");
+  box.innerHTML = `
+    <div class="sub" style="margin:8px 0">${d.events} events · head
+      <code>${d.head_sha.slice(0, 16)}…</code> · ${d.path}</div>
+    <table class="ledger"><thead><tr><th>State</th><th>Hypothesis</th>
+      <th>Origin</th><th>Verdicts</th></tr></thead><tbody>${hyps}</tbody></table>
+    <h3 style="margin:14px 0 6px">Experiments</h3>
+    <table class="ledger"><thead><tr><th>Question</th><th>Adapter</th>
+      <th>Verdicts (pre-registered vs receipt)</th><th>Receipt</th></tr></thead>
+      <tbody>${exps}</tbody></table>
+    <h3 style="margin:14px 0 6px">Knowledge credit</h3>${credits}`;
+}
+if (document.getElementById("scirefresh"))
+  $("scirefresh").onclick = () => loadScientist();
