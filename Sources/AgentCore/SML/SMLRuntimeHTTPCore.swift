@@ -227,7 +227,11 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
             lifecycleLock.lock()
             // Keep the lock through shutdown: handlers remove and close descriptors under the
             // same lock, so a recycled descriptor can never target an unrelated host socket.
+            #if canImport(Darwin)
             for active in activeConnectionFDs { _ = shutdown(active, SHUT_RDWR) }
+            #else
+            for active in activeConnectionFDs { _ = shutdown(active, Int32(SHUT_RDWR)) }
+            #endif
             lifecycleLock.unlock()
             // Give a socket unblocked above one bounded opportunity to unwind its handler. A
             // capability implementation may ignore cancellation, so stop never waits forever.
@@ -238,10 +242,19 @@ public final class SMLRuntimeHTTPCore: @unchecked Sendable {
     }
 
     private func bind(port candidate: UInt16) -> URL? {
+        #if canImport(Darwin)
         let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #else
+        // Glibc types SOCK_STREAM as `__socket_type` and SOL_SOCKET as Int; socket()/setsockopt() want Int32.
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #endif
         guard fd >= 0 else { return nil }
         var yes: Int32 = 1
+        #if canImport(Darwin)
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        #else
+        setsockopt(fd, Int32(SOL_SOCKET), Int32(SO_REUSEADDR), &yes, socklen_t(MemoryLayout<Int32>.size))
+        #endif
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = candidate.bigEndian

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // Linux: URLSession lives here
+#endif
 
 /// The production backend for `GeminiVisualComparator`: base64-encodes the reference + rendered screenshots
 /// and POSTs them to Gemini's OpenAI-compatible vision endpoint, returning the model's text. This is the

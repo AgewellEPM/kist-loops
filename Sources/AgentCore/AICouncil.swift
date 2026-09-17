@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // Linux: URLSession lives here
+#endif
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -425,7 +428,12 @@ public struct AICouncil: Sendable {
     private static func tcpConnectable(host: String, port: Int, timeout: TimeInterval) -> Bool {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
+        #if canImport(Darwin)
         hints.ai_socktype = SOCK_STREAM
+        #else
+        // Glibc types SOCK_STREAM as `__socket_type`; addrinfo.ai_socktype is Int32.
+        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        #endif
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &res) == 0 else { return false }
         defer { freeaddrinfo(res) }
