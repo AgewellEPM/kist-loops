@@ -1,0 +1,38 @@
+{
+  "model": "llama3.2:3b",
+  "n": 27,
+  "parse_rate": 0.741,
+  "kind_accuracy": 0.63,
+  "subject_accuracy": 0.304,
+  "abstain_recall": 0.5,
+  "false_abstains": 1,
+  "floor_admission_rate": 1.0,
+  "elapsed_s": 41.4,
+  "parse_failures": [
+    {
+      "prompt": "Is the AlphaFold prediction for cytochrome c backed by an experimental structure",
+      "error": "claim.shape must be 'structural-consistency-v1', got 'experimental-structure-backed'",
+      "reply": "{\"kind\": \"claim\", \"subject\": \"P0A9M2\", \"shape\": \"experimental-structure-backed\", \"predicted_outcome\": \"The AlphaFold pre"
+    },
+    {
+      "prompt": "Is the AlphaFold prediction for P99999 backed by an experimental structure?",
+      "error": "claim.shape must be 'structural-consistency-v1', got 'experimental-structure-backed-v1'",
+      "reply": "{\"kind\": \"claim\", \"subject\": \"P99999\", \"shape\": \"experimental-structure-backed-v1\", \"predicted_outcome\": \"The AlphaFold "
+    },
+    {
+      "prompt": "Read A595 for well:D1. (sample of insulin)",
+      "error": "malformed protein id: 'protein:A595'",
+      "reply": "{\"kind\": \"extract\", \"subject\": \"A595\", \"predicted_outcome\": \"Insulin sample exists in the floor's database.\"}"
+    },
+    {
+      "prompt": "Is the AlphaFold prediction for P04637 backed by an experimental structure?",
+      "error": "claim.shape must be 'structural-consistency-v1', got 'experimental-structure-backing-v1'",
+      "reply": "{\"kind\": \"claim\", \"subject\": \"P04637\", \"shape\": \"experimental-structure-backing-v1\", \"predicted_outcome\": \"The AlphaFold"
+    },
+    {
+      "prompt": "Is the AlphaFold prediction for flurbozyme backed by an experimental structure?",
+      "error": "malformed protein id: 'protein:FLURBOZYME'",
+      "reply": "{\"kind\": \"claim\", \"subject\": \"flurbozyme\", \"shape\": \"experimental-structure-backed-v1\", \"predicted_outcome\": \"The AlphaF"
+    }
+  ]
+}
