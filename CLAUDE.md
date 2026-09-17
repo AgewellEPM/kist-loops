@@ -115,5 +115,12 @@ readiness truth, read `docs/MODEL_CAPABILITY_MEMORY.md`. It is context, not an a
   `.planReady` via `default: break` → 78-min silent hang). A dropped event is a UX lie.
 - Multi-site fixes need per-site regression assertions (see R3MicroTaskTests gate-site pins).
 - Commit each tested increment; push to origin. Files ≤1000 lines target.
+- ⚠️ **NEVER `git add -A` / `git add .` in this repo.** The git root is
+  `science-loops` and it holds SEVERAL independent subprojects (the Swift `kist`
+  tree, `bio-mcp/`, `system-one-symbolic/`, …). Parallel Claude sessions commit
+  to the SAME branch concurrently, so `-A` from any subdir sweeps in another
+  session's in-flight work. Stage YOUR subproject's paths explicitly (e.g.
+  `git add bio-mcp/`), and before committing run `git diff --cached --name-only`
+  to confirm nothing outside your subtree is staged.
 - MCP servers come from `~/.mcp.json` (`kist --protocols` to verify; perslis = legacy-systems limb).
 - Codex/adversarial review before declaring done; label deliverables honestly.
