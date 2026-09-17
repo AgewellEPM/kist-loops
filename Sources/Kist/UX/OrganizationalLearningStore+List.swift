@@ -4,6 +4,17 @@ import AgentCore
 extension OrganizationalLearningStore {
     struct ListImportResult { let imported: Int; let succeeded: Bool }
 
+    /// PROJECT OPT-OUT (Luke 2026-09-17: "LIST should not be fed into science-loops"). A committed
+    /// marker file at the project root excludes that project from LIST observation ingestion AND
+    /// from injecting any previously-imported LIST context into prompts. Checked at every surface
+    /// (session wiring, sync command, store import, context read) — belt and suspenders, because
+    /// they all move the same untrusted advisory data toward a model prompt.
+    static let listLearningOptOutMarker = ".kist-list-learning-off"
+
+    static func listLearningOptedOut(projectRoot: String) -> Bool {
+        FileManager.default.fileExists(atPath: projectRoot + "/" + listLearningOptOutMarker)
+    }
+
     // Rolling-version barrier: an already-running older Kist knows only the generic shelves and
     // must never render new LIST prose without the advisory boundary. Reuse the existing temporal
     // record/transaction machinery, but publish only to these explicitly versioned paths.
@@ -22,6 +33,9 @@ extension OrganizationalLearningStore {
     /// changed source content appends a dated revision, retaining the original audit record.
     @discardableResult
     func recordListObservations(_ observations: [KistListLearning.Observation], at instant: Date) -> ListImportResult {
+        guard !Self.listLearningOptedOut(projectRoot: projectRoot) else {
+            return .init(imported: 0, succeeded: false)
+        }
         let admitted = observations.filter { KistListLearning.valid($0, projectRoot: projectRoot, at: instant) }
         guard admitted.count == observations.count else { return .init(imported: 0, succeeded: false) }
         guard !admitted.isEmpty else { return .init(imported: 0, succeeded: true) }
@@ -74,6 +88,9 @@ extension OrganizationalLearningStore {
     }
 
     func listLearningContext() -> String {
+        // Opt-out must also silence context ALREADY on the shelf — the marker may arrive after
+        // observations were imported, and "not fed" means no prompt injection, not just no import.
+        guard !Self.listLearningOptedOut(projectRoot: projectRoot) else { return "" }
         let observations = Array(listObservations(at: now()).prefix(4))
         guard !observations.isEmpty, let data = KistListLearning.json(observations) else { return "" }
         return """
@@ -139,6 +156,11 @@ extension OrganizationalLearningStore {
     }
 
     func listLearningStatus() -> String {
+        if Self.listLearningOptedOut(projectRoot: projectRoot) {
+            return "LIST learning · OPTED OUT for this project (\(Self.listLearningOptOutMarker) present)\n"
+                + "No observations are imported and no LIST context enters prompts here.\n"
+                + "Project: \(projectRoot)"
+        }
         let observations = listObservations(at: now())
         let proposals = loadJSONL(DiskMemoryRecord.self, path: listProposalsPath)
             .filter { $0.tags?.contains("list-proposal") == true }.count

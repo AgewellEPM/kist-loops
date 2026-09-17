@@ -18,6 +18,11 @@ extension KistRunner {
             return 2
         }
         let store = OrganizationalLearningStore(projectRoot: root)
+        if OrganizationalLearningStore.listLearningOptedOut(projectRoot: root) {
+            // Honest no-op, not a failure: the operator excluded this project by marker.
+            print(store.listLearningStatus())
+            return 0
+        }
         if opts.listLearningStatus {
             print(store.listLearningStatus())
             return 0

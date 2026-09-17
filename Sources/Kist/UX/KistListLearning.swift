@@ -162,7 +162,10 @@ actor KistListLearning {
 extension KistRunner {
     static func makeListLearning(root: String, opts: KistOptions,
                                  tools: ToolRegistry, context: ToolContext) -> KistListLearning? {
-        guard !opts.noMemory, !opts.evolve, !opts.evolveSession, !opts.bench, !opts.eval,
+        // Project opt-out marker (e.g. science-loops): never even wire the LIST fetch for an
+        // excluded project — no MCP call, no import, no recall injection.
+        guard !OrganizationalLearningStore.listLearningOptedOut(projectRoot: root),
+              !opts.noMemory, !opts.evolve, !opts.evolveSession, !opts.bench, !opts.eval,
               let remote = tools.all().compactMap({ $0 as? RemoteMCPTool }).first(where: {
                   $0.explicitComputerUseRequirement != true
                       && $0.matches(server: "list", tool: "recent_observations")

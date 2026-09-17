@@ -250,4 +250,71 @@ final class KistListLearningTests: XCTestCase {
         var arguments: (String, Int)?
         func record(since: String, limit: Int) { count += 1; arguments = (since, limit) }
     }
+
+    // MARK: project opt-out marker — one assertion PER SURFACE (multi-site fix discipline).
+    // "LIST should not be fed into science-loops" (Luke 2026-09-17): the marker must stop the feed
+    // at import, at context injection (even for data imported BEFORE the marker appeared), at the
+    // session wiring, and at the sync command — not just at the one surface that prompted the rule.
+
+    private func optOut(_ root: String) throws {
+        try "off".write(atPath: root + "/" + OrganizationalLearningStore.listLearningOptOutMarker)
+    }
+
+    func testOptOutMarkerBlocksImport() throws {
+        let root = try root()
+        try optOut(root)
+        let store = OrganizationalLearningStore(projectRoot: root, now: { self.instant })
+        let result = store.recordListObservations([observation(root)], at: instant)
+        XCTAssertEqual(result.imported, 0)
+        XCTAssertFalse(result.succeeded, "opted-out import must refuse, never silently accept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.listObservationsPath))
+    }
+
+    func testOptOutMarkerSilencesPreviouslyImportedContext() throws {
+        let root = try root()
+        let store = OrganizationalLearningStore(projectRoot: root, now: { self.instant })
+        XCTAssertEqual(store.recordListObservations([observation(root)], at: instant).imported, 1)
+        XCTAssertFalse(store.listLearningContext().isEmpty, "sanity: context flows before the marker")
+        try optOut(root)
+        XCTAssertTrue(store.listLearningContext().isEmpty,
+                      "marker must silence context already on the shelf — 'not fed' means no prompt injection")
+    }
+
+    func testOptOutMarkerReportsInStatus() throws {
+        let root = try root()
+        try optOut(root)
+        let status = OrganizationalLearningStore(projectRoot: root, now: { self.instant }).listLearningStatus()
+        XCTAssertTrue(status.contains("OPTED OUT"), "status must say WHY nothing is imported: \(status)")
+        XCTAssertTrue(status.contains(OrganizationalLearningStore.listLearningOptOutMarker))
+    }
+
+    func testOptOutSessionWiringAndSyncCommandSitesAreWired() throws {
+        // Source pins for the two sites that can't be exercised without a live MCP registry.
+        let testFile = URL(fileURLWithPath: #filePath)
+        let pkg = testFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let wiring = try String(contentsOf: pkg.appendingPathComponent("Sources/Kist/UX/KistListLearning.swift"),
+                                encoding: .utf8)
+        XCTAssertTrue(wiring.contains("listLearningOptedOut(projectRoot: root)"),
+                      "makeListLearning lost the project opt-out guard")
+        let sync = try String(contentsOf: pkg.appendingPathComponent("Sources/Kist/KistRunner+ListLearning.swift"),
+                              encoding: .utf8)
+        XCTAssertTrue(sync.contains("listLearningOptedOut(projectRoot: root)"),
+                      "--list-learning-sync lost the project opt-out guard")
+    }
+
+    func testScienceLoopsShipsWithTheMarker() throws {
+        // The rule that motivated the feature: THIS repo is excluded. If the marker file vanishes,
+        // LIST feeds back into science-loops on the next sync — fail loudly here instead.
+        let testFile = URL(fileURLWithPath: #filePath)
+        let pkg = testFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let marker = pkg.appendingPathComponent(OrganizationalLearningStore.listLearningOptOutMarker)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path),
+                      "science-loops must carry \(OrganizationalLearningStore.listLearningOptOutMarker) at its root")
+    }
+}
+
+private extension String {
+    func write(atPath path: String) throws {
+        try self.write(toFile: path, atomically: true, encoding: .utf8)
+    }
 }
