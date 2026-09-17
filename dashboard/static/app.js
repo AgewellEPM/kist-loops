@@ -441,7 +441,7 @@ async function sendMsg() {
 $("csend").onclick = sendMsg;
 $("cmsg").addEventListener("keydown", ev => { if (ev.key === "Enter") sendMsg(); });
 $("newchat").onclick = () => { state.chatId = null; $("chatlog").innerHTML = "";
-  chatCard("🧬 New conversation — message the floor."); loadChats(); };
+  chatCard("🧬 New conversation — message Lois."); loadChats(); };
 
 loadChats();
 loadDbs();
