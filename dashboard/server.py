@@ -26,9 +26,17 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+
+def utc_now_iso_local() -> str:
+    from symbolic_floor.schema import utc_now_iso
+    return utc_now_iso()
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
-INDEX_HTML = Path(__file__).resolve().parent / "index.html"
+DASH_DIR = Path(__file__).resolve().parent
+INDEX_HTML = DASH_DIR / "index.html"
+STATIC_DIR = DASH_DIR / "static"
+STATIC_TYPES = {".css": "text/css", ".js": "text/javascript"}
 DEFAULT_PORT = 8977
 
 # Only DBs that actually look like floor DBs are listed (must have the
@@ -382,18 +390,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _file(self, path: Path, ctype: str) -> None:
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):  # noqa: N802 (http.server API)
         url = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(url.query)
         db = (q.get("db") or [""])[0]
         try:
             if url.path == "/":
-                body = INDEX_HTML.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._file(INDEX_HTML, "text/html; charset=utf-8")
+            elif url.path.startswith("/static/"):
+                name = url.path[len("/static/"):]
+                target = (STATIC_DIR / name).resolve()
+                if (target.parent != STATIC_DIR or not target.is_file()
+                        or target.suffix not in STATIC_TYPES):
+                    self._json({"error": "not found"}, 404)
+                else:
+                    self._file(target, STATIC_TYPES[target.suffix])
             elif url.path == "/api/dbs":
                 self._json(list_dbs())
             elif url.path == "/api/sources":
@@ -437,6 +456,24 @@ class Handler(BaseHTTPRequestHandler):
                 kind = (q.get("kind") or [""])[0] or None
                 self._json({"path": str(nb.path),
                             "entries": nb.entries(limit=limit, kind=kind)})
+            elif url.path == "/api/tile":
+                conn = open_ro(_resolve_db(db))
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM responses WHERE id = ?",
+                        ((q.get("id") or [""])[0],)).fetchone()
+                finally:
+                    conn.close()
+                self._json(dict(row) if row else {"error": "no such tile"},
+                           200 if row else 404)
+            elif url.path == "/api/chats":
+                from .chat import ChatStore
+                self._json({"chats": ChatStore(DATA_DIR / "chats").list()})
+            elif url.path == "/api/chat":
+                from .chat import ChatStore
+                cid = (q.get("id") or [""])[0]
+                self._json({"id": cid,
+                            "turns": ChatStore(DATA_DIR / "chats").turns(cid)})
             else:
                 self._json({"error": "not found"}, 404)
         except ValueError as e:
@@ -446,14 +483,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802 (http.server API)
         url = urllib.parse.urlparse(self.path)
-        if url.path != "/api/research":
-            self._json({"error": "not found"}, 404)
-            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
-            self._json(research(str(body.get("db") or ""),
-                                str(body.get("prompt") or "")))
+            if url.path == "/api/research":
+                self._json(research(str(body.get("db") or ""),
+                                    str(body.get("prompt") or "")))
+            elif url.path == "/api/chat":
+                from .chat import ChatStore, reply
+                text = str(body.get("text") or "").strip()
+                if not text:
+                    raise ValueError("empty message")
+                db_path = _resolve_db(str(body.get("db") or ""))
+                cs = ChatStore(DATA_DIR / "chats")
+                chat_id = str(body.get("chat_id") or "") or cs.create(text)
+                cs.append(chat_id, {"role": "user", "text": text,
+                                    "at": utc_now_iso_local()})
+                r = reply(str(db_path), text)
+                cs.append(chat_id, {"role": "floor", "at": utc_now_iso_local(),
+                                    **r})
+                self._json({"chat_id": chat_id, "reply": r})
+            else:
+                self._json({"error": "not found"}, 404)
         except ValueError as e:
             self._json({"error": str(e)}, 400)
         except sqlite3.Error as e:
