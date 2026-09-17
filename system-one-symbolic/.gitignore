@@ -1,9 +1,0 @@
-.venv/
-__pycache__/
-*.pyc
-doom_lane/receipts.jsonl
-_vizdoom.ini
-
-doom_lane/real_receipts.jsonl
-doom_lane/*.ppm
-*.ppm
