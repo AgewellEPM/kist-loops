@@ -13,7 +13,9 @@ import sys
 from .connectors import alphafold, pdb, uniprot
 from .connectors.base import ConnectorError
 from .db import DEFAULT_DB
+from .extract import extract_protein
 from .reasoner import evaluate_claim
+from .recall import recall_protein
 from .schema import ValidationError
 from .store import CLAIM_SHAPE_STRUCTURAL, Store
 
@@ -77,6 +79,14 @@ def main(argv: list[str] | None = None) -> int:
                           help="end-to-end: seed if needed, evaluate structural consistency")
     p_ep.add_argument("--uniprot", required=True, metavar="ACCESSION")
 
+    p_ext = sub.add_parser("extract",
+                           help="bio wheel: extract typed facts + links for an accession")
+    p_ext.add_argument("--uniprot", required=True, metavar="ACCESSION")
+
+    p_rec = sub.add_parser("recall",
+                           help="everything stored about an accession, with traces")
+    p_rec.add_argument("--uniprot", required=True, metavar="ACCESSION")
+
     args = parser.parse_args(argv)
     store = Store(args.db)
     try:
@@ -95,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
             claim_id = store.get_or_create_claim(f"protein:{acc}", CLAIM_SHAPE_STRUCTURAL)
             verdict = evaluate_claim(store, claim_id)
             _print({"seeded": seeded, "evaluation": verdict})
+        elif args.command == "extract":
+            _print(extract_protein(store, args.uniprot))
+        elif args.command == "recall":
+            _print(recall_protein(store, args.uniprot))
         return 0
     except ValidationError as e:
         _print({"error": "validation", "message": str(e)})

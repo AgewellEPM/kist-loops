@@ -15,8 +15,8 @@ import json
 from ..schema import utc_now_iso, validate_node_id
 from ..store import Store
 from .base import ConnectorError, Transport, http_get
+from .uniprot import fetch_entry_json
 
-UNIPROT_JSON_URL = "https://rest.uniprot.org/uniprotkb/{accession}.json"
 RCSB_ENTRY_URL = "https://data.rcsb.org/rest/v1/core/entry/{pdb_id}"
 
 
@@ -28,22 +28,11 @@ def fetch_experimental_structure(store: Store, accession: str, *,
     NO_EXPERIMENTAL_STRUCTURE (no usable PDB cross-reference). 404/absence
     writes NO edge.
     """
-    acc = accession.strip().upper()
-    validate_node_id(f"protein:{acc}")
-
-    xref_url = UNIPROT_JSON_URL.format(accession=acc)
-    status, body = http_get(xref_url, transport=transport)
-    if status == 404:
+    fetched = fetch_entry_json(accession, transport=transport)
+    acc = fetched["accession"]
+    if fetched["status"] == "NOT_FOUND":
         return {"status": "NOT_FOUND", "accession": acc}
-    if status != 200:
-        raise ConnectorError(f"UniProt JSON for {acc}: unexpected HTTP {status}")
-    if not body.strip():
-        # Same live quirk as the .fasta route: nonexistent accession -> 200 empty.
-        return {"status": "NOT_FOUND", "accession": acc}
-    try:
-        entry = json.loads(body)
-    except ValueError as e:
-        raise ConnectorError(f"UniProt JSON for {acc}: unparseable body") from e
+    entry = fetched["entry"]
 
     pdb_id = None
     for xref in entry.get("uniProtKBCrossReferences") or []:

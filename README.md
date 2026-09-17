@@ -26,6 +26,12 @@ python3.13 -m venv .venv && .venv/bin/pip install pytest   # tests only
 .venv/bin/python -m symbolic_floor claim --uniprot P69905
 .venv/bin/python -m symbolic_floor evaluate --claim <claim_id>
 .venv/bin/python -m symbolic_floor eval-protein --uniprot P69905   # end-to-end
+
+.venv/bin/python -m symbolic_floor extract --uniprot P69905  # the bio wheel
+.venv/bin/python -m symbolic_floor recall  --uniprot P69905  # recall it all
+
+.venv/bin/python -m dogfood.harness            # dogfood: offline + live
+.venv/bin/python -m dogfood.harness --offline  # fixtures only
 ```
 
 Runtime is stdlib-only (Python 3.11+). The default DB is
@@ -47,6 +53,35 @@ one object per subject, so two different objects for the same protein are an
 ID-provable contradiction detected by the ENGINE (`_are_compatible`), not by
 slice-specific code. `has_structure` is deliberately not functional — many
 experimental structures per protein is normal.
+
+### Slice-1.5: the bio wheel (extraction + recall)
+
+The analog of the Jeeves wiki wheel: `extract --uniprot ACC` fans one UniProt
+entry into typed Peel facts — every one provenance-pinned to the exact URL:
+
+| relation | source → target | derived from |
+|---|---|---|
+| `encodes` | `gene:*` → `protein:*` | `genes[].geneName` |
+| `belongs_to` | `protein:*` → `organism:*` | `organism.scientificName` |
+| `located_in` | `protein:*` → `location:*` | SUBCELLULAR LOCATION comments |
+| `affects` | `protein:*` → `disease:*` | DISEASE comments (involvement, NOT causation) |
+| `has_part` | `protein:*` → `domain:*` | `Domain`-typed features ONLY (no fabrication — p53 legitimately yields zero) |
+| `has_structure` | ALL PDB xrefs, first 5 confirmed vs RCSB | cap reported in the trace, never silent |
+
+These map onto relations the vendored engine already knows (`located_in` even
+participates in its Rule-1 conflict scan). `recall --uniprot ACC` walks it all
+back: facts grouped by relation with edge IDs + provenance, incoming edges,
+and bounded 2-hop link-trace paths. Extraction is idempotent; recall is
+byte-deterministic on a fixed DB.
+
+### Dogfood harness
+
+`dogfood/harness.py` — inverted scoring (a FINDING earns points; clean run =
+0). 13 scenarios over extract → store → recall → verdict: provenance on every
+edge, recall completeness ("recall it all" — no silent drops), idempotency,
+determinism, functional-veto firing, the embedded engine's own contradiction
+scan, malformed/hostile payloads, allowlist, abstention, plus LIVE roundtrips
+(P69905, P04637 cap-honesty + no-fabrication). Report: `dogfood/REPORT.md`.
 
 Node ID conventions: `protein:<uniprot_accession>`, `structure:<pdb_id>`
 (4-char experimental or `AF-<acc>-F<n>` predicted), `sequence:<sha256>`

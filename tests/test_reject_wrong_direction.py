@@ -27,6 +27,11 @@ def test_direction_enforced_per_relation(store):
         "predicts_structure": ("structure:AF-P12345-F1", "protein:P12345"),
         "supports_claim":     (claim, "structure:1ABC"),
         "conflicts_with":     (claim, "structure:1ABC"),
+        # slice-1.5 extraction relations — same fixed-direction contract.
+        "belongs_to":         ("organism:homo_sapiens", "protein:P12345"),
+        "located_in":         ("location:cytoplasm", "protein:P12345"),
+        "affects":            ("disease:alpha_thalassemia", "protein:P12345"),
+        "has_part":           ("domain:globin", "protein:P12345"),
     }
     assert set(reversed_cases) == set(RELATION_DIRECTIONS), "cover every relation"
     for relation, (src, dst) in reversed_cases.items():

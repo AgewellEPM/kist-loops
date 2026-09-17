@@ -1,0 +1,102 @@
+{
+  "generated": "2026-09-17",
+  "scenarios": 13,
+  "passes": 13,
+  "findings": 0,
+  "finding_points": 0,
+  "elapsed_s": 8.9,
+  "mode": "offline+live",
+  "results": [
+    {
+      "name": "extraction writes typed facts",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "every edge has provenance",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "re-extraction idempotent",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "recall completeness (recall it all)",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "recall deterministic",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "extract -> verdict SUPPORTED",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "functional veto fires on rogue prediction",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "embedded engine contradiction scan runs",
+      "severity": "medium",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "malformed payload handled honestly",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0
+    },
+    {
+      "name": "allowlist still enforced",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0
+    },
+    {
+      "name": "fictional accession writes nothing",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0
+    },
+    {
+      "name": "LIVE extract/recall/verdict roundtrip P69905",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 4.63
+    },
+    {
+      "name": "LIVE rich extraction P04637 (cap honesty)",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 4.22
+    }
+  ]
+}

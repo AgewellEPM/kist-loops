@@ -9,9 +9,32 @@ from ..store import Store
 from .base import ConnectorError, Transport, http_get
 
 FASTA_URL = "https://rest.uniprot.org/uniprotkb/{accession}.fasta"
+ENTRY_URL = "https://rest.uniprot.org/uniprotkb/{accession}.json"
 
 # One-letter amino-acid alphabet incl. extended codes (U=Sec, O=Pyl, B/Z/X ambiguity).
 _RESIDUES = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYUOBZX]+$")
+
+
+def fetch_entry_json(accession: str, *, transport: Transport | None = None) -> dict:
+    """Shared UniProt entry fetch: {"status": "OK", "entry", "url"} or
+    {"status": "NOT_FOUND"}. Used by the PDB connector and the extractor so
+    one URL is the single provenance base for entry-derived facts."""
+    import json
+
+    acc = accession.strip().upper()
+    validate_node_id(f"protein:{acc}")
+    url = ENTRY_URL.format(accession=acc)
+    status, body = http_get(url, transport=transport)
+    if status == 404 or (status == 200 and not body.strip()):
+        # Live quirk: nonexistent accessions answer 200 + empty body.
+        return {"status": "NOT_FOUND", "accession": acc, "url": url}
+    if status != 200:
+        raise ConnectorError(f"UniProt JSON for {acc}: unexpected HTTP {status}")
+    try:
+        entry = json.loads(body)
+    except ValueError as e:
+        raise ConnectorError(f"UniProt JSON for {acc}: unparseable body") from e
+    return {"status": "OK", "accession": acc, "entry": entry, "url": url}
 
 
 def fetch_sequence(store: Store, accession: str, *, transport: Transport | None = None) -> dict:

@@ -110,6 +110,24 @@ duplicates. `store.add_edge` checks hash-existence itself (first write wins,
 original provenance kept, re-seeding idempotent). Caught by
 `test_reseed_is_idempotent`.
 
+## 13. **[REVIEW]** Slice-1.5 extraction relations extend the six (Luke's goal)
+
+- **Ambiguity:** the original brief fixed EXACTLY six relations; Luke then
+  directed the Jeeves-wiki-wheel analog for bio sites ("extract … into our
+  Peel trace system, recall it all, dogfood test it all") — which needs
+  richer vocabulary.
+- **Chosen:** `EXTRACTION_RELATIONS` (belongs_to/located_in/affects/has_part)
+  added as a SEPARATE registry unioned into validation, all mapping onto
+  vocabulary the vendored engine already owns. The verification six are
+  unchanged (`CORE_RELATIONS`); the reasoner still evaluates only those.
+  Disease uses `affects`, not `causes` — UniProt records involvement, not
+  causation. `has_part` derives ONLY from `Domain`-typed features: p53
+  legitimately yields zero (its annotation uses DNA binding/Region/Motif) —
+  pinned as a no-fabrication check in the dogfood harness.
+- PDB confirmation is capped at 5 per protein (politeness; p53 lists ~200+
+  xrefs) with `pdb_xrefs_total`/`pdb_confirm_cap` in every trace — capped,
+  never silent.
+
 ## 12. Reasoner reads edges via direct ordered SQL, semantics via the engine
 
 Edge retrieval uses `ORDER BY id` SQL for byte-stable traces; *semantic*

@@ -28,6 +28,10 @@ _UNIPROT_ACC = (
     r"(?:-\d+)?"
 )
 
+# Slugged concept identifiers extracted from bio-site payloads (lowercase,
+# underscore-joined; produced by slug()).
+_SLUG = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,127}$")
+
 # Node ID shape per prefix. structure: covers experimental PDB (4 alnum) and
 # AlphaFold predicted entries (AF-<accession>-F<n>).
 _NODE_SHAPES: dict[str, re.Pattern[str]] = {
@@ -38,10 +42,16 @@ _NODE_SHAPES: dict[str, re.Pattern[str]] = {
     # gene: appears in the `encodes` relation. The brief's node list omits it;
     # DECISIONS.md records why it must still be a valid prefix.
     "gene":      re.compile(r"^[A-Za-z0-9_.:-]{1,128}$"),
+    # Extraction concept nodes (slice 1.5 — the bio wiki-wheel analog).
+    "organism":  _SLUG,
+    "location":  _SLUG,
+    "disease":   _SLUG,
+    "domain":    _SLUG,
 }
 
 # relation -> (source prefix, target prefix). Directionality is FIXED.
-RELATION_DIRECTIONS: dict[str, tuple[str, str]] = {
+# The slice-1 verification six:
+CORE_RELATIONS: dict[str, tuple[str, str]] = {
     "encodes":            ("gene", "protein"),
     "has_sequence":       ("protein", "sequence"),
     "has_structure":      ("protein", "structure"),
@@ -50,7 +60,29 @@ RELATION_DIRECTIONS: dict[str, tuple[str, str]] = {
     "conflicts_with":     ("structure", "claim"),
 }
 
+# Slice-1.5 extraction relations (DECISIONS.md #13). Every one maps onto a
+# relation the vendored Peel engine ALREADY knows (located_in participates in
+# the engine's own Rule-1 conflict checking; belongs_to/affects/has_part are
+# native vocabulary) — extraction feeds the engine, it does not fork it.
+EXTRACTION_RELATIONS: dict[str, tuple[str, str]] = {
+    "belongs_to": ("protein", "organism"),   # organism of origin
+    "located_in": ("protein", "location"),   # subcellular location
+    "affects":    ("protein", "disease"),    # disease involvement (NOT causation)
+    "has_part":   ("protein", "domain"),     # sequence domain/region
+}
+
+RELATION_DIRECTIONS: dict[str, tuple[str, str]] = {**CORE_RELATIONS, **EXTRACTION_RELATIONS}
+
 ALLOWED_RELATIONS = frozenset(RELATION_DIRECTIONS)
+
+
+def slug(text: str) -> str:
+    """Deterministic concept slug: lowercase, runs of non-alphanumerics -> '_'.
+    Raises if nothing identifier-like survives (never emit an empty node)."""
+    s = re.sub(r"[^a-z0-9.+-]+", "_", (text or "").lower()).strip("_")
+    if not s or not _SLUG.fullmatch(s):
+        raise ValidationError(f"cannot slug {text!r} into a concept id")
+    return s
 
 
 class ValidationError(ValueError):
