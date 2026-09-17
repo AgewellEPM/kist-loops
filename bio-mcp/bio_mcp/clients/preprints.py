@@ -18,6 +18,14 @@ ARXIV_API = "https://export.arxiv.org/api/query"
 BIORXIV_API = "https://api.biorxiv.org"
 _ATOM = "{http://www.w3.org/2005/Atom}"
 
+# Hard wall-clock ceiling for the recent_biorxiv backward page-walk. bioRxiv's
+# windowed endpoint is slow and flaky; past this we degrade to the first page
+# rather than let internal HTTP retries push the call to the caller's deadline.
+# 45s gives a slow-but-alive bioRxiv room to answer while staying comfortably
+# under a typical 120s client deadline; past it the endpoint is effectively down
+# and a flagged fallback beats a hang.
+TAIL_WALK_BUDGET_S = 45.0
+
 
 async def search_arxiv(http: BioHTTP, query: str, *, max_results: int = 20, category: str | None = None) -> dict:
     """arXiv Atom search. category e.g. 'q-bio' or 'q-bio.GN' scopes the query."""
@@ -115,6 +123,7 @@ async def recent_biorxiv(http: BioHTTP, *, server: str = "biorxiv", days: int = 
     Honest limitation: bioRxiv's public API has no keyword search; this is a
     date-window listing optionally filtered by category client-side.
     """
+    import asyncio
     from datetime import date, timedelta
 
     server = server.lower()
@@ -141,15 +150,29 @@ async def recent_biorxiv(http: BioHTTP, *, server: str = "biorxiv", days: int = 
         total = 0
     page = 100
     entries = list(first.get("collection") or [])
-    if total > len(entries):
-        entries = []
+    freshness = "full"
+
+    async def _walk_tail() -> list[dict]:
+        acc: list[dict] = []
         cursor = ((total - 1) // page) * page
-        for _ in range(5):  # bounded backwards walk: 500 newest entries max
+        for _ in range(3):  # newest 300 entries max
             data = await http.get_json(f"{base}/{cursor}")
-            entries = (data.get("collection") or []) + entries
-            if cursor == 0 or sum(1 for e in entries if _keep(e)) >= max_results:
+            acc = (data.get("collection") or []) + acc
+            if cursor == 0 or sum(1 for e in acc if _keep(e)) >= max_results:
                 break
             cursor -= page
+        return acc
+
+    if total > len(entries):
+        # bioRxiv's windowed endpoint is slow and intermittently times out; the
+        # backward walk must never hang the whole call to the client's deadline.
+        # Bound it, and on timeout/upstream failure degrade to the first page
+        # (window START — less fresh) rather than raising, flagging it honestly.
+        try:
+            tail = await asyncio.wait_for(_walk_tail(), timeout=TAIL_WALK_BUDGET_S)
+            entries = tail or entries
+        except (asyncio.TimeoutError, BioAPIError):
+            freshness = "degraded"
 
     newest_first = sorted((e for e in entries if _keep(e)), key=lambda e: e.get("date") or "", reverse=True)
     out = [
@@ -162,11 +185,15 @@ async def recent_biorxiv(http: BioHTTP, *, server: str = "biorxiv", days: int = 
         }
         for e in newest_first[:max_results]
     ]
+    note = "bioRxiv API is date-window only (no keyword search); filter is client-side on category. Listed newest-first from the window tail."
+    if freshness == "degraded":
+        note += " NOTE: bioRxiv tail pages were slow/unavailable — showing the window START (less recent)."
     return {
         "server": server,
         "window": f"{start.isoformat()}..{end.isoformat()}",
         "category_filter": category,
+        "freshness": freshness,
         "returned": len(out),
-        "note": "bioRxiv API is date-window only (no keyword search); filter is client-side on category. Listed newest-first from the window tail.",
+        "note": note,
         "preprints": out,
     }

@@ -110,6 +110,20 @@ async def test_get_text_capped_aborts_early(http):
 
 
 @respx.mock
+async def test_get_text_capped_retries_429(http):
+    # Streaming path must retry 429 like get() — a transient rate-limit under
+    # load must not surface as a hard error on the NCBI streaming fetch.
+    route = respx.get("https://example.org/seq")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "0"}, text="slow down"),
+        httpx.Response(200, content=b">seq\nACGT"),
+    ]
+    text = await http.get_text_capped("https://example.org/seq", max_bytes=1_000)
+    assert text.startswith(">seq")
+    assert route.call_count == 2
+
+
+@respx.mock
 async def test_ncbi_oversize_names_save_path(http):
     respx.get(url__startswith=f"{EUTILS}/efetch.fcgi").mock(
         return_value=httpx.Response(200, content=b">chr1\n" + b"A" * 300_000)
@@ -174,3 +188,28 @@ async def test_biorxiv_recent_reads_window_tail(http):
     r = await preprints.recent_biorxiv(http, days=10, max_results=30)
     assert r["returned"] == 30
     assert all(p["date"] == "2026-09-16" for p in r["preprints"][:30]), "newest page must lead"
+    assert r["freshness"] == "full"
+
+
+@respx.mock
+async def test_biorxiv_recent_degrades_when_tail_unavailable(http):
+    # bioRxiv tail page fails → must degrade to the window-start page and flag it,
+    # NEVER raise or hang the whole call.
+    first_page = {
+        "messages": [{"status": "ok", "total": "250"}],
+        "collection": [
+            {"doi": "10.1101/2026.old1", "title": "t", "category": "genomics", "date": "2026-09-07"},
+            {"doi": "10.1101/2026.old2", "title": "t", "category": "genomics", "date": "2026-09-07"},
+        ],
+    }
+    respx.get(url__regex=r".*/details/biorxiv/.*/0$").mock(
+        return_value=httpx.Response(200, json=first_page)
+    )
+    # tail cursor 200 → 400 (immediate BioAPIError, no retry) simulates unavailability
+    respx.get(url__regex=r".*/details/biorxiv/.*/200$").mock(
+        return_value=httpx.Response(400, text="unavailable")
+    )
+    r = await preprints.recent_biorxiv(http, days=10, max_results=30)
+    assert r["freshness"] == "degraded"
+    assert r["returned"] == 2  # fell back to the first page rather than raising
+    assert "less recent" in r["note"]

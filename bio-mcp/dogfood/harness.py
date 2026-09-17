@@ -94,6 +94,14 @@ def _special_checks(sc: Scenario, payload: dict | None) -> list[str]:
     if payload is None:
         return findings
     if sc.name == "biorxiv recent window freshness":
+        # Honest degradation is not pagination blindness: if the tool SELF-FLAGGED
+        # freshness=degraded (bioRxiv's slow windowed API forced a window-start
+        # fallback) and said so in the note, that's correct behavior under a slow
+        # upstream. The failure mode this check exists to catch is SILENT stale.
+        if payload.get("freshness") == "degraded":
+            if "less recent" not in (payload.get("note") or ""):
+                findings.append("freshness=degraded but the note doesn't disclose the staleness to the caller")
+            return findings
         dates = sorted(d for d in ((p.get("date") or "") for p in payload.get("preprints", [])) if d)
         if dates:
             newest = date.fromisoformat(dates[-1])

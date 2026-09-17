@@ -20,6 +20,7 @@ compute = [
     "pandas>=2.2",
     "scipy>=1.13",
     "numpy>=1.26",
+    "rdkit>=2024.3",  # cheminformatics: SMILES/mol parsing, descriptors, fingerprints
 ]
 
 [project.scripts]

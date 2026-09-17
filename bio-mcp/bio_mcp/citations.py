@@ -29,6 +29,18 @@ _URL_BUILDERS = {
     "ensembl": lambda i: f"https://www.ensembl.org/id/{i}",
     "kegg": lambda i: f"https://www.kegg.jp/entry/{i}",
     "reactome": lambda i: f"https://reactome.org/content/detail/{i}",
+    # scholarly graph
+    "openalex": lambda i: f"https://openalex.org/{i}",
+    "semanticscholar": lambda i: f"https://www.semanticscholar.org/paper/{i}",
+    # predicted structure + protein domains
+    "alphafold": lambda i: f"https://alphafold.ebi.ac.uk/entry/{i}",
+    "interpro": lambda i: f"https://www.ebi.ac.uk/interpro/entry/InterPro/{i}/",
+    # cheminformatics
+    "pubchem": lambda i: f"https://pubchem.ncbi.nlm.nih.gov/compound/{i}",
+    "chembl": lambda i: f"https://www.ebi.ac.uk/chembl/explore/compound/{i}",
+    # variants / clinical
+    "clinvar": lambda i: f"https://www.ncbi.nlm.nih.gov/clinvar/variation/{i}/",
+    "dbsnp": lambda i: f"https://www.ncbi.nlm.nih.gov/snp/{i}",
 }
 
 SUPPORTED_DATABASES = sorted(_URL_BUILDERS)

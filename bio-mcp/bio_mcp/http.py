@@ -39,6 +39,11 @@ HOST_RPS: dict[str, float] = {
     "api.biorxiv.org": 2.0,
     "rest.kegg.jp": 3.0,
     "reactome.org": 5.0,
+    "api.openalex.org": 5.0,          # OpenAlex polite pool (with mailto) allows ~10/s; stay conservative
+    "api.semanticscholar.org": 1.0,   # unauthenticated S2 is aggressively throttled; 1/s is realistic
+    "alphafold.ebi.ac.uk": 5.0,
+    "pubchem.ncbi.nlm.nih.gov": 5.0,  # PUG REST asks for <=5 req/s
+    # NOTE: www.ebi.ac.uk (InterPro + ChEMBL) already bucketed above at 5.0
 }
 
 
@@ -143,36 +148,62 @@ class BioHTTP:
         max_bytes: int,
     ) -> str:
         """Stream a GET, aborting with BioOversizeError the moment the body
-        passes max_bytes — never buffers an unbounded record. Single attempt
-        (no retry loop): oversize is deterministic, and a mid-stream 5xx is
-        rare enough that the caller's retry is the whole request anyway."""
+        passes max_bytes — never buffers an unbounded record. Retries 429/5xx
+        and transport errors with backoff exactly like get() (the retry decision
+        is made from the status line, BEFORE any body is streamed). Oversize is
+        terminal and never retried — the fix is a save_path, not another attempt."""
         req = self._client.build_request("GET", url, params=params, headers=headers)
         host = req.url.host or ""
         if host.endswith("ncbi.nlm.nih.gov") and self._ncbi_key:
             req.url = req.url.copy_merge_params({"api_key": self._ncbi_key})
-        await self._bucket(host).acquire()
-        resp = await self._client.send(req, stream=True)
-        try:
-            if resp.status_code >= 400:
-                body = (await resp.aread())[:300].decode(errors="replace")
-                raise BioAPIError(
-                    f"{host} returned {resp.status_code} for {req.url}: {body}",
-                    status=resp.status_code,
-                    url=str(req.url),
-                )
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in resp.aiter_bytes():
-                size += len(chunk)
-                if size > max_bytes:
-                    raise BioOversizeError(
-                        f"response from {host} exceeded the {max_bytes:,}-byte inline cap",
+
+        last_err: Exception | None = None
+        for attempt in range(MAX_RETRIES + 1):
+            await self._bucket(host).acquire()
+            try:
+                resp = await self._client.send(req, stream=True)
+            except httpx.TransportError as e:
+                last_err = e
+                await asyncio.sleep(BACKOFF_BASE * (2**attempt))
+                continue
+            delay: float | None = None
+            try:
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    body = (await resp.aread())[:200].decode(errors="replace")
+                    last_err = BioAPIError(
+                        f"{host} returned {resp.status_code}: {body}",
+                        status=resp.status_code,
                         url=str(req.url),
                     )
-                chunks.append(chunk)
-        finally:
-            await resp.aclose()
-        return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+                    retry_after = resp.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after and retry_after.isdigit() else BACKOFF_BASE * (2**attempt)
+                elif resp.status_code >= 400:
+                    body = (await resp.aread())[:300].decode(errors="replace")
+                    raise BioAPIError(
+                        f"{host} returned {resp.status_code} for {req.url}: {body}",
+                        status=resp.status_code,
+                        url=str(req.url),
+                    )
+                else:
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in resp.aiter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise BioOversizeError(
+                                f"response from {host} exceeded the {max_bytes:,}-byte inline cap",
+                                url=str(req.url),
+                            )
+                        chunks.append(chunk)
+                    return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+            finally:
+                await resp.aclose()
+            # only reached on the 429/5xx retry branch (delay was set)
+            await asyncio.sleep(delay)
+        raise BioAPIError(
+            f"{host}: giving up after {MAX_RETRIES + 1} attempts: {last_err}",
+            url=str(req.url),
+        )
 
     async def get_json(self, url: str, *, params: dict | None = None, headers: dict | None = None):
         resp = await self.get(url, params=params, headers={**(headers or {}), "Accept": "application/json"})

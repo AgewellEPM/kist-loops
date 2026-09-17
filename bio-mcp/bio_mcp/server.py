@@ -19,7 +19,19 @@ from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 
-from .clients import ensembl, ncbi_seq, pathways, pdb, preprints, pubmed, uniprot
+from .clients import (
+    chem,
+    ensembl,
+    ncbi_seq,
+    pathways,
+    pdb,
+    preprints,
+    pubmed,
+    scholarly,
+    structure_extra,
+    uniprot,
+    variants,
+)
 from .errors import surface_rejections
 from .http import shared_http
 from .sandbox import list_workspace as _list_workspace
@@ -30,10 +42,15 @@ DOCS = Path(__file__).resolve().parent.parent / "docs"
 mcp = MCPServer(
     "bio-research",
     instructions=(
-        "Grounded bio-science research tools. Every result carries a `source` block "
-        "(database, accession/PMID, URL) — cite those identifiers, never paraphrase "
-        "molecular biology from memory when a tool can pin it. Sequences can be saved "
-        "to the workspace and analyzed with run_python (biopython/pandas/scipy)."
+        "Grounded bio-science research tools spanning literature (PubMed/PMC/arXiv/"
+        "bioRxiv), scholarly graph (OpenAlex/Semantic Scholar), proteins & structure "
+        "(UniProt/PDB/AlphaFold/InterPro), genomics (Ensembl/NCBI), variants (ClinVar/"
+        "dbSNP/VEP), cheminformatics (PubChem/ChEMBL), and pathways (KEGG/Reactome). "
+        "Every result carries a `source` block (database, accession/PMID, URL) — cite "
+        "those identifiers, never paraphrase molecular biology from memory when a tool "
+        "can pin it. Variant/clinical tools report significance VERBATIM and are for "
+        "research use only, not medical advice. Sequences and molecules can be analyzed "
+        "with run_python (biopython/pandas/scipy/rdkit)."
     ),
 )
 
@@ -80,6 +97,36 @@ async def biorxiv_fetch(doi: str, server: str = "biorxiv") -> dict:
 async def biorxiv_recent(server: str = "biorxiv", days: int = 7, category: str | None = None, max_results: int = 30) -> dict:
     """List recent bioRxiv/medRxiv preprints in a date window (their API has no keyword search)."""
     return await preprints.recent_biorxiv(shared_http(), server=server, days=days, category=category, max_results=max_results)
+
+
+# ---------- Layer 1b: scholarly citation graph ----------
+
+@mcp.tool()
+@surface_rejections
+async def openalex_search(query: str, max_results: int = 15) -> dict:
+    """Search OpenAlex scholarly works (open metadata: any discipline, citation counts, no key)."""
+    return await scholarly.search_openalex(shared_http(), query, max_results=max_results)
+
+
+@mcp.tool()
+@surface_rejections
+async def openalex_work(work_id: str) -> dict:
+    """One OpenAlex work by ID or DOI (W-id, 'doi:10...', or DOI URL): abstract, references, concepts."""
+    return await scholarly.openalex_work(shared_http(), work_id)
+
+
+@mcp.tool()
+@surface_rejections
+async def semantic_scholar_search(query: str, max_results: int = 15) -> dict:
+    """Search Semantic Scholar papers (abstracts, citation counts). Unauthenticated tier is rate-limited."""
+    return await scholarly.search_semantic_scholar(shared_http(), query, max_results=max_results)
+
+
+@mcp.tool()
+@surface_rejections
+async def semantic_scholar_citations(paper_id: str, max_results: int = 25) -> dict:
+    """Papers that CITE a given Semantic Scholar paper (S2 id or 'DOI:10...'). Forward citation graph."""
+    return await scholarly.semantic_scholar_citations(shared_http(), paper_id, max_results=max_results)
 
 
 # ---------- Layer 2: structured bio data ----------
@@ -145,6 +192,89 @@ async def ensembl_sequence(ensembl_id: str, seq_type: str = "genomic", save_path
 async def ensembl_xrefs(ensembl_gene_id: str, max_results: int = 100) -> dict:
     """Cross-references for an Ensembl gene (UniProt, RefSeq, HGNC...). Capped at max_results; `n_total` reports the full count."""
     return await ensembl.gene_xrefs(shared_http(), ensembl_gene_id, max_results=max_results)
+
+
+# ---------- Layer 2b: predicted structure + protein domains ----------
+
+@mcp.tool()
+@surface_rejections
+async def alphafold_structure(uniprot_accession: str) -> dict:
+    """AlphaFold DB predicted structure for a UniProt accession → model + cif/pdb/PAE download URLs."""
+    return await structure_extra.alphafold_prediction(shared_http(), uniprot_accession)
+
+
+@mcp.tool()
+@surface_rejections
+async def interpro_domains(uniprot_accession: str) -> dict:
+    """InterPro families/domains/sites matching a UniProt protein (returned=0 is honest, not an error)."""
+    return await structure_extra.interpro_protein_domains(shared_http(), uniprot_accession)
+
+
+@mcp.tool()
+@surface_rejections
+async def interpro_entry(interpro_id: str) -> dict:
+    """Metadata for one InterPro entry (IPR######): name, type, description, member databases."""
+    return await structure_extra.interpro_entry(shared_http(), interpro_id)
+
+
+# ---------- Layer 2c: variants & clinical (research use only) ----------
+
+@mcp.tool()
+@surface_rejections
+async def clinvar_search(query: str, max_results: int = 15) -> dict:
+    """Search ClinVar variants. Clinical significance + review status reported VERBATIM. Research use only."""
+    return await variants.clinvar_search(shared_http(), query, max_results=max_results)
+
+
+@mcp.tool()
+@surface_rejections
+async def clinvar_variant(variation_id: str) -> dict:
+    """One ClinVar VariationID: verbatim classifications (significance + review status) + conditions. Research use only."""
+    return await variants.clinvar_variant(shared_http(), variation_id)
+
+
+@mcp.tool()
+@surface_rejections
+async def dbsnp_variant(rsid: str) -> dict:
+    """dbSNP record for an rsID ('rs328' or '328'): location, genes, alleles, clinical significance if any."""
+    return await variants.dbsnp_variant(shared_http(), rsid)
+
+
+@mcp.tool()
+@surface_rejections
+async def vep_consequences(variant: str, species: str = "human") -> dict:
+    """Ensembl VEP: predicted consequences for an rsID or HGVS notation. Research use only."""
+    return await variants.vep_consequences(shared_http(), variant, species=species)
+
+
+# ---------- Layer 2d: cheminformatics ----------
+
+@mcp.tool()
+@surface_rejections
+async def pubchem_compound(name: str) -> dict:
+    """Resolve a compound NAME via PubChem → CID, formula, weight, SMILES, InChIKey, XLogP."""
+    return await chem.pubchem_compound_by_name(shared_http(), name)
+
+
+@mcp.tool()
+@surface_rejections
+async def pubchem_compound_by_cid(cid: int) -> dict:
+    """PubChem compound properties by numeric CID."""
+    return await chem.pubchem_compound_by_cid(shared_http(), cid)
+
+
+@mcp.tool()
+@surface_rejections
+async def chembl_search(query: str, max_results: int = 15) -> dict:
+    """Search ChEMBL molecules → CHEMBL IDs, clinical phase, molecular properties."""
+    return await chem.chembl_search_molecule(shared_http(), query, max_results=max_results)
+
+
+@mcp.tool()
+@surface_rejections
+async def chembl_bioactivity(chembl_id: str, max_results: int = 25) -> dict:
+    """Measured bioactivities (IC50/Ki/...) for a ChEMBL molecule ID against biological targets."""
+    return await chem.chembl_bioactivities(shared_http(), chembl_id, max_results=max_results)
 
 
 # ---------- Layer 5: pathway knowledge ----------

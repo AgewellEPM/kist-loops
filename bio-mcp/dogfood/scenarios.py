@@ -143,6 +143,56 @@ SCENARIOS: list[Scenario] = [
     Scenario("reactome nonsense query honest", "reactome_search", {"query": "zqxjkwvbnm nonexistent pathway"}, "ok",
              severity="medium", notes="runner special-check: 0 results must be reported as 0, not error/fabrication"),
 
+    # ---------- scholarly graph ----------
+    Scenario("openalex search", "openalex_search", {"query": "CRISPR gene editing", "max_results": 5}, "ok",
+             validate=lambda r: check_records(r, "works", id_key="openalex_id"), severity="high"),
+    Scenario("openalex work by DOI", "openalex_work", {"work_id": "doi:10.7717/peerj.4375"}, "ok",
+             validate=lambda r: _single_ok("openalex_id")(r), severity="medium",
+             notes="abstract reconstructed from inverted index; must not be an empty string if present"),
+    Scenario("openalex empty query rejected", "openalex_search", {"query": "  "}, "error", error_must_mention="empty"),
+    Scenario("semantic scholar empty id rejected", "semantic_scholar_citations", {"paper_id": " "}, "error",
+             error_must_mention="empty",
+             notes="S2 LIVE happy-path is in smoke tests, not dogfood: unauthenticated 429 is correct upstream behavior, would flake the score"),
+
+    # ---------- predicted structure + domains ----------
+    Scenario("alphafold structure P04637", "alphafold_structure", {"uniprot_accession": "P04637"}, "ok",
+             validate=lambda r: check_source(r) + ([] if r.get("model", {}).get("downloads") else ["no download URLs on model"]),
+             severity="high"),
+    Scenario("alphafold bogus accession clean error", "alphafold_structure", {"uniprot_accession": "NOTAUNIPROT9"}, "error",
+             severity="medium"),
+    Scenario("interpro domains P04637", "interpro_domains", {"uniprot_accession": "P04637"}, "ok",
+             validate=lambda r: check_records(r, "entries", id_key="interpro_id"), severity="high"),
+    Scenario("interpro entry IPR002117", "interpro_entry", {"interpro_id": "IPR002117"}, "ok",
+             validate=lambda r: check_source(r) + ([] if r.get("name") else ["no name on InterPro entry"])),
+    Scenario("interpro malformed id rejected", "interpro_entry", {"interpro_id": "NOTANIPR"}, "error",
+             error_must_mention="IPR"),
+
+    # ---------- variants / clinical ----------
+    Scenario("clinvar search BRCA1", "clinvar_search", {"query": "BRCA1 pathogenic", "max_results": 5}, "ok",
+             severity="high",
+             validate=lambda r: check_records(r, "variants", id_key="variation_id")
+             + ([] if "not medical advice" in (r.get("disclaimer") or "") else ["missing research-use disclaimer"])),
+    Scenario("clinvar variant nonnumeric rejected", "clinvar_variant", {"variation_id": "BRCA1"}, "error",
+             error_must_mention="numeric"),
+    Scenario("dbsnp variant rs328", "dbsnp_variant", {"rsid": "rs328"}, "ok", severity="high",
+             validate=lambda r: check_source(r) + ([] if r.get("rsid") == "rs328" else ["rsid not normalized to rs328"])),
+    Scenario("dbsnp bad rsid rejected", "dbsnp_variant", {"rsid": "rsABC"}, "error"),
+    Scenario("vep consequences rs699", "vep_consequences", {"variant": "rs699"}, "ok", severity="high",
+             validate=lambda r: check_source(r) + ([] if r.get("most_severe_consequence") else ["no most_severe_consequence"])),
+    Scenario("vep empty variant rejected", "vep_consequences", {"variant": " "}, "error", error_must_mention="empty"),
+
+    # ---------- cheminformatics ----------
+    Scenario("pubchem compound aspirin", "pubchem_compound", {"name": "aspirin"}, "ok", severity="high",
+             validate=lambda r: check_source(r) + ([] if r.get("cid") and r.get("canonical_smiles") else ["missing CID or SMILES"])),
+    Scenario("pubchem bogus name clean error", "pubchem_compound", {"name": "notarealcompoundxyz123"}, "error",
+             severity="medium", notes="unresolvable name → PubChem 404 → clean tool error, not a crash"),
+    Scenario("pubchem nonpositive cid rejected", "pubchem_compound_by_cid", {"cid": 0}, "error",
+             error_must_mention="positive"),
+    Scenario("chembl search imatinib", "chembl_search", {"query": "imatinib", "max_results": 5}, "ok",
+             validate=lambda r: check_records(r, "molecules", id_key="chembl_id"), severity="high"),
+    Scenario("chembl bioactivity bad id rejected", "chembl_bioactivity", {"chembl_id": "941"}, "error",
+             error_must_mention="CHEMBL"),
+
     # ---------- compute ----------
     Scenario("run_python libs available", "run_python",
              {"script": "import Bio, pandas, scipy, numpy; print('ok', Bio.__version__)"}, "ok",

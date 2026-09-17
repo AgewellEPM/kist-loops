@@ -1,11 +1,11 @@
 {
   "generated": "2026-09-17",
-  "scenarios": 53,
-  "passes": 53,
+  "scenarios": 73,
+  "passes": 73,
   "findings": 0,
   "finding_points": 0,
   "server_reconnects": 0,
-  "elapsed_s": 53.7,
+  "elapsed_s": 70.7,
   "results": [
     {
       "name": "glossary resource readable",
@@ -34,7 +34,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.8,
+      "elapsed_s": 0.57,
       "notes": ""
     },
     {
@@ -44,7 +44,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 2.83,
+      "elapsed_s": 1.2,
       "notes": ""
     },
     {
@@ -54,7 +54,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.54,
+      "elapsed_s": 0.53,
       "notes": ""
     },
     {
@@ -64,7 +64,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 2.7,
+      "elapsed_s": 0.89,
       "notes": ""
     },
     {
@@ -74,7 +74,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.41,
+      "elapsed_s": 0.37,
       "notes": "dict contract: {requested, returned, missing, articles}"
     },
     {
@@ -84,7 +84,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.37,
+      "elapsed_s": 0.31,
       "notes": ""
     },
     {
@@ -94,7 +94,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.13,
+      "elapsed_s": 0.09,
       "notes": ""
     },
     {
@@ -104,7 +104,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.3,
+      "elapsed_s": 0.51,
       "notes": ""
     },
     {
@@ -114,7 +114,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 33.94,
+      "elapsed_s": 26.07,
       "notes": "runner applies special freshness check: are returned dates near the window END or only its start (pagination blindness)?"
     },
     {
@@ -144,7 +144,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.16,
+      "elapsed_s": 0.25,
       "notes": "runner special-check: silently returning [] for a bogus PMID without any note = silent-drop finding"
     },
     {
@@ -194,7 +194,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.72,
+      "elapsed_s": 0.42,
       "notes": ""
     },
     {
@@ -204,7 +204,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.11,
+      "elapsed_s": 0.1,
       "notes": ""
     },
     {
@@ -214,7 +214,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.14,
+      "elapsed_s": 0.08,
       "notes": ""
     },
     {
@@ -224,7 +224,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.21,
+      "elapsed_s": 0.24,
       "notes": ""
     },
     {
@@ -244,7 +244,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.4,
+      "elapsed_s": 0.41,
       "notes": ""
     },
     {
@@ -254,7 +254,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.45,
+      "elapsed_s": 2.46,
       "notes": "suspect: rettype 'gb' vs required 'gp' for protein db"
     },
     {
@@ -264,7 +264,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.43,
+      "elapsed_s": 4.25,
       "notes": ""
     },
     {
@@ -274,7 +274,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.1,
+      "elapsed_s": 15.19,
       "notes": ""
     },
     {
@@ -284,7 +284,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.21,
+      "elapsed_s": 1.33,
       "notes": ""
     },
     {
@@ -294,7 +294,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.09,
+      "elapsed_s": 0.37,
       "notes": ""
     },
     {
@@ -304,7 +304,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.55,
+      "elapsed_s": 0.37,
       "notes": "runner accepts EITHER clean success or clean error; crash/ugly error = finding"
     },
     {
@@ -324,7 +324,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.04,
+      "elapsed_s": 0.13,
       "notes": ""
     },
     {
@@ -354,7 +354,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.52,
+      "elapsed_s": 0.56,
       "notes": "chr1 ~248 Mb: must refuse inline, must NOT try to buffer forever; runner enforces 120s deadline"
     },
     {
@@ -364,7 +364,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.14,
+      "elapsed_s": 0.2,
       "notes": ""
     },
     {
@@ -384,7 +384,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.82,
+      "elapsed_s": 0.9,
       "notes": ""
     },
     {
@@ -394,7 +394,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.62,
+      "elapsed_s": 1.23,
       "notes": ""
     },
     {
@@ -424,7 +424,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.1,
+      "elapsed_s": 0.13,
       "notes": ""
     },
     {
@@ -434,8 +434,208 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.16,
+      "elapsed_s": 0.14,
       "notes": "runner special-check: 0 results must be reported as 0, not error/fabrication"
+    },
+    {
+      "name": "openalex search",
+      "tool": "openalex_search",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 1.07,
+      "notes": ""
+    },
+    {
+      "name": "openalex work by DOI",
+      "tool": "openalex_work",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.07,
+      "notes": "abstract reconstructed from inverted index; must not be an empty string if present"
+    },
+    {
+      "name": "openalex empty query rejected",
+      "tool": "openalex_search",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "semantic scholar empty id rejected",
+      "tool": "semantic_scholar_citations",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": "S2 LIVE happy-path is in smoke tests, not dogfood: unauthenticated 429 is correct upstream behavior, would flake the score"
+    },
+    {
+      "name": "alphafold structure P04637",
+      "tool": "alphafold_structure",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.17,
+      "notes": ""
+    },
+    {
+      "name": "alphafold bogus accession clean error",
+      "tool": "alphafold_structure",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.11,
+      "notes": ""
+    },
+    {
+      "name": "interpro domains P04637",
+      "tool": "interpro_domains",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.49,
+      "notes": ""
+    },
+    {
+      "name": "interpro entry IPR002117",
+      "tool": "interpro_entry",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.12,
+      "notes": ""
+    },
+    {
+      "name": "interpro malformed id rejected",
+      "tool": "interpro_entry",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "clinvar search BRCA1",
+      "tool": "clinvar_search",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 1.07,
+      "notes": ""
+    },
+    {
+      "name": "clinvar variant nonnumeric rejected",
+      "tool": "clinvar_variant",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "dbsnp variant rs328",
+      "tool": "dbsnp_variant",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.05,
+      "notes": ""
+    },
+    {
+      "name": "dbsnp bad rsid rejected",
+      "tool": "dbsnp_variant",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "vep consequences rs699",
+      "tool": "vep_consequences",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.45,
+      "notes": ""
+    },
+    {
+      "name": "vep empty variant rejected",
+      "tool": "vep_consequences",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "pubchem compound aspirin",
+      "tool": "pubchem_compound",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 1.58,
+      "notes": ""
+    },
+    {
+      "name": "pubchem bogus name clean error",
+      "tool": "pubchem_compound",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.66,
+      "notes": "unresolvable name \u2192 PubChem 404 \u2192 clean tool error, not a crash"
+    },
+    {
+      "name": "pubchem nonpositive cid rejected",
+      "tool": "pubchem_compound_by_cid",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "chembl search imatinib",
+      "tool": "chembl_search",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.3,
+      "notes": ""
+    },
+    {
+      "name": "chembl bioactivity bad id rejected",
+      "tool": "chembl_bioactivity",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
     },
     {
       "name": "run_python libs available",
@@ -444,7 +644,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.2,
+      "elapsed_s": 0.29,
       "notes": ""
     },
     {
@@ -464,7 +664,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.03,
+      "elapsed_s": 0.04,
       "notes": "suspect: text=True strict decode raises inside the tool"
     },
     {
@@ -535,7 +735,7 @@
       "status": "PASS",
       "findings": [],
       "notes": "",
-      "elapsed_s": 0.49
+      "elapsed_s": 0.92
     }
   ]
 }
