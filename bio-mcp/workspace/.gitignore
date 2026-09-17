@@ -1,0 +1,3 @@
+# Keep fetched data out of git; keep the dir.
+*
+!.gitignore

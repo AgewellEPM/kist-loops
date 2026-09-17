@@ -1,6 +1,33 @@
-# kist-loops — Project Context (CLAUDE.md)
+# science-loops — Project Context (CLAUDE.md)
 
-## What this is
+## What THIS repo is (read first)
+**science-loops is the successor fork of kist-loops (frozen 2026-09-17 at tag
+`freeze/kist-loops-2026-09-17`).** New AI-system/model work happens HERE.
+Remote: private `github.com/AgewellEPM/science-loops` (`origin`); the frozen
+kist repo is remote `kist-loops-origin` — never push there.
+
+### bio-mcp — grounded bio-science research MCP server (first science deliverable)
+`bio-mcp/` — Python 3.12 MCP server (mcp SDK 2.x), PILOT-READY, registered
+user-scope in Claude Code as `bio-research`. Five layers: literature
+(PubMed/PMC E-utilities, arXiv, bioRxiv/medRxiv), structured data (UniProt,
+RCSB PDB, NCBI nuccore/protein, Ensembl), compute (`run_python` in the
+bio-mcp venv: biopython/pandas/scipy — process isolation ONLY, not a security
+boundary), verification (every result carries `source{database,id,url}`;
+unpinned = raised error; style in `bio-mcp/docs/CITATION_STYLE.md`), pathway
+knowledge (KEGG, Reactome + `bio://glossary` resource).
+- Test: `cd bio-mcp && .venv/bin/pytest` (mocked) / `-m live` (real APIs).
+- Rate limits are enforced in `bio_mcp/http.py`; `NCBI_API_KEY` env raises
+  NCBI 3→10 req/s.
+- Rule: no unreferenced molecular-biology assertions in answers — pin to
+  PMID/accession/DOI from tool results or say "unverified".
+
+Everything below is inherited kist-loops context — still accurate for the
+Swift `kist` CLI code that lives in this tree, but deployment/promotion
+paths refer to the FROZEN repo's world; verify before invoking them here.
+
+---
+
+## What the kist tree is
 **The canonical kist source, not proof of the installed or running captain.** This is a Swift Package
 (SPM, NOT Xcode) building the `kist` CLI —
 an agent shell (REPL + one-shot goals + plan→execute + fleet/council/research) that runs
