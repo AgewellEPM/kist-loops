@@ -113,6 +113,22 @@ def build_contract(store: Store, claim_id: str, *, predicted_outcome: str,
     return {**body, "contract_id": f"handoff:{digest}", "created_at": utc_now_iso()}
 
 
+def verify_contract(contract: dict) -> None:
+    """Re-derive the content hash and compare to contract_id. A contract that
+    was modified after build — anywhere, by anyone — fails here. Runs at
+    dispatch AND at collect, so tampering with the stored copy between the
+    two is caught before any evidence is ingested."""
+    body = {k: v for k, v in contract.items() if k not in ("contract_id", "created_at")}
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if contract.get("contract_id") != f"handoff:{digest}":
+        raise ValidationError(
+            f"contract integrity check FAILED for {contract.get('contract_id')!r} "
+            "— body does not match its content address; refusing"
+        )
+
+
 def _record(store: Store, contract: dict, env_id: str, status: str, *,
             executor_ref: str | None = None, plan: dict | None = None,
             outcome: dict | None = None, completed_at: str | None = None) -> None:
@@ -133,6 +149,7 @@ def dispatch_handoff(store: Store, contract: dict, env: Environment) -> dict:
     """Plan the contract's intent from the environment's DISCOVERED
     capabilities, then submit. Refusals (blocked / unplannable) are recorded
     and raised — never silently dropped, never guessed around."""
+    verify_contract(contract)
     if contract["execution_class"] == "blocked":
         _record(store, contract, env.env_id, "refused")
         raise ValidationError(
@@ -201,7 +218,15 @@ def collect_result(store: Store, contract_id: str, env: Environment) -> dict:
         raise ValidationError(
             f"{contract_id} was never submitted (status {record['status']})"
         )
+    contract = json.loads(record["contract_json"])
+    verify_contract(contract)  # tamper between dispatch and collect -> refuse
+
     outcome = env.collect(record["executor_ref"])
+    if not isinstance(outcome, dict):
+        raise ValidationError(
+            f"environment {env.env_id!r} returned a non-dict outcome: "
+            f"{type(outcome).__name__}"
+        )
     observed = outcome.get("observed")
     if observed not in OUTCOME_VALUES:
         raise ValidationError(
@@ -209,7 +234,6 @@ def collect_result(store: Store, contract_id: str, env: Environment) -> dict:
             f"allowed: {OUTCOME_VALUES}"
         )
 
-    contract = json.loads(record["contract_json"])
     now = utc_now_iso()
     store.db.execute(
         "UPDATE handoffs SET status = ?, outcome_json = ?, completed_at = ? "

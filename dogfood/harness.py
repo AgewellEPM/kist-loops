@@ -462,6 +462,262 @@ def sc_unplannable_intent_honest(findings):
         s.close()
 
 
+# ---------------------------------------------------------------- reverse round 2
+# Hostile wave against the terminus loop: tampering, lying environments,
+# malformed human results, hostile payloads, traversal.
+
+def _supported_world(tag):
+    from symbolic_floor.handoff import build_contract
+    s = _fresh_store(tag)
+    extract_protein(s, "P69905", transport=_fixture_transport())
+    claim = s.get_or_create_claim("protein:P69905")
+    contract = build_contract(s, claim, predicted_outcome="x",
+                              intent="measure_sample",
+                              intent_params={"target": "well:D1", "wavelength_nm": 280})
+    return s, contract
+
+
+def sc_rev_malformed_result_files(findings):
+    """The human's result file is hostile: not-JSON, a list, a bad verdict.
+    Each must be a CLEAN refusal (ValidationError), never a crash, zero edges."""
+    from symbolic_floor.environments import load_environment
+    from symbolic_floor.handoff import collect_result, dispatch_handoff
+    from symbolic_floor.schema import ValidationError
+    import shutil
+    for label, payload in (("not-json", b"{{{garbage"),
+                           ("json-list", b"[1,2,3]"),
+                           ("bad-observed", b'{"observed": "maybe"}')):
+        s, contract = _supported_world(f"rev_mrf_{label}")
+        outbox = ROOT / "data" / f"outbox_rev_{label}"
+        try:
+            env = load_environment("human_tech", outbox=outbox)
+            receipt = dispatch_handoff(s, contract, env)
+            (outbox / f"{receipt['executor_ref']}.result.json").write_bytes(payload)
+            try:
+                collect_result(s, contract["contract_id"], env)
+                findings.append(f"[{label}] hostile result file ACCEPTED")
+            except ValidationError:
+                pass  # clean refusal — correct
+            except Exception as e:
+                findings.append(f"[{label}] CRASHED: {type(e).__name__}: {e}")
+            if s.get_edges(relation="supports_claim"):
+                findings.append(f"[{label}] hostile result STILL wrote evidence edges")
+        finally:
+            s.close()
+            shutil.rmtree(outbox, ignore_errors=True)
+
+
+def sc_rev_lying_environment_shapes(findings):
+    """An environment returning garbage from collect(): non-dict shapes must be
+    clean refusals, and a 'confirmed' from a SIMULATED grade must not ingest."""
+    from symbolic_floor.handoff import collect_result, dispatch_handoff
+    from symbolic_floor.schema import ValidationError
+
+    for label, ret in (("none", None), ("string", "confirmed"), ("int", 7)):
+        s, contract = _supported_world(f"rev_lie_{label}")
+        try:
+            class Liar:
+                env_id = f"liar_{label}"; evidence_grade = "physical"
+                def capabilities(self): return {"measure_absorbance"}
+                def submit(self, c, p): return {"status": "submitted", "executor_ref": "L1"}
+                def check(self, r): return {"status": "completed"}
+                def collect(self, r, _ret=ret): return _ret
+            env = Liar()
+            dispatch_handoff(s, contract, env)
+            try:
+                collect_result(s, contract["contract_id"], env)
+                findings.append(f"[{label}] non-dict outcome ACCEPTED")
+            except ValidationError:
+                pass
+            except Exception as e:
+                findings.append(f"[{label}] CRASHED: {type(e).__name__}: {e}")
+        finally:
+            s.close()
+
+    # Simulated grade claiming 'confirmed' must be recorded but NEVER ingested.
+    s, contract = _supported_world("rev_lie_simconf")
+    try:
+        class SimLiar:
+            env_id = "simliar"; evidence_grade = "simulated"
+            def capabilities(self): return {"measure_absorbance"}
+            def submit(self, c, p): return {"status": "submitted", "executor_ref": "SL1"}
+            def check(self, r): return {"status": "completed"}
+            def collect(self, r): return {"observed": "confirmed", "notes": "trust me"}
+        from symbolic_floor.handoff import collect_result as _collect
+        dispatch_handoff(s, contract, SimLiar())
+        out = _collect(s, contract["contract_id"], SimLiar())
+        if out["ingested_as_evidence"] or s.get_edges(relation="supports_claim"):
+            findings.append("SIMULATED 'confirmed' was ingested as evidence — laundering")
+    finally:
+        s.close()
+
+
+def sc_rev_contract_tamper_detected(findings):
+    """Tamper the stored contract between dispatch and collect: the
+    content-addressed id must be re-verified before ingestion."""
+    import json as _json
+    from symbolic_floor.environments import load_environment
+    from symbolic_floor.handoff import collect_result, dispatch_handoff
+    from symbolic_floor.schema import ValidationError
+    import shutil
+    s, contract = _supported_world("rev_tamper")
+    outbox = ROOT / "data" / "outbox_rev_tamper"
+    try:
+        env = load_environment("human_tech", outbox=outbox)
+        receipt = dispatch_handoff(s, contract, env)
+        # Attacker swaps the claim inside the recorded contract.
+        row = s.db.execute("SELECT rowid, contract_json FROM handoffs WHERE contract_id=?",
+                           (contract["contract_id"],)).fetchone()
+        doc = _json.loads(row["contract_json"])
+        doc["claim"]["claim_id"] = "claim:00000000-0000-4000-8000-000000000000"
+        s.db.execute("UPDATE handoffs SET contract_json=? WHERE rowid=?",
+                     (_json.dumps(doc, sort_keys=True), row["rowid"]))
+        s.db.commit()
+        (outbox / f"{receipt['executor_ref']}.result.json").write_text(
+            '{"observed": "confirmed", "notes": "tampered"}')
+        try:
+            collect_result(s, contract["contract_id"], env)
+            findings.append("TAMPERED contract accepted at collect — integrity unverified")
+        except ValidationError:
+            pass  # refused — correct
+        if s.get_edges(relation="supports_claim"):
+            findings.append("tampered contract STILL produced evidence edges")
+    finally:
+        s.close()
+        shutil.rmtree(outbox, ignore_errors=True)
+
+
+def sc_rev_hostile_gene_names(findings):
+    """One un-typeable gene name must not kill the whole wheel — skip it
+    honestly (reported in the trace), keep every valid fact."""
+    import json as _json
+    s = _fresh_store("rev_gene")
+    try:
+        entry = _json.loads((FIXTURES / "rich_entry.json").read_text())
+        entry["genes"] = [{"geneName": {"value": "HBA1"}},
+                          {"geneName": {"value": "BAD GENE; rm -rf /"}},
+                          {"geneName": {"value": "x" * 500}}]
+        body = _json.dumps(entry).encode()
+        fasta = (FIXTURES / "rich.fasta").read_bytes()
+        rcsb = (FIXTURES / "rcsb_ok.json").read_bytes()
+        af = (FIXTURES / "af_ok.json").read_bytes()
+
+        def send(url, timeout):
+            if url.endswith(".json") and "uniprot" in url:
+                return 200, body
+            if url.endswith(".fasta"):
+                return 200, fasta
+            if "rcsb" in url:
+                return 200, rcsb
+            return 200, af
+
+        try:
+            result = extract_protein(s, "P69905", transport=send)
+        except Exception as e:
+            findings.append(f"hostile gene name CRASHED the wheel: {type(e).__name__}: {e}")
+            return
+        good = [e for e in result["edges_written"]
+                if e["relation"] == "encodes" and e["source"] == "gene:HBA1"]
+        if not good:
+            findings.append("valid gene lost while skipping hostile ones")
+        bad = [e for e in result["edges_written"]
+               if e["relation"] == "encodes" and e["source"] != "gene:HBA1"]
+        if bad:
+            findings.append(f"hostile gene names became edges: {bad}")
+        if "skipped" in result and not result["skipped"]:
+            findings.append("skips not reported in the extraction trace")
+    finally:
+        s.close()
+
+
+def sc_rev_executor_ref_traversal(findings):
+    """A tampered executor_ref must not walk out of the outbox."""
+    from symbolic_floor.environments import load_environment
+    from symbolic_floor.schema import ValidationError
+    import shutil
+    outbox = ROOT / "data" / "outbox_rev_trav"
+    try:
+        env = load_environment("human_tech", outbox=outbox)
+        for ref in ("../../../etc/passwd", "..", "a/../../b"):
+            try:
+                env.check(ref)
+                env.collect(ref)
+                findings.append(f"traversal ref {ref!r} was PROCESSED (path escape possible)")
+            except (ValidationError, ValueError):
+                pass  # refused — correct
+            except Exception as e:
+                findings.append(f"traversal ref crashed uncleanly: {type(e).__name__}")
+    finally:
+        shutil.rmtree(outbox, ignore_errors=True)
+
+
+def sc_rev_double_collect_no_dupes(findings):
+    """Collecting twice must not duplicate evidence or corrupt the audit."""
+    from symbolic_floor.environments import load_environment
+    from symbolic_floor.handoff import collect_result, dispatch_handoff
+    import shutil
+    s, contract = _supported_world("rev_double")
+    outbox = ROOT / "data" / "outbox_rev_double"
+    try:
+        env = load_environment("human_tech", outbox=outbox)
+        receipt = dispatch_handoff(s, contract, env)
+        (outbox / f"{receipt['executor_ref']}.result.json").write_text(
+            '{"observed": "confirmed", "notes": "run"}')
+        first = collect_result(s, contract["contract_id"], env)
+        second = collect_result(s, contract["contract_id"], env)
+        n = len(s.get_edges(relation="supports_claim"))
+        if n != len(first["evidence_edges_written"]):
+            findings.append(f"double collect changed evidence count: {n}")
+        if second["evidence_edges_written"]:
+            findings.append("second collect wrote NEW edges (not idempotent)")
+    finally:
+        s.close()
+        shutil.rmtree(outbox, ignore_errors=True)
+
+
+def sc_rev_reeval_after_ingest_stable(findings):
+    """Executor edges in the graph must not destabilize the reasoner."""
+    import json as _json
+    from symbolic_floor.environments import load_environment
+    from symbolic_floor.handoff import collect_result, dispatch_handoff
+    from symbolic_floor.reasoner import evaluate_claim
+    import shutil
+    s, contract = _supported_world("rev_reeval")
+    outbox = ROOT / "data" / "outbox_rev_reeval"
+    try:
+        env = load_environment("human_tech", outbox=outbox)
+        receipt = dispatch_handoff(s, contract, env)
+        (outbox / f"{receipt['executor_ref']}.result.json").write_text(
+            '{"observed": "confirmed"}')
+        collect_result(s, contract["contract_id"], env)
+        claim = contract["claim"]["claim_id"]
+        v1 = _json.dumps(evaluate_claim(s, claim), sort_keys=True)
+        v2 = _json.dumps(evaluate_claim(s, claim), sort_keys=True)
+        if v1 != v2:
+            findings.append("verdict non-deterministic after executor ingestion")
+        if _json.loads(v1)["verdict"] != "SUPPORTED":
+            findings.append(f"verdict destabilized after ingestion: {_json.loads(v1)['verdict']}")
+    finally:
+        s.close()
+        shutil.rmtree(outbox, ignore_errors=True)
+
+
+def sc_rev_extreme_intent_params(findings):
+    """Params that compose into out-of-range capability calls must refuse
+    cleanly with the range named — no partial plan, no partial writes."""
+    from symbolic_floor.planner import plan_intent
+    from symbolic_floor.schema import ValidationError
+    try:
+        plan_intent("serial_dilution", {"factor": 1000, "steps": 3, "volume_ul": 1},
+                    {"aspirate", "dispense", "mix"})
+        findings.append("sub-0.1ul transfer plan was ACCEPTED (unpipettable)")
+    except ValidationError as e:
+        if "outside" not in str(e):
+            findings.append(f"extreme params refused with unclear error: {e}")
+    except Exception as e:
+        findings.append(f"extreme params CRASHED planner: {type(e).__name__}")
+
+
 SCENARIOS = [
     ("extraction writes typed facts", "high", sc_extraction_writes_typed_facts),
     ("every edge has provenance", "critical", sc_every_edge_has_provenance),
@@ -478,6 +734,15 @@ SCENARIOS = [
     ("simulation never becomes evidence", "critical", sc_simulation_never_becomes_evidence),
     ("blocked contract refused (no ship)", "critical", sc_blocked_contract_refused),
     ("unplannable intent honest", "high", sc_unplannable_intent_honest),
+    # reverse round 2 — hostile wave
+    ("REV2 malformed result files refused cleanly", "high", sc_rev_malformed_result_files),
+    ("REV2 lying environment shapes refused", "high", sc_rev_lying_environment_shapes),
+    ("REV2 contract tamper detected at collect", "critical", sc_rev_contract_tamper_detected),
+    ("REV2 hostile gene names don't kill the wheel", "high", sc_rev_hostile_gene_names),
+    ("REV2 executor_ref traversal contained", "high", sc_rev_executor_ref_traversal),
+    ("REV2 double collect idempotent", "medium", sc_rev_double_collect_no_dupes),
+    ("REV2 reasoner stable after ingestion", "high", sc_rev_reeval_after_ingest_stable),
+    ("REV2 extreme intent params refused", "medium", sc_rev_extreme_intent_params),
 ]
 
 LIVE_SCENARIOS = [

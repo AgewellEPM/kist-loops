@@ -15,10 +15,23 @@ conflicts_with) — a human actually did the thing.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+from ..schema import ValidationError
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_OUTBOX = _PROJECT_ROOT / "data" / "outbox"
+
+# Executor refs we generated are contract ids with ':' -> '_'. Anything else —
+# separators, dot-dot, absolute paths — must never be joined into the outbox.
+_SAFE_REF = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _safe_ref(executor_ref: str) -> str:
+    if not _SAFE_REF.fullmatch(executor_ref or "") or ".." in executor_ref:
+        raise ValidationError(f"unsafe executor_ref {executor_ref!r}")
+    return executor_ref
 
 # Human-executable rendering of each capability call.
 _VERBS = {
@@ -54,20 +67,30 @@ class Env:
         return {"status": "submitted", "executor_ref": ref}
 
     def check(self, executor_ref: str) -> dict:
-        result = self.outbox / f"{executor_ref}.result.json"
+        ref = _safe_ref(executor_ref)
+        result = self.outbox / f"{ref}.result.json"
         if result.exists():
             return {"status": "completed"}
-        if (self.outbox / f"{executor_ref}.json").exists():
+        if (self.outbox / f"{ref}.json").exists():
             return {"status": "pending"}
         return {"status": "failed", "notes": "work order not found in outbox"}
 
     def collect(self, executor_ref: str) -> dict:
-        result = self.outbox / f"{executor_ref}.result.json"
+        ref = _safe_ref(executor_ref)
+        result = self.outbox / f"{ref}.result.json"
         if not result.exists():
             return {"observed": "inconclusive",
                     "notes": "no result file yet — human has not reported back",
                     "readings": []}
-        data = json.loads(result.read_text())
+        # The result file is human-written — treat it as hostile input.
+        try:
+            data = json.loads(result.read_text())
+        except ValueError as e:
+            raise ValidationError(f"result file {result.name} is not valid JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise ValidationError(
+                f"result file {result.name} must be a JSON object, got {type(data).__name__}"
+            )
         return {"observed": data.get("observed", "inconclusive"),
                 "notes": data.get("notes", ""),
                 "readings": data.get("readings", [])}

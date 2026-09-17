@@ -113,11 +113,20 @@ def extract_protein(store: Store, accession: str, *,
     entry_url = fetched["url"]
     sources = [entry_url]
     written: list[dict] = []
+    skipped: list[dict] = []
     existing = 0
 
     def _add(src: str, rel: str, dst: str, label: str, provenance: dict) -> None:
         nonlocal existing
-        edge_id, created = store.add_edge(src, rel, dst, provenance, label=label)
+        # One un-typeable fact (a gene symbol with spaces, an over-long id)
+        # must not kill the whole wheel: skip it, report it, keep going. The
+        # skip list in the trace keeps this honest — dropped is never silent.
+        try:
+            edge_id, created = store.add_edge(src, rel, dst, provenance, label=label)
+        except ValidationError as e:
+            skipped.append({"source": src, "relation": rel, "target": dst,
+                            "reason": str(e)})
+            return
         if created:
             written.append({"edge_id": edge_id, "source": src,
                             "relation": rel, "target": dst})
@@ -178,6 +187,7 @@ def extract_protein(store: Store, accession: str, *,
         "accession": acc,
         "edges_written": written,
         "edges_already_present": existing,
+        "skipped": skipped,
         "pdb_xrefs_total": len(xrefs),
         "pdb_confirmed": confirmed,
         "pdb_confirm_cap": max_structures,
