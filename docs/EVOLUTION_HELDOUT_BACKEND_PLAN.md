@@ -95,6 +95,33 @@ winners stays regardless — the loop never auto-promotes.
 
 ## Progress log
 
+- **2026-09-16:** Step 2 (delegated cgroup-v2 supervisor) implemented and proven.
+  `LinuxDelegatedCgroupSupervisor` (Sources/AgentCore/LinuxDelegatedCgroupSupervisor.swift)
+  creates a scope under the operator-delegated subtree, joins the launcher into
+  `cgroup.procs` *before* exec and verifies membership host-side (fork + sync
+  pipe: the parent reads `cgroup.procs` and confirms the launcher PID before
+  releasing the child to `execve`), writes and reads back `memory.max`/`pids.max`,
+  runs a live `cpu.stat` aggregate CPU-time watcher, then issues `cgroup.kill` and
+  fails closed unless `cgroup.procs` drains to empty. It builds a
+  `HardProcessContainmentReceipt` from host-owned observations only; on non-Linux
+  hosts every entry point throws `.unavailable`. Proven against a real cgroup2
+  host (Ubuntu 6.8, Swift 6.1.3) by `scripts/evolution/linux-supervisor-proof`,
+  which compiles the **exact shipped source** and passes three checks: (A) a
+  benign run whose receipt clears the real `HardProcessContainmentContract` +
+  one-use `HardProcessContainmentReplayGuard` (replay rejected); (B) a `setsid`
+  daemon that outlives its launcher is reaped by `cgroup.kill` and the scope
+  verifies empty — a process-group kill would miss it; (C) `pids.max=4` caps a
+  50-process adversary and the scope still drains. Held on branch
+  `feat/linux-evolution-supervisor`, un-merged pending review.
+  **Explicitly NOT done (and why):** `HardProcessContainmentRuntime.currentAvailability`
+  and `EvolutionPairedBenchmarkCoordinator.productionBackend` are unchanged — the
+  readiness gate stays fail-closed. Flipping them (step 4) requires step 1 (the
+  full AgentCore Linux build green) so the backend that consumes this supervisor
+  is exercised on the only platform where it goes live; activating a gate against
+  code unproven on its live platform is the exact "buildable in an evening and
+  worthless" trap this plan rejects. The supervisor is the reviewed, proven unit;
+  wiring it into the coordinator is the next reviewed step, not this one.
+
 - **2026-09-11:** Step 3 (private corpus store) shipped + test-pinned, and the
   self-upgrade readiness checklist is now visible via `--evolve-status`
   (per-gate ✓/✗ + reason + corpus probe). Remaining long poles are the
