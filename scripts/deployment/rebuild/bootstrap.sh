@@ -388,10 +388,12 @@ def walk(fd,prefix,target_fd=None):
         if rel==".kist/runs":
             if stat.S_ISDIR(st.st_mode): continue
             raise RuntimeError("run telemetry has an invalid type")
-        if name in {".build",".build-local","DerivedData"}:
+        if name in {".build",".build-local","DerivedData",".venv"}:
             # Build output at ANY depth is a regenerable artifact, never source — skip it (and never
             # descend, so a nested SwiftPM `.build/debug` symlink can't choke the source hasher). Was
             # `not prefix and …` (root-only), which let e.g. mcp-server/.build/debug fail the snapshot.
+            # `.venv` is a regenerable Python interpreter environment (gitignored, symlink-laden —
+            # bio-mcp/.venv/bin/python choked the 2026-09-17 science-loops promotion at this line).
             if stat.S_ISDIR(st.st_mode): continue
             raise RuntimeError("build output has an invalid type")
         if stat.S_ISDIR(st.st_mode):
