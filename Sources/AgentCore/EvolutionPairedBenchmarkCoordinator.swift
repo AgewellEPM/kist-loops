@@ -29,9 +29,31 @@ struct EvolutionPairedBenchmarkCompletion: Sendable {
 }
 
 enum EvolutionPairedBenchmarkCoordinator {
-    /// Availability is code-owned. An optimistic caller, test fixture, or decoded receipt cannot install
-    /// a backend in a production process. Adding the real backend is a separate readiness change.
-    private static var productionBackend: (any EvolutionPairedBenchmarkBackend)? { nil }
+    /// Availability is code-owned: the backend TYPE is chosen here in source, never installed by a caller,
+    /// fixture, or decoded receipt. On Linux, once an operator has provisioned a qualifying delegated
+    /// cgroup-v2 subtree AND a private held-out corpus, the code-owned Linux backend runs each arm under
+    /// the delegated-cgroup supervisor + bubblewrap + the seccomp escape-deny filter. Everywhere else, and
+    /// whenever either operator resource is absent, this stays nil and evaluation refuses before any
+    /// candidate runs. The env vars only point at operator paths; they cannot fabricate the kernel-backed
+    /// cgroup qualification the availability probe requires.
+    private static var productionBackend: (any EvolutionPairedBenchmarkBackend)? {
+        #if os(Linux)
+        guard let cgroupRoot = LinuxDelegatedCgroupProbe.configuredRoot,
+              LinuxDelegatedCgroupProbe.qualifies(cgroupRoot),
+              let corpusDir = ProcessInfo.processInfo.environment["KIST_EVOLUTION_HELDOUT_CORPUS"],
+              !corpusDir.isEmpty, corpusDir.hasPrefix("/") else {
+            return nil
+        }
+        return LinuxEvolutionPairedBenchmarkBackend(
+            corpusDirectory: corpusDir, delegatedRoot: cgroupRoot,
+            limits: HardProcessContainmentLimits(
+                aggregateCPUTimeMicros: 120_000_000,
+                aggregateMemoryBytes: 2 * 1_024 * 1_024 * 1_024,
+                aggregateProcessCount: 256))
+        #else
+        return nil
+        #endif
+    }
 
     static func run(commands: [String], candidate: GitIsolation.EvolutionCommitSnapshot,
                     worktree: GitWorktree, hostRoot: String,

@@ -68,6 +68,17 @@ public enum HardProcessContainmentRuntime {
                 mechanism: .macOSSeatbeltProcessGroup,
                 reason: unavailableReason(for: .macOS))
         case .linux:
+            // Available only when an operator has provisioned a real delegated cgroup-v2 subtree the
+            // trusted supervisor can own. The env var merely POINTS at it; qualification is decided by
+            // kernel-backed facts (required controllers + writable cgroup.kill/procs/limit files) that a
+            // fixture or decoded receipt cannot fabricate. Absent that, the lane stays fail-closed.
+            if let root = LinuxDelegatedCgroupProbe.configuredRoot,
+               LinuxDelegatedCgroupProbe.qualifies(root) {
+                return HardProcessContainmentAvailability(
+                    available: true, platform: .linux,
+                    mechanism: .linuxDelegatedCgroupV2,
+                    reason: "delegated cgroup-v2 subtree qualified at \(root)")
+            }
             return HardProcessContainmentAvailability(
                 available: false, platform: .linux,
                 mechanism: .linuxBubblewrapProcessGroup,
@@ -89,6 +100,36 @@ public enum HardProcessContainmentRuntime {
         case .unsupported:
             return "hard containment unavailable on this platform"
         }
+    }
+}
+
+/// Kernel-backed qualification probe for an operator-provisioned delegated cgroup-v2 subtree. It reads
+/// only real cgroup control files, so it cannot be satisfied by an env var alone: the required
+/// controllers must be delegated and the lifecycle files (`cgroup.kill`/`procs`/`subtree_control` and the
+/// per-controller limit files) must be writable — which only holds on a genuine delegated subtree. This
+/// mirrors `scripts/evolution/check-linux-cgroup-v2.sh`. On non-Linux hosts the files do not exist, so it
+/// returns false and the gate stays closed.
+public enum LinuxDelegatedCgroupProbe {
+    /// The operator-provisioned delegated subtree, if configured. The env var only points at a candidate
+    /// path; `qualifies` decides whether it is real.
+    public static var configuredRoot: String? {
+        guard let v = ProcessInfo.processInfo.environment["KIST_EVOLUTION_CGROUP_ROOT"],
+              !v.isEmpty, v.hasPrefix("/") else { return nil }
+        return v
+    }
+
+    public static func qualifies(_ root: String) -> Bool {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+        guard let controllers = try? String(contentsOfFile: root + "/cgroup.controllers", encoding: .utf8)
+        else { return false }
+        let present = Set(controllers.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init))
+        guard ["cpu", "memory", "pids"].allSatisfy(present.contains) else { return false }
+        let writable = ["cgroup.procs", "cgroup.subtree_control", "cgroup.kill",
+                        "cpu.max", "memory.max", "pids.max"]
+        return writable.allSatisfy { FileManager.default.isWritableFile(atPath: root + "/" + $0) }
     }
 }
 
