@@ -1,0 +1,193 @@
+{
+  "generated": "2026-09-17",
+  "scenarios": 26,
+  "passes": 26,
+  "findings": 0,
+  "finding_points": 0,
+  "elapsed_s": 14.2,
+  "mode": "offline+live",
+  "results": [
+    {
+      "name": "extraction writes typed facts",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "every edge has provenance",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "re-extraction idempotent",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "recall completeness (recall it all)",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "recall deterministic",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "extract -> verdict SUPPORTED",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "functional veto fires on rogue prediction",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "embedded engine contradiction scan runs",
+      "severity": "medium",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "malformed payload handled honestly",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0
+    },
+    {
+      "name": "allowlist still enforced",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0
+    },
+    {
+      "name": "fictional accession writes nothing",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "terminus full loop (dispatch->collect->ingest)",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "simulation never becomes evidence",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "blocked contract refused (no ship)",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "unplannable intent honest",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "canonical-37 tile trace complete",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "REV2 malformed result files refused cleanly",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.06
+    },
+    {
+      "name": "REV2 lying environment shapes refused",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.1
+    },
+    {
+      "name": "REV2 contract tamper detected at collect",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "REV2 hostile gene names don't kill the wheel",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "REV2 executor_ref traversal contained",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0
+    },
+    {
+      "name": "REV2 double collect idempotent",
+      "severity": "medium",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.03
+    },
+    {
+      "name": "REV2 reasoner stable after ingestion",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.04
+    },
+    {
+      "name": "REV2 extreme intent params refused",
+      "severity": "medium",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0
+    },
+    {
+      "name": "LIVE extract/recall/verdict roundtrip P69905",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 6.96
+    },
+    {
+      "name": "LIVE rich extraction P04637 (cap honesty)",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 6.69
+    }
+  ]
+}

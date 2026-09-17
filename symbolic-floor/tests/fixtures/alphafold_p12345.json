@@ -1,0 +1,8 @@
+[
+  {
+    "uniprotAccession": "P12345",
+    "uniprotId": "TEST_FIXTURE",
+    "latestVersion": 4,
+    "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P12345-F1-model_v4.pdb"
+  }
+]

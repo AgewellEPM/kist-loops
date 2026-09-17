@@ -1,0 +1,5 @@
+{
+  "rcsb_id": "1ABC",
+  "struct": {"title": "Test experimental structure"},
+  "rcsb_entry_info": {"experimental_method": "X-RAY DIFFRACTION"}
+}
