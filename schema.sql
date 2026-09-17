@@ -1,0 +1,51 @@
+-- symbolic_floor schema v1 (slice 1: protein-structure validation)
+--
+-- OWNERSHIP SPLIT: the tables below are owned by this project. The typed
+-- fact store itself (typed_relations, contradictions, inferred_links) is
+-- owned by the VENDORED Peel engine (symbolic_floor/peel/relation_schema.py,
+-- RelationSchemaEngine._ensure_tables) — the engine creates and manages its
+-- own DDL in the same SQLite file. Facts live in typed_relations; everything
+-- here is the typed node registry, provenance enforcement, sequences, and
+-- claim bindings around that engine.
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS nodes (
+    node_id    TEXT PRIMARY KEY,   -- e.g. protein:P12345, structure:1ABC
+    label      TEXT NOT NULL,      -- cosmetic only; the reasoner never reads it
+    created_at TEXT NOT NULL       -- UTC ISO-8601
+);
+
+-- Raw amino-acid sequences, content-addressed. DECISIONS.md: table chosen
+-- over a sequences/ file directory (single reviewable artifact).
+CREATE TABLE IF NOT EXISTS sequences (
+    sequence_id TEXT PRIMARY KEY,  -- sequence:<sha256 of exact residue string>
+    residues    TEXT NOT NULL,     -- one-letter code, no whitespace
+    length      INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+-- Claim registry. The six relations give no claim->protein linkage and labels
+-- are forbidden for reasoning, so the binding is a typed row here
+-- (DECISIONS.md #2 — flagged for review).
+CREATE TABLE IF NOT EXISTS claims (
+    claim_id   TEXT PRIMARY KEY,   -- claim:<uuid4>
+    subject    TEXT NOT NULL,      -- protein:<accession>
+    shape      TEXT NOT NULL,      -- e.g. structural-consistency-v1
+    created_at TEXT NOT NULL,
+    UNIQUE (subject, shape)
+);
+
+-- Provenance is REQUIRED for every edge; an edge row in typed_relations
+-- without a row here is invalid. Enforced at write time in store.py (the only
+-- write path), validated before anything is inserted.
+CREATE TABLE IF NOT EXISTS edge_provenance (
+    edge_id         TEXT PRIMARY KEY,  -- typed_relations.id
+    provenance_json TEXT NOT NULL,     -- {"source","url","retrieved_at","raw_id"}
+    created_at      TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
