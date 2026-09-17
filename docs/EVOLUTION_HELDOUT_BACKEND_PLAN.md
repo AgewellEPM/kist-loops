@@ -95,6 +95,32 @@ winners stays regardless — the loop never auto-promotes.
 
 ## Progress log
 
+- **2026-09-16 (later):** Steps 1 and 2a landed on `feat/linux-evolution-supervisor`.
+  - **Step 1 — AgentCore builds on Linux** (`1e08aa6`). Empirically scoped by a
+    real Linux build (Swift 6.1), not guessed: 13 files, resolved to Darwin-guarded
+    swift-corelibs-foundation shims (a `URLSession.bytes(for:)` buffered shim +
+    `autoreleasepool` pass-through in `LinuxFoundationCompat.swift`,
+    `FoundationNetworking` imports, CFBoolean→objCType checks, Glibc socket-constant
+    casts). `swift build --target AgentCore` is green on Linux and macOS.
+  - **Step 2a — attested seccomp-BPF escape-syscall deny** (`67fad7d`).
+    `EvolutionSeccompFilter` compiles a classic BPF program denying
+    link/linkat/symlink/symlinkat + mount/namespace/ptrace/keyring/module/kexec/bpf
+    /mknod for x86_64 and aarch64, and KILLs non-native-arch syscalls (closes the
+    32-bit-compat-ABI bypass). Content-addressed via `programDigest` for attestation.
+    Proven two ways on a real kernel (both compile the exact shipped source):
+    (i) `scripts/evolution/linux-seccomp-proof` installs it via prctl(PR_SET_SECCOMP)
+    — link/symlink/unshare all EPERM, no-filter control shows link succeeds, allowed
+    syscalls still work; (ii) the real deployment path — `bwrap --seccomp <fd>` with
+    our filter — blocks a hardlink ("Operation not permitted") while writes succeed.
+    5 macOS structural unit tests pin the assembly.
+  - **Remaining in step 2 (2b, not yet done):** wire the filter into the bubblewrap
+    attestor (`--seccomp` fd plumbing through the spawn path) + bind `programDigest`
+    into the sandbox policy, then implement `EvolutionPairedBenchmarkBackend`
+    (per-arm git worktrees run under BOTH the cgroup supervisor and the filtered
+    sandbox). Step 3 flips the gate under review; the external witness (step 4) is
+    operator infra. Held un-merged pending review — this is the evolution-gate code
+    that most needs a second reviewer.
+
 - **2026-09-16:** Step 2 (delegated cgroup-v2 supervisor) implemented and proven.
   `LinuxDelegatedCgroupSupervisor` (Sources/AgentCore/LinuxDelegatedCgroupSupervisor.swift)
   creates a scope under the operator-delegated subtree, joins the launcher into
