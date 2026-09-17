@@ -1048,6 +1048,9 @@ enum KistRunner {
                         substantiveSummary: verifiedContext?.substantiveSummary,
                         artifactReferences: verifiedContext?.artifactReferences ?? [])
                 }
+                // Capture the box, not the REPL (repl.research → closure → repl would cycle). Read
+                // `isActive` at RUN time so "lois" toggles made after wiring are honored per run.
+                let loisPeelMode = repl.peelMode
                 repl.research = { g, roles in
                     // R1 sibling: same watcher for the research pipeline.
                     TurnInputQueue.shared.begin()
@@ -1066,7 +1069,8 @@ enum KistRunner {
                                           tools: tools, context: context,
                                           providerId: providerId, model: model,
                                           rolesOverride: roles, capture: researchCapture,
-                                          councilCapture: councilCapture)
+                                          councilCapture: councilCapture,
+                                          requirePEEL: loisPeelMode.isActive)
                     }
                     let verification: HeavyRouteResult.Verification
                     if interrupted.value != nil {

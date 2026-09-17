@@ -535,13 +535,16 @@ extension KistREPL {
                                                            sessionStart: sessionStart,
                                                            hasActiveTask: currentActive != nil)
             let plan = showPlan ? persisted : Plan()
-            let modeLabel: String
+            var modeLabel: String
             switch perm.mode {
             case .normal: modeLabel = "chat"
             case .acceptEdits: modeLabel = "accept-edits"
             case .plan: modeLabel = "plan"
             case .bypass: modeLabel = "bypass"
             }
+            // "Lois" wake word armed the required PEEL gate — keep that visible at every prompt so
+            // the operator always knows research is running fail-closed symbolic-first.
+            if peelMode.isActive { modeLabel += " · ◫lois" }
             return StatusLine(modelLabel: modelLabel,
                               mode: modeLabel,
                               cost: cost,

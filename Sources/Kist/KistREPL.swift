@@ -30,6 +30,9 @@ final class KistREPL {
     var digDeep: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Run an evidence-first research pass, feed the dossier to council, and seed the shared board.
     var research: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
+    /// "Lois" wake word state: while active, research runs REQUIRE the symbolic PEEL proof gate.
+    /// Shared box (not a plain var) so the runner-built research closure observes REPL-time toggles.
+    let peelMode = LoisPeelMode()
     /// `/dive` — a LOCAL, repo-scoped multi-model read of OUR OWN code (no web, no cross-repo estate sweep).
     /// Grounds a dossier in the actual files under the project root, then fans it to every reachable model.
     var dive: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
@@ -471,6 +474,40 @@ final class KistREPL {
                     }
                 }
                 continue
+            }
+
+            // LOIS WAKE WORD: "lois" turns the Peel symbolic lane ON — research must cross the PEEL
+            // proof gate (fail-closed) until "lois off". "lois <question>" also runs a PEEL-required
+            // research pass immediately. Deterministic interceptor, no LLM turn (see LoisIntent).
+            if !submittedIsDelegation, let lois = LoisIntent.parse(input) {
+                switch lois {
+                case .activate:
+                    peelMode.isActive = true
+                    print("\u{001B}[32m◫ Lois online — Peel symbolic gate ACTIVE\u{001B}[0m\u{001B}[2m · research now requires grounded PEEL evidence · \"lois off\" to release\u{001B}[0m")
+                    continue
+                case .deactivate:
+                    peelMode.isActive = false
+                    print("\u{001B}[37m◫ Lois released — Peel gate back to advisory\u{001B}[0m")
+                    continue
+                case .research(let loisGoal):
+                    peelMode.isActive = true
+                    print("\u{001B}[32m◫ Lois online — Peel symbolic gate ACTIVE\u{001B}[0m")
+                    guard let research else {
+                        print("\u{001B}[31mresearch isn't available here — Peel mode stays armed for when it is\u{001B}[0m")
+                        continue
+                    }
+                    print("\u{001B}[2m↳ PEEL-gated evidence dossier → role-bound council → durable task board\u{001B}[0m")
+                    let outcome = OutcomeContract(
+                        desiredResult: loisGoal, intent: .research, mode: .inline,
+                        authority: .readOnly, isContinuation: false)
+                    await runHeavyRoute(goal: loisGoal, intent: .research, mode: .inline,
+                                        execution: "research", startProof: true,
+                                        outcomeContract: outcome,
+                                        rememberInConversation: true) {
+                        await research(loisGoal, roleSelection.bindings)
+                    }
+                    continue
+                }
             }
 
             // NATURAL-LANGUAGE SANDBOX CONTROL: "run it headless" / "run it in a small window at the
