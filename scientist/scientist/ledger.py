@@ -9,9 +9,12 @@ States and the only legal moves between them:
 
     PROPOSED ──→ TESTABLE ──→ EXPERIMENTING ──→ SUPPORTED | CONTESTED | REJECTED
     SUPPORTED ──→ CONTESTED            (new conflicting receipt-backed verdict)
-    CONTESTED ──→ SUPPORTED | REJECTED | REVISED
+    CONTESTED ──→ REJECTED | REVISED   (one-way: a refutation on record never un-happens
+                                        in an append-only ledger, so SUPPORTED — which
+                                        requires zero refutations — is unreachable from
+                                        here; rehabilitation is a REVISED successor)
     EXPERIMENTING ──→ TESTABLE         (experiment concluded; more tests still possible)
-    REVISED, REJECTED are terminal. REVISED must name its successor hypothesis.
+    REVISED, REJECTED are terminal. REVISED must name a non-terminal successor hypothesis.
 
 Preconditions the ledger enforces (the "WHAT MUST BE TESTED / WHAT COUNTS AS EVIDENCE" rules):
   → TESTABLE       requires ≥1 registered prediction for the hypothesis.
@@ -52,7 +55,6 @@ ALLOWED_TRANSITIONS = {
     (EXPERIMENTING, CONTESTED),
     (EXPERIMENTING, REJECTED),
     (SUPPORTED, CONTESTED),
-    (CONTESTED, SUPPORTED),
     (CONTESTED, REJECTED),
     (CONTESTED, REVISED),
 }
@@ -253,10 +255,18 @@ class Ledger:
         if to_state == REJECTED and counts.discriminating_refuted < 1:
             raise RuleViolation("REJECTED requires a REFUTED verdict on a DISCRIMINATING "
                                 "prediction — easy-miss refutations only contest")
-        if to_state == REVISED and not justification.get("successor_id"):
-            raise RuleViolation("REVISED must name the successor hypothesis")
-        if to_state == REVISED and justification["successor_id"] not in self.hypotheses:
-            raise RuleViolation("REVISED successor must already be proposed")
+        if to_state == REVISED:
+            successor_id = justification.get("successor_id")
+            if not successor_id:
+                raise RuleViolation("REVISED must name the successor hypothesis")
+            successor = self.hypotheses.get(successor_id)
+            if successor is None:
+                raise RuleViolation("REVISED successor must already be proposed")
+            if successor.state in TERMINAL_STATES:
+                raise RuleViolation("REVISED successor must be a non-terminal hypothesis — "
+                                    "a revision chain must end in something alive")
+            if successor_id == hypothesis_id:
+                raise RuleViolation("a hypothesis cannot be its own revision successor")
         payload = {"hypothesis_id": hypothesis_id, "from": hypothesis.state, "to": to_state,
                    "justification": justification}
         self._record("state_changed", payload)

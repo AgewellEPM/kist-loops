@@ -48,15 +48,50 @@ def content_sha(seq: int, ts: float, kind: str, payload: Dict[str, Any], prev_sh
 
 
 class EventLog:
-    """A JSONL file of chained events. Fail-fast: any verification problem raises, never skips."""
+    """A JSONL file of chained events. Fail-fast: any verification problem raises, never skips.
+
+    The hash chain alone detects edits and front/middle deletions, but a clean TRUNCATION from
+    the end leaves a valid sub-chain (review finding, 2026-09-17). So the expected head sha is
+    persisted in a fsynced sidecar (`<log>.head`) after every append, and reload refuses a log
+    whose replayed head does not match the sidecar."""
 
     def __init__(self, path: Path, now: Optional[Any] = None) -> None:
         self.path = Path(path)
+        self.head_path = self.path.with_name(self.path.name + ".head")
         self._now = now or time.time
         self._events: List[Event] = []
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             self._events = list(self._verify_and_load())
+            self._verify_head_sidecar()
+        elif self.head_path.exists():
+            raise LedgerIntegrityError(
+                f"head sidecar {self.head_path} exists but the log is missing — "
+                "history was deleted")
+
+    def _verify_head_sidecar(self) -> None:
+        if not self.head_path.exists():
+            raise LedgerIntegrityError(
+                f"missing head sidecar {self.head_path} — cannot rule out end-truncation")
+        recorded = self.head_path.read_text(encoding="utf-8").strip()
+        if recorded == self.head_sha:
+            return
+        # Exactly-one-behind is provably crash-shaped (append durable, sidecar write lost):
+        # the last event verifiably CHAINS FROM the recorded head. Truncation can only leave
+        # the recorded head unreachable ahead of the replayed head — never this shape.
+        if self._events and self._events[-1].prev_sha == recorded:
+            self._write_head(self.head_sha)
+            return
+        raise LedgerIntegrityError(
+            f"head mismatch: sidecar records {recorded[:16]}… but the log replays to "
+            f"{self.head_sha[:16]}… — events were truncated from the end or the sidecar "
+            "was edited")
+
+    def _write_head(self, sha: str) -> None:
+        with self.head_path.open("w", encoding="utf-8") as handle:
+            handle.write(sha + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def _verify_and_load(self) -> Iterator[Event]:
         prev = GENESIS_SHA
@@ -104,6 +139,9 @@ class EventLog:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+        # Sidecar updated AFTER the log line is durable: a crash between the two writes leaves
+        # the sidecar exactly one behind, which reload proves crash-shaped and repairs.
+        self._write_head(sha)
         self._events.append(event)
         return event
 

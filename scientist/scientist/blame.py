@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .ledger import Hypothesis, Ledger, PASSED, REFUTED
+from .ledger import Hypothesis, Ledger, PASSED, REFUTED, RuleViolation
 
 BLAME_RULE_VERSION = 1
 SUSPICION_THRESHOLD = 1
@@ -28,17 +28,22 @@ def assign_blame(ledger: Ledger, experiment_id: str) -> List[Dict[str, str]]:
     """Update assumption suspicion from one experiment's verdicts; spawn follow-up hypotheses.
 
     Returns the list of generated hypotheses (possibly empty)."""
-    refuted_hypotheses: List[Hypothesis] = []
-    passed_hypotheses: List[Hypothesis] = []
+    # Deduplicate by hypothesis: suspicion moves once per HYPOTHESIS per experiment, not once
+    # per verdict — a hypothesis with three refuted predictions in one experiment failed once,
+    # not three times (review finding, 2026-09-17).
+    refuted_by_id: Dict[str, Hypothesis] = {}
+    passed_by_id: Dict[str, Hypothesis] = {}
     for verdict in ledger.verdicts.values():
         if verdict["experiment_id"] != experiment_id:
             continue
         hypothesis = ledger.hypotheses[
             ledger.predictions[verdict["prediction_id"]]["hypothesis_id"]]
         if verdict["outcome"] == REFUTED:
-            refuted_hypotheses.append(hypothesis)
+            refuted_by_id[hypothesis.id] = hypothesis
         elif verdict["outcome"] == PASSED:
-            passed_hypotheses.append(hypothesis)
+            passed_by_id[hypothesis.id] = hypothesis
+    refuted_hypotheses = [refuted_by_id[k] for k in sorted(refuted_by_id)]
+    passed_hypotheses = [passed_by_id[k] for k in sorted(passed_by_id)]
 
     exonerated = {aid for h in passed_hypotheses for aid in h.assumption_ids}
     for hypothesis in refuted_hypotheses:
@@ -65,8 +70,9 @@ def assign_blame(ledger: Ledger, experiment_id: str) -> List[Dict[str, str]]:
                                f"{experiment_id}; suspicion {assumption['suspicion']}"),
                     assumptions=[],
                     origin=f"generator:{hypothesis.id}")
-            except Exception:
-                continue    # already generated for this assumption — dedup by statement digest
+            except RuleViolation:
+                continue    # already generated for this assumption — dedup by statement digest;
+                            # anything else (disk, encoding) must propagate, not vanish
             generated.append({"hypothesis_id": new_hypothesis.id,
                               "blamed_assumption": assumption_id,
                               "source_hypothesis": hypothesis.id})

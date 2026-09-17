@@ -36,6 +36,10 @@ def grade(prediction: Dict[str, Any], actual: Any) -> Dict[str, Any]:
             error = actual_number - expected_number
             outcome = PASSED if abs(error) <= tolerance else REFUTED
             return {"outcome": outcome, "error": error}
+        # Python's True == 1 must not leak into grading: a bool claim and a numeric
+        # observation are DIFFERENT KINDS of statement, so mixing them refutes.
+        if isinstance(actual, bool) != isinstance(expected, bool):
+            return {"outcome": REFUTED, "error": "type mismatch: bool vs non-bool"}
         outcome = PASSED if actual == expected else REFUTED
         return {"outcome": outcome, "error": None if outcome == PASSED else "mismatch"}
     if actual_number is None or (relation != "in_range" and expected_number is None):

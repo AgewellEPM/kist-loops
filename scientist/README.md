@@ -25,8 +25,9 @@ ledger proposals, and proposals that break the rules raise — they are never ha
 ## The non-negotiables (each is pinned by tests)
 
 - **Append-only, hash-chained ledger** (`events.py`): every mutation is an event carrying the
-  sha256 of its predecessor; edit or delete any past line and replay refuses to load. The
-  model cannot quietly rewrite history.
+  sha256 of its predecessor; edit or delete any past line and replay refuses to load. A
+  fsynced head sidecar (`<log>.head`) additionally catches clean truncation from the END —
+  the one rewrite a hash chain alone cannot see. The model cannot quietly rewrite history.
 - **Pre-registration** (`ledger.record_verdict`): a prediction is only gradable if its
   registration event precedes the receipt event in the chain, and only against an experiment
   that declared it at design time. Postdiction and post-hoc matching are both refused.
@@ -35,7 +36,9 @@ ledger proposals, and proposals that break the rules raise — they are never ha
   disposes.
 - **State machine** (`ledger.py`): PROPOSED→TESTABLE→EXPERIMENTING→SUPPORTED/CONTESTED/
   REJECTED/REVISED, transitions justified by verdicts on record. REJECTED requires a
-  discriminating refutation; SUPPORTED requires zero refutations.
+  discriminating refutation; SUPPORTED requires zero refutations; CONTESTED is a one-way
+  gate (a refutation never un-happens — rehabilitation is a REVISED successor, which must
+  itself be non-terminal).
 - **Ungameable knowledge objective** (`knowledge.py`): credit only for experiments that
   refute something or settle a live disagreement, never for re-proving the proven or lone
   confirmations of the uncontested. "Validated knowledge gained per experiment" is an
@@ -56,7 +59,7 @@ evidence: `dogfood/hemoglobin-P69905/` (34 hash-chained events, 2/2 experiments 
 ## Tests
 
 ```
-python3 -m unittest discover -s tests    # 23 tests, no network (live probe = run_live.py)
+python3 -m unittest discover -s tests    # 31 tests, no network (live probe = run_live.py)
 ```
 
 ## Honest scope (what PILOT-READY means here)

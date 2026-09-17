@@ -662,6 +662,24 @@ final class DeploymentProvenanceTests: XCTestCase {
             try sourceState(of: repo),
             initial,
             "a symlink-laden Python virtualenv must be excluded from source identity at any depth")
+        try FileManager.default.removeItem(at: virtualenv)
+        try write("not a venv directory\n", to: virtualenv)
+        let wrongVenvType = try run(
+            rebuild,
+            arguments: ["--print-source-state", repo.path])
+        XCTAssertNotEqual(
+            wrongVenvType.status,
+            0,
+            "a regular file named .venv must not masquerade as the excluded virtualenv")
+        try FileManager.default.removeItem(at: virtualenv)
+        // Recreate the real (directory) virtualenv so the snapshot-two omission assertion
+        // below exercises an actually-present venv, not a vacuously absent one.
+        try FileManager.default.createDirectory(
+            at: virtualenv.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: virtualenv.appendingPathComponent("bin/python"),
+            withDestinationURL: URL(fileURLWithPath: "/usr/bin/python3"))
+        XCTAssertEqual(try sourceState(of: repo), initial)
 
         try write("// root near-miss remains bound\n", to: alternateBuildNearMiss)
         XCTAssertNotEqual(

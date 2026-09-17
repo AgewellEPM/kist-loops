@@ -88,6 +88,35 @@ class LoopTests(unittest.TestCase):
         with self.assertRaises(RuleViolation):
             propose_competing(self.ledger, [{"statement": "only one idea"}])
 
+    def test_multi_prediction_refutation_blames_once_per_hypothesis(self):
+        # Review finding 2026-09-17: suspicion moved once per VERDICT, so a hypothesis with
+        # two refuted predictions blamed its assumption twice in one experiment.
+        loser, winner = propose_competing(self.ledger, [
+            {"statement": "sample is heavy and wide", "rationale": "",
+             "assumptions": [{"text": "one shared gauge"}]},
+            {"statement": "sample is light", "rationale": "", "assumptions": []},
+        ])
+        self.ledger.register_prediction(loser.id, "lab:sample:mass", "==", 41,
+                                        discriminating=True)
+        self.ledger.register_prediction(loser.id, "lab:sample:mass", "==", 43,
+                                        discriminating=True)
+        self.ledger.register_prediction(winner.id, "lab:sample:mass", "==", 37,
+                                        discriminating=True)
+        run_cycle(self.ledger, {"lab": fake_adapter({"mass": 37})})
+        suspicions = {a["text"]: a["suspicion"] for a in self.ledger.assumptions.values()}
+        self.assertEqual(suspicions["one shared gauge"], 1,
+                         "two refuted predictions = ONE failed hypothesis = suspicion 1")
+
+    def test_bool_claim_never_equals_a_number(self):
+        # Review finding 2026-09-17: Python's True == 1 leaked into grading.
+        from scientist.critic import grade
+        refuted = grade({"relation": "==", "expected": True, "tolerance": 0}, 1)
+        self.assertEqual(refuted["outcome"], "REFUTED")
+        also_refuted = grade({"relation": "==", "expected": 1, "tolerance": 0}, True)
+        self.assertEqual(also_refuted["outcome"], "REFUTED")
+        passed = grade({"relation": "==", "expected": True, "tolerance": 0}, True)
+        self.assertEqual(passed["outcome"], "PASSED")
+
 
 if __name__ == "__main__":
     unittest.main()

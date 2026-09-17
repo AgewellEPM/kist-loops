@@ -4,7 +4,7 @@ from pathlib import Path
 
 from scientist.confidence import HARD_VETO_CEILING
 from scientist.ledger import (CONTESTED, EXPERIMENTING, Ledger, PASSED, REFUTED, REJECTED,
-                              RuleViolation, SUPPORTED, TESTABLE)
+                              REVISED, RuleViolation, SUPPORTED, TESTABLE)
 
 
 def make_ledger(path):
@@ -117,6 +117,40 @@ class LedgerRuleTests(unittest.TestCase):
         with self.assertRaises(RuleViolation):
             self.ledger.record_receipt(experiment["id"], {"lab:sample:mass": 38},
                                        raw_digest="1" * 64, adapter_meta={})
+
+    def test_contested_is_a_one_way_gate(self):
+        # Review finding 2026-09-17: (CONTESTED → SUPPORTED) was listed but unreachable —
+        # a refutation on record never un-happens in an append-only ledger. Pin the removal.
+        hypothesis, prediction, experiment = self._experimented(discriminating=False)
+        self.ledger.record_verdict(prediction["id"], experiment["id"], REFUTED, 37, -4)
+        self.ledger.transition(hypothesis.id, CONTESTED, {})
+        with self.assertRaises(RuleViolation) as caught:
+            self.ledger.transition(hypothesis.id, SUPPORTED, {})
+        self.assertIn("illegal transition", str(caught.exception))
+
+    def test_revised_successor_must_be_alive_and_not_self(self):
+        hypothesis, prediction, experiment = self._experimented(discriminating=False)
+        self.ledger.record_verdict(prediction["id"], experiment["id"], REFUTED, 37, -4)
+        self.ledger.transition(hypothesis.id, CONTESTED, {})
+        dead = self.ledger.propose_hypothesis("dead end", "r", [], "operator")
+        dead_prediction = self.ledger.register_prediction(
+            dead.id, "lab:sample:mass2", "==", 1, discriminating=True)
+        dead_experiment = self.ledger.design_experiment(
+            "weigh 2", "lab", {"key": "sample2"}, [dead_prediction["id"]])
+        self.ledger.transition(dead.id, TESTABLE, {})
+        self.ledger.transition(dead.id, EXPERIMENTING, {})
+        self.ledger.record_receipt(dead_experiment["id"], {"lab:sample:mass2": 9},
+                                   raw_digest="2" * 64, adapter_meta={})
+        self.ledger.record_verdict(dead_prediction["id"], dead_experiment["id"],
+                                   REFUTED, 9, 8)
+        self.ledger.transition(dead.id, REJECTED, {})
+        with self.assertRaises(RuleViolation) as terminal:
+            self.ledger.transition(hypothesis.id, REVISED, {"successor_id": dead.id})
+        self.assertIn("non-terminal", str(terminal.exception))
+        with self.assertRaises(RuleViolation) as own:
+            self.ledger.transition(hypothesis.id, REVISED,
+                                   {"successor_id": hypothesis.id})
+        self.assertIn("own revision successor", str(own.exception))
 
 
 if __name__ == "__main__":
