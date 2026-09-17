@@ -12,6 +12,7 @@ Makes any Claude session bio-science-research-ready. Five layers:
 | 1 Literature | PubMed/PMC via NCBI E-utilities; arXiv; bioRxiv/medRxiv | `pubmed_search`, `pubmed_abstracts`, `pmc_fulltext`, `arxiv_search`, `biorxiv_fetch`, `biorxiv_recent` |
 | 2 Bio data | UniProtKB, RCSB PDB, NCBI GenBank/Protein, Ensembl | `uniprot_search`, `uniprot_entry`, `pdb_search`, `pdb_entry`, `ncbi_sequence_search`, `ncbi_fetch_sequence`, `ensembl_gene`, `ensembl_sequence`, `ensembl_xrefs` |
 | 3 Compute | Python in the bio-mcp venv: biopython, pandas, scipy, numpy | `run_python`, `list_workspace` |
+| 3b Wetware | Actuation lane: workspace writes + detached background jobs (survive server restarts; state on disk under `workspace/.wetware/jobs/`) | `wetware_write_file`, `wetware_read_file`, `wetware_move`, `wetware_remove`, `wetware_job_start`, `wetware_job_status`, `wetware_job_output`, `wetware_job_cancel`, `wetware_jobs` |
 | 4 Verification | Every result carries `source{database,id,url,retrieved}`; unpinned source = raised error | (contract, not a tool — see `citations.py`) |
 | 5 Knowledge | KEGG + Reactome pathways; glossary + citation-style resources | `kegg_search`, `kegg_entry`, `reactome_search`, `bio://glossary`, `bio://citation-style` |
 

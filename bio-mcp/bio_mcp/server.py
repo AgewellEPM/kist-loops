@@ -7,6 +7,9 @@ Layer map (see README.md):
                    ncbi_sequence_search, ncbi_fetch_sequence,
                    ensembl_gene, ensembl_sequence, ensembl_xrefs
   3 compute      → run_python, list_workspace
+  3b wetware     → wetware_write_file, wetware_read_file, wetware_move,
+                   wetware_remove, wetware_job_start, wetware_job_status,
+                   wetware_job_output, wetware_job_cancel, wetware_jobs
   5 knowledge    → kegg_search, kegg_entry, reactome_search
                    + resources bio://glossary, bio://citation-style
   4 verification → every result carries source{database,id,url,retrieved};
@@ -36,6 +39,8 @@ from .errors import surface_rejections
 from .http import shared_http
 from .sandbox import list_workspace as _list_workspace
 from .sandbox import run_python_script
+from .wetware import jobs as wetware_jobs_mod
+from .wetware import workspace_ops
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 
@@ -319,6 +324,76 @@ def run_python(script: str, timeout_s: int = 120, cwd: str | None = None) -> dic
 def list_workspace(subdir: str | None = None) -> dict:
     """List files in the bio-mcp workspace (where fetched sequences are saved)."""
     return _list_workspace(subdir)
+
+
+# ---------- Layer 3b: wetware actuation lane ----------
+
+@mcp.tool()
+@surface_rejections
+def wetware_write_file(path: str, content: str, append: bool = False) -> dict:
+    """Write (or append) a text file inside the bio-mcp workspace. Path is workspace-relative."""
+    return workspace_ops.write_file(path, content, append=append)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_read_file(path: str, max_chars: int = 200000) -> dict:
+    """Read a workspace file as text (results, FASTA, CSVs written by jobs or fetches)."""
+    return workspace_ops.read_file(path, max_chars=max_chars)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_move(src: str, dst: str) -> dict:
+    """Move/rename a file or directory within the workspace."""
+    return workspace_ops.move_path(src, dst)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_remove(path: str) -> dict:
+    """Delete a workspace file or directory tree (workspace root and job state refused)."""
+    return workspace_ops.remove_path(path)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_job_start(script: str, label: str | None = None, timeout_s: int = 3600) -> dict:
+    """Start a long-running Python job (simulation/analysis) in the background.
+
+    Runs in the bio-mcp venv with the same process isolation as run_python but
+    detached — survives this server restarting. Returns a job_id immediately;
+    poll wetware_job_status / wetware_job_output. Max timeout 24h.
+    """
+    return wetware_jobs_mod.start_job(script, label=label, timeout_s=timeout_s)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_job_status(job_id: str) -> dict:
+    """State of a background job: running | finished (exit_code/timed_out/cancelled) | died."""
+    return wetware_jobs_mod.job_status(job_id)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_job_output(job_id: str, tail_chars: int = 10000) -> dict:
+    """Tail of a job's stdout/stderr — readable while it runs and after it exits."""
+    return wetware_jobs_mod.job_output(job_id, tail_chars=tail_chars)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_job_cancel(job_id: str) -> dict:
+    """Cancel a running job (SIGTERM to its process group); the cancel is recorded."""
+    return wetware_jobs_mod.cancel_job(job_id)
+
+
+@mcp.tool()
+@surface_rejections
+def wetware_jobs(max_results: int = 50) -> dict:
+    """List recent background jobs with their states, newest first."""
+    return wetware_jobs_mod.list_jobs(max_results)
 
 
 # ---------- Layer 5: reference resources ----------
