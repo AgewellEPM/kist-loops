@@ -54,6 +54,33 @@ They built the case for us: their own demo concedes structured state in and
 that a non-AI bot plays better. A non-AI bot *does* — above — in 2 µs
 instead of 100 ms, free instead of $7/hour, with receipts.
 
+### 3b. Real DOOM — the actual 1993 binary, not a simulator
+
+Jev's Doom demo runs on "structured state as a data structure with text";
+ViZDoom hands us a labels buffer. To remove even that advantage we also drove
+the **real DOOM.EXE (shareware 1.9)** inside a genuine Windows 98 guest, over
+the Perslis legacy runtime — no engine API at all, only the framebuffer.
+
+| | **Jev / ViZDoom (structured state in)** | **Ours on real DOOM.EXE (win98 guest)** |
+|---|---|---|
+| Perception | engine hands typed state | frame-difference two still captures → motion blobs; HUD red-mass for ammo/health. **Zero neural, zero engine hooks** |
+| Control | model → action | rules → typed action over {TURN_L, TURN_R, FORWARD, ATTACK, OBSERVE} via one held QMP send-key channel |
+| Honesty | — | when the last action moved the camera the diff is invalid, so facts carry `observed=False` and the policy fires `look-before-acting` instead of inventing enemies |
+| Measured | — | 120 decisions, **12.6 µs median decision latency**, tracked real enemies (fired TURN_RIGHT at 0.97 confidence on `blobs=3–4` motion clusters), $0 |
+| Evidence | — | live traversal-graph window + `real-doom98-symbolic-combat.mp4` (game left, lit decision graph right) + `real_receipts.jsonl` (one line per decision) |
+
+Honest limitation: in this run ATTACK fired 0 times — the motion-diff sensor
+tracks and turns toward enemies but the observe/turn cadence rarely lands one
+inside the aim tolerance *on a clean still frame*. The system never
+hallucinated a target (that's the point); tightening the fire gate is future
+work, and it is logged, not hidden.
+
+Infra note earned the hard way: spawning a CLI process per capture/keystroke
+churns the guest's single QMP client slot and wedges it after ~30 actions
+(qemu stayed alive every time — it was never the VM dying). Holding **one**
+persistent QMP connection for the whole run dropped per-cycle wall time from
+0.86 s to 0.02–0.04 s and ran 120 cycles clean.
+
 ## 4. What they have that we still don't (kept honest)
 
 1. **Zero feature engineering.** Jev decides in ANY domain from a schema +

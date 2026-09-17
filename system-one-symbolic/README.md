@@ -15,7 +15,8 @@ Comparison with measured numbers: [COMPARISON.md](COMPARISON.md)
 |---|---|---|
 | `decision_head.py` | **PILOT-READY** | Typed decision primitive; contract-tested (9 pins); pure stdlib; no deploy path needed (library) |
 | `calibration.py` | **PILOT-READY** | Outcome log + reliability + PAV isotonic; 8 pins incl. tie-aggregation regression |
-| `doom_lane/` | **PROTOTYPE** | Demo. Real gameplay, real receipts, but a demo |
+| `doom_lane/` (ViZDoom) | **PROTOTYPE** | Simulator lane. Labels-buffer perception, live traversal graph, ~20 kills/episode |
+| `doom_lane/real_doom98.py` | **PROTOTYPE** | Real DOOM.EXE in a win98 guest over Perslis; framebuffer-only perception, persistent-QMP control, 120 clean cycles, recorded |
 | `wikirace_lane/` | **PROTOTYPE** | Demo. Live Wikipedia API, polite throttle, best-first search |
 
 **Productionize plan** (when a lane graduates): wire `DecisionHead` +
@@ -27,10 +28,29 @@ jeeves-brain `tests/test_wiki_wheel_trace.py`; nothing here weakens that.
 ## Run
 
 ```bash
-.venv/bin/python -m unittest discover tests          # 38 tests
-.venv/bin/python -m doom_lane.play 3                 # headless Doom, receipts.jsonl
+.venv/bin/python -m unittest discover tests          # 66 tests
+.venv/bin/python -m doom_lane.play 3                 # headless ViZDoom, receipts.jsonl
+.venv/bin/python -m doom_lane.play 2 --watch --record out.mp4   # visible + traversal graph
 .venv/bin/python -m wikirace_lane.racer "Cheese" "Volcano"
 ```
+
+### Real DOOM.EXE in a Windows 98 guest (Perslis lane)
+
+Drives the actual 1993 binary over one held QMP connection — perception is
+arithmetic over the framebuffer, no engine API. Bring the guest up through
+the lease owner first, then:
+
+```bash
+# 1. open the owner-leased VM, dismiss login, launch C:\DOOMS\DOOM
+#    (see doom_lane/bringup98.sh — repairs qcow2 leaks, logs in, starts DOOM)
+# 2. hand off to symbolic control (persistent QMP, live graph, recording):
+.venv/bin/python -m doom_lane.real_doom98 --cycles 120 --start-game --live \
+    --record ~/Desktop/real-doom98-symbolic-combat.mp4
+```
+
+Note: use ONE persistent QMP connection (`doom_lane/qmp_client.py`), never a
+CLI process per action — the latter wedges the guest's single QMP slot after
+~30 calls.
 
 ## The design in one paragraph
 

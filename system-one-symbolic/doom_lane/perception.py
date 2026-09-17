@@ -29,9 +29,17 @@ class SymbolicState:
 
     @property
     def nearest_enemy(self) -> EnemyFact | None:
+        """Smallest angular offset from the crosshair."""
         if not self.enemies:
             return None
         return min(self.enemies, key=lambda e: abs(e.dx_norm))
+
+    @property
+    def closest_enemy(self) -> EnemyFact | None:
+        """Largest apparent width = physically closest = the threat."""
+        if not self.enemies:
+            return None
+        return max(self.enemies, key=lambda e: e.width_norm)
 
     def evidence(self) -> dict:
         nearest = self.nearest_enemy
