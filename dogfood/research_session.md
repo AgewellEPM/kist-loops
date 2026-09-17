@@ -1,9 +1,9 @@
 # Research session — human-oxygen-transport-v1
 model `floor-proposer` · db `data/research_globins.db`
-2026-09-17T08:03:08.628Z → 2026-09-17T08:03:52.298Z
+2026-09-17T08:12:10.073Z → 2026-09-17T08:12:59.825Z
 
 **Extracted OK:** P69905, P68871, P02144, P69891, P02042, P02008, Q9NPG2, Q8WWM9
-**Admissions:** {'extract': 9, 'claim': 8, 'abstain': 1}
+**Admissions:** {'extract': 9, 'claim': 8, 'abstain': 1, 'intent': 2, 'rejected_unparseable': 1}
 **Claim verdicts:** {'P69905': 'SUPPORTED', 'P68871': 'SUPPORTED', 'P02144': 'SUPPORTED', 'P69891': 'SUPPORTED', 'P02042': 'SUPPORTED', 'P02008': 'SUPPORTED', 'Q9NPG2': 'SUPPORTED', 'Q8WWM9': 'SUPPORTED'}
 **Honesty probes all abstained:** False
 

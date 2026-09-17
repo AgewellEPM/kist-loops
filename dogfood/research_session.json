@@ -1,9 +1,11 @@
 {
   "programme": "human-oxygen-transport-v1",
+  "session": "human-oxygen-transport-v1@2026-09-17T08:12:10.073Z",
   "model": "floor-proposer",
   "db": "data/research_globins.db",
-  "started": "2026-09-17T08:03:08.628Z",
-  "finished": "2026-09-17T08:03:52.298Z",
+  "notebook": "/Users/lukekist/.kist/workspaces/captain/symbolic_floor/data/notebook.jsonl",
+  "started": "2026-09-17T08:12:10.073Z",
+  "finished": "2026-09-17T08:12:59.825Z",
   "targets": 8,
   "extracted_ok": [
     "P69905",
@@ -18,7 +20,9 @@
   "admission_counts": {
     "extract": 9,
     "claim": 8,
-    "abstain": 1
+    "abstain": 1,
+    "intent": 2,
+    "rejected_unparseable": 1
   },
   "claim_verdicts": {
     "P69905": "SUPPORTED",
@@ -293,12 +297,13 @@
       ]
     }
   ],
+  "notebook_entries_this_session": 31,
   "log": [
     {
       "phase": "extract",
       "target": "P69905",
       "prompt": "Pull the available evidence for P69905 (hemoglobin subunit alpha) into the floor.",
-      "at": "2026-09-17T08:03:14.709Z",
+      "at": "2026-09-17T08:12:12.698Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -307,9 +312,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 14,
           "pdb_xrefs_total": 355,
-          "edges_written": 14
+          "edges_written": 0
         }
       }
     },
@@ -317,7 +322,7 @@
       "phase": "extract",
       "target": "P68871",
       "prompt": "Pull the available evidence for P68871 (hemoglobin subunit beta) into the floor.",
-      "at": "2026-09-17T08:03:18.084Z",
+      "at": "2026-09-17T08:12:15.844Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -326,9 +331,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 14,
           "pdb_xrefs_total": 348,
-          "edges_written": 14
+          "edges_written": 0
         }
       }
     },
@@ -336,7 +341,7 @@
       "phase": "extract",
       "target": "P02144",
       "prompt": "Pull the available evidence for P02144 (myoglobin) into the floor.",
-      "at": "2026-09-17T08:03:20.494Z",
+      "at": "2026-09-17T08:12:18.490Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -345,9 +350,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 8,
           "pdb_xrefs_total": 1,
-          "edges_written": 8
+          "edges_written": 0
         }
       }
     },
@@ -355,7 +360,7 @@
       "phase": "extract",
       "target": "P69891",
       "prompt": "Pull the available evidence for P69891 (hemoglobin subunit gamma-1) into the floor.",
-      "at": "2026-09-17T08:03:22.496Z",
+      "at": "2026-09-17T08:12:21.008Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -364,9 +369,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 7,
           "pdb_xrefs_total": 2,
-          "edges_written": 7
+          "edges_written": 0
         }
       }
     },
@@ -374,7 +379,7 @@
       "phase": "extract",
       "target": "P02042",
       "prompt": "Pull the available evidence for P02042 (hemoglobin subunit delta) into the floor.",
-      "at": "2026-09-17T08:03:24.997Z",
+      "at": "2026-09-17T08:12:24.779Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -383,9 +388,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 7,
           "pdb_xrefs_total": 2,
-          "edges_written": 7
+          "edges_written": 0
         }
       }
     },
@@ -393,7 +398,7 @@
       "phase": "extract",
       "target": "P02008",
       "prompt": "Pull the available evidence for P02008 (hemoglobin subunit zeta) into the floor.",
-      "at": "2026-09-17T08:03:27.532Z",
+      "at": "2026-09-17T08:12:26.961Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -402,9 +407,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 7,
           "pdb_xrefs_total": 2,
-          "edges_written": 7
+          "edges_written": 0
         }
       }
     },
@@ -412,7 +417,7 @@
       "phase": "extract",
       "target": "Q9NPG2",
       "prompt": "Pull the available evidence for Q9NPG2 (neuroglobin) into the floor.",
-      "at": "2026-09-17T08:03:30.750Z",
+      "at": "2026-09-17T08:12:30.280Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -421,9 +426,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 12,
           "pdb_xrefs_total": 5,
-          "edges_written": 12
+          "edges_written": 0
         }
       }
     },
@@ -431,7 +436,7 @@
       "phase": "extract",
       "target": "Q8WWM9",
       "prompt": "Pull the available evidence for Q8WWM9 (cytoglobin) into the floor.",
-      "at": "2026-09-17T08:03:34.081Z",
+      "at": "2026-09-17T08:12:33.044Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -440,9 +445,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 12,
           "pdb_xrefs_total": 9,
-          "edges_written": 12
+          "edges_written": 0
         }
       }
     },
@@ -450,7 +455,7 @@
       "phase": "claim",
       "target": "P69905",
       "prompt": "Verify the structural consistency of hemoglobin subunit alpha (P69905).",
-      "at": "2026-09-17T08:03:35.838Z",
+      "at": "2026-09-17T08:12:34.848Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -491,7 +496,7 @@
       "phase": "claim",
       "target": "P68871",
       "prompt": "Verify the structural consistency of hemoglobin subunit beta (P68871).",
-      "at": "2026-09-17T08:03:37.578Z",
+      "at": "2026-09-17T08:12:36.610Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -532,7 +537,7 @@
       "phase": "claim",
       "target": "P02144",
       "prompt": "Verify the structural consistency of myoglobin (P02144).",
-      "at": "2026-09-17T08:03:39.365Z",
+      "at": "2026-09-17T08:12:38.400Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -565,7 +570,7 @@
       "phase": "claim",
       "target": "P69891",
       "prompt": "Verify the structural consistency of hemoglobin subunit gamma-1 (P69891).",
-      "at": "2026-09-17T08:03:41.111Z",
+      "at": "2026-09-17T08:12:40.164Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -600,7 +605,7 @@
       "phase": "claim",
       "target": "P02042",
       "prompt": "Verify the structural consistency of hemoglobin subunit delta (P02042).",
-      "at": "2026-09-17T08:03:42.890Z",
+      "at": "2026-09-17T08:12:41.896Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -635,7 +640,7 @@
       "phase": "claim",
       "target": "P02008",
       "prompt": "Verify the structural consistency of hemoglobin subunit zeta (P02008).",
-      "at": "2026-09-17T08:03:44.650Z",
+      "at": "2026-09-17T08:12:43.655Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -670,7 +675,7 @@
       "phase": "claim",
       "target": "Q9NPG2",
       "prompt": "Verify the structural consistency of neuroglobin (Q9NPG2).",
-      "at": "2026-09-17T08:03:46.485Z",
+      "at": "2026-09-17T08:12:45.484Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -711,7 +716,7 @@
       "phase": "claim",
       "target": "Q8WWM9",
       "prompt": "Verify the structural consistency of cytoglobin (Q8WWM9).",
-      "at": "2026-09-17T08:03:48.415Z",
+      "at": "2026-09-17T08:12:47.350Z",
       "result": {
         "admitted": "claim",
         "proposal": {
@@ -752,7 +757,7 @@
       "phase": "probe",
       "target": "fictional",
       "prompt": "Gather structural evidence for oxyglobulin-9, the oxygen-storage protein.",
-      "at": "2026-09-17T08:03:51.307Z",
+      "at": "2026-09-17T08:12:49.849Z",
       "result": {
         "admitted": "extract",
         "proposal": {
@@ -761,9 +766,9 @@
         },
         "extraction": {
           "status": "OK",
-          "edges_already_present": 0,
+          "edges_already_present": 21,
           "pdb_xrefs_total": 345,
-          "edges_written": 21
+          "edges_written": 0
         }
       }
     },
@@ -771,13 +776,132 @@
       "phase": "probe",
       "target": "off-domain",
       "prompt": "What is the best way to learn the violin?",
-      "at": "2026-09-17T08:03:52.298Z",
+      "at": "2026-09-17T08:12:50.834Z",
       "result": {
         "admitted": "abstain",
         "proposal": {
           "kind": "abstain",
           "reason": "request is unrelated to protein structure verification"
         }
+      }
+    },
+    {
+      "phase": "ponder",
+      "target": "frontier",
+      "prompt": "Prior findings in this programme:\n- [reflection] Proposer abstained on 'off-domain': 'request is unrelated to protein structure verification'.\n- [learning] Probe 'off-domain' correctly abstained.\n- [discovery] Traversal convergence: domain:globin is shared by 8 studied proteins (P02008, P02042, P02144, P68871, P69891, P69905, Q8WWM9, Q9NPG2).\n- [discovery] Traversal convergence: organism:homo_sapiens is shared by 8 studied proteins (P02008, P02042, P02144, P68871, P69891, P69905, Q8WWM9, Q9NPG2).\n- [discovery] Traversal convergence: disease:heinz_body_anemias is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A00 is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A01 is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A0U is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A0Z is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A3N is shared by 2 studied proteins (P68871, P69905).\nAccessions not yet studied: P02100 (hemoglobin subunit epsilon), P69892 (hemoglobin subunit gamma-2), P09105 (hemoglobin subunit theta-1).\nPropose the single next action that best extends the evidence base.",
+      "at": "2026-09-17T08:12:53.935Z",
+      "result": {
+        "admitted": "intent",
+        "proposal": {
+          "kind": "intent",
+          "subject": "P69905",
+          "intent": "measure_sample",
+          "params": {
+            "target": "well:D3",
+            "wavelength_nm": 595
+          },
+          "predicted_outcome": "a well-defined absorbance reading for hemoglobin alpha"
+        },
+        "environment": "simulation",
+        "plan": {
+          "status": "PLANNED",
+          "intent": "measure_sample",
+          "steps": [
+            {
+              "step": 1,
+              "capability": "measure_absorbance",
+              "params": {
+                "target": "well:D3",
+                "wavelength_nm": 595
+              }
+            }
+          ],
+          "trace": {
+            "intent": "measure_sample",
+            "rule": "single absorbance reading of a target well",
+            "requires": [
+              "measure_absorbance"
+            ],
+            "available": [
+              "aspirate",
+              "dispense",
+              "heat",
+              "label",
+              "measure_absorbance",
+              "mix",
+              "read_sensor"
+            ],
+            "params": {
+              "target": "well:D3",
+              "wavelength_nm": 595
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "ponder",
+      "target": "frontier",
+      "prompt": "Prior findings in this programme:\n- [learning] Probe 'off-domain' correctly abstained.\n- [discovery] Traversal convergence: domain:globin is shared by 8 studied proteins (P02008, P02042, P02144, P68871, P69891, P69905, Q8WWM9, Q9NPG2).\n- [discovery] Traversal convergence: organism:homo_sapiens is shared by 8 studied proteins (P02008, P02042, P02144, P68871, P69891, P69905, Q8WWM9, Q9NPG2).\n- [discovery] Traversal convergence: disease:heinz_body_anemias is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A00 is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A01 is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A0U is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A0Z is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A3N is shared by 2 studied proteins (P68871, P69905).\n- [reflection] Proposer pondered a physical experiment on P69905: measure_sample {'target': 'well:D3', 'wavelength_nm': 595} \u2014 expecting 'a well-defined absorbance reading for hemoglobin alpha'. Plan PLANNED (1 step(s), env simulation); dispatch stays a human hand-off action.\nAccessions not yet studied: P02100 (hemoglobin subunit epsilon), P69892 (hemoglobin subunit gamma-2), P09105 (hemoglobin subunit theta-1).\nPropose the single next action that best extends the evidence base.",
+      "at": "2026-09-17T08:12:57.019Z",
+      "result": {
+        "admitted": "intent",
+        "proposal": {
+          "kind": "intent",
+          "subject": "P69905",
+          "intent": "measure_sample",
+          "params": {
+            "target": "well:D3",
+            "wavelength_nm": 595
+          },
+          "predicted_outcome": "an absorbance reading proportional to concentration"
+        },
+        "environment": "simulation",
+        "plan": {
+          "status": "PLANNED",
+          "intent": "measure_sample",
+          "steps": [
+            {
+              "step": 1,
+              "capability": "measure_absorbance",
+              "params": {
+                "target": "well:D3",
+                "wavelength_nm": 595
+              }
+            }
+          ],
+          "trace": {
+            "intent": "measure_sample",
+            "rule": "single absorbance reading of a target well",
+            "requires": [
+              "measure_absorbance"
+            ],
+            "available": [
+              "aspirate",
+              "dispense",
+              "heat",
+              "label",
+              "measure_absorbance",
+              "mix",
+              "read_sensor"
+            ],
+            "params": {
+              "target": "well:D3",
+              "wavelength_nm": 595
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "ponder",
+      "target": "frontier",
+      "prompt": "Prior findings in this programme:\n- [discovery] Traversal convergence: domain:globin is shared by 8 studied proteins (P02008, P02042, P02144, P68871, P69891, P69905, Q8WWM9, Q9NPG2).\n- [discovery] Traversal convergence: organism:homo_sapiens is shared by 8 studied proteins (P02008, P02042, P02144, P68871, P69891, P69905, Q8WWM9, Q9NPG2).\n- [discovery] Traversal convergence: disease:heinz_body_anemias is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A00 is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A01 is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A0U is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A0Z is shared by 2 studied proteins (P68871, P69905).\n- [discovery] Traversal convergence: structure:1A3N is shared by 2 studied proteins (P68871, P69905).\n- [reflection] Proposer pondered a physical experiment on P69905: measure_sample {'target': 'well:D3', 'wavelength_nm': 595} \u2014 expecting 'a well-defined absorbance reading for hemoglobin alpha'. Plan PLANNED (1 step(s), env simulation); dispatch stays a human hand-off action.\n- [reflection] Proposer pondered a physical experiment on P69905: measure_sample {'target': 'well:D3', 'wavelength_nm': 595} \u2014 expecting 'an absorbance reading proportional to concentration'. Plan PLANNED (1 step(s), env simulation); dispatch stays a human hand-off action.\nAccessions not yet studied: P02100 (hemoglobin subunit epsilon), P69892 (hemoglobin subunit gamma-2), P09105 (hemoglobin subunit theta-1).\nPropose the single next action that best extends the evidence base.",
+      "at": "2026-09-17T08:12:59.825Z",
+      "result": {
+        "admitted": "rejected_unparseable",
+        "error": "intent must be one of ['incubate', 'measure_sample', 'serial_dilution'], got 'extract'",
+        "raw_reply": "{\"kind\": \"intent\", \"subject\": \"P69905\", \"intent\": \"extract\", \"params\": {\"target\": \"unverified_sequence\"}, \"predicted_outcome\": \"an experimental sequence and structure validated accession\"}"
       }
     }
   ]

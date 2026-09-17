@@ -101,6 +101,9 @@
   <nav class="tabs">
     <button class="tab active" id="tab-graph">Graph</button>
     <button class="tab" id="tab-ledger">Ledger</button>
+    <button class="tab" id="tab-harvest">Harvest</button>
+    <button class="tab" id="tab-research">Research</button>
+    <button class="tab" id="tab-notebook">Notebook</button>
   </nav>
   <input type="text" id="nodesearch" placeholder="find node… (e.g. P69905)" list="nodelist">
   <datalist id="nodelist"></datalist>
@@ -132,6 +135,39 @@
     <tbody id="lrows"></tbody>
   </table>
   <div style="margin:10px 0"><button class="btn" id="lmore">Load more</button></div>
+</div>
+
+<div id="harvestview" style="grid-area:graph; overflow-y:auto; padding:14px; display:none">
+  <div class="filters"><span class="sub">topics — click to open its trace</span></div>
+  <div id="htopics"></div>
+  <div id="hsources"></div>
+  <div id="htiles"></div>
+</div>
+
+<div id="researchview" style="grid-area:graph; overflow-y:auto; padding:14px; display:none">
+  <div class="card" style="max-width:760px">
+    <h2>Research — proposer → gate → floor</h2>
+    <p class="sub" style="margin-bottom:8px">Your request goes to the local
+      <b>floor-proposer</b> model. Its reply is admitted only through the
+      gate: extracts pull provenance-pinned evidence, claims get floor
+      verdicts, everything else is rejected or abstained — the model never
+      writes the graph.</p>
+    <div class="filters">
+      <input type="text" id="rq" style="flex:1"
+             placeholder="e.g. Pull the available evidence for P68871 into the floor.">
+      <button class="btn" id="rgo">Propose</button>
+    </div>
+    <div id="rout"><span class="empty">no proposals yet this session</span></div>
+  </div>
+</div>
+
+<div id="notebookview" style="grid-area:graph; overflow-y:auto; padding:14px; display:none">
+  <div class="filters">
+    <span class="sub">the system's own journal — what it saw, found, learned
+      (live, auto-refreshes)</span>
+    <span style="flex:1"></span><span id="nbkinds"></span>
+  </div>
+  <div id="nbentries"></div>
 </div>
 
 <section class="detail">
@@ -187,6 +223,7 @@ async function pick(name) {
     (g.truncated ? ` (capped at ${g.edge_cap})` : "");
   $("node").innerHTML = '<span class="empty">click a node in the graph</span>';
   if ($("tab-ledger").classList.contains("active")) runLedger(true);
+  if ($("tab-harvest").classList.contains("active")) loadHarvest("");
   const deep = new URLSearchParams(location.search).get("node");
   if (deep) {
     const hit = state.nodes.find(n => n.id === deep);
@@ -331,17 +368,21 @@ async function showNode(id) {
 $("dbsel").onchange = ev => pick(ev.target.value);
 
 /* ---------- tabs ---------- */
+const TABS = ["graph", "ledger", "harvest", "research", "notebook"];
 function showTab(name) {
-  $("tab-graph").classList.toggle("active", name === "graph");
-  $("tab-ledger").classList.toggle("active", name === "ledger");
-  $("graphview").style.display = name === "graph" ? "" : "none";
-  $("ledgerview").style.display = name === "ledger" ? "block" : "none";
+  for (const t of TABS) {
+    $("tab-" + t).classList.toggle("active", t === name);
+    $(t + "view").style.display =
+      t === name ? (t === "graph" ? "" : "block") : "none";
+  }
   if (name === "ledger") runLedger(true);
+  if (name === "harvest") loadHarvest("");
+  if (name === "notebook") loadNotebook();
 }
-$("tab-graph").onclick = () => showTab("graph");
-$("tab-ledger").onclick = () => showTab("ledger");
-if (location.hash === "#ledger")
-  window.addEventListener("load", () => showTab("ledger"));
+for (const t of TABS) $("tab-" + t).onclick = () => showTab(t);
+const wantTab = location.hash.slice(1);
+if (TABS.includes(wantTab) && wantTab !== "graph")
+  window.addEventListener("load", () => showTab(wantTab));
 
 /* ---------- node search (also selects in the graph) ---------- */
 $("nodesearch").addEventListener("change", ev => {
@@ -415,6 +456,103 @@ const dl = fmt => {
 };
 $("lcsv").onclick = () => dl("csv");
 $("ljson").onclick = () => dl("json");
+
+/* ---------- harvest (Jeeves tile browser) ---------- */
+async function loadHarvest(topic) {
+  if (!state.db) return;
+  const d = await api("/api/harvest", { db: state.db, topic });
+  if (!topic) {
+    $("htiles").innerHTML = ""; $("hsources").innerHTML = "";
+    $("htopics").innerHTML = (d.topics || []).length
+      ? d.topics.map(t =>
+          `<span class="chip" data-t="${t.topic}">${t.topic} · ${t.tiles}</span>`).join("")
+      : '<span class="empty">no trace tiles in this db</span>';
+    document.querySelectorAll("#htopics .chip").forEach(el =>
+      el.onclick = () => loadHarvest(el.dataset.t));
+    return;
+  }
+  document.querySelectorAll("#htopics .chip").forEach(el =>
+    el.classList.toggle("on", el.dataset.t === topic));
+  $("hsources").innerHTML = d.sources.length
+    ? `<div class="card" style="margin-top:10px"><h2>Collected from</h2>` +
+      d.sources.map(s => `<div class="edge-row">
+        <a href="${s.url}" target="_blank" rel="noopener">${s.url}</a>
+        <div class="when">${s.source} · ${(s.retrieved_at || "").slice(0, 19)}</div>
+      </div>`).join("") + "</div>"
+    : "";
+  const conn = t => ["related_to","causes","requires","part_of","next_step","previous_step"]
+    .filter(k => t[k]).map(k => `<span class="chip">${k}: ${t[k]}</span>`).join("");
+  $("htiles").innerHTML = `<div style="margin-top:10px">` +
+    d.tiles.map(t => `<div class="tile">
+      <b>${t.emoji || "🧩"}</b> ${t.sentence}
+      <div class="when">${t.subcategory} · depth ${t.depth_level} · turn ${t.turn_number}</div>
+      <div>${conn(t)}</div>
+    </div>`).join("") + "</div>";
+}
+
+/* ---------- research (proposer through the gate) ---------- */
+async function runResearch() {
+  const prompt = $("rq").value.trim();
+  if (!prompt || !state.db) return;
+  $("rgo").disabled = true;
+  $("rout").insertAdjacentHTML("afterbegin",
+    `<div class="edge-row"><b>»</b> ${prompt}<div class="when">proposing…</div></div>`);
+  let d;
+  try {
+    d = await fetch("/api/research", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db: state.db, prompt }) }).then(r => r.json());
+  } catch (e) { d = { admitted: "request_failed", error: String(e) }; }
+  $("rgo").disabled = false;
+  const badge = { extract: "ok", claim: "ok", intent: "ok", abstain: "claim" };
+  let detail = "";
+  if (d.admitted === "extract") {
+    const x = d.extraction || {};
+    detail = `status ${x.status} · ${x.edges_written ?? 0} new edges` +
+      (x.pdb_xrefs_total != null ? ` · ${x.pdb_xrefs_total} PDB xrefs` : "");
+  } else if (d.admitted === "claim") {
+    detail = `verdict: <b>${(d.verdict || {}).verdict}</b>`;
+  } else if (d.admitted === "abstain") {
+    detail = `reason: ${(d.proposal || {}).reason || ""}`;
+  } else detail = d.error || "";
+  $("rout").firstElementChild.innerHTML =
+    `<b>»</b> ${prompt}
+     <div><span class="kind kind-${badge[d.admitted] ? "edge" : "tile"}">${d.admitted}</span>
+       ${(d.proposal && d.proposal.subject) ? " subject " + d.proposal.subject : ""}</div>
+     <div class="when">${detail}</div>`;
+  if (d.admitted === "extract") pick(state.db);   // graph + panels refresh
+}
+$("rgo").onclick = runResearch;
+$("rq").addEventListener("keydown", ev => { if (ev.key === "Enter") runResearch(); });
+
+/* ---------- notebook (the system's journal, live) ---------- */
+const NBCOLOR = { observation: "node", discovery: "edge", learning: "claim",
+                  anomaly: "tile", reflection: "sequence" };
+let nbKind = "", nbTimer = null;
+async function loadNotebook() {
+  const d = await api("/api/notebook", { limit: 300, kind: nbKind });
+  const kinds = {};
+  d.entries.forEach(e => kinds[e.kind] = (kinds[e.kind] || 0) + 1);
+  $("nbkinds").innerHTML = Object.entries(kinds).map(([k, c]) =>
+    `<span class="chip ${nbKind === k ? "on" : ""}" data-k="${k}">${k} ${c}</span>`).join("");
+  document.querySelectorAll("#nbkinds .chip").forEach(el => el.onclick = () => {
+    nbKind = nbKind === el.dataset.k ? "" : el.dataset.k; loadNotebook();
+  });
+  $("nbentries").innerHTML = d.entries.length
+    ? d.entries.slice().reverse().map(e => `<div class="edge-row">
+        <span class="kind kind-${NBCOLOR[e.kind] || "tile"}">${e.kind}</span>
+        ${e.text}
+        <div class="when">${(e.at || "").replace("T", " ").slice(0, 19)}
+          · ${e.session || ""}${e.refs && e.refs.length
+            ? " · refs: " + e.refs.slice(0, 6).map(r => r.slice(0, 26)).join(", ")
+            : ""}</div>
+      </div>`).join("")
+    : `<span class="empty">no notes yet — run a research session
+       (dogfood/research_loop.py) and the system will start dictating</span>`;
+  clearTimeout(nbTimer);
+  if ($("tab-notebook").classList.contains("active"))
+    nbTimer = setTimeout(loadNotebook, 4000);
+}
 
 loadDbs();
 </script>

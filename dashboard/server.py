@@ -1,13 +1,18 @@
-"""Floor dashboard: read-only web view of the floor's evidence base.
+"""Floor dashboard: the Jeeves-system view of the floor, on the web.
 
-Answers two questions, with edge-level receipts:
+Mirrors the Jeeves desktop lanes:
   WHERE IS the data?          -> every floor DB in data/, with counts
   WHERE did it COME FROM?     -> per-edge provenance (source, exact URL,
                                  retrieved_at), rolled up per connector
+  HARVEST                     -> the canonical-37 trace tiles, by topic,
+                                 each topic carrying its source receipts
+  RESEARCH                    -> a prompt goes to the local proposer and is
+                                 admitted THROUGH THE GATE (propose());
+                                 the model never touches the graph
 
-Strictly read-only: every connection opens the SQLite file with
-``mode=ro`` — this process cannot author facts (the Store stays the only
-write path). stdlib only, localhost only.
+Every read opens the SQLite file with ``mode=ro``. The single write lane
+is /api/research, and it writes only via the Store — the floor's one
+authorized author. stdlib only, localhost only.
 
 Run:  .venv/bin/python -m dashboard.server [--port 8977]
 """
@@ -302,6 +307,69 @@ def node_detail(db_name: str, node_id: str) -> dict:
         conn.close()
 
 
+def harvest(db_name: str, topic: str = "") -> dict:
+    """The Jeeves Harvest lane: trace tiles grouped by topic. With a topic
+    selected, every tile is returned in trace order together with the
+    subject protein's distinct source URLs — the receipts panel."""
+    conn = open_ro(_resolve_db(db_name))
+    try:
+        if not topic:
+            rows = conn.execute(
+                """SELECT topic, COUNT(*) AS n FROM responses
+                    GROUP BY topic ORDER BY topic""").fetchall()
+            return {"db": db_name,
+                    "topics": [{"topic": r["topic"], "tiles": r["n"]}
+                               for r in rows]}
+        tiles = [dict(r) for r in conn.execute(
+            """SELECT emoji, sentence, subcategory, depth_level, turn_number,
+                      related_to, causes, requires, part_of, next_step,
+                      previous_step
+                 FROM responses WHERE topic = ?
+                ORDER BY turn_number, id""", (topic,))]
+        sources: list[dict] = []
+        if topic.startswith("bio-structure:"):
+            acc = topic.split(":", 1)[1]
+            seen: dict[str, dict] = {}
+            for r in conn.execute(
+                    """SELECT ep.provenance_json FROM typed_relations tr
+                        JOIN edge_provenance ep ON ep.edge_id = tr.id
+                       WHERE tr.subject = ? OR tr.object = ?
+                       ORDER BY tr.id""",
+                    (f"protein:{acc}", f"protein:{acc}")):
+                try:
+                    prov = json.loads(r["provenance_json"])
+                except ValueError:
+                    continue
+                url = prov.get("url")
+                if url and url not in seen:
+                    seen[url] = {"url": url, "source": prov.get("source"),
+                                 "retrieved_at": prov.get("retrieved_at")}
+            sources = list(seen.values())
+        return {"db": db_name, "topic": topic, "tiles": tiles,
+                "sources": sources}
+    finally:
+        conn.close()
+
+
+def research(db_name: str, prompt: str) -> dict:
+    """The Jeeves Research lane on the floor: prompt -> local proposer ->
+    strict parse -> floor admission. This is the dashboard's ONLY write
+    path, and it writes exclusively through the Store/gate."""
+    if not prompt.strip():
+        raise ValueError("empty research prompt")
+    # Imported lazily: the read lanes must work even with no model runtime.
+    from proposer.runtime import ProposerError, propose
+    from symbolic_floor.store import Store
+    db_path = _resolve_db(db_name)
+    store = Store(str(db_path))
+    try:
+        return propose(store, prompt.strip())
+    except ProposerError as e:
+        return {"admitted": "model_unavailable", "error": str(e)}
+    finally:
+        store.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet: it's a local dashboard
         pass
@@ -360,8 +428,32 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(body)
                 else:
                     self._json(led)
+            elif url.path == "/api/harvest":
+                self._json(harvest(db, (q.get("topic") or [""])[0]))
+            elif url.path == "/api/notebook":
+                from dogfood.notebook import Notebook
+                nb = Notebook(DATA_DIR / "notebook.jsonl")
+                limit = min(int((q.get("limit") or ["200"])[0]), 2000)
+                kind = (q.get("kind") or [""])[0] or None
+                self._json({"path": str(nb.path),
+                            "entries": nb.entries(limit=limit, kind=kind)})
             else:
                 self._json({"error": "not found"}, 404)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+        except sqlite3.Error as e:
+            self._json({"error": f"db error: {e}"}, 500)
+
+    def do_POST(self):  # noqa: N802 (http.server API)
+        url = urllib.parse.urlparse(self.path)
+        if url.path != "/api/research":
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            self._json(research(str(body.get("db") or ""),
+                                str(body.get("prompt") or "")))
         except ValueError as e:
             self._json({"error": str(e)}, 400)
         except sqlite3.Error as e:

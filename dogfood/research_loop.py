@@ -31,11 +31,28 @@ from proposer.runtime import DEFAULT_MODEL, ProposerError, propose
 from symbolic_floor.schema import utc_now_iso
 from symbolic_floor.store import Store
 
+from .notebook import Notebook
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "data" / "research_globins.db"
+DEFAULT_NOTEBOOK = ROOT / "data" / "notebook.jsonl"
 REPORT_DIR = ROOT / "dogfood"
 
 PROGRAMME = "human-oxygen-transport-v1"
+
+# The ponder frontier: curated, witnessed candidates the proposer may pick
+# from when reflecting. The model chooses; it never invents the menu.
+FRONTIER: list[tuple[str, str]] = [
+    ("P02100", "hemoglobin subunit epsilon"),
+    ("P69892", "hemoglobin subunit gamma-2"),
+    ("P09105", "hemoglobin subunit theta-1"),
+]
+
+PONDER_PROMPT = (
+    "Prior findings in this programme:\n{digest}\n"
+    "Accessions not yet studied: {frontier}.\n"
+    "Propose the single next action that best extends the evidence base."
+)
 
 # Curated targets: the human globin family + myoglobin. Accessions are
 # handed to the model in the prompt (accession-form prompts are exactly the
@@ -107,21 +124,102 @@ def find_convergences(store: Store, proteins: list[str]) -> list[dict]:
     return discoveries
 
 
-def run_session(db_path: Path, *, model: str = DEFAULT_MODEL) -> dict:
+def _dictate(nb: Notebook, session: str, phase: str, target: str,
+             result: dict) -> None:
+    """Turn one admission result into journal notes — derived strictly from
+    what actually happened, with refs back to the evidence."""
+    admitted = result.get("admitted")
+    proposal = result.get("proposal") or {}
+    subject = proposal.get("subject")
+    if admitted == "extract":
+        x = result.get("extraction") or {}
+        if x.get("status") == "OK":
+            nb.note("observation",
+                    f"Pulled evidence for {subject}: {x.get('edges_written', 0)} "
+                    f"new edges, {x.get('pdb_xrefs_total', 0)} PDB xrefs known.",
+                    session=session, refs=[f"protein:{subject}"])
+            if phase == "probe":
+                nb.note("anomaly",
+                        f"Probe '{target}' should have abstained but the model "
+                        f"proposed extract {subject} — gate contained it "
+                        f"(only true, provenanced facts entered).",
+                        session=session, refs=[f"protein:{subject}"])
+        else:
+            nb.note("anomaly",
+                    f"Extract {subject} came back {x.get('status')} — the "
+                    f"accession has no UniProt entry; nothing was written.",
+                    session=session, refs=[f"protein:{subject}"])
+    elif admitted == "claim":
+        v = (result.get("verdict") or {})
+        nb.note("learning",
+                f"Floor verdict on {subject} structural consistency: "
+                f"{v.get('verdict')} ({len(v.get('trace') or [])} evidence "
+                f"edges). Model predicted: {proposal.get('predicted_outcome')!r}.",
+                session=session,
+                refs=[f"protein:{subject}", v.get("claim_id") or ""])
+    elif admitted == "intent":
+        plan = result.get("plan") or {}
+        nb.note("reflection",
+                f"Proposer pondered a physical experiment on {subject}: "
+                f"{proposal.get('intent')} {proposal.get('params')} — "
+                f"expecting {proposal.get('predicted_outcome')!r}. Plan "
+                f"{plan.get('status')} ({len(plan.get('steps') or [])} step(s), "
+                f"env {result.get('environment')}); dispatch stays a human "
+                f"hand-off action.",
+                session=session, refs=[f"protein:{subject}"])
+    elif admitted == "abstain":
+        nb.note("reflection",
+                f"Proposer abstained on '{target}': "
+                f"{proposal.get('reason')!r}.", session=session)
+        if phase == "probe":
+            nb.note("learning",
+                    f"Probe '{target}' correctly abstained.", session=session)
+    elif admitted in ("rejected_unparseable", "rejected_by_floor"):
+        nb.note("anomaly",
+                f"Proposal for '{target}' was {admitted}: "
+                f"{result.get('error', '')[:160]}", session=session)
+
+
+def _dictate_discoveries(nb: Notebook, session: str,
+                         discoveries: list[dict], *,
+                         already: set[str]) -> set[str]:
+    """Journal each convergence once per notebook lifetime (compounding:
+    later sessions add only what is genuinely new)."""
+    fresh = set()
+    for d in discoveries:
+        if d["node"] in already:
+            continue
+        fresh.add(d["node"])
+        accs = ", ".join(a.split(":")[1] for a in d["shared_by"])
+        nb.note("discovery",
+                f"Traversal convergence: {d['node']} is shared by "
+                f"{d['degree']} studied proteins ({accs}).",
+                session=session,
+                refs=[d["node"], *[p["edge_id"] for p in d["paths"]]])
+    return fresh
+
+
+def run_session(db_path: Path, *, model: str = DEFAULT_MODEL,
+                notebook_path: Path = DEFAULT_NOTEBOOK,
+                ponder_rounds: int = 2) -> dict:
     store = Store(str(db_path))
+    nb = Notebook(notebook_path)
     log: list[dict] = []
     started = utc_now_iso()
+    session = f"{PROGRAMME}@{started}"
 
-    def turn(phase: str, target: str, prompt: str) -> None:
+    def turn(phase: str, target: str, prompt: str) -> dict:
         try:
             result = propose(store, prompt, model=model)
         except ProposerError as e:
             result = {"admitted": "model_unavailable", "error": str(e)}
         log.append({"phase": phase, "target": target, "prompt": prompt,
                     "at": utc_now_iso(), "result": result})
+        _dictate(nb, session, phase, target, result)
         print(f"[{phase}] {target}: {result.get('admitted')}"
               + (f" -> {result['verdict']['verdict']}"
                  if "verdict" in result else ""))
+        return result
 
     # Phase 1 — the proposer asks the floor to pull evidence.
     for acc, name in TARGETS:
@@ -139,6 +237,39 @@ def run_session(db_path: Path, *, model: str = DEFAULT_MODEL) -> dict:
 
     # Phase 4 — traversal discovery. No model involved.
     discoveries = find_convergences(store, studied)
+    noted = _dictate_discoveries(nb, session, discoveries, already=set())
+
+    # Phase 5 — reflect / propose / ponder: the system reads its own
+    # journal, is offered the witnessed frontier, and proposes what to do
+    # next. Whatever it proposes still goes through the gate.
+    frontier_left = [f for f in FRONTIER if f[0] not in studied]
+    for _ in range(ponder_rounds):
+        if not frontier_left:
+            break
+        menu = ", ".join(f"{acc} ({name})" for acc, name in frontier_left)
+        prompt = PONDER_PROMPT.format(digest=nb.digest(limit=10),
+                                      frontier=menu)
+        result = turn("ponder", "frontier", prompt)
+        admitted = result.get("admitted")
+        picked = (result.get("proposal") or {}).get("subject")
+        if (admitted == "extract"
+                and result.get("extraction", {}).get("status") == "OK"):
+            studied.append(picked)
+            frontier_left = [f for f in frontier_left if f[0] != picked]
+            discoveries = find_convergences(store, studied)
+            fresh = _dictate_discoveries(nb, session, discoveries,
+                                         already=noted)
+            noted |= fresh
+            if fresh:
+                nb.note("learning",
+                        f"Pondering paid off: extracting {picked} exposed "
+                        f"{len(fresh)} new convergence(s): "
+                        f"{', '.join(sorted(fresh))}.",
+                        session=session, refs=sorted(fresh))
+        elif admitted in ("intent", "claim", "abstain"):
+            continue    # a legitimate pondering outcome, already journaled
+        else:
+            break       # model unavailable / rejected — stop pondering
 
     counts: dict[str, int] = {}
     for entry in log:
@@ -152,8 +283,10 @@ def run_session(db_path: Path, *, model: str = DEFAULT_MODEL) -> dict:
 
     report = {
         "programme": PROGRAMME,
+        "session": session,
         "model": model,
         "db": str(db_path),
+        "notebook": str(nb.path),
         "started": started,
         "finished": utc_now_iso(),
         "targets": len(TARGETS),
@@ -162,6 +295,8 @@ def run_session(db_path: Path, *, model: str = DEFAULT_MODEL) -> dict:
         "claim_verdicts": verdicts,
         "probes_all_abstained": probe_ok,
         "discoveries": discoveries,
+        "notebook_entries_this_session":
+            len([e for e in nb.entries() if e.get("session") == session]),
         "log": log,
     }
     store.close()
@@ -191,8 +326,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
     ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--notebook", type=Path, default=DEFAULT_NOTEBOOK)
+    ap.add_argument("--ponder-rounds", type=int, default=2)
     args = ap.parse_args()
-    report = run_session(args.db, model=args.model)
+    report = run_session(args.db, model=args.model,
+                         notebook_path=args.notebook,
+                         ponder_rounds=args.ponder_rounds)
     out = REPORT_DIR / "research_session.json"
     write_report(report, out)
     print(f"\ndiscoveries: {len(report['discoveries'])} · report -> {out}")
