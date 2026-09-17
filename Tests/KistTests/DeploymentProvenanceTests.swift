@@ -649,6 +649,20 @@ final class DeploymentProvenanceTests: XCTestCase {
         try FileManager.default.removeItem(at: nestedBuildCache)
         XCTAssertEqual(try sourceState(of: repo), initial)
 
+        // A Python virtualenv is a regenerable interpreter environment, not source. Its bin/
+        // symlinks choked the 2026-09-17 science-loops promotion ("source symlink/special:
+        // bio-mcp/.venv/bin/python") — the walker must skip `.venv` at any depth, symlinks and all.
+        let virtualenv = repo.appendingPathComponent("Sources/Kist/.venv", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: virtualenv.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: virtualenv.appendingPathComponent("bin/python"),
+            withDestinationURL: URL(fileURLWithPath: "/usr/bin/python3"))
+        XCTAssertEqual(
+            try sourceState(of: repo),
+            initial,
+            "a symlink-laden Python virtualenv must be excluded from source identity at any depth")
+
         try write("// root near-miss remains bound\n", to: alternateBuildNearMiss)
         XCTAssertNotEqual(
             try sourceState(of: repo),
@@ -701,6 +715,10 @@ final class DeploymentProvenanceTests: XCTestCase {
                 second.0.appendingPathComponent(
                     "Sources/Kist/node_modules/Explicit.swift")),
             "// explicit nested source\n")
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: second.0.appendingPathComponent("Sources/Kist/.venv").path),
+            "the private source snapshot must omit Python virtualenvs")
     }
 
     func testSafeRebuildExplicitRepoWinsWithoutInstalledProvenance() throws {
