@@ -113,13 +113,25 @@ winners stays regardless — the loop never auto-promotes.
     syscalls still work; (ii) the real deployment path — `bwrap --seccomp <fd>` with
     our filter — blocks a hardlink ("Operation not permitted") while writes succeed.
     5 macOS structural unit tests pin the assembly.
-  - **Remaining in step 2 (2b, not yet done):** wire the filter into the bubblewrap
-    attestor (`--seccomp` fd plumbing through the spawn path) + bind `programDigest`
-    into the sandbox policy, then implement `EvolutionPairedBenchmarkBackend`
-    (per-arm git worktrees run under BOTH the cgroup supervisor and the filtered
-    sandbox). Step 3 flips the gate under review; the external witness (step 4) is
-    operator infra. Held un-merged pending review — this is the evolution-gate code
-    that most needs a second reviewer.
+  - **Keystone integration proven** (`dc4c378`). `scripts/evolution/linux-combined-proof`
+    runs one command under BOTH layers together — the cgroup supervisor executing
+    bubblewrap, which installs the seccomp filter via `--seccomp <fd>` before exec.
+    On a real cgroup2 host: the candidate hardlink is denied (seccomp), a setsid
+    daemon it leaves behind is reaped by `cgroup.kill` (cgroup, peak 5 procs), and
+    the host-owned receipt validates through `HardProcessContainmentContract`. This
+    is the exact composition the backend needs; both boundaries hold at once.
+  - **Remaining in step 2 (2b, not yet done):** (a) refactor the supervisor to a
+    session that runs N commands then finalizes ONE receipt whose `executionDigest`
+    is the batch digest `EvolutionEvaluationAuthority` recomputes; (b) plumb the
+    seccomp `--seccomp` fd through the real bubblewrap spawn path in
+    `BuilderOSProcessSandboxAttestor`/`ProcessGroupRunner` and bind `programDigest`
+    into the sandbox policy; (c) implement `EvolutionPairedBenchmarkBackend` —
+    per-arm detached git worktrees, corpus cases run under the composed containment,
+    ordinary benchmarks under the same, verified-empty cleanup. Verifiable on Linux
+    with a synthetic corpus in the shipped `EvolutionHeldOutCorpus` format. Step 3
+    flips `productionBackend`/`currentAvailability` under review; the external
+    witness (step 4) is operator infra. This is the evolution-gate code that most
+    needs a second reviewer — held un-merged.
 
 - **2026-09-16:** Step 2 (delegated cgroup-v2 supervisor) implemented and proven.
   `LinuxDelegatedCgroupSupervisor` (Sources/AgentCore/LinuxDelegatedCgroupSupervisor.swift)
