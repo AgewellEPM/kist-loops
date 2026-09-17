@@ -75,6 +75,7 @@ def run_python_script(
             cwd=workdir,
             capture_output=True,
             text=True,
+            errors="replace",  # scripts may emit raw bytes; never crash the tool on decode
             timeout=timeout,
         )
         stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode

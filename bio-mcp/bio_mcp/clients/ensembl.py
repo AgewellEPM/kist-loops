@@ -79,17 +79,27 @@ async def fetch_ensembl_sequence(
     return result
 
 
-async def gene_xrefs(http: BioHTTP, ensembl_gene_id: str) -> dict:
-    """Cross-references for an Ensembl gene (UniProt, RefSeq, HGNC, ...)."""
+async def gene_xrefs(http: BioHTTP, ensembl_gene_id: str, *, max_results: int = 100) -> dict:
+    """Cross-references for an Ensembl gene (UniProt, RefSeq, HGNC, ...), capped at max_results."""
     ident = ensembl_gene_id.strip()
     if not ident:
         raise ValueError("empty Ensembl gene ID")
+    if max_results <= 0:
+        raise ValueError(f"max_results must be positive, got {max_results}")
     data = await http.get_json(f"{ENSEMBL}/xrefs/id/{ident}")
     if not isinstance(data, list):
         raise BioAPIError(f"unexpected xrefs payload for {ident}")
-    refs = [
+    all_refs = [
         {"db": x.get("dbname"), "id": x.get("primary_id"), "description": x.get("description")}
         for x in data
         if x.get("dbname") and x.get("primary_id")
     ]
-    return {"ensembl_id": ident, "n_xrefs": len(refs), "xrefs": refs, "source": source_record("ensembl", ident)}
+    refs = all_refs[:max_results]
+    return {
+        "ensembl_id": ident,
+        "n_xrefs": len(refs),
+        "n_total": len(all_refs),
+        "truncated": len(all_refs) > len(refs),
+        "xrefs": refs,
+        "source": source_record("ensembl", ident),
+    }

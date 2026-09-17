@@ -51,6 +51,11 @@ class BioAPIError(RuntimeError):
         self.url = url
 
 
+class BioOversizeError(BioAPIError):
+    """Streamed body exceeded the caller's cap. Never retried — the fix is a
+    save_path, not another attempt."""
+
+
 @dataclass
 class _TokenBucket:
     rps: float
@@ -128,6 +133,46 @@ class BioHTTP:
             f"{host}: giving up after {MAX_RETRIES + 1} attempts: {last_err}",
             url=str(req.url),
         )
+
+    async def get_text_capped(
+        self,
+        url: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+        max_bytes: int,
+    ) -> str:
+        """Stream a GET, aborting with BioOversizeError the moment the body
+        passes max_bytes — never buffers an unbounded record. Single attempt
+        (no retry loop): oversize is deterministic, and a mid-stream 5xx is
+        rare enough that the caller's retry is the whole request anyway."""
+        req = self._client.build_request("GET", url, params=params, headers=headers)
+        host = req.url.host or ""
+        if host.endswith("ncbi.nlm.nih.gov") and self._ncbi_key:
+            req.url = req.url.copy_merge_params({"api_key": self._ncbi_key})
+        await self._bucket(host).acquire()
+        resp = await self._client.send(req, stream=True)
+        try:
+            if resp.status_code >= 400:
+                body = (await resp.aread())[:300].decode(errors="replace")
+                raise BioAPIError(
+                    f"{host} returned {resp.status_code} for {req.url}: {body}",
+                    status=resp.status_code,
+                    url=str(req.url),
+                )
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in resp.aiter_bytes():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise BioOversizeError(
+                        f"response from {host} exceeded the {max_bytes:,}-byte inline cap",
+                        url=str(req.url),
+                    )
+                chunks.append(chunk)
+        finally:
+            await resp.aclose()
+        return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
 
     async def get_json(self, url: str, *, params: dict | None = None, headers: dict | None = None):
         resp = await self.get(url, params=params, headers={**(headers or {}), "Accept": "application/json"})

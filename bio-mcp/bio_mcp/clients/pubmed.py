@@ -93,6 +93,21 @@ async def fetch_abstracts(http: BioHTTP, pmids: list[str]) -> list[dict]:
     return articles
 
 
+async def fetch_abstracts_report(http: BioHTTP, pmids: list[str]) -> dict:
+    """fetch_abstracts + explicit per-ID accounting — a bogus PMID shows up in
+    `missing`, never as a silent drop."""
+    requested = [p.strip() for p in pmids if p.strip()]
+    articles = await fetch_abstracts(http, requested)
+    found = {a["pmid"] for a in articles}
+    missing = [p for p in requested if p not in found]
+    return {
+        "requested": len(requested),
+        "returned": len(articles),
+        "missing": missing,
+        "articles": articles,
+    }
+
+
 async def fetch_pmc_fulltext(http: BioHTTP, pmcid: str, *, max_chars: int = 60_000) -> dict:
     """efetch PMC XML → plain-text full body for open-access articles.
 

@@ -148,13 +148,13 @@ async def test_pdb_entry_pins_sources(http):
                 "struct": {"title": "SARS-CoV-2 spike"},
                 "rcsb_entry_info": {"experimental_method": "EM", "resolution_combined": [2.8], "polymer_entity_count_total": 1, "molecular_weight": 438.5},
                 "rcsb_accession_info": {"deposit_date": "2020-02-25T00:00:00Z"},
-                "citation": [{"title": "Structure...", "rcsb_journal_abbrev": "Science", "year": 2020, "pdbx_database_id_doi": "10.1126/science.abb2507", "pdbx_database_id_pub_med": 32075877}],
+                "citation": [{"title": "Structure...", "rcsb_journal_abbrev": "Science", "year": 2020, "pdbx_database_id_DOI": "10.1126/science.abb2507", "pdbx_database_id_PubMed": 32075877}],
             },
         )
     )
     out = await pdb.fetch_pdb_entry(http, "6vxx")
     assert out["resolution_angstrom"] == 2.8
-    assert out["primary_citation"]["pmid"] == 32075877
+    assert out["primary_citation"]["pmid"] == "32075877"
     assert out["source"]["url"] == "https://www.rcsb.org/structure/6VXX"
     assert out["download"]["cif"].endswith("6VXX.cif")
 

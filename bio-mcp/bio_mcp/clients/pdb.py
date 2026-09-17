@@ -51,7 +51,8 @@ async def fetch_pdb_entry(http: BioHTTP, pdb_id: str) -> dict:
         raise BioAPIError(f"RCSB returned no entry for {ident}")
 
     info = entry.get("rcsb_entry_info", {})
-    citation = next(iter(entry.get("citation", [])), {})
+    # rcsb_primary_citation carries the PMID; the citation[] list often omits it.
+    citation = entry.get("rcsb_primary_citation") or next(iter(entry.get("citation", [])), {})
     return {
         "pdb_id": ident,
         "title": entry.get("struct", {}).get("title"),
@@ -64,8 +65,9 @@ async def fetch_pdb_entry(http: BioHTTP, pdb_id: str) -> dict:
             "title": citation.get("title"),
             "journal": citation.get("rcsb_journal_abbrev"),
             "year": citation.get("year"),
-            "doi": citation.get("pdbx_database_id_doi"),
-            "pmid": citation.get("pdbx_database_id_pub_med"),
+            # RCSB's exact key casing: ..._DOI / ..._PubMed (PubMed value is an int)
+            "doi": citation.get("pdbx_database_id_DOI"),
+            "pmid": str(citation["pdbx_database_id_PubMed"]) if citation.get("pdbx_database_id_PubMed") else None,
         },
         "download": {
             "pdb": f"https://files.rcsb.org/download/{ident}.pdb",

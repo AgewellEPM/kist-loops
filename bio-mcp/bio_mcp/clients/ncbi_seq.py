@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..citations import source_record
-from ..http import BioAPIError, BioHTTP
+from ..http import BioAPIError, BioHTTP, BioOversizeError
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
@@ -38,12 +38,29 @@ async def fetch_sequence(
         raise ValueError(f"db must be one of {_DBS}, got {db!r}")
     if fmt not in _FORMATS:
         raise ValueError(f"fmt must be one of {sorted(_FORMATS)}, got {fmt!r}")
+    dest: Path | None = None
+    if save_path:  # validate BEFORE fetching — never download just to reject the path
+        dest = Path(save_path).expanduser()
+        if not dest.is_absolute():
+            raise ValueError(f"save_path must be absolute, got {save_path!r}")
 
-    text = await http.get_text(
-        f"{EUTILS}/efetch.fcgi",
-        params={"db": db, "id": acc, "rettype": _FORMATS[fmt], "retmode": "text"},
-    )
-    text = text.strip()
+    params = {"db": db, "id": acc, "rettype": _FORMATS[fmt], "retmode": "text"}
+    if dest is not None:
+        text = (await http.get_text(f"{EUTILS}/efetch.fcgi", params=params)).strip()
+    else:
+        try:
+            # Stream with an early abort: a chromosome-scale record must not be
+            # buffered for a minute just to be refused at the end.
+            text = (
+                await http.get_text_capped(
+                    f"{EUTILS}/efetch.fcgi", params=params, max_bytes=MAX_INLINE_CHARS + 1024
+                )
+            ).strip()
+        except BioOversizeError as e:
+            raise ValueError(
+                f"record for {acc} exceeds the {MAX_INLINE_CHARS:,}-char inline cap; "
+                "pass save_path (absolute) to write it to a file instead"
+            ) from e
     if not text or text.lower().startswith("error"):
         raise BioAPIError(f"NCBI {db} returned no record for {acc!r}: {text[:200]}")
 
@@ -54,13 +71,10 @@ async def fetch_sequence(
         "chars": len(text),
         "source": source_record(db, acc),
     }
-    if save_path:
-        p = Path(save_path).expanduser()
-        if not p.is_absolute():
-            raise ValueError(f"save_path must be absolute, got {save_path!r}")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text + "\n")
-        result["saved_to"] = str(p)
+    if dest is not None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text + "\n")
+        result["saved_to"] = str(dest)
         result["preview"] = text[:500]
     elif len(text) > MAX_INLINE_CHARS:
         raise ValueError(

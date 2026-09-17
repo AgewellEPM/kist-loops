@@ -122,31 +122,51 @@ async def recent_biorxiv(http: BioHTTP, *, server: str = "biorxiv", days: int = 
         raise ValueError(f"server must be 'biorxiv' or 'medrxiv', got {server!r}")
     end = date.today()
     start = end - timedelta(days=max(1, min(days, 30)))
-    data = await http.get_json(f"{BIORXIV_API}/details/{server}/{start.isoformat()}/{end.isoformat()}/0")
-    out = []
+    base = f"{BIORXIV_API}/details/{server}/{start.isoformat()}/{end.isoformat()}"
     want = category.lower() if category else None
-    for e in data.get("collection", []):
+
+    def _keep(e: dict) -> bool:
         if want and (e.get("category") or "").lower() != want:
-            continue
-        d = e.get("doi") or ""
-        if not d.startswith("10.1101/"):
-            continue
-        out.append(
-            {
-                "doi": d,
-                "title": e.get("title"),
-                "category": e.get("category"),
-                "date": e.get("date"),
-                "source": source_record(server, d.split("10.1101/", 1)[1]),
-            }
-        )
-        if len(out) >= max_results:
-            break
+            return False
+        return (e.get("doi") or "").startswith("10.1101/")
+
+    # The window endpoint pages OLDEST-first in fixed pages of 100, so cursor 0
+    # is the stale start of the window. "Recent" must come from the tail: read
+    # the total, then walk the last pages backwards until we have enough.
+    first = await http.get_json(f"{base}/0")
+    msg = (first.get("messages") or [{}])[0]
+    try:
+        total = int(msg.get("total") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    page = 100
+    entries = list(first.get("collection") or [])
+    if total > len(entries):
+        entries = []
+        cursor = ((total - 1) // page) * page
+        for _ in range(5):  # bounded backwards walk: 500 newest entries max
+            data = await http.get_json(f"{base}/{cursor}")
+            entries = (data.get("collection") or []) + entries
+            if cursor == 0 or sum(1 for e in entries if _keep(e)) >= max_results:
+                break
+            cursor -= page
+
+    newest_first = sorted((e for e in entries if _keep(e)), key=lambda e: e.get("date") or "", reverse=True)
+    out = [
+        {
+            "doi": e["doi"],
+            "title": e.get("title"),
+            "category": e.get("category"),
+            "date": e.get("date"),
+            "source": source_record(server, e["doi"].split("10.1101/", 1)[1]),
+        }
+        for e in newest_first[:max_results]
+    ]
     return {
         "server": server,
         "window": f"{start.isoformat()}..{end.isoformat()}",
         "category_filter": category,
         "returned": len(out),
-        "note": "bioRxiv API is date-window only (no keyword search); filter is client-side on category.",
+        "note": "bioRxiv API is date-window only (no keyword search); filter is client-side on category. Listed newest-first from the window tail.",
         "preprints": out,
     }

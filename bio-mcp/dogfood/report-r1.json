@@ -1,0 +1,591 @@
+{
+  "generated": "2026-09-17",
+  "scenarios": 53,
+  "passes": 28,
+  "findings": 25,
+  "finding_points": 58,
+  "server_reconnects": 0,
+  "elapsed_s": 110.9,
+  "results": [
+    {
+      "name": "glossary resource readable",
+      "tool": "bio://glossary",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "citation-style resource readable",
+      "tool": "bio://citation-style",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "pubmed basic search",
+      "tool": "pubmed_search",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 1.08,
+      "notes": ""
+    },
+    {
+      "name": "pubmed unicode query (\u03b2-catenin)",
+      "tool": "pubmed_search",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 2.61,
+      "notes": ""
+    },
+    {
+      "name": "pubmed quoted-phrase query",
+      "tool": "pubmed_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.59,
+      "notes": ""
+    },
+    {
+      "name": "pubmed sort=pub_date",
+      "tool": "pubmed_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.86,
+      "notes": ""
+    },
+    {
+      "name": "pubmed abstracts by pmid",
+      "tool": "pubmed_abstracts",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "FINDING",
+      "findings": [
+        "unexpected shape"
+      ],
+      "elapsed_s": 0.14,
+      "notes": "runner wraps bare-list results as {'_list': [...]}"
+    },
+    {
+      "name": "pmc open-access fulltext",
+      "tool": "pmc_fulltext",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.73,
+      "notes": ""
+    },
+    {
+      "name": "arxiv q-bio search",
+      "tool": "arxiv_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.29,
+      "notes": ""
+    },
+    {
+      "name": "biorxiv fetch known preprint",
+      "tool": "biorxiv_fetch",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.14,
+      "notes": ""
+    },
+    {
+      "name": "biorxiv recent window freshness",
+      "tool": "biorxiv_recent",
+      "severity": "high",
+      "expect": "ok",
+      "status": "FINDING",
+      "findings": [
+        "'recent' preprints end at 2026-09-07 (10d stale) \u2014 cursor-0 page only; window start bias / no pagination (window 2026-09-07..2026-09-17)"
+      ],
+      "elapsed_s": 2.31,
+      "notes": "runner applies special freshness check: are returned dates near the window END or only its start (pagination blindness)?"
+    },
+    {
+      "name": "pubmed empty query rejected",
+      "tool": "pubmed_search",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool pubmed_search"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "pubmed 101 pmids rejected",
+      "tool": "pubmed_abstracts",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool pubmed_abstracts"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "pubmed nonexistent pmid honest",
+      "tool": "pubmed_abstracts",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.08,
+      "notes": "runner special-check: silently returning [] for a bogus PMID without any note = silent-drop finding"
+    },
+    {
+      "name": "pmc rejects non-PMC id",
+      "tool": "pmc_fulltext",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool pmc_fulltext"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "biorxiv rejects foreign DOI",
+      "tool": "biorxiv_fetch",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool biorxiv_fetch"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "biorxiv rejects bad server",
+      "tool": "biorxiv_fetch",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool biorxiv_fetch"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "arxiv empty query rejected",
+      "tool": "arxiv_search",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool arxiv_search"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "uniprot search kinase",
+      "tool": "uniprot_search",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 3.85,
+      "notes": ""
+    },
+    {
+      "name": "uniprot entry P04637",
+      "tool": "uniprot_entry",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.1,
+      "notes": ""
+    },
+    {
+      "name": "pdb search spike",
+      "tool": "pdb_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.11,
+      "notes": ""
+    },
+    {
+      "name": "pdb entry 6VXX",
+      "tool": "pdb_entry",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "FINDING",
+      "findings": [
+        "no PMID on primary citation"
+      ],
+      "elapsed_s": 0.15,
+      "notes": ""
+    },
+    {
+      "name": "ncbi nuccore search",
+      "tool": "ncbi_sequence_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.43,
+      "notes": ""
+    },
+    {
+      "name": "ncbi fetch small fasta inline",
+      "tool": "ncbi_fetch_sequence",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.61,
+      "notes": ""
+    },
+    {
+      "name": "ncbi PROTEIN db + genbank fmt",
+      "tool": "ncbi_fetch_sequence",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.14,
+      "notes": "suspect: rettype 'gb' vs required 'gp' for protein db"
+    },
+    {
+      "name": "ensembl gene TP53",
+      "tool": "ensembl_gene",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 1.83,
+      "notes": ""
+    },
+    {
+      "name": "ensembl protein sequence",
+      "tool": "ensembl_sequence",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 7.3,
+      "notes": ""
+    },
+    {
+      "name": "ensembl xrefs bounded?",
+      "tool": "ensembl_xrefs",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "FINDING",
+      "findings": [
+        "unbounded xrefs payload: n_xrefs=157 with no cap/pagination param"
+      ],
+      "elapsed_s": 3.83,
+      "notes": ""
+    },
+    {
+      "name": "uniprot bogus accession clean error",
+      "tool": "uniprot_entry",
+      "severity": "high",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool uniprot_entry"
+      ],
+      "elapsed_s": 0.37,
+      "notes": ""
+    },
+    {
+      "name": "uniprot isoform accession behavior",
+      "tool": "uniprot_entry",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.4,
+      "notes": "runner accepts EITHER clean success or clean error; crash/ugly error = finding"
+    },
+    {
+      "name": "pdb 5-char id rejected",
+      "tool": "pdb_entry",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool pdb_entry"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "pdb nonexistent id clean error",
+      "tool": "pdb_entry",
+      "severity": "high",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool pdb_entry"
+      ],
+      "elapsed_s": 0.08,
+      "notes": ""
+    },
+    {
+      "name": "ncbi bad db rejected",
+      "tool": "ncbi_fetch_sequence",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool ncbi_fetch_sequence"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "ncbi relative save_path rejected",
+      "tool": "ncbi_fetch_sequence",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool ncbi_fetch_sequence"
+      ],
+      "elapsed_s": 1.28,
+      "notes": ""
+    },
+    {
+      "name": "ncbi huge genome without save_path",
+      "tool": "ncbi_fetch_sequence",
+      "severity": "high",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool ncbi_fetch_sequence"
+      ],
+      "elapsed_s": 61.65,
+      "notes": "chr1 ~248 Mb: must refuse inline, must NOT try to buffer forever; runner enforces 120s deadline"
+    },
+    {
+      "name": "ensembl bogus symbol clean error",
+      "tool": "ensembl_gene",
+      "severity": "high",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool ensembl_gene"
+      ],
+      "elapsed_s": 9.76,
+      "notes": ""
+    },
+    {
+      "name": "ensembl bad seq_type rejected",
+      "tool": "ensembl_sequence",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool ensembl_sequence"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "kegg pathway search",
+      "tool": "kegg_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.84,
+      "notes": ""
+    },
+    {
+      "name": "kegg entry hsa04110",
+      "tool": "kegg_entry",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.86,
+      "notes": ""
+    },
+    {
+      "name": "kegg bogus id clean error",
+      "tool": "kegg_entry",
+      "severity": "high",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool kegg_entry"
+      ],
+      "elapsed_s": 0.43,
+      "notes": ""
+    },
+    {
+      "name": "kegg bad database rejected",
+      "tool": "kegg_search",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool kegg_search"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "reactome apoptosis search",
+      "tool": "reactome_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.18,
+      "notes": ""
+    },
+    {
+      "name": "reactome nonsense query honest",
+      "tool": "reactome_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.11,
+      "notes": "runner special-check: 0 results must be reported as 0, not error/fabrication"
+    },
+    {
+      "name": "run_python libs available",
+      "tool": "run_python",
+      "severity": "critical",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.41,
+      "notes": ""
+    },
+    {
+      "name": "run_python timeout honored",
+      "tool": "run_python",
+      "severity": "critical",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 3.01,
+      "notes": ""
+    },
+    {
+      "name": "run_python non-utf8 stdout survives",
+      "tool": "run_python",
+      "severity": "high",
+      "expect": "ok",
+      "status": "FINDING",
+      "findings": [
+        "stdout not a string"
+      ],
+      "elapsed_s": 0.03,
+      "notes": "suspect: text=True strict decode raises inside the tool"
+    },
+    {
+      "name": "run_python huge output capped",
+      "tool": "run_python",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.03,
+      "notes": ""
+    },
+    {
+      "name": "run_python empty script rejected",
+      "tool": "run_python",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool run_python"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "run_python relative cwd rejected",
+      "tool": "run_python",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool run_python"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "run_python zero timeout rejected",
+      "tool": "run_python",
+      "severity": "medium",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool run_python"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "workspace escape blocked",
+      "tool": "list_workspace",
+      "severity": "high",
+      "expect": "error",
+      "status": "FINDING",
+      "findings": [
+        "validation gap: call SUCCEEDED, expected rejection. payload head: Error executing tool list_workspace"
+      ],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "workspace listing works",
+      "tool": "list_workspace",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "concurrency: 5 parallel mixed calls",
+      "tool": "(multiple)",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "notes": "",
+      "elapsed_s": 4.05
+    }
+  ]
+}
