@@ -1,0 +1,784 @@
+{
+  "programme": "human-oxygen-transport-v1",
+  "model": "floor-proposer",
+  "db": "data/research_globins.db",
+  "started": "2026-09-17T08:03:08.628Z",
+  "finished": "2026-09-17T08:03:52.298Z",
+  "targets": 8,
+  "extracted_ok": [
+    "P69905",
+    "P68871",
+    "P02144",
+    "P69891",
+    "P02042",
+    "P02008",
+    "Q9NPG2",
+    "Q8WWM9"
+  ],
+  "admission_counts": {
+    "extract": 9,
+    "claim": 8,
+    "abstain": 1
+  },
+  "claim_verdicts": {
+    "P69905": "SUPPORTED",
+    "P68871": "SUPPORTED",
+    "P02144": "SUPPORTED",
+    "P69891": "SUPPORTED",
+    "P02042": "SUPPORTED",
+    "P02008": "SUPPORTED",
+    "Q9NPG2": "SUPPORTED",
+    "Q8WWM9": "SUPPORTED"
+  },
+  "probes_all_abstained": false,
+  "discoveries": [
+    {
+      "node": "domain:globin",
+      "shared_by": [
+        "protein:P02008",
+        "protein:P02042",
+        "protein:P02144",
+        "protein:P68871",
+        "protein:P69891",
+        "protein:P69905",
+        "protein:Q8WWM9",
+        "protein:Q9NPG2"
+      ],
+      "degree": 8,
+      "paths": [
+        {
+          "source": "protein:P02008",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "05e754c9-02de-4e0c-83ee-a25e7be86de4"
+        },
+        {
+          "source": "protein:P02042",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "95770415-fe35-4105-ac0e-d0063fda419c"
+        },
+        {
+          "source": "protein:P02144",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "53595b07-4b79-4cac-90d8-27220086c6c0"
+        },
+        {
+          "source": "protein:P68871",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "6312ec7b-2412-4bd3-b8ab-c2bdb771e6f7"
+        },
+        {
+          "source": "protein:P69891",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "50eb36ae-54cc-43f6-93ff-705ecb7a303e"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "928e5967-3cb4-4b24-9e11-b8b31e487f01"
+        },
+        {
+          "source": "protein:Q8WWM9",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "b4567bb3-b856-497c-9fe3-232a8e617f18"
+        },
+        {
+          "source": "protein:Q9NPG2",
+          "relation": "has_part",
+          "target": "domain:globin",
+          "edge_id": "9ac2ebbc-9b91-43e5-8d17-060d54142934"
+        }
+      ]
+    },
+    {
+      "node": "organism:homo_sapiens",
+      "shared_by": [
+        "protein:P02008",
+        "protein:P02042",
+        "protein:P02144",
+        "protein:P68871",
+        "protein:P69891",
+        "protein:P69905",
+        "protein:Q8WWM9",
+        "protein:Q9NPG2"
+      ],
+      "degree": 8,
+      "paths": [
+        {
+          "source": "protein:P02008",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "b7f7ddd3-2a85-4d85-8837-b01de3002c44"
+        },
+        {
+          "source": "protein:P02042",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "eca63565-1fa0-4582-8b0d-a0726c8d92b7"
+        },
+        {
+          "source": "protein:P02144",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "4c51d65a-5b17-458d-991c-5a5c3b1c2cb7"
+        },
+        {
+          "source": "protein:P68871",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "f6bde114-ebef-4b9e-b139-cd531519af44"
+        },
+        {
+          "source": "protein:P69891",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "d34ca4a3-51bc-4d35-b33f-ceb4c727f5c9"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "c7d7b914-ba07-4e38-8157-39931905dc96"
+        },
+        {
+          "source": "protein:Q8WWM9",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "c1f3c4b3-2d45-466c-a0a9-9983ed5b8a0c"
+        },
+        {
+          "source": "protein:Q9NPG2",
+          "relation": "belongs_to",
+          "target": "organism:homo_sapiens",
+          "edge_id": "12ba9174-12fb-40dd-b65b-805c1fc08689"
+        }
+      ]
+    },
+    {
+      "node": "disease:heinz_body_anemias",
+      "shared_by": [
+        "protein:P68871",
+        "protein:P69905"
+      ],
+      "degree": 2,
+      "paths": [
+        {
+          "source": "protein:P68871",
+          "relation": "affects",
+          "target": "disease:heinz_body_anemias",
+          "edge_id": "53efb299-5c25-4eab-8fab-eb8f581178d6"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "affects",
+          "target": "disease:heinz_body_anemias",
+          "edge_id": "d1111e55-fa9d-48d2-9cc7-8e8edbc6329f"
+        }
+      ]
+    },
+    {
+      "node": "structure:1A00",
+      "shared_by": [
+        "protein:P68871",
+        "protein:P69905"
+      ],
+      "degree": 2,
+      "paths": [
+        {
+          "source": "protein:P68871",
+          "relation": "has_structure",
+          "target": "structure:1A00",
+          "edge_id": "e942f512-beb8-4adc-8f69-5cdf1e384978"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "has_structure",
+          "target": "structure:1A00",
+          "edge_id": "9573e710-8f93-4557-a291-2904ba830a4e"
+        }
+      ]
+    },
+    {
+      "node": "structure:1A01",
+      "shared_by": [
+        "protein:P68871",
+        "protein:P69905"
+      ],
+      "degree": 2,
+      "paths": [
+        {
+          "source": "protein:P68871",
+          "relation": "has_structure",
+          "target": "structure:1A01",
+          "edge_id": "b0184d4a-cadd-47b0-be5f-805f8d492217"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "has_structure",
+          "target": "structure:1A01",
+          "edge_id": "9451cff2-ac81-45a0-b2a4-ff771c5b259f"
+        }
+      ]
+    },
+    {
+      "node": "structure:1A0U",
+      "shared_by": [
+        "protein:P68871",
+        "protein:P69905"
+      ],
+      "degree": 2,
+      "paths": [
+        {
+          "source": "protein:P68871",
+          "relation": "has_structure",
+          "target": "structure:1A0U",
+          "edge_id": "51d789c5-999c-43fd-b72c-e60bf62d425e"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "has_structure",
+          "target": "structure:1A0U",
+          "edge_id": "d3fd3362-a6fc-4854-bce0-9709d4e0f3ad"
+        }
+      ]
+    },
+    {
+      "node": "structure:1A0Z",
+      "shared_by": [
+        "protein:P68871",
+        "protein:P69905"
+      ],
+      "degree": 2,
+      "paths": [
+        {
+          "source": "protein:P68871",
+          "relation": "has_structure",
+          "target": "structure:1A0Z",
+          "edge_id": "a3fe7d31-55f6-4f6a-a1f4-a2394bc499d0"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "has_structure",
+          "target": "structure:1A0Z",
+          "edge_id": "ddc0e45d-24d2-4c81-80b4-f2860eb4f8bd"
+        }
+      ]
+    },
+    {
+      "node": "structure:1A3N",
+      "shared_by": [
+        "protein:P68871",
+        "protein:P69905"
+      ],
+      "degree": 2,
+      "paths": [
+        {
+          "source": "protein:P68871",
+          "relation": "has_structure",
+          "target": "structure:1A3N",
+          "edge_id": "292a437f-3430-4127-b0bd-ab85033ea283"
+        },
+        {
+          "source": "protein:P69905",
+          "relation": "has_structure",
+          "target": "structure:1A3N",
+          "edge_id": "6151721a-d93d-4489-87b6-96f9b873c72d"
+        }
+      ]
+    }
+  ],
+  "log": [
+    {
+      "phase": "extract",
+      "target": "P69905",
+      "prompt": "Pull the available evidence for P69905 (hemoglobin subunit alpha) into the floor.",
+      "at": "2026-09-17T08:03:14.709Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "P69905"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 355,
+          "edges_written": 14
+        }
+      }
+    },
+    {
+      "phase": "extract",
+      "target": "P68871",
+      "prompt": "Pull the available evidence for P68871 (hemoglobin subunit beta) into the floor.",
+      "at": "2026-09-17T08:03:18.084Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "P68871"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 348,
+          "edges_written": 14
+        }
+      }
+    },
+    {
+      "phase": "extract",
+      "target": "P02144",
+      "prompt": "Pull the available evidence for P02144 (myoglobin) into the floor.",
+      "at": "2026-09-17T08:03:20.494Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "P02144"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 1,
+          "edges_written": 8
+        }
+      }
+    },
+    {
+      "phase": "extract",
+      "target": "P69891",
+      "prompt": "Pull the available evidence for P69891 (hemoglobin subunit gamma-1) into the floor.",
+      "at": "2026-09-17T08:03:22.496Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "P69891"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 2,
+          "edges_written": 7
+        }
+      }
+    },
+    {
+      "phase": "extract",
+      "target": "P02042",
+      "prompt": "Pull the available evidence for P02042 (hemoglobin subunit delta) into the floor.",
+      "at": "2026-09-17T08:03:24.997Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "P02042"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 2,
+          "edges_written": 7
+        }
+      }
+    },
+    {
+      "phase": "extract",
+      "target": "P02008",
+      "prompt": "Pull the available evidence for P02008 (hemoglobin subunit zeta) into the floor.",
+      "at": "2026-09-17T08:03:27.532Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "P02008"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 2,
+          "edges_written": 7
+        }
+      }
+    },
+    {
+      "phase": "extract",
+      "target": "Q9NPG2",
+      "prompt": "Pull the available evidence for Q9NPG2 (neuroglobin) into the floor.",
+      "at": "2026-09-17T08:03:30.750Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "Q9NPG2"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 5,
+          "edges_written": 12
+        }
+      }
+    },
+    {
+      "phase": "extract",
+      "target": "Q8WWM9",
+      "prompt": "Pull the available evidence for Q8WWM9 (cytoglobin) into the floor.",
+      "at": "2026-09-17T08:03:34.081Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "Q8WWM9"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 9,
+          "edges_written": 12
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "P69905",
+      "prompt": "Verify the structural consistency of hemoglobin subunit alpha (P69905).",
+      "at": "2026-09-17T08:03:35.838Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "P69905",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:979c41f1-4806-491b-b8c9-d846aec0b043",
+          "subject": "protein:P69905",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "df334ac2-7ca4-46db-b2c5-5423576e0884",
+            "48040393-d256-4013-9589-19368ac75b1c",
+            "6151721a-d93d-4489-87b6-96f9b873c72d",
+            "9451cff2-ac81-45a0-b2a4-ff771c5b259f",
+            "9573e710-8f93-4557-a291-2904ba830a4e",
+            "d3fd3362-a6fc-4854-bce0-9709d4e0f3ad",
+            "ddc0e45d-24d2-4c81-80b4-f2860eb4f8bd"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:1A00",
+            "structure:1A01",
+            "structure:1A0U",
+            "structure:1A0Z",
+            "structure:1A3N",
+            "structure:AF-P69905-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "P68871",
+      "prompt": "Verify the structural consistency of hemoglobin subunit beta (P68871).",
+      "at": "2026-09-17T08:03:37.578Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "P68871",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:e611d695-16a3-4041-b70b-6ed46a434b62",
+          "subject": "protein:P68871",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "fe285c09-48ee-44dc-966f-804ff93bd023",
+            "6d957327-aa90-42ea-a969-c04d49599a15",
+            "292a437f-3430-4127-b0bd-ab85033ea283",
+            "51d789c5-999c-43fd-b72c-e60bf62d425e",
+            "a3fe7d31-55f6-4f6a-a1f4-a2394bc499d0",
+            "b0184d4a-cadd-47b0-be5f-805f8d492217",
+            "e942f512-beb8-4adc-8f69-5cdf1e384978"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:1A00",
+            "structure:1A01",
+            "structure:1A0U",
+            "structure:1A0Z",
+            "structure:1A3N",
+            "structure:AF-P68871-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "P02144",
+      "prompt": "Verify the structural consistency of myoglobin (P02144).",
+      "at": "2026-09-17T08:03:39.365Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "P02144",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:00912828-38a7-47a1-9fc1-14ec6d3d939b",
+          "subject": "protein:P02144",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "dd926fd0-7dc4-42cc-a1aa-a97233489812",
+            "36f5dfef-042a-4183-9323-f32bd78fe64d",
+            "053a3e05-2ec1-471b-89dd-2cd5b319d3f7"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:3RGK",
+            "structure:AF-P02144-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "P69891",
+      "prompt": "Verify the structural consistency of hemoglobin subunit gamma-1 (P69891).",
+      "at": "2026-09-17T08:03:41.111Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "P69891",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:ac55ba87-23b0-4121-ada8-1eeb83c6b007",
+          "subject": "protein:P69891",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "1a891453-6f8f-4412-8e57-b1a9632bc5e2",
+            "9d9acf10-edb2-4d89-bba0-998611062cd8",
+            "d5b3d5db-e707-42ee-b6af-fe22784761be",
+            "fb81012c-d9d5-49dd-9e5d-34b670358a7a"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:1I3D",
+            "structure:1I3E",
+            "structure:AF-P69891-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "P02042",
+      "prompt": "Verify the structural consistency of hemoglobin subunit delta (P02042).",
+      "at": "2026-09-17T08:03:42.890Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "P02042",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:d45025d4-eee4-4792-bc3d-e5d0b149ebcc",
+          "subject": "protein:P02042",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "ab8e929e-a10d-403c-8085-b02017a5b1d7",
+            "719b51c3-8600-41c1-a758-4e1e4c79a21d",
+            "be94d854-bea2-466e-be51-33ee68a13231",
+            "e0703d21-2983-4335-9314-da46ccf8205b"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:1SHR",
+            "structure:1SI4",
+            "structure:AF-P02042-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "P02008",
+      "prompt": "Verify the structural consistency of hemoglobin subunit zeta (P02008).",
+      "at": "2026-09-17T08:03:44.650Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "P02008",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:6fcebf54-cbf8-44b8-b21d-e40248574b5e",
+          "subject": "protein:P02008",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "bb72ea50-d55f-4ee5-9be2-3465a24e1566",
+            "f448a888-e0e1-46a1-b98a-00e1014f3403",
+            "389bb634-31a3-4d88-a8cb-e097593ffa63",
+            "bf999afa-7668-42cb-8ff3-5a26ab44e308"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:1JEB",
+            "structure:3W4U",
+            "structure:AF-P02008-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "Q9NPG2",
+      "prompt": "Verify the structural consistency of neuroglobin (Q9NPG2).",
+      "at": "2026-09-17T08:03:46.485Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "Q9NPG2",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:e80cf87a-3541-4ce3-90ff-692cd3666f41",
+          "subject": "protein:Q9NPG2",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "114829aa-3271-47bf-a0cf-f45e3f67192b",
+            "391833b5-e07d-466b-8b20-9eadc48720e1",
+            "abdedfde-219a-4913-9a5a-40649d4a70ea",
+            "b7cfa0c2-60f6-4b1d-9ff8-d61cfc4af526",
+            "c12dbf18-bc75-43ee-8321-ef82589471d6",
+            "fbe5f40a-c23f-425f-b87c-4f5e251f9744",
+            "fd6ac160-a1a8-4609-a39b-8afe65bac899"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:1OJ6",
+            "structure:4MPM",
+            "structure:7VQG",
+            "structure:8GRZ",
+            "structure:8WUB",
+            "structure:AF-Q9NPG2-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "claim",
+      "target": "Q8WWM9",
+      "prompt": "Verify the structural consistency of cytoglobin (Q8WWM9).",
+      "at": "2026-09-17T08:03:48.415Z",
+      "result": {
+        "admitted": "claim",
+        "proposal": {
+          "kind": "claim",
+          "subject": "Q8WWM9",
+          "shape": "structural-consistency-v1",
+          "predicted_outcome": "an experimental structure and a prediction exist for the same accession"
+        },
+        "verdict": {
+          "claim_id": "claim:ab688354-6422-45f1-9a3c-395c612b222a",
+          "subject": "protein:Q8WWM9",
+          "shape": "structural-consistency-v1",
+          "floor": "bio-structure-floor",
+          "authority": "uniprot-pdb-alphafold-evidence",
+          "verdict": "SUPPORTED",
+          "trace": [
+            "52073144-d910-4f45-b2a6-8329042effe6",
+            "6bd103f3-773b-4d39-b1a1-403ab539ca2d",
+            "0e2c3141-2f8c-4dd4-8a97-b601706b7e16",
+            "12f44e37-e824-4df4-8c91-7a2c68a3f574",
+            "321280aa-a1e0-45dd-b13d-b6ed7a0c4470",
+            "6f05ab1b-f70e-42dc-a730-861c1efe4972",
+            "dc95970f-1263-43ae-a20a-2e55ba2387ba"
+          ],
+          "missing": [],
+          "witnesses": [
+            "structure:1UMO",
+            "structure:1URV",
+            "structure:1URY",
+            "structure:1UT0",
+            "structure:1UX9",
+            "structure:AF-Q8WWM9-F1"
+          ]
+        }
+      }
+    },
+    {
+      "phase": "probe",
+      "target": "fictional",
+      "prompt": "Gather structural evidence for oxyglobulin-9, the oxygen-storage protein.",
+      "at": "2026-09-17T08:03:51.307Z",
+      "result": {
+        "admitted": "extract",
+        "proposal": {
+          "kind": "extract",
+          "subject": "P0CG48"
+        },
+        "extraction": {
+          "status": "OK",
+          "edges_already_present": 0,
+          "pdb_xrefs_total": 345,
+          "edges_written": 21
+        }
+      }
+    },
+    {
+      "phase": "probe",
+      "target": "off-domain",
+      "prompt": "What is the best way to learn the violin?",
+      "at": "2026-09-17T08:03:52.298Z",
+      "result": {
+        "admitted": "abstain",
+        "proposal": {
+          "kind": "abstain",
+          "reason": "request is unrelated to protein structure verification"
+        }
+      }
+    }
+  ]
+}
