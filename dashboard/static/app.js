@@ -86,14 +86,24 @@ if (TABS.includes(wantTab) && wantTab !== "graph")
   window.addEventListener("load", () => showTab(wantTab));
 
 /* ---------------- peel column tabs ---------------- */
-const PTABS = ["harvest", "research", "data"];
+const PTABS = ["harvest", "research", "trace"];
 for (const t of PTABS)
   $("ptab-" + t).onclick = () => {
     for (const u of PTABS) {
       $("ptab-" + u).classList.toggle("active", u === t);
       $("p" + u).style.display = u === t ? "block" : "none";
     }
+    if (t === "trace") loadTrace("");
   };
+
+/* ---------------- popout modal (the Jeeves inspector) ---------------- */
+function openModal(html) {
+  $("modalbody").innerHTML = html;
+  $("modal").style.display = "flex";
+}
+$("modal").onclick = ev => { if (ev.target === $("modal")) $("modal").style.display = "none"; };
+window.addEventListener("keydown", ev => {
+  if (ev.key === "Escape") $("modal").style.display = "none"; });
 
 /* ---------------- node search ---------------- */
 $("nodesearch").addEventListener("change", ev => {
@@ -223,25 +233,27 @@ async function showNode(id) {
           : `<div class="when">no provenance row</div>`}
     </div>`;
   };
-  chatCard(`<b>${d.node}</b>` +
+  openModal(`<h2>${d.node}</h2>` +
     (d.outgoing.length + d.incoming.length
       ? d.outgoing.map(e => edgeHtml(e, "out")).join("") +
         d.incoming.map(e => edgeHtml(e, "in")).join("")
-      : '<div class="empty">no edges</div>'), "nodecard");
+      : '<div class="empty">no edges</div>') +
+    (d.tiles.length
+      ? `<h2 style="margin-top:10px">Trace tiles</h2>` +
+        d.tiles.map(t => `<div class="edge-row">${t.emoji || ""} ${esc(t.sentence)}</div>`).join("")
+      : ""));
 }
 
 /* ---------------- harvest: tile cards ---------------- */
+let harvestTopics = [], currentTopic = "";
 async function loadHarvest(topic) {
   if (!state.db) return;
+  currentTopic = topic;
   const d = await api("/api/harvest", { db: state.db, topic });
   if (!topic) {
+    harvestTopics = d.topics || [];
     $("htiles").innerHTML = "";
-    $("htopics").innerHTML = (d.topics || []).length
-      ? d.topics.map(t =>
-          `<span class="chip" data-t="${t.topic}">${t.topic.replace("bio-structure:","")} · ${t.tiles}</span>`).join("")
-      : '<span class="empty">no trace tiles in this db</span>';
-    document.querySelectorAll("#htopics .chip").forEach(el =>
-      el.onclick = () => loadHarvest(el.dataset.t));
+    renderTopicChips();
     return;
   }
   document.querySelectorAll("#htopics .chip").forEach(el =>
@@ -254,25 +266,68 @@ async function loadHarvest(topic) {
       </div>`).join("") + "</div>"
     : "";
   $("htiles").innerHTML = srcHtml + d.tiles.map(t => `
-    <div class="tilecard" data-topic="${esc(topic)}" data-turn="${t.turn_number}">
+    <div class="tilecard" data-id="${t.id}">
       <b>${t.emoji || "🧩"}</b> ${esc(t.sentence)}
       <div class="when">${esc(t.subcategory)} · depth ${t.depth_level} · turn ${t.turn_number}</div>
     </div>`).join("");
   document.querySelectorAll("#htiles .tilecard").forEach(el =>
-    el.onclick = () => inspectTile(el.dataset.topic, el.dataset.turn));
+    el.onclick = () => inspectTile(el.dataset.id));
+}
+function renderTopicChips() {
+  const filter = ($("catsearch").value || "").toLowerCase();
+  const shown = harvestTopics.filter(t => t.topic.toLowerCase().includes(filter));
+  $("htopics").innerHTML = shown.length
+    ? shown.map(t =>
+        `<span class="chip" data-t="${t.topic}">${t.topic.replace("bio-structure:","")} · ${t.tiles}</span>`).join("")
+    : '<span class="empty">no matching topics</span>';
+  document.querySelectorAll("#htopics .chip").forEach(el =>
+    el.onclick = () => loadHarvest(el.dataset.t));
+}
+$("catsearch").addEventListener("input", renderTopicChips);
+$("latestharvest").onclick = () =>
+  harvestTopics.length && loadHarvest(harvestTopics[0].topic);
+$("refreshharvest").onclick = () => loadHarvest(currentTopic);
+
+async function inspectTile(id) {
+  // The Jeeves popout: the tile's FULL dataset — every stored field.
+  const t = await api("/api/tile", { db: state.db, id });
+  if (t.error) return;
+  const skip = new Set(["id", "conversation_id", "sentence", "emoji"]);
+  const fields = Object.entries(t)
+    .filter(([k, v]) => !skip.has(k) && v !== "" && v !== null)
+    .map(([k, v]) => `<div class="edge-row"><span class="rel">${k}</span> ${esc(v)}</div>`)
+    .join("");
+  openModal(`<h2>${t.emoji || "🧩"} ${esc(t.sentence)}</h2>${fields}
+    <div class="when" style="margin-top:8px">tile ${esc(t.id)}</div>`);
 }
 
-async function inspectTile(topic, turn) {
-  // Tile ids aren't in the list payload; re-query the topic and match turn.
+/* ---------------- trace tab ---------------- */
+async function loadTrace(topic) {
+  if (!state.db) return;
+  if (!topic) {
+    $("ttrace").innerHTML = "";
+    $("tsubjects").innerHTML = harvestTopics.length
+      ? harvestTopics.map(t =>
+          `<span class="chip" data-t="${t.topic}">${t.topic.replace("bio-structure:","")}</span>`).join("")
+      : '<span class="empty">no traces yet</span>';
+    document.querySelectorAll("#tsubjects .chip").forEach(el =>
+      el.onclick = () => loadTrace(el.dataset.t));
+    return;
+  }
+  document.querySelectorAll("#tsubjects .chip").forEach(el =>
+    el.classList.toggle("on", el.dataset.t === topic));
   const d = await api("/api/harvest", { db: state.db, topic });
-  const t = d.tiles.find(x => String(x.turn_number) === String(turn));
-  if (!t) return;
-  const conns = ["related_to","causes","requires","part_of","next_step","previous_step"]
-    .filter(k => t[k]).map(k => `<div>· <span class="rel">${k}</span> ${esc(t[k])}</div>`).join("");
-  chatCard(`<b>${t.emoji || "🧩"} tile — ${esc(topic)}</b>
-    <div>${esc(t.sentence)}</div>
-    <div class="when">${esc(t.subcategory)} · depth ${t.depth_level} · turn ${t.turn_number}</div>
-    ${conns || '<div class="empty">no connectors</div>'}`, "nodecard");
+  $("ttrace").innerHTML =
+    d.tiles.map(t => `<div class="edge-row">
+      <span class="kind kind-node">turn ${t.turn_number}</span>
+      ${t.emoji || ""} ${esc(t.sentence)}
+      <div class="when">${esc(t.subcategory)} · depth ${t.depth_level}</div>
+    </div>`).join("") +
+    (d.sources.length
+      ? `<div class="card" style="margin:8px 0"><h2>Sources</h2>` +
+        d.sources.map(s => `<div class="edge-row">
+          <a href="${s.url}" target="_blank" rel="noopener">${s.url}</a></div>`).join("") + "</div>"
+      : "");
 }
 
 /* ---------------- research (peel column) ---------------- */
@@ -284,8 +339,10 @@ async function runResearch() {
   try {
     d = await fetch("/api/research", { method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ db: state.db, prompt }) }).then(r => r.json());
+      body: JSON.stringify({ db: state.db, prompt,
+                             model: $("modelsel").value }) }).then(r => r.json());
   } catch (e) { d = { admitted: "request_failed", error: String(e) }; }
+  window.lastReply = d;
   $("rgo").disabled = false;
   let detail = "";
   if (d.admitted === "extract") {
@@ -397,11 +454,25 @@ async function loadChats() {
   const d = await api("/api/chats", {});
   $("chatlist").innerHTML = d.chats.map(c => `
     <div class="chatrow ${c.id === state.chatId ? "active" : ""}" data-id="${c.id}">
+      <span class="rowops">
+        <button data-op="rename" title="Rename">✏️</button>
+        <button data-op="delete" title="Delete">🗑</button>
+      </span>
       ${esc(c.title)}
       <div class="when">${(c.created_at || "").replace("T", " ").slice(0, 16)}</div>
     </div>`).join("") || '<div class="empty" style="padding:10px">no conversations yet</div>';
-  document.querySelectorAll(".chatrow").forEach(el =>
-    el.onclick = () => openChat(el.dataset.id));
+  document.querySelectorAll(".chatrow").forEach(el => {
+    el.onclick = () => openChat(el.dataset.id);
+    el.querySelectorAll(".rowops button").forEach(b => b.onclick = ev => {
+      ev.stopPropagation();
+      if (b.dataset.op === "delete") {
+        if (confirm("Delete this conversation?")) manageChat("delete", el.dataset.id);
+      } else {
+        const t = prompt("New title:");
+        if (t) manageChat("rename", el.dataset.id, t);
+      }
+    });
+  });
 }
 async function openChat(id) {
   state.chatId = id;
@@ -427,21 +498,139 @@ async function sendMsg() {
   try {
     d = await fetch("/api/chat", { method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ db: state.db, chat_id: state.chatId, text }) })
+      body: JSON.stringify({ db: state.db, chat_id: state.chatId, text,
+                             model: $("modelsel").value }) })
       .then(r => r.json());
   } catch (e) { d = { reply: { kind: "error", text: String(e) } }; }
   $("csend").disabled = false;
   $("chatlog").lastElementChild.remove();   // the “thinking” bubble
   if (d.error) { renderTurn({ role: "floor", kind: "error", text: d.error }); return; }
   state.chatId = d.chat_id;
+  window.lastReply = d.reply;
   renderTurn({ role: "floor", ...d.reply });
   if (d.reply.kind === "extract") pick(state.db);
   loadChats();
 }
 $("csend").onclick = sendMsg;
 $("cmsg").addEventListener("keydown", ev => { if (ev.key === "Enter") sendMsg(); });
-$("newchat").onclick = () => { state.chatId = null; $("chatlog").innerHTML = "";
+const newChat = () => { state.chatId = null; $("chatlog").innerHTML = "";
   chatCard("🧬 New conversation — message Lois."); loadChats(); };
+$("newchat").onclick = newChat;
 
+/* ---------------- chats: search + organize ---------------- */
+$("chatsearch").addEventListener("input", ev => {
+  const f = ev.target.value.toLowerCase();
+  document.querySelectorAll(".chatrow").forEach(el =>
+    el.style.display = el.textContent.toLowerCase().includes(f) ? "" : "none");
+});
+$("organize").onclick = () => $("chatscol").classList.toggle("organizing");
+async function manageChat(op, id, title) {
+  await fetch("/api/chats/manage", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ op, id, title }) });
+  if (op === "delete" && id === state.chatId) newChat();
+  loadChats();
+}
+
+/* ---------------- Knowledge Categories lane ---------------- */
+async function pollHealth() {
+  const h = await api("/api/health", {}).catch(() => ({ status: "server unreachable", ollama: false }));
+  const pill = $("readypill");
+  pill.textContent = h.status;
+  pill.classList.toggle("down", !(h.ok && h.ollama));
+  setTimeout(pollHealth, 30000);
+}
+$("newmind").onclick = async () => {
+  const name = prompt("Name the new mind (a-z 0-9 _ -):");
+  if (!name) return;
+  const r = await fetch("/api/minds", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }) }).then(x => x.json());
+  if (r.error) { openModal(`<h2>Create New Mind</h2><div class="empty">${esc(r.error)}</div>`); return; }
+  await loadDbs(); pick(r.created);
+};
+$("exportbtn").onclick = () =>
+  window.open("/api/export?" + new URLSearchParams({ db: state.db, format: "json" }), "_blank");
+$("importbtn").onclick = () => {
+  openModal(`<h2>📥 Import — run the wheel on accessions</h2>
+    <div class="sub">One UniProt accession per line (max 10 per run). The floor
+    pulls each one directly — every edge provenance-pinned. No model involved.</div>
+    <textarea id="implist" rows="6" style="width:100%;margin:8px 0;background:var(--bg);
+      color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px"></textarea>
+    <button class="btn" id="imprun">Run import</button><div id="impout"></div>`);
+  $("imprun").onclick = async () => {
+    const accs = $("implist").value.split(/\s+/).filter(Boolean);
+    if (!accs.length) return;
+    $("imprun").disabled = true;
+    $("impout").innerHTML = '<div class="empty">running the wheel…</div>';
+    const r = await fetch("/api/import", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db: state.db, accessions: accs }) }).then(x => x.json());
+    $("imprun").disabled = false;
+    $("impout").innerHTML = r.error ? `<div class="empty">${esc(r.error)}</div>`
+      : r.results.map(x => `<div class="edge-row">${x.accession} —
+          <b>${x.status}</b>${x.edges_written != null ? ` · ${x.edges_written} new edges` : ""}</div>`).join("") +
+        (r.requested > r.processed
+          ? `<div class="when">${r.requested - r.processed} skipped (cap ${r.cap}/run)</div>` : "");
+    pick(state.db);
+  };
+};
+
+/* ---------------- toolbar (all buttons do something real) ------------- */
+window.lastReply = null;
+$("t-new").onclick = newChat;
+$("t-learn").onclick = async () => {
+  const d = await api("/api/notebook", { limit: 100, kind: "learning" });
+  openModal(`<h2>🧠 Learnings</h2>` + (d.entries.length
+    ? d.entries.slice().reverse().map(e => `<div class="edge-row">${esc(e.text)}
+        <div class="when">${(e.at || "").slice(0, 19)}</div></div>`).join("")
+    : '<div class="empty">no learnings journaled yet</div>'));
+};
+$("learnings").onclick = $("t-learn").onclick;
+$("t-rules").onclick = async () => {
+  const r = await api("/api/rules", {});
+  const rel = list => list.map(x =>
+    `<div class="edge-row"><span class="rel">${x.relation}</span> ${x.source} → ${x.target}</div>`).join("");
+  openModal(`<h2>📜 Rules — the floor's law</h2>
+    <div class="sub">Rendered from the schema constants — this cannot drift from the code.</div>
+    <h2 style="margin-top:10px">Core relations</h2>${rel(r.core_relations)}
+    <h2 style="margin-top:10px">Extraction relations</h2>${rel(r.extraction_relations)}
+    <h2 style="margin-top:10px">Laws</h2>` +
+    r.laws.map(l => `<div class="edge-row">${esc(l)}</div>`).join("") +
+    `<h2 style="margin-top:10px">Allowlisted hosts</h2>
+     <div class="sub">${r.allowlisted_hosts.join(" · ")}</div>`);
+};
+$("rulesbtn").onclick = $("t-rules").onclick;
+$("t-sources").onclick = async () => {
+  const s = await api("/api/sources", { db: state.db });
+  openModal(`<h2>🌐 Where the data came from — ${esc(state.db)}</h2>` +
+    s.sources.map(x => `<div class="edge-row"><b>${x.source}</b> · ${x.edges} edges
+      <div class="sub">${Object.entries(x.hosts).map(([h, c]) => `${h} (${c})`).join(" · ")}</div>
+      <div class="when">${(x.first_retrieved || "").slice(0, 19)} → ${(x.last_retrieved || "").slice(0, 19)}</div>
+    </div>`).join(""));
+};
+$("t-notebook").onclick = () => showTab("notebook");
+$("t-raw").onclick = () => openModal(`<h2>&lt;/&gt; Last reply — raw</h2>
+  <pre style="white-space:pre-wrap;font-size:12px">${esc(JSON.stringify(window.lastReply, null, 2)
+    || "no reply yet")}</pre>`);
+$("t-theme").onclick = () => {
+  document.body.classList.toggle("light");
+  localStorage.setItem("loisTheme", document.body.classList.contains("light") ? "light" : "dark");
+};
+if (localStorage.getItem("loisTheme") === "light") document.body.classList.add("light");
+$("t-find").onclick = () => $("nodesearch").focus();
+
+/* ---------------- model switcher ---------------- */
+async function loadModels() {
+  const d = await api("/api/models", {});
+  const sel = $("modelsel");
+  sel.innerHTML = "";
+  if (!d.models.length) { sel.add(new Option("model runtime down", "")); return; }
+  for (const m of d.models) sel.add(new Option(m, m));
+  sel.value = d.models.includes("floor-proposer") ? "floor-proposer" : d.models[0];
+}
+
+loadModels();
+pollHealth();
 loadChats();
 loadDbs();

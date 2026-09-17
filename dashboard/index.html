@@ -24,37 +24,68 @@
 <!-- column 1: conversations (Jeeves Chats) -->
 <aside id="chatscol">
   <div class="colhead">💬 Chats <button class="btn" id="newchat">+ New</button></div>
+  <div class="pad" style="padding-top:8px">
+    <input type="text" id="chatsearch" placeholder="🔍 Search chats…" style="width:100%">
+    <button class="btn wide" id="organize">✏️ Organize</button>
+  </div>
   <div id="chatlist"></div>
 </aside>
 
-<!-- column 2: PEEL (Harvest / Research / Data) -->
+<!-- column 2: PEEL (Harvest / Research / Trace) + Knowledge Categories -->
 <aside id="peelcol">
   <div class="colhead">🧠 PEEL
-    <nav class="tabs small">
+    <span>
+      <button class="btn small" id="learnings">🧠 Learnings</button>
+      <button class="btn small" id="rulesbtn">📜 Rules</button>
+    </span>
+  </div>
+  <div class="pad" style="padding-top:8px">
+    <div class="sub">Click any tile card to inspect its dataset and lineage.</div>
+    <nav class="tabs small" style="margin-top:6px">
       <button class="tab active" id="ptab-harvest">Harvest</button>
       <button class="tab" id="ptab-research">Research</button>
-      <button class="tab" id="ptab-data">Data</button>
+      <button class="tab" id="ptab-trace">Trace</button>
     </nav>
   </div>
   <div id="pharvest">
-    <div class="sub pad">Click any tile card to inspect its dataset and lineage.</div>
+    <div class="pad">
+      <div class="green">Harvested tiles</div>
+      <div class="sub">Click any tile to inspect its full text, fields and source.</div>
+      <button class="btn" id="latestharvest">Latest harvest</button>
+      <button class="btn" id="refreshharvest">Refresh</button>
+    </div>
     <div id="htopics" class="pad"></div>
     <div id="htiles" class="pad"></div>
   </div>
   <div id="presearch" style="display:none">
-    <div class="sub pad">Your request goes to the local <b>floor-proposer</b>.
-      Extracts pull provenance-pinned evidence, claims get floor verdicts —
-      the model never writes the graph.</div>
+    <div class="sub pad">Your request goes to the local proposer. Extracts pull
+      provenance-pinned evidence, claims get floor verdicts — the model never
+      writes the graph.</div>
     <div class="pad">
       <input type="text" id="rq" placeholder="e.g. Pull the available evidence for P68871.">
       <button class="btn wide" id="rgo">Propose through the gate</button>
     </div>
     <div id="rout" class="pad"></div>
   </div>
-  <div id="pdata" style="display:none">
-    <div class="card"><h2>Where the data is</h2><div id="dbs"></div></div>
-    <div class="card"><h2>Where it was collected from</h2><div id="sources"></div></div>
+  <div id="ptrace" style="display:none">
+    <div class="sub pad">The canonical trace: every tile the wheel wrote for a
+      subject, in turn order, with its sources.</div>
+    <div id="tsubjects" class="pad"></div>
+    <div id="ttrace" class="pad"></div>
   </div>
+
+  <div class="colhead">📚 Knowledge Categories</div>
+  <div class="pad" style="padding-top:8px">
+    <input type="text" id="catsearch" placeholder="🔍 Search categories…" style="width:100%">
+    <div style="margin-top:6px">
+      <button class="btn" id="exportbtn">📤 Export</button>
+      <button class="btn" id="importbtn">📥 Import</button>
+    </div>
+    <div id="readypill" class="pill">checking…</div>
+    <button class="btn wide accentbtn" id="newmind">🧠 Create New Mind</button>
+  </div>
+  <div class="card"><h2>Minds — where the data is</h2><div id="dbs"></div></div>
+  <div class="card"><h2>Where it was collected from</h2><div id="sources"></div></div>
 </aside>
 
 <!-- center: graph / ledger / notebook -->
@@ -90,18 +121,35 @@
 
 <!-- column 4: Chat with Lois -->
 <section id="chatcol">
-  <div class="colhead">Chat with Lois</div>
+  <div class="colhead">Chat with Lois
+    <select id="modelsel" title="model for the gate lane"></select>
+  </div>
   <div id="chatlog"><div class="floorbubble">
     🧬 Grounded chat. Ask what Lois knows (“what do you know about
     P69905”), ask it to pull evidence, or ask for a verdict. Replies come
     only from stored facts or the gate — never free prose. Clicking a graph
-    node or a tile card drops its inspection here.
+    node or a tile card pops its inspection out.
   </div></div>
+  <div id="toolrow">
+    <button class="tool" id="t-new" title="New conversation">➕</button>
+    <button class="tool" id="t-learn" title="Learnings — what the system has learned">🧠</button>
+    <button class="tool" id="t-rules" title="Rules — the floor's law">📜</button>
+    <button class="tool" id="t-sources" title="Sources — where the data came from">🌐</button>
+    <button class="tool" id="t-notebook" title="Notebook — live journal">📓</button>
+    <button class="tool" id="t-raw" title="Raw data of the last reply">&lt;/&gt;</button>
+    <button class="tool" id="t-theme" title="Toggle theme">🎨</button>
+    <button class="tool" id="t-find" title="Find a node">🔍</button>
+  </div>
   <div id="chatbar">
     <input type="text" id="cmsg" placeholder="Message Lois">
     <button class="btn" id="csend">➤</button>
   </div>
 </section>
+
+<!-- popout (Jeeves inspector) -->
+<div id="modal" style="display:none">
+  <div id="modalbody"></div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

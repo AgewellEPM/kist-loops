@@ -131,3 +131,31 @@ a:hover { text-decoration: underline; }
 .floorbubble { background: var(--panel); border: 1px solid var(--line); }
 .floorbubble .kind { margin-right: 6px; }
 .nodecard { border-left: 3px solid var(--accent); }
+
+/* Jeeves parity: toolbar, pill, popout modal, organize, theme */
+.green { color: var(--ok); font-weight: 700; margin-bottom: 2px; }
+.btn.small { padding: 2px 8px; font-size: 12px; }
+.accentbtn { background: #4753d6; border-color: #4753d6; color: #fff; }
+.pill { border: 1px solid var(--blue); color: var(--blue); border-radius: 14px;
+        padding: 4px 12px; font-size: 12px; margin: 8px 0; text-align: center; }
+.pill.down { border-color: var(--bad); color: var(--bad); }
+#toolrow { display: flex; gap: 6px; padding: 6px 12px 0; flex-wrap: wrap; }
+.tool { width: 34px; height: 34px; border-radius: 50%; background: var(--panel);
+        border: 1px solid var(--line); color: var(--ink); cursor: pointer;
+        font-size: 15px; }
+.tool:hover { border-color: var(--accent); }
+#modelsel { max-width: 170px; font-size: 12px; }
+#modal { position: fixed; inset: 0; background: #000a; z-index: 50;
+         display: flex; align-items: center; justify-content: center; }
+#modalbody { background: var(--panel); border: 1px solid var(--line);
+             border-radius: 12px; padding: 18px; width: min(680px, 90vw);
+             max-height: 82vh; overflow-y: auto; }
+#modalbody h2 { font-size: 14px; margin-bottom: 10px; }
+.chatrow .rowops { float: right; display: none; }
+.organizing .chatrow .rowops { display: inline; }
+.rowops button { background: none; border: 0; cursor: pointer; font-size: 13px; }
+
+body.light { --bg: #f4f6f8; --panel: #ffffff; --line: #d5dbe2;
+             --ink: #1c232b; --dim: #5b6672; }
+body.light #legend { background: #ffffffcc; }
+body.light .userbubble { background: #d8e6fb; }

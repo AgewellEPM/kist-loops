@@ -318,20 +318,22 @@ def node_detail(db_name: str, node_id: str) -> dict:
 def harvest(db_name: str, topic: str = "") -> dict:
     """The Jeeves Harvest lane: trace tiles grouped by topic. With a topic
     selected, every tile is returned in trace order together with the
-    subject protein's distinct source URLs — the receipts panel."""
+    subject protein's distinct source URLs — the receipts panel. Topics are
+    ordered newest-trace-first so 'Latest harvest' is simply topics[0]."""
     conn = open_ro(_resolve_db(db_name))
     try:
         if not topic:
             rows = conn.execute(
-                """SELECT topic, COUNT(*) AS n FROM responses
-                    GROUP BY topic ORDER BY topic""").fetchall()
+                """SELECT topic, COUNT(*) AS n, MAX(rowid) AS latest
+                     FROM responses GROUP BY topic
+                    ORDER BY latest DESC""").fetchall()
             return {"db": db_name,
                     "topics": [{"topic": r["topic"], "tiles": r["n"]}
                                for r in rows]}
         tiles = [dict(r) for r in conn.execute(
-            """SELECT emoji, sentence, subcategory, depth_level, turn_number,
-                      related_to, causes, requires, part_of, next_step,
-                      previous_step
+            """SELECT id, emoji, sentence, subcategory, depth_level,
+                      turn_number, related_to, causes, requires, part_of,
+                      next_step, previous_step
                  FROM responses WHERE topic = ?
                 ORDER BY turn_number, id""", (topic,))]
         sources: list[dict] = []
@@ -359,23 +361,123 @@ def harvest(db_name: str, topic: str = "") -> dict:
         conn.close()
 
 
-def research(db_name: str, prompt: str) -> dict:
+def research(db_name: str, prompt: str, model: str = "") -> dict:
     """The Jeeves Research lane on the floor: prompt -> local proposer ->
-    strict parse -> floor admission. This is the dashboard's ONLY write
-    path, and it writes exclusively through the Store/gate."""
+    strict parse -> floor admission. Writes exclusively through the
+    Store/gate."""
     if not prompt.strip():
         raise ValueError("empty research prompt")
     # Imported lazily: the read lanes must work even with no model runtime.
-    from proposer.runtime import ProposerError, propose
+    from proposer.runtime import DEFAULT_MODEL, ProposerError, propose
     from symbolic_floor.store import Store
     db_path = _resolve_db(db_name)
     store = Store(str(db_path))
     try:
-        return propose(store, prompt.strip())
+        return propose(store, prompt.strip(), model=model or DEFAULT_MODEL)
     except ProposerError as e:
         return {"admitted": "model_unavailable", "error": str(e)}
     finally:
         store.close()
+
+
+def rules() -> dict:
+    """The floor's actual law, straight from the schema constants — the
+    Rules popout renders THIS, so it can never drift from the code."""
+    from symbolic_floor.schema import (ALLOWED_HOSTS, CORE_RELATIONS,
+                                       EXTRACTION_RELATIONS)
+    rel = lambda d: [{"relation": r, "source": s, "target": t}  # noqa: E731
+                     for r, (s, t) in d.items()]
+    return {
+        "core_relations": rel(CORE_RELATIONS),
+        "extraction_relations": rel(EXTRACTION_RELATIONS),
+        "laws": [
+            "Directionality is FIXED per relation — wrong direction is rejected, never flipped.",
+            "Every edge REQUIRES provenance (source, url, retrieved_at, raw_id) written in the same transaction.",
+            "Non-manual provenance URLs must be https on an allowlisted host.",
+            "Functional relations hard-veto: at most one object per subject; a second value is a CONTRADICTION.",
+            "The model never writes the graph — proposals are admitted only through the gate.",
+            "Labels are cosmetic; the reasoner never reads them to decide.",
+        ],
+        "allowlisted_hosts": sorted(ALLOWED_HOSTS),
+    }
+
+
+def health() -> dict:
+    """'Peel is ready…' pill, honestly: db count + local model runtime."""
+    import urllib.request
+    ollama = False
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags",
+                                    timeout=1.5) as r:
+            ollama = r.status == 200
+    except OSError:
+        pass
+    n = len(list_dbs()["dbs"])
+    return {"ok": n > 0, "dbs": n, "ollama": ollama,
+            "status": ("Peel is ready…" if n and ollama
+                       else "floor readable — model runtime down" if n
+                       else "no floor DBs found")}
+
+
+def models() -> dict:
+    """Local Ollama models for the chat model switcher (Jeeves /model)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags",
+                                    timeout=2) as r:
+            tags = json.loads(r.read())
+        return {"models": sorted(m["name"].removesuffix(":latest")
+                                 for m in tags.get("models", []))}
+    except (OSError, ValueError):
+        return {"models": []}
+
+
+MAX_IMPORT = 10
+
+
+def import_accessions(db_name: str, accessions: list) -> dict:
+    """The Import lane: a pasted accession list runs the bio wheel directly
+    (the CLI seed lane — no model involved; every edge still provenanced).
+    Capped per request, cap reported, never silent."""
+    from symbolic_floor.extract import extract_protein
+    from symbolic_floor.schema import ValidationError, validate_node_id
+    from symbolic_floor.store import Store
+    accs = [str(a).strip().upper() for a in accessions if str(a).strip()]
+    if not accs:
+        raise ValueError("no accessions given")
+    capped = accs[:MAX_IMPORT]
+    store = Store(str(_resolve_db(db_name)))
+    results = []
+    try:
+        for acc in capped:
+            try:
+                validate_node_id(f"protein:{acc}")
+            except ValidationError as e:
+                results.append({"accession": acc, "status": "INVALID",
+                                "error": str(e)})
+                continue
+            r = extract_protein(store, acc)
+            results.append({"accession": acc, "status": r["status"],
+                            "edges_written": len(r.get("edges_written", []))})
+    finally:
+        store.close()
+    return {"db": db_name, "requested": len(accs), "processed": len(capped),
+            "cap": MAX_IMPORT, "results": results}
+
+
+def create_mind(name: str) -> dict:
+    """Create New Mind: a fresh, empty floor DB (schema initialized by the
+    Store — the only author). Name is slug-checked, no path escapes."""
+    import re as _re
+    from symbolic_floor.store import Store
+    slug = str(name).strip().lower()
+    if not _re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,40}", slug):
+        raise ValueError("mind name must be 2-41 chars: a-z 0-9 _ -")
+    path = DATA_DIR / f"{slug}.db"
+    if path.exists():
+        raise ValueError(f"mind {slug!r} already exists")
+    Store(str(path)).close()
+    return {"created": path.name, "path": str(path)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -474,6 +576,12 @@ class Handler(BaseHTTPRequestHandler):
                 cid = (q.get("id") or [""])[0]
                 self._json({"id": cid,
                             "turns": ChatStore(DATA_DIR / "chats").turns(cid)})
+            elif url.path == "/api/rules":
+                self._json(rules())
+            elif url.path == "/api/health":
+                self._json(health())
+            elif url.path == "/api/models":
+                self._json(models())
             else:
                 self._json({"error": "not found"}, 404)
         except ValueError as e:
@@ -488,7 +596,8 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if url.path == "/api/research":
                 self._json(research(str(body.get("db") or ""),
-                                    str(body.get("prompt") or "")))
+                                    str(body.get("prompt") or ""),
+                                    str(body.get("model") or "")))
             elif url.path == "/api/chat":
                 from .chat import ChatStore, reply
                 text = str(body.get("text") or "").strip()
@@ -499,10 +608,28 @@ class Handler(BaseHTTPRequestHandler):
                 chat_id = str(body.get("chat_id") or "") or cs.create(text)
                 cs.append(chat_id, {"role": "user", "text": text,
                                     "at": utc_now_iso_local()})
-                r = reply(str(db_path), text)
+                r = reply(str(db_path), text,
+                          model=str(body.get("model") or ""))
                 cs.append(chat_id, {"role": "floor", "at": utc_now_iso_local(),
                                     **r})
                 self._json({"chat_id": chat_id, "reply": r})
+            elif url.path == "/api/chats/manage":
+                from .chat import ChatStore
+                cs = ChatStore(DATA_DIR / "chats")
+                op = str(body.get("op") or "")
+                cid = str(body.get("id") or "")
+                if op == "rename":
+                    cs.rename(cid, str(body.get("title") or ""))
+                elif op == "delete":
+                    cs.delete(cid)
+                else:
+                    raise ValueError(f"unknown op {op!r}")
+                self._json({"ok": True})
+            elif url.path == "/api/import":
+                self._json(import_accessions(str(body.get("db") or ""),
+                                             body.get("accessions") or []))
+            elif url.path == "/api/minds":
+                self._json(create_mind(str(body.get("name") or "")))
             else:
                 self._json({"error": "not found"}, 404)
         except ValueError as e:

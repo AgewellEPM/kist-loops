@@ -74,6 +74,18 @@ class ChatStore:
                 continue
         return out
 
+    def rename(self, chat_id: str, title: str) -> None:
+        if not title.strip():
+            raise ValueError("empty title")
+        p = self._path(chat_id)
+        lines = p.read_text().splitlines()
+        meta = json.loads(lines[0])
+        meta["title"] = title.strip()[:60]
+        p.write_text("\n".join([json.dumps(meta)] + lines[1:]) + "\n")
+
+    def delete(self, chat_id: str) -> None:
+        self._path(chat_id).unlink(missing_ok=False)
+
 
 def _recall_reply(db_path: str, acc: str) -> dict:
     store = Store(db_path)
@@ -99,12 +111,12 @@ def _recall_reply(db_path: str, acc: str) -> dict:
             "data": r}
 
 
-def _gate_reply(db_path: str, text: str) -> dict:
+def _gate_reply(db_path: str, text: str, model: str = "") -> dict:
     # Imported lazily so chat recall works with no model runtime present.
-    from proposer.runtime import ProposerError, propose
+    from proposer.runtime import DEFAULT_MODEL, ProposerError, propose
     store = Store(db_path)
     try:
-        result = propose(store, text)
+        result = propose(store, text, model=model or DEFAULT_MODEL)
     except ProposerError as e:
         return {"kind": "error", "text": f"Local model unavailable: {e}",
                 "data": None}
@@ -137,7 +149,7 @@ def _gate_reply(db_path: str, text: str) -> dict:
     return {"kind": admitted or "error", "text": msg, "data": result}
 
 
-def reply(db_path: str, text: str) -> dict:
+def reply(db_path: str, text: str, model: str = "") -> dict:
     """Route one user message: recall when it names an accession and reads
     like a question about stored knowledge; otherwise the gate."""
     accs = ACCESSION_RE.findall(text)
@@ -145,4 +157,4 @@ def reply(db_path: str, text: str) -> dict:
     if accs and any(h in lowered for h in RECALL_HINTS) \
             and "pull" not in lowered and "verify" not in lowered:
         return _recall_reply(db_path, accs[0].upper())
-    return _gate_reply(db_path, text)
+    return _gate_reply(db_path, text, model=model)
