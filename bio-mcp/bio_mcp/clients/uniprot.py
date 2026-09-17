@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..citations import source_record
 from ..http import BioAPIError, BioHTTP
+from ..pathseg import path_segment
 
 UNIPROT = "https://rest.uniprot.org/uniprotkb"
 
@@ -14,16 +15,21 @@ _ENTRY_FIELDS = (
 )
 
 
+# UniProt JSON distinguishes missing keys from present-but-null values; every
+# accessor below guards BOTH (`or {}` / `or []`), so a null field degrades to
+# "absent" instead of crashing.
+
+
 def _protein_name(entry: dict) -> str | None:
-    desc = entry.get("proteinDescription", {})
-    rec = desc.get("recommendedName") or (desc.get("submissionNames") or [{}])[0]
+    desc = entry.get("proteinDescription") or {}
+    rec = desc.get("recommendedName") or (desc.get("submissionNames") or [{}])[0] or {}
     return (rec.get("fullName") or {}).get("value")
 
 
 def _genes(entry: dict) -> list[str]:
     return [
         g["geneName"]["value"]
-        for g in entry.get("genes", [])
+        for g in entry.get("genes") or []
         if g.get("geneName", {}).get("value")
     ]
 
@@ -48,8 +54,8 @@ async def search_uniprot(http: BioHTTP, query: str, *, max_results: int = 15, re
                 "entry_name": entry.get("uniProtkbId"),
                 "protein_name": _protein_name(entry),
                 "genes": _genes(entry),
-                "organism": entry.get("organism", {}).get("scientificName"),
-                "length": entry.get("sequence", {}).get("length"),
+                "organism": (entry.get("organism") or {}).get("scientificName"),
+                "length": (entry.get("sequence") or {}).get("length"),
                 "reviewed": entry.get("entryType") == "UniProtKB reviewed (Swiss-Prot)",
                 "source": source_record("uniprot", acc),
             }
@@ -62,39 +68,49 @@ async def fetch_uniprot_entry(http: BioHTTP, accession: str, *, include_sequence
     acc = accession.strip().upper()
     if not acc:
         raise ValueError("empty UniProt accession")
-    entry = await http.get_json(f"{UNIPROT}/{acc}", params={"fields": _ENTRY_FIELDS, "format": "json"})
+    # Encode the accession so a crafted value ("P04637/../../uniparc/X") can't
+    # escape /uniprotkb; isoform accessions ("P04637-2") pass through unchanged.
+    entry = await http.get_json(
+        f"{UNIPROT}/{path_segment(acc, what='UniProt accession')}",
+        params={"fields": _ENTRY_FIELDS, "format": "json"},
+    )
     if entry.get("primaryAccession") is None:
         raise BioAPIError(f"UniProt returned no entry for {acc}")
 
     def _comments(ctype: str) -> list[str]:
         out = []
-        for c in entry.get("comments", []):
+        for c in entry.get("comments") or []:
             if c.get("commentType") != ctype:
                 continue
-            for t in c.get("texts", []):
+            for t in c.get("texts") or []:
                 if t.get("value"):
                     out.append(t["value"])
-            if ctype == "DISEASE" and c.get("disease", {}).get("description"):
-                out.append(f"{c['disease'].get('diseaseId', '')}: {c['disease']['description']}")
+            disease = c.get("disease") or {}
+            if ctype == "DISEASE" and disease.get("description"):
+                out.append(f"{disease.get('diseaseId', '')}: {disease['description']}")
         return out
 
     domains = [
         {
             "description": f.get("description"),
-            "start": f.get("location", {}).get("start", {}).get("value"),
-            "end": f.get("location", {}).get("end", {}).get("value"),
+            "start": ((f.get("location") or {}).get("start") or {}).get("value"),
+            "end": ((f.get("location") or {}).get("end") or {}).get("value"),
         }
-        for f in entry.get("features", [])
+        for f in entry.get("features") or []
         if f.get("type") == "Domain"
     ]
-    pdb_ids = [x["id"] for x in entry.get("uniProtKBCrossReferences", []) if x.get("database") == "PDB"]
-    seq = entry.get("sequence", {})
+    pdb_ids = [
+        x.get("id")
+        for x in entry.get("uniProtKBCrossReferences") or []
+        if x.get("database") == "PDB" and x.get("id")
+    ]
+    seq = entry.get("sequence") or {}
     return {
         "accession": entry["primaryAccession"],
         "entry_name": entry.get("uniProtkbId"),
         "protein_name": _protein_name(entry),
         "genes": _genes(entry),
-        "organism": entry.get("organism", {}).get("scientificName"),
+        "organism": (entry.get("organism") or {}).get("scientificName"),
         "reviewed": entry.get("entryType") == "UniProtKB reviewed (Swiss-Prot)",
         "function": _comments("FUNCTION"),
         "subcellular_location": _comments("SUBCELLULAR LOCATION"),

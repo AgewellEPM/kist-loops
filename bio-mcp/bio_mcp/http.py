@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -24,6 +25,8 @@ USER_AGENT = "bio-mcp/0.1 (research tooling; +https://github.com/AgewellEPM/scie
 DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.5  # seconds; grows 1.5, 3.0, 6.0
+RETRY_AFTER_CAP = 60.0  # a hostile/buggy Retry-After must not park the loop for days
+ERROR_BODY_CAP = 4096  # max bytes pulled from a 429/5xx stream just for the message
 
 # Published/polite requests-per-second budgets. Anything unlisted gets DEFAULT_RPS.
 DEFAULT_RPS = 5.0
@@ -59,6 +62,31 @@ class BioAPIError(RuntimeError):
 class BioOversizeError(BioAPIError):
     """Streamed body exceeded the caller's cap. Never retried — the fix is a
     save_path, not another attempt."""
+
+
+def _retry_delay(retry_after: str | None, attempt: int) -> float:
+    """Backoff for a 429/5xx. Honors Retry-After (seconds form) capped at
+    RETRY_AFTER_CAP. str.isdigit() admits non-ASCII digits ('²'.isdigit() is
+    True) that float() rejects — accept ASCII [0-9]+ only."""
+    if retry_after and re.fullmatch(r"[0-9]+", retry_after):
+        return min(float(retry_after), RETRY_AFTER_CAP)
+    return BACKOFF_BASE * (2**attempt)
+
+
+async def _read_error_head(resp: httpx.Response) -> bytes:
+    """Pull at most ERROR_BODY_CAP bytes of an error body for the message —
+    never buffer a whole (possibly huge) 429/5xx body. A transport error
+    mid-read is tolerated: the retry/raise decision was already made from the
+    status line, and a partial head is fine for a diagnostic."""
+    head = b""
+    try:
+        async for chunk in resp.aiter_bytes():
+            head += chunk
+            if len(head) >= ERROR_BODY_CAP:
+                break
+    except httpx.TransportError:
+        pass
+    return head[:ERROR_BODY_CAP]
 
 
 @dataclass
@@ -115,7 +143,8 @@ class BioHTTP:
                 resp = await self._client.send(req)
             except httpx.TransportError as e:
                 last_err = e
-                await asyncio.sleep(BACKOFF_BASE * (2**attempt))
+                if attempt < MAX_RETRIES:  # no wasted sleep before "giving up"
+                    await asyncio.sleep(BACKOFF_BASE * (2**attempt))
                 continue
             if resp.status_code == 429 or resp.status_code >= 500:
                 last_err = BioAPIError(
@@ -123,9 +152,8 @@ class BioHTTP:
                     status=resp.status_code,
                     url=str(req.url),
                 )
-                retry_after = resp.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after and retry_after.isdigit() else BACKOFF_BASE * (2**attempt)
-                await asyncio.sleep(delay)
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(_retry_delay(resp.headers.get("Retry-After"), attempt))
                 continue
             if resp.status_code >= 400:
                 raise BioAPIError(
@@ -149,9 +177,10 @@ class BioHTTP:
     ) -> str:
         """Stream a GET, aborting with BioOversizeError the moment the body
         passes max_bytes — never buffers an unbounded record. Retries 429/5xx
-        and transport errors with backoff exactly like get() (the retry decision
-        is made from the status line, BEFORE any body is streamed). Oversize is
-        terminal and never retried — the fix is a save_path, not another attempt."""
+        and transport errors with backoff exactly like get(), including a
+        transport error MID-BODY (chromosome-scale streams are where resets
+        actually happen). Oversize is terminal and never retried — the fix is
+        a save_path, not another attempt."""
         req = self._client.build_request("GET", url, params=params, headers=headers)
         host = req.url.host or ""
         if host.endswith("ncbi.nlm.nih.gov") and self._ncbi_key:
@@ -164,42 +193,49 @@ class BioHTTP:
                 resp = await self._client.send(req, stream=True)
             except httpx.TransportError as e:
                 last_err = e
-                await asyncio.sleep(BACKOFF_BASE * (2**attempt))
+                if attempt < MAX_RETRIES:  # no wasted sleep before "giving up"
+                    await asyncio.sleep(BACKOFF_BASE * (2**attempt))
                 continue
             delay: float | None = None
             try:
                 if resp.status_code == 429 or resp.status_code >= 500:
-                    body = (await resp.aread())[:200].decode(errors="replace")
+                    body = (await _read_error_head(resp))[:200].decode(errors="replace")
                     last_err = BioAPIError(
                         f"{host} returned {resp.status_code}: {body}",
                         status=resp.status_code,
                         url=str(req.url),
                     )
-                    retry_after = resp.headers.get("Retry-After")
-                    delay = float(retry_after) if retry_after and retry_after.isdigit() else BACKOFF_BASE * (2**attempt)
+                    delay = _retry_delay(resp.headers.get("Retry-After"), attempt)
                 elif resp.status_code >= 400:
-                    body = (await resp.aread())[:300].decode(errors="replace")
+                    body = (await _read_error_head(resp))[:300].decode(errors="replace")
                     raise BioAPIError(
                         f"{host} returned {resp.status_code} for {req.url}: {body}",
                         status=resp.status_code,
                         url=str(req.url),
                     )
                 else:
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in resp.aiter_bytes():
-                        size += len(chunk)
-                        if size > max_bytes:
-                            raise BioOversizeError(
-                                f"response from {host} exceeded the {max_bytes:,}-byte inline cap",
-                                url=str(req.url),
-                            )
-                        chunks.append(chunk)
-                    return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+                    try:
+                        chunks: list[bytes] = []
+                        size = 0
+                        async for chunk in resp.aiter_bytes():
+                            size += len(chunk)
+                            if size > max_bytes:
+                                raise BioOversizeError(
+                                    f"response from {host} exceeded the {max_bytes:,}-byte inline cap",
+                                    url=str(req.url),
+                                )
+                            chunks.append(chunk)
+                        return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+                    except httpx.TransportError as e:
+                        # Mid-body reset: retry exactly like a failed send().
+                        # BioOversizeError is NOT a TransportError and stays terminal.
+                        last_err = e
+                        delay = BACKOFF_BASE * (2**attempt)
             finally:
                 await resp.aclose()
-            # only reached on the 429/5xx retry branch (delay was set)
-            await asyncio.sleep(delay)
+            # only reached on a retry branch (delay was set)
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(delay)
         raise BioAPIError(
             f"{host}: giving up after {MAX_RETRIES + 1} attempts: {last_err}",
             url=str(req.url),

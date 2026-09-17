@@ -11,6 +11,13 @@ The contract enforced across bio-mcp:
 from __future__ import annotations
 
 from datetime import date
+from urllib.parse import quote
+
+# Percent-encoding for identifiers embedded in citation URLs. The safe set
+# keeps legitimate id punctuation byte-identical (DOI '/', ':', '.', '(', ')';
+# KEGG ':'; version '+'/'@') while still encoding anything that would break
+# the resolvable-URL contract: space, '#' (fragment truncation), '?', controls.
+_IDENT_SAFE = "/:.()@_-+"
 
 # Canonical URL builders per database. Single source of truth — clients must
 # not hand-roll citation URLs.
@@ -66,8 +73,8 @@ def source_record(database: str, identifier: str, *, label: str | None = None) -
         raise UnpinnedSourceError(f"empty identifier for database {database!r}")
     return {
         "database": db,
-        "id": ident,
-        "url": _URL_BUILDERS[db](ident),
+        "id": ident,  # the raw identifier; only the URL below is encoded
+        "url": _URL_BUILDERS[db](quote(ident, safe=_IDENT_SAFE)),
         "retrieved": date.today().isoformat(),
         **({"label": label} if label else {}),
     }

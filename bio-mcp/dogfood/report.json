@@ -1,11 +1,11 @@
 {
   "generated": "2026-09-17",
-  "scenarios": 73,
-  "passes": 73,
+  "scenarios": 90,
+  "passes": 90,
   "findings": 0,
   "finding_points": 0,
   "server_reconnects": 0,
-  "elapsed_s": 70.7,
+  "elapsed_s": 45.0,
   "results": [
     {
       "name": "glossary resource readable",
@@ -34,7 +34,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.57,
+      "elapsed_s": 1.19,
       "notes": ""
     },
     {
@@ -44,7 +44,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.2,
+      "elapsed_s": 1.11,
       "notes": ""
     },
     {
@@ -54,7 +54,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.53,
+      "elapsed_s": 0.66,
       "notes": ""
     },
     {
@@ -64,7 +64,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.89,
+      "elapsed_s": 0.8,
       "notes": ""
     },
     {
@@ -74,7 +74,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.37,
+      "elapsed_s": 0.34,
       "notes": "dict contract: {requested, returned, missing, articles}"
     },
     {
@@ -84,7 +84,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.31,
+      "elapsed_s": 0.39,
       "notes": ""
     },
     {
@@ -104,7 +104,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.51,
+      "elapsed_s": 0.42,
       "notes": ""
     },
     {
@@ -114,7 +114,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 26.07,
+      "elapsed_s": 21.97,
       "notes": "runner applies special freshness check: are returned dates near the window END or only its start (pagination blindness)?"
     },
     {
@@ -144,7 +144,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.25,
+      "elapsed_s": 0.66,
       "notes": "runner special-check: silently returning [] for a bogus PMID without any note = silent-drop finding"
     },
     {
@@ -194,7 +194,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.42,
+      "elapsed_s": 0.34,
       "notes": ""
     },
     {
@@ -224,7 +224,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.24,
+      "elapsed_s": 0.09,
       "notes": ""
     },
     {
@@ -234,7 +234,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.39,
+      "elapsed_s": 0.41,
       "notes": ""
     },
     {
@@ -244,7 +244,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.41,
+      "elapsed_s": 0.4,
       "notes": ""
     },
     {
@@ -254,7 +254,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 2.46,
+      "elapsed_s": 2.4,
       "notes": "suspect: rettype 'gb' vs required 'gp' for protein db"
     },
     {
@@ -264,7 +264,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 4.25,
+      "elapsed_s": 0.4,
       "notes": ""
     },
     {
@@ -274,7 +274,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 15.19,
+      "elapsed_s": 0.1,
       "notes": ""
     },
     {
@@ -284,7 +284,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.33,
+      "elapsed_s": 0.21,
       "notes": ""
     },
     {
@@ -294,7 +294,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.37,
+      "elapsed_s": 0.09,
       "notes": ""
     },
     {
@@ -304,7 +304,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.37,
+      "elapsed_s": 0.51,
       "notes": "runner accepts EITHER clean success or clean error; crash/ugly error = finding"
     },
     {
@@ -324,7 +324,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.13,
+      "elapsed_s": 0.03,
       "notes": ""
     },
     {
@@ -354,7 +354,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.56,
+      "elapsed_s": 0.66,
       "notes": "chr1 ~248 Mb: must refuse inline, must NOT try to buffer forever; runner enforces 120s deadline"
     },
     {
@@ -364,7 +364,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.2,
+      "elapsed_s": 0.51,
       "notes": ""
     },
     {
@@ -384,7 +384,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.9,
+      "elapsed_s": 0.8,
       "notes": ""
     },
     {
@@ -394,7 +394,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.23,
+      "elapsed_s": 0.64,
       "notes": ""
     },
     {
@@ -404,7 +404,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.4,
+      "elapsed_s": 0.42,
       "notes": ""
     },
     {
@@ -424,7 +424,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.13,
+      "elapsed_s": 0.1,
       "notes": ""
     },
     {
@@ -434,7 +434,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.14,
+      "elapsed_s": 0.15,
       "notes": "runner special-check: 0 results must be reported as 0, not error/fabrication"
     },
     {
@@ -444,7 +444,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.07,
+      "elapsed_s": 0.52,
       "notes": ""
     },
     {
@@ -454,7 +454,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.07,
+      "elapsed_s": 0.08,
       "notes": "abstract reconstructed from inverted index; must not be an empty string if present"
     },
     {
@@ -484,7 +484,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.17,
+      "elapsed_s": 0.14,
       "notes": ""
     },
     {
@@ -494,7 +494,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.11,
+      "elapsed_s": 0.0,
       "notes": ""
     },
     {
@@ -504,7 +504,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.49,
+      "elapsed_s": 0.43,
       "notes": ""
     },
     {
@@ -514,7 +514,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.12,
+      "elapsed_s": 0.11,
       "notes": ""
     },
     {
@@ -534,7 +534,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.07,
+      "elapsed_s": 0.47,
       "notes": ""
     },
     {
@@ -554,7 +554,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.05,
+      "elapsed_s": 0.31,
       "notes": ""
     },
     {
@@ -594,7 +594,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 1.58,
+      "elapsed_s": 0.55,
       "notes": ""
     },
     {
@@ -604,7 +604,7 @@
       "expect": "error",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.66,
+      "elapsed_s": 0.07,
       "notes": "unresolvable name \u2192 PubChem 404 \u2192 clean tool error, not a crash"
     },
     {
@@ -624,7 +624,7 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.3,
+      "elapsed_s": 0.18,
       "notes": ""
     },
     {
@@ -638,13 +638,163 @@
       "notes": ""
     },
     {
+      "name": "pdb zero-hit search returns empty",
+      "tool": "pdb_search",
+      "severity": "high",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.12,
+      "notes": "RCSB answers zero hits with HTTP 204 empty body; must be returned=0, not an error"
+    },
+    {
+      "name": "reactome names carry no markup",
+      "tool": "reactome_search",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.11,
+      "notes": "live Reactome wraps matches in double-quoted highlighting spans"
+    },
+    {
+      "name": "kegg path traversal rejected/neutralized",
+      "tool": "kegg_search",
+      "severity": "high",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.18,
+      "notes": "encoded query must NOT reroute /find to /get: KEGG 404s the literal '..%2F..' term \u2192 clean tool error. The catastrophic outcome this pins against is 200-with-fabricated-hits (pre-fix behavior)"
+    },
+    {
+      "name": "vep traversal variant rejected",
+      "tool": "vep_consequences",
+      "severity": "critical",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": "provenance laundering: crafted HGVS must never reroute to another Ensembl endpoint and come back source-pinned"
+    },
+    {
+      "name": "vep hostile species rejected",
+      "tool": "vep_consequences",
+      "severity": "high",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "ensembl newline symbol rejected",
+      "tool": "ensembl_gene",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": "non-printable in a path segment must be a clean ValueError, not httpx.InvalidURL"
+    },
+    {
+      "name": "dbsnp zero-padded rsid resolves",
+      "tool": "dbsnp_variant",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.08,
+      "notes": ""
+    },
+    {
+      "name": "chembl truncated id rejected",
+      "tool": "chembl_bioactivity",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": "bare CHEMBL prefix used to pin a dead source URL"
+    },
+    {
+      "name": "pubchem float cid rejected",
+      "tool": "pubchem_compound_by_cid",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": "int() truncation used to silently query the WRONG compound"
+    },
+    {
+      "name": "openalex traversal id neutralized",
+      "tool": "openalex_work",
+      "severity": "high",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.07,
+      "notes": "encoded id must not reroute /works to /authors; upstream 404 surfacing as a clean tool error is the pass condition"
+    },
+    {
+      "name": "arxiv negative max_results rejected",
+      "tool": "arxiv_search",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "biorxiv negative max_results rejected",
+      "tool": "biorxiv_recent",
+      "severity": "medium",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "pubmed all-bogus pmids reported missing",
+      "tool": "pubmed_abstracts",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.0,
+      "notes": ""
+    },
+    {
+      "name": "pubmed book pmid parsed not missing",
+      "tool": "pubmed_abstracts",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.58,
+      "notes": "PubmedBookArticle (GeneReviews) \u2014 used to vanish into `missing`"
+    },
+    {
+      "name": "pmc bogus id clean error not embargo lie",
+      "tool": "pmc_fulltext",
+      "severity": "high",
+      "expect": "error",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.27,
+      "notes": "nonexistent PMCID used to be reported as 'embargoed' with a pinned source to a nonexistent article"
+    },
+    {
       "name": "run_python libs available",
       "tool": "run_python",
       "severity": "critical",
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.29,
+      "elapsed_s": 0.25,
       "notes": ""
     },
     {
@@ -664,11 +814,31 @@
       "expect": "ok",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.04,
+      "elapsed_s": 0.02,
       "notes": "suspect: text=True strict decode raises inside the tool"
     },
     {
       "name": "run_python huge output capped",
+      "tool": "run_python",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02,
+      "notes": ""
+    },
+    {
+      "name": "run_python future imports work",
+      "tool": "run_python",
+      "severity": "medium",
+      "expect": "ok",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02,
+      "notes": "the old RLIMIT prelude was prepended to the script, breaking __future__ and shifting tracebacks"
+    },
+    {
+      "name": "run_python traceback line numbers honest",
       "tool": "run_python",
       "severity": "medium",
       "expect": "ok",
@@ -735,7 +905,7 @@
       "status": "PASS",
       "findings": [],
       "notes": "",
-      "elapsed_s": 0.92
+      "elapsed_s": 0.7
     }
   ]
 }

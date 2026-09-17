@@ -35,6 +35,32 @@ async def search_pubmed(http: BioHTTP, query: str, *, max_results: int = 20, sor
     return {"query": query, "total_matches": total, "returned": len(articles), "articles": articles}
 
 
+def _author_names(author_nodes: list[ET.Element]) -> list[str]:
+    """Person authors as 'LastName Initials'; consortium authors (CollectiveName
+    only, e.g. the ENCODE Project Consortium) kept under their collective name."""
+    names: list[str] = []
+    for a in author_nodes:
+        if a.findtext("LastName"):
+            names.append(f"{a.findtext('LastName', '')} {a.findtext('Initials', '')}".strip())
+        elif (a.findtext("CollectiveName") or "").strip():
+            names.append((a.findtext("CollectiveName") or "").strip())
+    return names
+
+
+def _abstract_text(node: ET.Element) -> str:
+    return "\n".join(
+        ("" if not seg.get("Label") else f"{seg.get('Label')}: ") + "".join(seg.itertext())
+        for seg in node.findall(".//Abstract/AbstractText")
+    )
+
+
+def _article_id(node: ET.Element, id_type: str) -> str | None:
+    return next(
+        (el.text for el in node.findall(".//ArticleIdList/ArticleId") if el.get("IdType") == id_type and el.text),
+        None,
+    )
+
+
 async def fetch_abstracts(http: BioHTTP, pmids: list[str]) -> list[dict]:
     """efetch PubMed XML for up to 100 PMIDs → structured records with abstracts."""
     if not pmids:
@@ -56,25 +82,12 @@ async def fetch_abstracts(http: BioHTTP, pmids: list[str]) -> list[dict]:
         if not pmid:
             continue
         title = "".join((art.find(".//ArticleTitle") is not None and art.find(".//ArticleTitle").itertext()) or []) or "(no title)"
-        abstract = "\n".join(
-            ("" if not seg.get("Label") else f"{seg.get('Label')}: ") + "".join(seg.itertext())
-            for seg in art.findall(".//Abstract/AbstractText")
-        )
-        authors = [
-            f"{a.findtext('LastName', '')} {a.findtext('Initials', '')}".strip()
-            for a in art.findall(".//AuthorList/Author")
-            if a.findtext("LastName")
-        ]
+        abstract = _abstract_text(art)
+        authors = _author_names(art.findall(".//AuthorList/Author"))
         journal = art.findtext(".//Journal/ISOAbbreviation") or art.findtext(".//Journal/Title")
         year = art.findtext(".//JournalIssue/PubDate/Year") or art.findtext(".//JournalIssue/PubDate/MedlineDate")
-        doi = next(
-            (el.text for el in art.findall(".//ArticleIdList/ArticleId") if el.get("IdType") == "doi" and el.text),
-            None,
-        )
-        pmcid = next(
-            (el.text for el in art.findall(".//ArticleIdList/ArticleId") if el.get("IdType") == "pmc" and el.text),
-            None,
-        )
+        doi = _article_id(art, "doi")
+        pmcid = _article_id(art, "pmc")
         ids = {"pmid": pmid, **({"doi": doi} if doi else {})}
         articles.append(
             {
@@ -90,6 +103,40 @@ async def fetch_abstracts(http: BioHTTP, pmids: list[str]) -> list[dict]:
                 "source": source_record("pubmed", pmid),
             }
         )
+    for book in root.iter("PubmedBookArticle"):
+        # NCBI Bookshelf records (e.g. GeneReviews): no Journal; the title lives
+        # in ArticleTitle (chapter) or BookTitle, chapter authors in the
+        # BookDocument-level AuthorList (the Book-level one holds editors).
+        pmid = book.findtext(".//PMID")
+        if not pmid:
+            continue
+        chapter_el = book.find(".//ArticleTitle")
+        book_el = book.find(".//BookTitle")
+        chapter = "".join(chapter_el.itertext()).strip() if chapter_el is not None else ""
+        book_title = "".join(book_el.itertext()).strip() if book_el is not None else ""
+        title = chapter or book_title or "(no title)"
+        venue = book_title if book_title and book_title != title else None
+        authors = _author_names(
+            book.findall("BookDocument/AuthorList/Author") or book.findall(".//AuthorList/Author")
+        )
+        year = book.findtext(".//PubDate/Year") or book.findtext(".//PubDate/MedlineDate")
+        doi = _article_id(book, "doi")
+        pmcid = _article_id(book, "pmc")
+        ids = {"pmid": pmid, **({"doi": doi} if doi else {})}
+        articles.append(
+            {
+                "pmid": pmid,
+                "title": title,
+                "abstract": _abstract_text(book) or "(no abstract available)",
+                "authors": authors,
+                "journal": venue,
+                "year": year,
+                "doi": doi,
+                "pmcid": pmcid,
+                "citation": format_citation(authors=authors, title=title, venue=venue, year=year, ids=ids),
+                "source": source_record("pubmed", pmid),
+            }
+        )
     return articles
 
 
@@ -97,7 +144,10 @@ async def fetch_abstracts_report(http: BioHTTP, pmids: list[str]) -> dict:
     """fetch_abstracts + explicit per-ID accounting — a bogus PMID shows up in
     `missing`, never as a silent drop."""
     requested = [p.strip() for p in pmids if p.strip()]
-    articles = await fetch_abstracts(http, requested)
+    # PMIDs are ASCII digits; anything else 400s the whole efetch batch at NCBI,
+    # so malformed ids go straight to `missing` and only the rest are fetched.
+    valid = [p for p in requested if p.isascii() and p.isdigit()]
+    articles = await fetch_abstracts(http, valid) if valid else []
     found = {a["pmid"] for a in articles}
     missing = [p for p in requested if p not in found]
     return {
@@ -125,6 +175,13 @@ async def fetch_pmc_fulltext(http: BioHTTP, pmcid: str, *, max_chars: int = 60_0
         root = ET.fromstring(text)
     except ET.ParseError as e:
         raise BioAPIError(f"unparseable PMC XML for {ident}: {e}") from e
+
+    err = root.find(".//error")
+    if err is not None:
+        # NCBI answers unknown/withdrawn PMCIDs with HTTP 200 + an <error>
+        # element — surface it instead of minting a source URL for a non-record.
+        detail = "".join(err.itertext()).strip() or "unspecified efetch error"
+        raise BioAPIError(f"PMC efetch error for {ident}: {detail}")
 
     body = root.find(".//body")
     if body is None:

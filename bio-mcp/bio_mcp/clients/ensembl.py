@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..citations import source_record
 from ..http import BioAPIError, BioHTTP
+from ..pathseg import path_segment
 
 ENSEMBL = "https://rest.ensembl.org"
 
@@ -13,10 +14,14 @@ async def lookup_gene(http: BioHTTP, symbol: str, *, species: str = "homo_sapien
     sym = symbol.strip()
     if not sym:
         raise ValueError("empty gene symbol")
+    # Both segments are caller-supplied: encode so a crafted species/symbol
+    # can't reroute the request off /lookup/symbol (live-confirmed injection).
     data = await http.get_json(
-        f"{ENSEMBL}/lookup/symbol/{species}/{sym}",
+        f"{ENSEMBL}/lookup/symbol/{path_segment(species, what='species')}/{path_segment(sym, what='gene symbol')}",
         params={"expand": 0},
     )
+    if not isinstance(data, dict):
+        raise BioAPIError(f"unexpected lookup payload for {sym!r} in {species}")
     gene_id = data.get("id")
     if not gene_id:
         raise BioAPIError(f"Ensembl returned no gene for {sym!r} in {species}")
@@ -49,7 +54,7 @@ async def fetch_ensembl_sequence(
     if seq_type not in ("genomic", "cds", "cdna", "protein"):
         raise ValueError(f"seq_type must be genomic|cds|cdna|protein, got {seq_type!r}")
     text = await http.get_text(
-        f"{ENSEMBL}/sequence/id/{ident}",
+        f"{ENSEMBL}/sequence/id/{path_segment(ident, what='Ensembl ID')}",
         params={"type": seq_type},
         headers={"Content-Type": "text/x-fasta", "Accept": "text/x-fasta"},
     )
@@ -86,7 +91,7 @@ async def gene_xrefs(http: BioHTTP, ensembl_gene_id: str, *, max_results: int = 
         raise ValueError("empty Ensembl gene ID")
     if max_results <= 0:
         raise ValueError(f"max_results must be positive, got {max_results}")
-    data = await http.get_json(f"{ENSEMBL}/xrefs/id/{ident}")
+    data = await http.get_json(f"{ENSEMBL}/xrefs/id/{path_segment(ident, what='Ensembl gene ID')}")
     if not isinstance(data, list):
         raise BioAPIError(f"unexpected xrefs payload for {ident}")
     all_refs = [

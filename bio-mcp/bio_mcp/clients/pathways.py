@@ -6,8 +6,16 @@ Reactome: https://reactome.org/ContentService/search/query
 
 from __future__ import annotations
 
+import re
+
 from ..citations import source_record
 from ..http import BioAPIError, BioHTTP
+from ..pathseg import path_segment
+
+# Reactome wraps search-term matches in highlight spans; the live API emits
+# double-quoted attributes (single-quoted in older payloads). Strip any span
+# tag, open or close, whatever the quoting.
+_HIGHLIGHT_SPAN = re.compile(r"</?span[^>]*>")
 
 KEGG = "https://rest.kegg.jp"
 REACTOME = "https://reactome.org/ContentService"
@@ -20,7 +28,11 @@ async def search_kegg(http: BioHTTP, query: str, *, database: str = "pathway", m
         raise ValueError(f"database must be one of {allowed}, got {database!r}")
     if not query.strip():
         raise ValueError("empty KEGG query")
-    text = await http.get_text(f"{KEGG}/find/{database}/{query}")
+    # safe=":" — KEGG identifiers used as find terms carry a literal colon
+    # (e.g. 'hsa:7157'), and ':' in this position cannot change the route.
+    # Everything else ('/', '..', '?', '#') is percent-encoded so a crafted
+    # query can't reroute find→get (live-confirmed injection).
+    text = await http.get_text(f"{KEGG}/find/{database}/{path_segment(query, what='KEGG query', safe=':')}")
     hits = []
     for line in text.strip().splitlines():
         if not line.strip():
@@ -38,7 +50,8 @@ async def fetch_kegg_entry(http: BioHTTP, kegg_id: str, *, max_chars: int = 30_0
     ident = kegg_id.strip()
     if not ident:
         raise ValueError("empty KEGG ID")
-    text = await http.get_text(f"{KEGG}/get/{ident}")
+    # safe=":" — KEGG entry ids REQUIRE the literal colon ('path:map00010').
+    text = await http.get_text(f"{KEGG}/get/{path_segment(ident, what='KEGG ID', safe=':')}")
     if not text.strip():
         raise BioAPIError(f"KEGG returned empty entry for {ident}")
     # Parse the NAME/DESCRIPTION headers out of the flat file for convenience.
@@ -65,15 +78,16 @@ async def search_reactome(http: BioHTTP, query: str, *, species: str = "Homo sap
         params={"query": query, "species": species, "cluster": "true"},
     )
     hits = []
-    for group in data.get("results", []):
-        for e in group.get("entries", []):
+    # results/entries can be present-but-null in crafted/edge payloads.
+    for group in data.get("results") or []:
+        for e in group.get("entries") or []:
             st_id = e.get("stId")
             if not st_id:
                 continue
             hits.append(
                 {
                     "stable_id": st_id,
-                    "name": (e.get("name") or "").replace("<span class='highlighting' >", "").replace("</span>", ""),
+                    "name": _HIGHLIGHT_SPAN.sub("", e.get("name") or ""),
                     "type": e.get("exactType") or group.get("typeName"),
                     "species": e.get("species"),
                     "source": source_record("reactome", st_id),

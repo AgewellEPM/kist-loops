@@ -7,6 +7,7 @@ Entry:   https://data.rcsb.org/rest/v1/core/entry/{pdb_id}
 from __future__ import annotations
 
 import json
+import re
 
 from ..citations import source_record
 from ..http import BioAPIError, BioHTTP
@@ -28,11 +29,22 @@ async def search_pdb(http: BioHTTP, query: str, *, max_results: int = 15) -> dic
         "return_type": "entry",
         "request_options": {"paginate": {"start": 0, "rows": min(max_results, 50)}},
     }
-    data = await http.get_json(RCSB_SEARCH, params={"json": json.dumps(payload)})
+    # NOTE: http.get (not get_json) because RCSB answers a zero-hit search with
+    # HTTP 204 and an empty body, which get_json rejects as non-JSON. Mirrors
+    # the InterPro 204 handling in structure_extra — "no matches" is a real,
+    # empty result, not an upstream failure.
+    resp = await http.get(RCSB_SEARCH, params={"json": json.dumps(payload)}, headers={"Accept": "application/json"})
+    if resp.status_code == 204 or not resp.content:
+        return {"query": query, "total_matches": 0, "returned": 0, "structures": []}
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise BioAPIError(f"non-JSON RCSB search response: {resp.text[:200]}", url=str(resp.url)) from e
     hits = [
         {
             "pdb_id": h["identifier"],
-            "score": round(h.get("score", 0.0), 3),
+            # score can be present-but-null in RCSB payloads; None must not hit round().
+            "score": round(h.get("score") or 0.0, 3),
             "source": source_record("pdb", h["identifier"]),
         }
         for h in data.get("result_set", [])
@@ -44,7 +56,9 @@ async def search_pdb(http: BioHTTP, query: str, *, max_results: int = 15) -> dic
 async def fetch_pdb_entry(http: BioHTTP, pdb_id: str) -> dict:
     """Entry metadata: title, method, resolution, organisms, citation, download URLs."""
     ident = pdb_id.strip().upper()
-    if len(ident) != 4:
+    # Alphanumeric-only: a length check alone lets 4-char path metacharacters
+    # ("/../", "1AB?") reroute the request off /core/entry.
+    if not re.fullmatch(r"[A-Za-z0-9]{4}", ident):
         raise ValueError(f"PDB IDs are 4 characters (e.g. 6VXX), got {pdb_id!r}")
     entry = await http.get_json(f"{RCSB_DATA}/{ident}")
     if not entry.get("rcsb_id"):
@@ -52,13 +66,22 @@ async def fetch_pdb_entry(http: BioHTTP, pdb_id: str) -> dict:
 
     info = entry.get("rcsb_entry_info", {})
     # rcsb_primary_citation carries the PMID; the citation[] list often omits it.
-    citation = entry.get("rcsb_primary_citation") or next(iter(entry.get("citation", [])), {})
+    # It can also be present-but-empty ({} is falsy): prefer the citation[]
+    # entry explicitly flagged id=="primary" before the first-element fallback,
+    # which may be a software reference.
+    citations = entry.get("citation") or []
+    citation = (
+        entry.get("rcsb_primary_citation")
+        or next((c for c in citations if c.get("id") == "primary"), {})
+        or next(iter(citations), {})
+    )
     return {
         "pdb_id": ident,
         "title": entry.get("struct", {}).get("title"),
         "experimental_method": (info.get("experimental_method") or "").strip() or None,
         "resolution_angstrom": (info.get("resolution_combined") or [None])[0],
-        "deposited": entry.get("rcsb_accession_info", {}).get("deposit_date", "")[:10] or None,
+        # rcsb_accession_info and deposit_date can each be present-but-null.
+        "deposited": ((entry.get("rcsb_accession_info") or {}).get("deposit_date") or "")[:10] or None,
         "polymer_entity_count": info.get("polymer_entity_count_total"),
         "molecular_weight_kda": info.get("molecular_weight"),
         "primary_citation": {

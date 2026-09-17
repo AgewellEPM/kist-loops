@@ -16,8 +16,17 @@ review status is misleading. Variant results additionally carry a top-level
 
 from __future__ import annotations
 
+import re
+
 from ..citations import source_record
 from ..http import BioAPIError, BioHTTP
+from ..pathseg import path_segment
+
+# Ensembl species names/aliases ('human', 'homo_sapiens') are lowercase
+# [a-z0-9_]. The species is interpolated raw into the VEP path on BOTH input
+# branches, so anything outside this alphabet ('human/../../lookup/id') is a
+# route-change vector and must be rejected before a URL exists.
+_VEP_SPECIES_RE = re.compile(r"[a-z0-9_]+")
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 ENSEMBL = "https://rest.ensembl.org"
@@ -54,10 +63,12 @@ def _clinvar_classifications(doc: dict) -> dict[str, dict]:
         significance = (block.get("description") or "").strip()
         if not significance:
             continue
+        # trait_set can be present-but-null and has been seen carrying bare
+        # strings; only dict rows have a trait_name to surface.
         traits = [
             t.get("trait_name")
-            for t in block.get("trait_set", [])
-            if t.get("trait_name")
+            for t in (block.get("trait_set") or [])
+            if isinstance(t, dict) and t.get("trait_name")
         ]
         out[axis] = {
             "clinical_significance": significance,          # VERBATIM
@@ -69,8 +80,15 @@ def _clinvar_classifications(doc: dict) -> dict[str, dict]:
 
 
 def _clinvar_genes(doc: dict) -> list[str]:
-    """Gene symbols from a ClinVar summary doc's `genes` list."""
-    return [g.get("symbol") for g in doc.get("genes", []) if g.get("symbol")]
+    """Gene symbols from a ClinVar summary doc's `genes` list.
+
+    `genes` can be present-but-null; rows can be malformed non-dicts.
+    """
+    return [
+        g.get("symbol")
+        for g in (doc.get("genes") or [])
+        if isinstance(g, dict) and g.get("symbol")
+    ]
 
 
 def _require_summary_doc(result: dict, uid: str, *, db_label: str) -> dict:
@@ -94,7 +112,9 @@ def _clinvar_variant_from_doc(doc: dict, uid: str) -> dict:
 
     `uid` is the ClinVar VariationID and the identifier we pin the source to.
     """
-    variation_set = doc.get("variation_set") or []
+    # variation_set can carry bare strings; only dict members have the fields
+    # we read below, so take the first DICT member (or nothing).
+    variation_set = [v for v in (doc.get("variation_set") or []) if isinstance(v, dict)]
     first_set = variation_set[0] if variation_set else {}
     return {
         "variation_id": uid,
@@ -169,8 +189,14 @@ async def clinvar_variant(http: BioHTTP, variation_id: str) -> dict:
     vid = str(variation_id).strip()
     if not vid:
         raise ValueError("empty ClinVar variation_id")
-    if not vid.isdigit():
+    # isdecimal (not isdigit): exactly the digits int() accepts — superscripts
+    # and the like pass isdigit but crash int().
+    if not vid.isdecimal():
         raise ValueError(f"ClinVar variation_id must be a numeric VariationID, got {variation_id!r}")
+    # NCBI canonicalizes esummary uids ('0012345' → uid '12345'); do the same or
+    # the result[uid] lookup below misses its own document and reports a false
+    # "no document" error.
+    vid = str(int(vid))
 
     summaries = await http.get_json(
         f"{EUTILS}/esummary.fcgi",
@@ -183,7 +209,7 @@ async def clinvar_variant(http: BioHTTP, variation_id: str) -> dict:
 
 
 def _normalize_rsid(rsid: str) -> tuple[str, str]:
-    """('rs328' | '328') → ('328', 'rs328'). Raises on anything non-numeric.
+    """('rs328' | '328' | 'rs00328') → ('328', 'rs328'). Raises on non-numeric.
 
     Returns (digits, full) so callers hit the API with digits and pin the source
     with the canonical 'rs...' identifier.
@@ -192,8 +218,14 @@ def _normalize_rsid(rsid: str) -> tuple[str, str]:
     if not raw:
         raise ValueError("empty dbSNP rsid")
     digits = raw[2:] if raw.lower().startswith("rs") else raw
-    if not digits.isdigit():
+    # isdecimal (not isdigit): exactly the digits int() accepts — superscripts
+    # and the like pass isdigit but crash int().
+    if not digits.isdecimal():
         raise ValueError(f"dbSNP rsid must be 'rs<number>' or '<number>', got {rsid!r}")
+    # NCBI canonicalizes esummary uids ('00328' → uid '328'); strip leading
+    # zeros the same way or the result[uid] lookup misses its own document and
+    # reports a false "no document" error.
+    digits = str(int(digits))
     return digits, f"rs{digits}"
 
 
@@ -233,7 +265,8 @@ async def dbsnp_variant(http: BioHTTP, rsid: str) -> dict:
     # db=snp nests data under result[uid]; the uid is the bare digit string.
     doc = _require_summary_doc(summaries.get("result", {}), digits, db_label="dbSNP")
 
-    genes = [g.get("name") for g in doc.get("genes", []) if g.get("name")]
+    # Same guard shape as _clinvar_genes: present-but-null list, non-dict rows.
+    genes = [g.get("name") for g in (doc.get("genes") or []) if isinstance(g, dict) and g.get("name")]
     # clinical_significance is a top-level string here (e.g. "benign"); carry it
     # VERBATIM, and only when the source actually populated it.
     significance = (doc.get("clinical_significance") or "").strip() or None
@@ -293,16 +326,31 @@ async def vep_consequences(http: BioHTTP, variant: str, *, species: str = "human
     Source pinning: an rsID input pins to dbSNP (the identifier is a dbSNP rs
     accession); an HGVS input has no dbSNP id, so we pin to Ensembl keyed on the
     exact HGVS string the caller supplied (the VEP query IS the provenance).
+
+    Both `variant` and `species` are URL path segments, so both are validated
+    BEFORE any URL is built: a '/' in either is rejected (ValueError), and the
+    HGVS notation is percent-encoded with only its own ':' left literal.
     """
     var = str(variant).strip()
     if not var:
         raise ValueError("empty VEP variant")
-    if not species.strip():
-        raise ValueError("empty VEP species")
+    if "/" in var:
+        # No VEP input notation contains '/'. Interpolated raw, a slash lets a
+        # crafted variant ('a:b/../../../../xrefs/id/...') climb out of /vep/
+        # and return a fully-shaped, source-pinned record from a DIFFERENT
+        # endpoint family (provenance laundering, live-repro'd 2026-09-17).
+        raise ValueError(f"VEP variant must not contain '/', got {variant!r}")
+    sp = str(species).strip().lower()
+    if not _VEP_SPECIES_RE.fullmatch(sp):
+        raise ValueError(
+            f"VEP species must be an Ensembl species name matching [a-z0-9_]+, got {species!r}"
+        )
 
     is_hgvs = ":" in var
     if is_hgvs:
-        url = f"{ENSEMBL}/vep/{species}/hgvs/{var}"
+        # path_segment: rejects non-printables, percent-encodes everything
+        # route-significant; safe=':' keeps HGVS's own separator literal.
+        url = f"{ENSEMBL}/vep/{sp}/hgvs/{path_segment(var, what='VEP HGVS variant', safe=':')}"
         # HGVS has no dbSNP accession — pin provenance to Ensembl on the query.
         source = source_record("ensembl", var)
     else:
@@ -310,7 +358,7 @@ async def vep_consequences(http: BioHTTP, variant: str, *, species: str = "human
         # dbSNP source id is canonical.
         digits, full = _normalize_rsid(var)
         var = full
-        url = f"{ENSEMBL}/vep/{species}/id/{full}"
+        url = f"{ENSEMBL}/vep/{sp}/id/{full}"
         source = source_record("dbsnp", full)
 
     data = await http.get_json(url, params={"content-type": "application/json"})
@@ -323,7 +371,7 @@ async def vep_consequences(http: BioHTTP, variant: str, *, species: str = "human
     return {
         "variant": var,
         "input_mode": "hgvs" if is_hgvs else "rsid",
-        "species": species,
+        "species": sp,  # the normalized name actually queried
         "assembly": rec.get("assembly_name"),
         "location": (
             f"{rec.get('seq_region_name')}:{rec.get('start')}-{rec.get('end')}"

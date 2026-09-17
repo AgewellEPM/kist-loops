@@ -71,12 +71,21 @@ def _is_error(res) -> bool:
 
 
 def _parse_payload(res) -> tuple[dict | None, str]:
-    """Tool result → (parsed dict/list-wrapped, raw text)."""
-    text = ""
-    for c in res.content or []:
-        if getattr(c, "text", None):
-            text = c.text
-            break
+    """Tool result → (parsed dict/list-wrapped, raw text).
+
+    SDK 2.x serializes a LIST tool return as one TextContent per item —
+    collect every block, not just the first, or a list-returning tool gets
+    judged on its head element alone."""
+    texts = [c.text for c in res.content or [] if getattr(c, "text", None)]
+    text = "\n".join(texts)
+    if len(texts) > 1:
+        parsed = []
+        for t in texts:
+            try:
+                parsed.append(json.loads(t))
+            except (ValueError, TypeError):
+                parsed.append(t)  # keep the raw block; a misparse must not crash scoring
+        return {"_list": parsed}, text
     try:
         obj = json.loads(text)
     except (ValueError, TypeError):

@@ -31,6 +31,8 @@ async def search_arxiv(http: BioHTTP, query: str, *, max_results: int = 20, cate
     """arXiv Atom search. category e.g. 'q-bio' or 'q-bio.GN' scopes the query."""
     if not query.strip():
         raise ValueError("empty arXiv query")
+    if max_results < 1:
+        raise ValueError(f"max_results must be >= 1, got {max_results}")
     term = f"({query}) AND cat:{category}*" if category else query
     text = await http.get_text(
         ARXIV_API,
@@ -48,6 +50,8 @@ async def search_arxiv(http: BioHTTP, query: str, *, max_results: int = 20, cate
     papers = []
     for entry in root.findall(f"{_ATOM}entry"):
         raw_id = entry.findtext(f"{_ATOM}id") or ""
+        if "/abs/" not in raw_id:
+            continue  # arXiv error feeds ship <entry> items whose id is not an article
         arxiv_id = raw_id.rsplit("/abs/", 1)[-1]
         if not arxiv_id:
             continue
@@ -129,6 +133,8 @@ async def recent_biorxiv(http: BioHTTP, *, server: str = "biorxiv", days: int = 
     server = server.lower()
     if server not in ("biorxiv", "medrxiv"):
         raise ValueError(f"server must be 'biorxiv' or 'medrxiv', got {server!r}")
+    if max_results < 1:
+        raise ValueError(f"max_results must be >= 1, got {max_results}")
     end = date.today()
     start = end - timedelta(days=max(1, min(days, 30)))
     base = f"{BIORXIV_API}/details/{server}/{start.isoformat()}/{end.isoformat()}"
@@ -156,9 +162,14 @@ async def recent_biorxiv(http: BioHTTP, *, server: str = "biorxiv", days: int = 
         acc: list[dict] = []
         cursor = ((total - 1) // page) * page
         for _ in range(3):  # newest 300 entries max
+            if cursor <= 0:
+                # cursor 0 is the page the probe request above already fetched —
+                # seed it rather than re-requesting {base}/0.
+                acc = list(first.get("collection") or []) + acc
+                break
             data = await http.get_json(f"{base}/{cursor}")
             acc = (data.get("collection") or []) + acc
-            if cursor == 0 or sum(1 for e in acc if _keep(e)) >= max_results:
+            if sum(1 for e in acc if _keep(e)) >= max_results:
                 break
             cursor -= page
         return acc
@@ -170,7 +181,12 @@ async def recent_biorxiv(http: BioHTTP, *, server: str = "biorxiv", days: int = 
         # (window START — less fresh) rather than raising, flagging it honestly.
         try:
             tail = await asyncio.wait_for(_walk_tail(), timeout=TAIL_WALK_BUDGET_S)
-            entries = tail or entries
+            if tail:
+                entries = tail
+            else:
+                # every tail page came back empty: the fresh end of the window
+                # is missing, so page 0 is a stale fallback, not a full answer.
+                freshness = "degraded"
         except (asyncio.TimeoutError, BioAPIError):
             freshness = "degraded"
 

@@ -43,6 +43,8 @@ async def fetch_sequence(
         dest = Path(save_path).expanduser()
         if not dest.is_absolute():
             raise ValueError(f"save_path must be absolute, got {save_path!r}")
+        if dest.is_dir():
+            raise ValueError(f"save_path is a directory: {save_path!r}")
 
     params = {"db": db, "id": acc, "rettype": _FORMATS[fmt], "retmode": "text"}
     if dest is not None:
@@ -61,8 +63,12 @@ async def fetch_sequence(
                 f"record for {acc} exceeds the {MAX_INLINE_CHARS:,}-char inline cap; "
                 "pass save_path (absolute) to write it to a file instead"
             ) from e
-    if not text or text.lower().startswith("error"):
-        raise BioAPIError(f"NCBI {db} returned no record for {acc!r}: {text[:200]}")
+    # Positive head check: efetch failures often arrive as HTTP 200 bodies
+    # ("Error: ...", XML <ERROR>, HTML maintenance pages) — only a well-formed
+    # record head proves we actually got sequence text.
+    head_ok = text.startswith(">") if fmt == "fasta" else "LOCUS" in text[:200]
+    if not head_ok:
+        raise BioAPIError(f"NCBI {db} returned no usable {fmt} record for {acc!r}: {text[:200] or '(empty body)'}")
 
     result: dict = {
         "accession": acc,
@@ -104,8 +110,15 @@ async def search_ncbi_sequences(http: BioHTTP, query: str, *, db: str = "nuccore
             f"{EUTILS}/esummary.fcgi",
             params={"db": db, "id": ",".join(uids), "retmode": "json"},
         )
+        by_uid = summaries.get("result") or {}
+        if not by_uid:
+            # esearch said the uids exist; a missing/empty esummary result block
+            # is an upstream fault, not "zero matches".
+            raise BioAPIError(
+                f"NCBI esummary returned no result block for {len(uids)} {db} uids (esearch total {result.get('count')})"
+            )
         for uid in uids:
-            doc = summaries.get("result", {}).get(uid, {})
+            doc = by_uid.get(uid, {})
             acc = doc.get("accessionversion") or doc.get("caption")
             if not acc:
                 continue

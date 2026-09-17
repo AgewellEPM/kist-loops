@@ -26,9 +26,21 @@ from ..http import BioAPIError, BioHTTP
 ALPHAFOLD = "https://alphafold.ebi.ac.uk/api/prediction"
 INTERPRO = "https://www.ebi.ac.uk/interpro/api/entry/interpro"
 
-# InterPro accessions are the literal string "IPR" followed by six digits
+# InterPro accessions are the literal string "IPR" followed by six ASCII digits
 # (e.g. IPR002117). We validate against this before spending a request.
-_IPR_RE = re.compile(r"^IPR\d{6}$")
+# [0-9], not \d: \d also matches non-ASCII digits (e.g. Arabic-Indic), which
+# InterPro does not accept.
+_IPR_RE = re.compile(r"^IPR[0-9]{6}$")
+
+# UniProt accession format (UniProt's published pattern), with an optional
+# "-<n>" isoform suffix. AlphaFold and InterPro both interpolate the accession
+# into a URL path AND bake it into the pinned source URL, so an arbitrary
+# string here is a traversal vector ('../' reaches other API families) and
+# fabricated provenance at once. Validate before spending a request.
+_UNIPROT_ACC_RE = re.compile(
+    r"^[OPQ][0-9][A-Z0-9]{3}[0-9](-[0-9]+)?$"
+    r"|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}(-[0-9]+)?$"
+)
 
 # Strip any HTML tags out of InterPro description prose. Descriptions arrive as
 # a list of {text: "<p>...</p>", ...} fragments; the text is lightly marked up
@@ -77,12 +89,15 @@ async def alphafold_prediction(http: BioHTTP, uniprot_accession: str) -> dict:
     first (the primary model) in detail and report how many exist via
     `model_count`. An empty list means AlphaFold has no model for the
     accession — raised as BioAPIError, since the caller asked for a structure
-    that does not exist. A malformed accession is rejected by AlphaFold with
-    HTTP 400, which the shared client already turns into a BioAPIError.
+    that does not exist. A malformed accession is rejected locally (ValueError)
+    before any request is spent — it would otherwise ride into the URL path
+    AND the pinned source URL.
     """
     acc = uniprot_accession.strip().upper()
     if not acc:
         raise ValueError("empty UniProt accession for AlphaFold lookup")
+    if not _UNIPROT_ACC_RE.match(acc):
+        raise ValueError(f"malformed UniProt accession {uniprot_accession!r} for AlphaFold lookup")
 
     predictions = await http.get_json(f"{ALPHAFOLD}/{acc}")
     if not isinstance(predictions, list):
@@ -91,6 +106,8 @@ async def alphafold_prediction(http: BioHTTP, uniprot_accession: str) -> dict:
         raise BioAPIError(f"AlphaFold has no prediction for {acc}")
 
     top = predictions[0]
+    if not isinstance(top, dict):
+        raise BioAPIError(f"AlphaFold returned a malformed prediction entry for {acc}: {type(top).__name__}")
     # Downloadable model artifacts — only include the URLs the API actually
     # returned so we never hand back a fabricated link.
     downloads = {
@@ -137,6 +154,10 @@ async def interpro_protein_domains(http: BioHTTP, uniprot_accession: str) -> dic
     acc = uniprot_accession.strip().upper()
     if not acc:
         raise ValueError("empty UniProt accession for InterPro protein lookup")
+    # Same gate as alphafold_prediction — the accession is a raw path segment
+    # here too, and it lands in every entry's provenance.
+    if not _UNIPROT_ACC_RE.match(acc):
+        raise ValueError(f"malformed UniProt accession {uniprot_accession!r} for InterPro protein lookup")
 
     resp = await http.get(f"{INTERPRO}/protein/uniprot/{acc}")
     # 204 (or any empty body) == no InterPro signatures for this protein.
@@ -148,12 +169,15 @@ async def interpro_protein_domains(http: BioHTTP, uniprot_accession: str) -> dic
         raise BioAPIError(f"non-JSON InterPro response for {acc}: {resp.text[:200]}", url=str(resp.url)) from e
 
     entries = []
-    for result in data.get("results", []):
-        meta = result.get("metadata", {})
+    for result in data.get("results") or []:  # `results` can be present-but-null
+        # `metadata` can be absent, present-but-null, or malformed; only a dict
+        # carrying an InterPro accession can be pinned to a source — anything
+        # else is skipped, which keeps the source contract intact.
+        meta = result.get("metadata") if isinstance(result, dict) else None
+        if not isinstance(meta, dict):
+            continue
         ipr_id = meta.get("accession")
         if not ipr_id:
-            # A result with no InterPro accession can't be pinned to a source;
-            # skipping it keeps the source contract intact.
             continue
         entries.append(
             {

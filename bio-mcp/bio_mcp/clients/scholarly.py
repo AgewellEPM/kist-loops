@@ -16,11 +16,19 @@ propagate is the correct behavior, not a bug.
 
 from __future__ import annotations
 
+import re
+
 from ..citations import source_record
 from ..http import BioAPIError, BioHTTP
+from ..pathseg import path_segment
 
 OPENALEX = "https://api.openalex.org"
 SEMANTIC_SCHOLAR = "https://api.semanticscholar.org/graph/v1"
+
+# Canonical short OpenAlex WORK ids: "W" + ASCII digits (what remains after the
+# "https://openalex.org/" prefix is stripped). Anything else must never reach
+# source_record, where it would render a nonsense (double-URL) citation link.
+_OPENALEX_WORK_ID_RE = re.compile(r"W[0-9]+")
 
 # Sent on every OpenAlex request to stay in the polite (faster, more reliable)
 # request pool. OpenAlex asks for a contact address rather than an API key.
@@ -48,8 +56,13 @@ def _strip_prefix(value: str | None, prefix: str) -> str | None:
 def _openalex_short_id(work: dict) -> str | None:
     """The short OpenAlex work id (e.g. "W2556159813"), stripped of the
     "https://openalex.org/" prefix. `source_record("openalex", ...)` builds the
-    URL back from this short form, so we must NOT pass the full URL."""
-    return _strip_prefix(work.get("id"), "https://openalex.org/")
+    URL back from this short form, so we must NOT pass the full URL — and a
+    non-canonical id (nothing to strip, or not W+digits) returns None rather
+    than passing through to make a garbage citation URL."""
+    short = _strip_prefix(work.get("id"), "https://openalex.org/")
+    if short is None or not _OPENALEX_WORK_ID_RE.fullmatch(short):
+        return None
+    return short
 
 
 def _openalex_doi(work: dict) -> str | None:
@@ -59,9 +72,15 @@ def _openalex_doi(work: dict) -> str | None:
 
 
 def _openalex_authors(work: dict) -> list[str]:
-    """Ordered list of author display names from OpenAlex `authorships`."""
+    """Ordered list of author display names from OpenAlex `authorships`.
+
+    `authorships` can be present-but-null, and rows can be null — skip those
+    rather than crash the whole work.
+    """
     names: list[str] = []
-    for authorship in work.get("authorships", []):
+    for authorship in work.get("authorships") or []:
+        if not isinstance(authorship, dict):
+            continue
         name = (authorship.get("author") or {}).get("display_name")
         if name:
             names.append(name)
@@ -86,13 +105,18 @@ def _reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | 
     (many records have no abstract) yields None rather than an empty string, so
     the caller can distinguish "no abstract" from "".
     """
-    if not inverted_index:
+    if not inverted_index or not isinstance(inverted_index, dict):
         return None
     # Place each token at all of its positions, then read left-to-right.
+    # Malformed entries (null/string positions, non-int members) are skipped —
+    # a broken index entry must not crash the whole work.
     positioned: list[tuple[int, str]] = []
     for word, positions in inverted_index.items():
+        if not isinstance(positions, list):
+            continue
         for pos in positions:
-            positioned.append((pos, word))
+            if isinstance(pos, int):
+                positioned.append((pos, word))
     if not positioned:
         return None
     positioned.sort(key=lambda pair: pair[0])
@@ -100,8 +124,15 @@ def _reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | 
 
 
 def _s2_authors(paper: dict) -> list[str]:
-    """Author names from a Semantic Scholar paper object ({authorId, name})."""
-    return [a["name"] for a in paper.get("authors", []) if a.get("name")]
+    """Author names from a Semantic Scholar paper object ({authorId, name}).
+
+    `authors` can be present-but-null, and rows can be null — skip those.
+    """
+    return [
+        a["name"]
+        for a in (paper.get("authors") or [])
+        if isinstance(a, dict) and a.get("name")
+    ]
 
 
 def _s2_doi(paper: dict) -> str | None:
@@ -127,7 +158,7 @@ async def search_openalex(http: BioHTTP, query: str, *, max_results: int = 15) -
         },
     )
     works = []
-    for work in data.get("results", []):
+    for work in data.get("results") or []:  # `results` can be present-but-null
         short_id = _openalex_short_id(work)
         if not short_id:
             continue  # no stable id -> cannot pin a source -> skip (never emit unpinned)
@@ -158,7 +189,16 @@ async def openalex_work(http: BioHTTP, work_id: str) -> dict:
     ident = work_id.strip()
     if not ident:
         raise ValueError("empty OpenAlex work id")
-    work = await http.get_json(f"{OPENALEX}/works/{ident}", params={"mailto": OPENALEX_MAILTO})
+    # /works/{id} is a RESOLVER: "W...", "doi:10.1038/nrn3241", and full
+    # "https://doi.org/..." URLs are all legitimate ids, so ':' and '/' are id
+    # characters here — but a literal '/' would let '../' climb out of /works/
+    # into a different OpenAlex entity family. OpenAlex resolves percent-encoded
+    # ids identically (live-verified 2026-09-17: /works/doi:10.7717%2Fpeerj.4375
+    # and the %2F-encoded https-URL form both → W2741809807), so we encode '/'
+    # as well: safe=":" keeps only the scheme/qualifier colon literal, and
+    # path_segment rejects non-printables outright.
+    encoded = path_segment(ident, what="OpenAlex work id", safe=":")
+    work = await http.get_json(f"{OPENALEX}/works/{encoded}", params={"mailto": OPENALEX_MAILTO})
     short_id = _openalex_short_id(work)
     if not short_id:
         raise BioAPIError(f"OpenAlex returned no work for {ident!r}")
@@ -198,7 +238,7 @@ async def search_semantic_scholar(http: BioHTTP, query: str, *, max_results: int
         params={"query": query, "limit": min(max_results, 100), "fields": _S2_SEARCH_FIELDS},
     )
     papers = []
-    for paper in data.get("data", []):
+    for paper in data.get("data") or []:  # `data` can be present-but-null
         paper_id = paper.get("paperId")
         if not paper_id:
             continue  # no stable id -> cannot pin a source -> skip
@@ -207,6 +247,8 @@ async def search_semantic_scholar(http: BioHTTP, query: str, *, max_results: int
                 "paper_id": paper_id,
                 "title": paper.get("title"),
                 "year": paper.get("year"),
+                # requested in _S2_SEARCH_FIELDS, so emit it (None when S2 has none)
+                "abstract": paper.get("abstract"),
                 "citation_count": paper.get("citationCount"),
                 "authors": _s2_authors(paper),
                 "venue": paper.get("venue"),
@@ -228,14 +270,22 @@ async def semantic_scholar_citations(http: BioHTTP, paper_id: str, *, max_result
     ident = paper_id.strip()
     if not ident:
         raise ValueError("empty Semantic Scholar paper id")
+    # Qualified S2 ids ("DOI:10.1038/nrn3241", "ARXIV:...", "URL:https://...")
+    # carry ':' and '/'. ':' must stay literal (safe=":"); '/' is percent-
+    # encoded so '../' can never climb out of /paper/ — S2 resolves the encoded
+    # form to the same paper (live-verified 2026-09-17: /paper/DOI:10.1038%2F
+    # nrn3241 → da82f8e6...). path_segment also rejects non-printables, which
+    # previously surfaced as an opaque httpx.InvalidURL crash.
+    encoded = path_segment(ident, what="Semantic Scholar paper id", safe=":")
     data = await http.get_json(
-        f"{SEMANTIC_SCHOLAR}/paper/{ident}/citations",
+        f"{SEMANTIC_SCHOLAR}/paper/{encoded}/citations",
         params={"limit": min(max_results, 1000), "fields": _S2_CITATION_FIELDS},
     )
     citing = []
-    for edge in data.get("data", []):
-        # Each row wraps the citing paper under `citingPaper`.
-        paper = edge.get("citingPaper") or {}
+    for edge in data.get("data") or []:  # `data` can be present-but-null
+        # Each row wraps the citing paper under `citingPaper`; the row itself
+        # can be null.
+        paper = (edge or {}).get("citingPaper") or {}
         cid = paper.get("paperId")
         if not cid:
             continue  # citing paper lacks a stable id -> cannot pin -> skip

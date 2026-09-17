@@ -13,6 +13,7 @@ for untrusted third-party code.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,13 +23,18 @@ WORKSPACE = Path(__file__).resolve().parent.parent / "workspace"
 DEFAULT_TIMEOUT_S = 120
 MAX_TIMEOUT_S = 600
 MAX_OUTPUT_CHARS = 40_000
+MAX_LISTED_FILES = 500
 ADDRESS_SPACE_MB = 4096
 
-# Best-effort memory cap: macOS constrains/ignores RLIMIT_AS (hard limit may be
-# below our cap and setrlimit then raises), so clamp to the hard limit and fall
-# back to timeout-only bounding rather than failing every script.
-_PREEXEC = (
-    "import resource as _r\n"
+# Bootstrap passed to `python -I -c`: sets the best-effort memory cap, then
+# execs the UNMODIFIED user file (argv[1]). Compiling the user source as its
+# own unit keeps `from __future__ import ...` legal and line 1 = line 1 in
+# tracebacks — prepending a prelude broke both. macOS constrains/ignores
+# RLIMIT_AS (hard limit may be below our cap and setrlimit then raises), so
+# clamp to the hard limit and fall back to timeout-only bounding rather than
+# failing every script.
+_BOOTSTRAP = (
+    "import resource as _r, sys\n"
     f"_cap = {ADDRESS_SPACE_MB} * 1024 * 1024\n"
     "_soft, _hard = _r.getrlimit(_r.RLIMIT_AS)\n"
     "_target = _cap if _hard == _r.RLIM_INFINITY else min(_cap, _hard)\n"
@@ -36,7 +42,9 @@ _PREEXEC = (
     "    _r.setrlimit(_r.RLIMIT_AS, (_target, _hard))\n"
     "except (ValueError, OSError):\n"
     "    pass  # platform refuses AS cap; wall-clock timeout remains the bound\n"
-    "del _r, _cap, _soft, _hard, _target\n"
+    "_p = sys.argv[1]\n"
+    "sys.argv = sys.argv[1:]  # user script sees argv[0] = its own path, like a normal run\n"
+    "exec(compile(open(_p, 'rb').read(), _p, 'exec'), {'__name__': '__main__', '__file__': _p})\n"
 )
 
 
@@ -62,16 +70,16 @@ def run_python_script(
         raise ValueError(f"cwd must be absolute, got {cwd!r}")
     workdir.mkdir(parents=True, exist_ok=True)
 
-    # RLIMIT_AS via an in-script prelude keeps this dependency-free and
-    # macOS-safe (no preexec_fn threading hazards).
-    full_script = _PREEXEC + script
-
-    with tempfile.NamedTemporaryFile("w", suffix=".py", dir=workdir, delete=False) as f:
-        f.write(full_script)
-        script_path = Path(f.name)
+    # RLIMIT_AS via the -c bootstrap keeps this dependency-free and macOS-safe
+    # (no preexec_fn threading hazards). The script lives in a PRIVATE temp dir
+    # OUTSIDE the workspace: concurrent runs must not read each other's source,
+    # and transient tmp*.py must not contaminate scripts that glob the cwd.
+    tmpdir = Path(tempfile.mkdtemp(prefix="bio-mcp-run-"))
+    script_path = tmpdir / "script.py"
+    script_path.write_text(script, encoding="utf-8")
     try:
         proc = subprocess.run(
-            [sys.executable, "-I", str(script_path)],
+            [sys.executable, "-I", "-c", _BOOTSTRAP, str(script_path)],
             cwd=workdir,
             capture_output=True,
             text=True,
@@ -86,7 +94,7 @@ def run_python_script(
         code = -1
         timed_out = True
     finally:
-        script_path.unlink(missing_ok=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     truncated = len(stdout) > MAX_OUTPUT_CHARS or len(stderr) > MAX_OUTPUT_CHARS
     return {
@@ -103,16 +111,24 @@ def run_python_script(
 
 def list_workspace(subdir: str | None = None) -> dict:
     """List files in the bio-mcp workspace so scripts and fetches can meet."""
-    base = WORKSPACE / subdir if subdir else WORKSPACE
-    base = base.resolve()
-    if not str(base).startswith(str(WORKSPACE.resolve())):
-        raise ValueError(f"subdir escapes the workspace: {subdir!r}")
+    # One resolved root for BOTH the guard and the relative_to below: the old
+    # str.startswith prefix check admitted siblings ('../workspace2'), and an
+    # unresolved WORKSPACE crashed on every file when the workspace is a symlink.
+    ws = WORKSPACE.resolve()
+    base = (WORKSPACE / subdir).resolve() if subdir else ws
+    try:
+        base.relative_to(ws)
+    except ValueError:
+        # deliberate rejection; never echo the resolved absolute path back
+        raise ValueError(f"subdir escapes the workspace: {subdir!r}") from None
     if not base.exists():
         return {"workspace": str(base), "files": [], "note": "directory does not exist yet"}
     files = []
-    for p in sorted(base.rglob("*")):
+    # Iterate lazily and stop at the cap — never materialize/sort the whole tree.
+    for p in base.rglob("*"):
         if p.is_file() and not p.name.startswith("."):
-            files.append({"path": str(p.relative_to(WORKSPACE)), "bytes": p.stat().st_size})
-        if len(files) >= 500:
-            break
+            files.append({"path": str(p.relative_to(ws)), "bytes": p.stat().st_size})
+            if len(files) >= MAX_LISTED_FILES:
+                break
+    files.sort(key=lambda f: f["path"])
     return {"workspace": str(WORKSPACE), "files": files}

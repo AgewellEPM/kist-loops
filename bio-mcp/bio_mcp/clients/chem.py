@@ -11,6 +11,7 @@ row is pinned to a CHEMBL id — a row without a resolvable source is a bug.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import quote
 
 from ..citations import source_record
@@ -18,6 +19,11 @@ from ..http import BioAPIError, BioHTTP
 
 PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 CHEMBL = "https://www.ebi.ac.uk/chembl/api/data"
+
+# ChEMBL ids are the literal string "CHEMBL" + ASCII digits. A bare "CHEMBL"
+# (or "CHEMBLxyz") passes a prefix check but queries nothing — ChEMBL answers
+# 200 with returned=0 and we'd pin the result to a DEAD source URL.
+_CHEMBL_ID_RE = re.compile(r"CHEMBL[0-9]+")
 
 # The PUG REST property set we request for every compound lookup, mapped into
 # snake_case result keys below.
@@ -77,9 +83,11 @@ async def pubchem_compound_by_name(http: BioHTTP, name: str) -> dict:
     # REST route and a space would break the request line.
     encoded = quote(name.strip(), safe="")
     data = await http.get_json(f"{PUBCHEM}/compound/name/{encoded}/property/{_PUBCHEM_PROPS}/JSON")
-    props = (data.get("PropertyTable", {}).get("Properties") or [None])[0]
-    if not props:  # 200 with an empty table — treat as an upstream/parse failure, not "no result".
-        raise BioAPIError(f"PubChem returned no property row for name {name!r}")
+    # PropertyTable can be present-but-null; a row that isn't a dict is equally
+    # unusable. 200 with no usable row — upstream/parse failure, not "no result".
+    props = ((data.get("PropertyTable") or {}).get("Properties") or [None])[0]
+    if not isinstance(props, dict):
+        raise BioAPIError(f"PubChem returned no usable property row for name {name!r}")
     return _compound_record(name, props)
 
 
@@ -89,16 +97,22 @@ async def pubchem_compound_by_cid(http: BioHTTP, cid: int | str) -> dict:
     Accepts an int or a digit-string; anything else (or <= 0) is a ValueError.
     """
     # Validate first so we never build a bad URL; accept "2244" as readily as 2244.
+    # ONLY int and digit-strings, per the contract above: bool and float would
+    # int() cleanly into the WRONG compound (True → CID 1, 2244.5 → CID 2244)
+    # and the caller would get a silently different molecule.
+    if isinstance(cid, bool) or not isinstance(cid, (int, str)):
+        raise ValueError(f"CID must be a positive integer or digit-string, got {cid!r}")
     try:
         cid_int = int(cid)
-    except (TypeError, ValueError) as e:
+    except ValueError as e:
         raise ValueError(f"CID must be a positive integer, got {cid!r}") from e
     if cid_int <= 0:
         raise ValueError(f"CID must be a positive integer, got {cid!r}")
     data = await http.get_json(f"{PUBCHEM}/compound/cid/{cid_int}/property/{_PUBCHEM_PROPS}/JSON")
-    props = (data.get("PropertyTable", {}).get("Properties") or [None])[0]
-    if not props:
-        raise BioAPIError(f"PubChem returned no property row for CID {cid_int}")
+    # Same guard shape as the name lookup: null table / malformed row → error.
+    props = ((data.get("PropertyTable") or {}).get("Properties") or [None])[0]
+    if not isinstance(props, dict):
+        raise BioAPIError(f"PubChem returned no usable property row for CID {cid_int}")
     # name is unknown on a CID lookup; leave it None rather than echo the CID.
     return _compound_record(None, props)
 
@@ -109,8 +123,11 @@ def _molecule_record(mol: dict) -> dict | None:
     chembl_id = mol.get("molecule_chembl_id")
     if not chembl_id:
         return None
-    # molecule_properties is present for most curated molecules but can be null.
-    mprops = mol.get("molecule_properties") or {}
+    # molecule_properties is present for most curated molecules but can be null —
+    # or, malformed, a list; anything that isn't a dict is treated as absent.
+    mprops = mol.get("molecule_properties")
+    if not isinstance(mprops, dict):
+        mprops = {}
     return {
         "chembl_id": chembl_id,
         "pref_name": mol.get("pref_name"),
@@ -136,7 +153,10 @@ async def chembl_search_molecule(http: BioHTTP, query: str, *, max_results: int 
         params={"q": query, "format": "json", "limit": min(max_results, 100)},
     )
     molecules = []
-    for mol in data.get("molecules", []):
+    # `molecules` can be present-but-null; a non-dict row can't be pinned → skip.
+    for mol in data.get("molecules") or []:
+        if not isinstance(mol, dict):
+            continue
         rec = _molecule_record(mol)
         if rec is not None:
             molecules.append(rec)
@@ -150,12 +170,13 @@ async def chembl_bioactivities(http: BioHTTP, chembl_id: str, *, max_results: in
     each activity row also names its target/assay CHEMBL ids inline.
     """
     ident = chembl_id.strip().upper()
-    if not ident.startswith("CHEMBL"):
-        raise ValueError(f"chembl_id must start with 'CHEMBL', got {chembl_id!r}")
+    if not _CHEMBL_ID_RE.fullmatch(ident):
+        raise ValueError(f"chembl_id must be 'CHEMBL' + digits (e.g. CHEMBL941), got {chembl_id!r}")
     data = await http.get_json(
         f"{CHEMBL}/activity",
         params={"molecule_chembl_id": ident, "format": "json", "limit": min(max_results, 1000)},
     )
+    # `activities` can be present-but-null and rows can be null — skip non-dicts.
     activities = [
         {
             "target_chembl_id": act.get("target_chembl_id"),
@@ -165,7 +186,8 @@ async def chembl_bioactivities(http: BioHTTP, chembl_id: str, *, max_results: in
             "assay_chembl_id": act.get("assay_chembl_id"),
             "target_organism": act.get("target_organism"),
         }
-        for act in data.get("activities", [])
+        for act in (data.get("activities") or [])
+        if isinstance(act, dict)
     ]
     return {
         "chembl_id": ident,
