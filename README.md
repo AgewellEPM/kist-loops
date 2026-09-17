@@ -74,14 +74,69 @@ back: facts grouped by relation with edge IDs + provenance, incoming edges,
 and bounded 2-hop link-trace paths. Extraction is idempotent; recall is
 byte-deterministic on a fixed DB.
 
+### Slice 2: the hand-off terminus (learn the hands, don't own them)
+
+The verified result flows into a hand-off contract and out to a physical
+executor — but the moat is *the software that knows how to use unfamiliar
+hands*, not the hands. Three layers, none vendor-coupled:
+
+1. **Affordance model** (`capabilities.py`) — a hand is a set of typed
+   capabilities (`aspirate`, `dispense`, `mix`, `heat`, `measure_absorbance`,
+   …), each with a validated parameter schema. Not a brand.
+2. **Environment registry** (`environments.py`) — each back-end registers a
+   *dictionary of capabilities* discovered at runtime. Swapping = registering
+   a new dictionary. `evidence_grade` is `physical` or `simulated`.
+3. **Execution planner** (`planner.py`) — the "knows how to use" part.
+   Composes a high-level intent (`serial_dilution`, `measure_sample`,
+   `incubate`) from the capabilities the *current* environment exposes. Same
+   intent, different hands → different command sequences; reasoning unchanged.
+   An intent it can't compose returns `UNPLANNABLE` with the missing
+   capabilities — never a guess, never a substitution.
+
+The terminus (`handoff.py`) owns the contract and the **closed loop** —
+hands-off is not fire-and-forget:
+
+```
+build_contract   verdict + trace + evidence(with provenance) + caller's
+                 predicted outcome + intent  ->  content-addressed contract
+dispatch_handoff plan the intent from the env's capabilities, then submit
+                 (blocked verdict or unplannable intent -> recorded refusal)
+handoff-check    poll the executor's status (terminus stays in control)
+handoff-collect  pull the observed outcome BACK; a **physical** confirmed/
+                 refuted result materializes supports_claim / conflicts_with
+                 edges (provenance source "executor"), so the executor's data
+                 becomes first-class graph evidence recall + the reasoner use.
+```
+
+Honesty gates (pinned in tests + dogfood): a **simulated** outcome validates
+the *plan*, never the world — it is recorded but NEVER ingested as evidence; a
+**CONFLICTING** verdict is `blocked` and refused (the floor never ships a
+contradicted premise); an inconclusive result is recorded, no edges. Shipped
+environments: `simulation` (deterministic, full capability set) and
+`human_tech` (work order out, result file back). Emerald Cloud Lab / Strateos
+/ robots are deliberately unbuilt — each is one new adapter module (or
+`pkg.mod:Class`) and the pipeline does not change by one line.
+
+```bash
+.venv/bin/python -m symbolic_floor env-register --spec simulation
+.venv/bin/python -m symbolic_floor envs
+.venv/bin/python -m symbolic_floor handoff --uniprot P69905 \
+    --predicted-outcome "A280 drops 10x per well" \
+    --intent serial_dilution --intent-params '{"factor":10,"steps":3,"volume_ul":100}' \
+    --environment human_tech
+.venv/bin/python -m symbolic_floor handoff-collect --contract <id> --environment human_tech
+```
+
 ### Dogfood harness
 
 `dogfood/harness.py` — inverted scoring (a FINDING earns points; clean run =
-0). 13 scenarios over extract → store → recall → verdict: provenance on every
-edge, recall completeness ("recall it all" — no silent drops), idempotency,
-determinism, functional-veto firing, the embedded engine's own contradiction
-scan, malformed/hostile payloads, allowlist, abstention, plus LIVE roundtrips
-(P69905, P04637 cap-honesty + no-fabrication). Report: `dogfood/REPORT.md`.
+0). 17 scenarios over extract → store → recall → verdict → **terminus**:
+provenance on every edge, recall completeness ("recall it all" — no silent
+drops), idempotency, determinism, functional-veto, the embedded engine's own
+contradiction scan, malformed/hostile payloads, allowlist, abstention, the
+full dispatch→collect→ingest loop, **simulation-never-becomes-evidence**,
+blocked-contract-refused, unplannable-intent-honest, plus LIVE roundtrips
+(P69905, P04637). Report: `dogfood/REPORT.md`.
 
 Node ID conventions: `protein:<uniprot_accession>`, `structure:<pdb_id>`
 (4-char experimental or `AF-<acc>-F<n>` predicted), `sequence:<sha256>`

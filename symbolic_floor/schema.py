@@ -20,7 +20,11 @@ ALLOWED_HOSTS = frozenset({
     "search.rcsb.org",
 })
 
-PROVENANCE_SOURCES = frozenset({"uniprot", "pdb", "alphafold", "manual"})
+PROVENANCE_SOURCES = frozenset({"uniprot", "pdb", "alphafold", "manual", "executor"})
+
+# Sources whose provenance may carry url=null (their raw_id must then hold the
+# citation / executor reference instead).
+_URLLESS_SOURCES = frozenset({"manual", "executor"})
 
 # UniProt accession (official regex), optional isoform suffix.
 _UNIPROT_ACC = (
@@ -147,11 +151,13 @@ def validate_provenance(provenance: dict) -> str:
 
     url = provenance["url"]
     raw_id = provenance["raw_id"]
-    if source == "manual":
+    if source in _URLLESS_SOURCES:
         if url is not None and not isinstance(url, str):
-            raise ValidationError("manual provenance url must be a string or null")
+            raise ValidationError(f"{source} provenance url must be a string or null")
         if not isinstance(raw_id, str) or not raw_id.strip():
-            raise ValidationError("manual provenance requires raw_id to hold a citation string")
+            raise ValidationError(
+                f"{source} provenance requires raw_id to hold a citation/executor reference"
+            )
     else:
         if not isinstance(url, str) or not url.startswith("https://"):
             raise ValidationError(f"provenance.url must be an https URL, got {url!r}")

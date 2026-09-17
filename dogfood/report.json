@@ -1,10 +1,10 @@
 {
   "generated": "2026-09-17",
-  "scenarios": 13,
-  "passes": 13,
+  "scenarios": 17,
+  "passes": 17,
   "findings": 0,
   "finding_points": 0,
-  "elapsed_s": 8.9,
+  "elapsed_s": 10.6,
   "mode": "offline+live",
   "results": [
     {
@@ -12,14 +12,14 @@
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.04
     },
     {
       "name": "every edge has provenance",
       "severity": "critical",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "re-extraction idempotent",
@@ -40,7 +40,7 @@
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 0.01
+      "elapsed_s": 0.02
     },
     {
       "name": "extract -> verdict SUPPORTED",
@@ -85,18 +85,46 @@
       "elapsed_s": 0.0
     },
     {
+      "name": "terminus full loop (dispatch->collect->ingest)",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "simulation never becomes evidence",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
+      "name": "blocked contract refused (no ship)",
+      "severity": "critical",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.01
+    },
+    {
+      "name": "unplannable intent honest",
+      "severity": "high",
+      "status": "PASS",
+      "findings": [],
+      "elapsed_s": 0.02
+    },
+    {
       "name": "LIVE extract/recall/verdict roundtrip P69905",
       "severity": "critical",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 4.63
+      "elapsed_s": 6.26
     },
     {
       "name": "LIVE rich extraction P04637 (cap honesty)",
       "severity": "high",
       "status": "PASS",
       "findings": [],
-      "elapsed_s": 4.22
+      "elapsed_s": 4.17
     }
   ]
 }

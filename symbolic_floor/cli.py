@@ -13,7 +13,15 @@ import sys
 from .connectors import alphafold, pdb, uniprot
 from .connectors.base import ConnectorError
 from .db import DEFAULT_DB
+from .environments import list_environments, load_environment, register_environment
 from .extract import extract_protein
+from .handoff import (
+    build_contract,
+    check_handoff,
+    collect_result,
+    dispatch_handoff,
+    list_handoffs,
+)
 from .reasoner import evaluate_claim
 from .recall import recall_protein
 from .schema import ValidationError
@@ -87,6 +95,39 @@ def main(argv: list[str] | None = None) -> int:
                            help="everything stored about an accession, with traces")
     p_rec.add_argument("--uniprot", required=True, metavar="ACCESSION")
 
+    p_ho = sub.add_parser("handoff",
+                          help="terminus: contract -> capability plan -> dispatch to an environment")
+    p_ho.add_argument("--uniprot", metavar="ACCESSION",
+                      help="use the structural-consistency claim for this accession")
+    p_ho.add_argument("--claim", metavar="CLAIM_ID", help="or an explicit claim id")
+    p_ho.add_argument("--predicted-outcome", required=True,
+                      help="the proposer's prediction (the floor never invents one)")
+    p_ho.add_argument("--intent", required=True,
+                      help="high-level intent (serial_dilution | measure_sample | incubate)")
+    p_ho.add_argument("--intent-params", default="{}",
+                      help='JSON params for the intent, e.g. {"factor":10,"steps":3,"volume_ul":100}')
+    p_ho.add_argument("--environment", default="human_tech",
+                      help="registered env (simulation | human_tech) or dotted path pkg.mod:Class")
+    p_ho.add_argument("--dry-run", action="store_true",
+                      help="build + print the contract (and plan) without dispatching")
+
+    p_hc = sub.add_parser("handoff-check", help="poll the executor for a contract's status")
+    p_hc.add_argument("--contract", required=True, metavar="CONTRACT_ID")
+    p_hc.add_argument("--environment", default="human_tech")
+
+    p_hr = sub.add_parser("handoff-collect",
+                          help="pull the observed outcome back and ingest physical evidence")
+    p_hr.add_argument("--contract", required=True, metavar="CONTRACT_ID")
+    p_hr.add_argument("--environment", default="human_tech")
+
+    sub.add_parser("handoffs", help="audit trail of every dispatch (incl. refusals)")
+
+    p_er = sub.add_parser("env-register",
+                          help="discover + persist an environment's capability dictionary")
+    p_er.add_argument("--spec", required=True,
+                      help="short name (simulation | human_tech) or dotted path")
+    sub.add_parser("envs", help="list registered environments and their capabilities")
+
     args = parser.parse_args(argv)
     store = Store(args.db)
     try:
@@ -109,6 +150,34 @@ def main(argv: list[str] | None = None) -> int:
             _print(extract_protein(store, args.uniprot))
         elif args.command == "recall":
             _print(recall_protein(store, args.uniprot))
+        elif args.command == "handoff":
+            if bool(args.uniprot) == bool(args.claim):
+                raise ValidationError("provide exactly one of --uniprot / --claim")
+            claim_id = args.claim or store.get_or_create_claim(
+                f"protein:{args.uniprot.strip().upper()}", CLAIM_SHAPE_STRUCTURAL
+            )
+            try:
+                intent_params = json.loads(args.intent_params)
+            except ValueError as e:
+                raise ValidationError(f"--intent-params is not valid JSON: {e}") from e
+            contract = build_contract(store, claim_id,
+                                      predicted_outcome=args.predicted_outcome,
+                                      intent=args.intent, intent_params=intent_params)
+            if args.dry_run:
+                _print(contract)
+            else:
+                env = load_environment(args.environment)
+                _print(dispatch_handoff(store, contract, env))
+        elif args.command == "handoff-check":
+            _print(check_handoff(store, args.contract, load_environment(args.environment)))
+        elif args.command == "handoff-collect":
+            _print(collect_result(store, args.contract, load_environment(args.environment)))
+        elif args.command == "handoffs":
+            _print(list_handoffs(store))
+        elif args.command == "env-register":
+            _print(register_environment(store, args.spec))
+        elif args.command == "envs":
+            _print(list_environments(store))
         return 0
     except ValidationError as e:
         _print({"error": "validation", "message": str(e)})

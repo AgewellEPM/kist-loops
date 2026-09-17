@@ -110,6 +110,44 @@ duplicates. `store.add_edge` checks hash-existence itself (first write wins,
 original provenance kept, re-seeding idempotent). Caught by
 `test_reseed_is_idempotent`.
 
+## 14. **[REVIEW]** Slice 2: hand-off is capability-based, three layers
+
+- **Ambiguity/correction:** the naive terminus was one adapter that took a
+  contract and "sent it somewhere". Luke's correction: swapping a robot API in
+  doesn't teach the system *how to use the hands* — that capability is the
+  product. And even hands-off, the terminus must stay in control and get data
+  BACK so the tools are actually usable (Coscientist model: learn unfamiliar
+  hands on demand, don't own them).
+- **Chosen:** three layers — affordance model (`capabilities.py`), environment
+  registry (`environments.py`), execution planner (`planner.py`) — plus a
+  closed lifecycle in `handoff.py` (build → dispatch/plan → check → collect →
+  ingest). The reasoning pipeline (slices 1/1.5) is untouched; environments are
+  loaded by short name or dotted path.
+- **Honesty gates (load-bearing, pinned):**
+  - `evidence_grade`: only `physical` environments can produce graph evidence.
+    A `simulated` outcome validates the PLAN (it executed, volumes balanced),
+    never the world — recorded, never ingested. Simulation `collect()` always
+    returns `inconclusive` by construction. This is the one rule that keeps the
+    floor from laundering a simulation into a fact.
+  - Verdict-gated dispatch: SUPPORTED→verified, UNKNOWN→exploratory (the
+    experiment is how an unknown resolves), CONFLICTING→blocked (dispatch
+    refuses; the refusal is recorded, not dropped).
+  - `UNPLANNABLE`: an intent the environment can't compose returns the missing
+    capabilities and writes nothing — no substitution, no partial plan.
+  - Ingested evidence is a real typed edge (supports_claim/conflicts_with,
+    structure→claim) with provenance source `executor` pinned to
+    `<env_id>:<executor_ref>`. New provenance source `executor` added
+    (url-less, like `manual`; raw_id carries the executor reference).
+- **Recall nuance (verified, not a bug):** ingested supports_claim edges are
+  `structure→claim`, so `recall --uniprot P` surfaces them as 2-hop paths
+  (protein→structure→claim), not in the protein's direct `facts`. All 6 were
+  confirmed trace-reachable.
+- **Deliberately unbuilt:** Emerald Cloud Lab, Strateos, robot bridges — no
+  accounts, no fake integrations. Each is one adapter module conforming to the
+  Environment protocol; nothing upstream changes.
+- CONTRACT_VERSION bumped 1→2 (added execution_request; the terminus is the
+  only consumer, no migration concern for a fresh slice).
+
 ## 13. **[REVIEW]** Slice-1.5 extraction relations extend the six (Luke's goal)
 
 - **Ambiguity:** the original brief fixed EXACTLY six relations; Luke then

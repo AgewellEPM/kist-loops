@@ -48,4 +48,31 @@ CREATE TABLE IF NOT EXISTS edge_provenance (
     created_at      TEXT NOT NULL
 );
 
+-- Layer 2: registered execution environments (the swap layer). Each row is a
+-- capability DICTIONARY discovered from the environment — swapping back-ends
+-- is registering a new row, never changing reasoning code.
+CREATE TABLE IF NOT EXISTS environments (
+    env_id            TEXT PRIMARY KEY,  -- e.g. simulation, human_tech
+    spec              TEXT NOT NULL,     -- how it loads (short name / dotted path)
+    evidence_grade    TEXT NOT NULL,     -- physical | simulated
+    capabilities_json TEXT NOT NULL,     -- sorted list of capability names
+    registered_at     TEXT NOT NULL
+);
+
+-- Hand-off audit trail: one row per dispatch attempt, INCLUDING refusals and
+-- unplannable intents (a refusal is itself auditable evidence). The loop is
+-- closed here: plan out, outcome back.
+CREATE TABLE IF NOT EXISTS handoffs (
+    contract_id     TEXT NOT NULL,     -- handoff:<sha256 of canonical body>
+    environment     TEXT NOT NULL,     -- env_id it was dispatched to
+    execution_class TEXT NOT NULL,     -- verified | exploratory | blocked
+    status          TEXT NOT NULL,     -- submitted | refused | unplannable | completed | failed
+    executor_ref    TEXT,              -- the environment's own reference
+    contract_json   TEXT NOT NULL,     -- full contract, verbatim
+    plan_json       TEXT,              -- the composed capability plan sent out
+    outcome_json    TEXT,              -- what came back (readings, observed, notes)
+    submitted_at    TEXT NOT NULL,     -- UTC ISO-8601
+    completed_at    TEXT               -- set when the outcome is collected
+);
+
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');

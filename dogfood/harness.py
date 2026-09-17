@@ -341,6 +341,127 @@ def sc_live_rich_protein_p04637(findings):
         s.close()
 
 
+def sc_terminus_full_loop(findings):
+    """extract -> verdict -> contract -> plan -> dispatch -> check -> collect."""
+    from symbolic_floor.environments import load_environment, register_environment
+    from symbolic_floor.handoff import (build_contract, check_handoff,
+                                        collect_result, dispatch_handoff)
+    s = _fresh_store("terminus")
+    try:
+        extract_protein(s, "P69905", transport=_fixture_transport())
+        claim = s.get_or_create_claim("protein:P69905")
+        register_environment(s, "human_tech")
+        contract = build_contract(s, claim, predicted_outcome="A280 changes",
+                                  intent="serial_dilution",
+                                  intent_params={"factor": 10, "steps": 3, "volume_ul": 100})
+        if contract["execution_class"] != "verified":
+            findings.append(f"SUPPORTED claim not verified-class: {contract['execution_class']}")
+        if not contract["evidence"] or any(not e["provenance"] for e in contract["evidence"]):
+            findings.append("contract evidence missing provenance (sources must flow through)")
+
+        outbox = ROOT / "data" / "outbox_dogfood"
+        env = load_environment("human_tech", outbox=outbox)
+        receipt = dispatch_handoff(s, contract, env)
+        if receipt["status"] != "submitted" or receipt["plan_steps"] != 9:
+            findings.append(f"dispatch wrong: {receipt}")
+        # Human sends data back.
+        (outbox / f"{receipt['executor_ref']}.result.json").write_text(
+            '{"observed": "confirmed", "notes": "dogfood bench"}')
+        if check_handoff(s, contract["contract_id"], env)["status"] != "completed":
+            findings.append("check did not see the completed result file")
+        collected = collect_result(s, contract["contract_id"], env)
+        if not collected["ingested_as_evidence"] or not collected["evidence_edges_written"]:
+            findings.append("confirmed physical result did NOT ingest as evidence")
+        if not s.get_edges(relation="supports_claim"):
+            findings.append("no supports_claim edge after confirmed physical result")
+    finally:
+        s.close()
+        import shutil
+        shutil.rmtree(ROOT / "data" / "outbox_dogfood", ignore_errors=True)
+
+
+def sc_simulation_never_becomes_evidence(findings):
+    from symbolic_floor.environments import load_environment
+    from symbolic_floor.handoff import (build_contract, collect_result,
+                                        dispatch_handoff)
+    s = _fresh_store("simhonest")
+    try:
+        extract_protein(s, "P69905", transport=_fixture_transport())
+        claim = s.get_or_create_claim("protein:P69905")
+        contract = build_contract(s, claim, predicted_outcome="x",
+                                  intent="measure_sample",
+                                  intent_params={"target": "well:D1", "wavelength_nm": 280})
+        env = load_environment("simulation")
+        dispatch_handoff(s, contract, env)
+        collected = collect_result(s, contract["contract_id"], env)
+        if collected["evidence_grade"] != "simulated":
+            findings.append("simulation not graded simulated")
+        if collected["ingested_as_evidence"] or s.get_edges(relation="supports_claim"):
+            findings.append("SIMULATION LAUNDERED into graph evidence — honesty breach")
+        if collected["observed"] != "inconclusive":
+            findings.append(f"simulation claimed a world outcome: {collected['observed']}")
+    finally:
+        s.close()
+
+
+def sc_blocked_contract_refused(findings):
+    from symbolic_floor.environments import load_environment
+    from symbolic_floor.handoff import build_contract, dispatch_handoff, list_handoffs
+    from symbolic_floor.schema import ValidationError, utc_now_iso
+    s = _fresh_store("blocked")
+    try:
+        def mp(cit):
+            return {"source": "manual", "url": None, "retrieved_at": utc_now_iso(), "raw_id": cit}
+        s.add_edge("protein:P69905", "has_sequence", "sequence:" + "c" * 64, provenance=mp("s"))
+        s.add_edge("protein:P69905", "predicts_structure", "structure:AF-Q99999-F1", provenance=mp("r"))
+        s.add_edge("protein:P69905", "has_structure", "structure:1A00", provenance=mp("e"))
+        claim = s.get_or_create_claim("protein:P69905")
+        contract = build_contract(s, claim, predicted_outcome="x",
+                                  intent="measure_sample",
+                                  intent_params={"target": "well:D1", "wavelength_nm": 280})
+        if contract["execution_class"] != "blocked":
+            findings.append(f"CONFLICTING claim not blocked: {contract['execution_class']}")
+        try:
+            dispatch_handoff(s, contract, load_environment("simulation"))
+            findings.append("blocked contract was DISPATCHED — floor shipped a contradiction")
+        except ValidationError:
+            pass
+        if list_handoffs(s)[-1]["status"] != "refused":
+            findings.append("blocked refusal not recorded in the audit trail")
+    finally:
+        s.close()
+
+
+def sc_unplannable_intent_honest(findings):
+    from symbolic_floor.handoff import build_contract, dispatch_handoff, list_handoffs
+    from symbolic_floor.schema import ValidationError
+    s = _fresh_store("unplan")
+    try:
+        extract_protein(s, "P69905", transport=_fixture_transport())
+        claim = s.get_or_create_claim("protein:P69905")
+        contract = build_contract(s, claim, predicted_outcome="x",
+                                  intent="serial_dilution",
+                                  intent_params={"factor": 10, "steps": 3, "volume_ul": 100})
+
+        class HeatOnly:
+            env_id = "heatonly"; evidence_grade = "physical"
+            def capabilities(self): return {"heat"}
+            def submit(self, c, p): raise AssertionError("must not submit an unplannable intent")
+            def check(self, r): return {}
+            def collect(self, r): return {}
+
+        try:
+            dispatch_handoff(s, contract, HeatOnly())
+            findings.append("unplannable intent was dispatched anyway")
+        except ValidationError as e:
+            if "missing capabilities" not in str(e):
+                findings.append(f"unplannable raised wrong error: {e}")
+        if list_handoffs(s)[-1]["status"] != "unplannable":
+            findings.append("unplannable not recorded")
+    finally:
+        s.close()
+
+
 SCENARIOS = [
     ("extraction writes typed facts", "high", sc_extraction_writes_typed_facts),
     ("every edge has provenance", "critical", sc_every_edge_has_provenance),
@@ -353,6 +474,10 @@ SCENARIOS = [
     ("malformed payload handled honestly", "high", sc_malformed_payload_honest),
     ("allowlist still enforced", "critical", sc_allowlist_still_enforced),
     ("fictional accession writes nothing", "high", sc_notfound_writes_nothing),
+    ("terminus full loop (dispatch->collect->ingest)", "critical", sc_terminus_full_loop),
+    ("simulation never becomes evidence", "critical", sc_simulation_never_becomes_evidence),
+    ("blocked contract refused (no ship)", "critical", sc_blocked_contract_refused),
+    ("unplannable intent honest", "high", sc_unplannable_intent_honest),
 ]
 
 LIVE_SCENARIOS = [
