@@ -44,6 +44,9 @@ body {
   grid-template-areas: "top top top top" "chats peel center chat";
   -webkit-font-smoothing: antialiased;
 }
+/* the public demo injects a banner + footer as body children — span the grid
+   so they never carve an implicit column (no-op on the local app) */
+#demobar, footer.site-footer { grid-column: 1 / -1; }
 .sub { color: var(--dim); font-size: var(--fs-caption); line-height: var(--lh-tight); }
 .pad { padding: 0 var(--sp-3) var(--sp-2); }
 .empty { color: var(--dim); font-style: italic; display: block; padding: var(--sp-3); }
