@@ -32,6 +32,12 @@ def test_direction_enforced_per_relation(store):
         "located_in":         ("location:cytoplasm", "protein:P12345"),
         "affects":            ("disease:alpha_thalassemia", "protein:P12345"),
         "has_part":           ("domain:globin", "protein:P12345"),
+        # slice-2 chemistry relations (molecule wheel) — reversed = target-first.
+        "has_formula":        ("formula:H2O", "molecule:962"),
+        "has_iupac_name":     ("compound:oxidane", "molecule:962"),
+        "known_as":           ("compound:water", "molecule:962"),
+        "has_inchikey":       ("inchikey:XLYOFNOQVPJJNP-UHFFFAOYSA-N", "molecule:962"),
+        "has_weight":         ("weight:18.015", "molecule:962"),
     }
     assert set(reversed_cases) == set(RELATION_DIRECTIONS), "cover every relation"
     for relation, (src, dst) in reversed_cases.items():

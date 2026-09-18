@@ -44,6 +44,12 @@ _RELATION_RENDER = {
     "has_part":           ("🧩", "has domain", ["has", "part"]),
     "supports_claim":     ("✅", "supports claim", ["supports"]),
     "conflicts_with":     ("⚠️", "conflicts with claim", ["conflicts", "with"]),
+    # Slice-2 chemistry (the molecule wheel).
+    "has_formula":        ("⚗️", "has molecular formula", ["has", "formula"]),
+    "has_iupac_name":     ("🏷️", "has IUPAC name", ["iupac", "name"]),
+    "known_as":           ("💬", "is also known as", ["known", "as"]),
+    "has_inchikey":       ("🔑", "has InChIKey", ["inchikey"]),
+    "has_weight":         ("⚖️", "has molecular weight", ["has", "weight"]),
 }
 
 
@@ -56,8 +62,11 @@ def _tile_id(conversation_id: str, branch_path: str) -> str:
 def _human(node: str) -> str:
     """Cosmetic surface form of a typed node id (labels never drive reasoning)."""
     prefix, _, ident = node.partition(":")
-    return ident.replace("_", " ") if prefix in ("organism", "location",
-                                                 "disease", "domain") else ident
+    if prefix in ("organism", "location", "disease", "domain", "compound"):
+        return ident.replace("_", " ")
+    if prefix == "molecule":
+        return f"CID {ident}"
+    return ident
 
 
 def write_tile(store: Store, tile: dict) -> tuple[str, bool]:
@@ -201,3 +210,112 @@ def tile_trace(store: Store, acc: str) -> list[dict]:
         (f"bio-wheel:{acc.strip().upper()}",),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _base_molecule_tile(conversation_id: str, cid: int, name: str, branch_path: str,
+                        turn: int, depth: int, parent_tile: str) -> dict:
+    """Shared scaffolding for chemistry tiles (molecule wheel). Mirrors
+    _base_tile but topics under chemistry:<cid> and suggests a chemistry
+    follow-up rather than a protein structural-consistency one."""
+    return {
+        "conversation_id": conversation_id,
+        "intent": "teach",
+        "emotion": "neutral",
+        "complexity_level": "medium",
+        "reading_level": "grade-8",
+        "speech_pattern": "declarative",
+        "cognitive_load": "low",
+        "confidence_score": 1.0,
+        "prerequisites": json.dumps([]),
+        "follow_up_suggestions": json.dumps([f"compare {name} to related molecules"]),
+        "audio_tts_hints": "plain",
+        "pet_motion": "idle",
+        "depth_level": depth,
+        "parent_tile_id": parent_tile,
+        "branch_path": branch_path,
+        "turn_number": turn,
+        "topic": f"chemistry:{cid}",
+    }
+
+
+def write_molecule_extraction_trace(store: Store, cid: int, name: str,
+                                    edges: list[dict], sources: list[str]) -> dict:
+    """Canonical-37 tile trace for one molecule wheel run: root + one tile per
+    chemistry fact, chained. Same determinism/idempotency contract as the
+    protein trace; keyed under conversation `chem-wheel:<cid>`."""
+    conversation_id = f"chem-wheel:{cid}"
+    molecule = f"molecule:{cid}"
+    written: list[str] = []
+
+    root_path = f"{molecule}/root"
+    root_id = _tile_id(conversation_id, root_path)
+    ordered = sorted(edges, key=lambda e: (e["relation"], e["target"]))
+
+    root = {
+        **_base_molecule_tile(conversation_id, cid, name, root_path, 0, 0, "root"),
+        "id": root_id,
+        "emoji": "🧪",
+        "words": json.dumps([name, "molecule", "chemistry"]),
+        "sentence": f"{name} (PubChem CID {cid}) chemistry gathered from "
+                    f"{len(sources)} allowlisted source(s).",
+        "verb": "gather",
+        "action": "extract",
+        "visual_representation": molecule,
+        "entities": json.dumps([molecule]),
+        "svo_triple": json.dumps({"s": "chem-wheel", "v": "extracted", "o": molecule}),
+        "learning_objective": f"ground the chemistry of {name}",
+        "visual_aids": sources[0] if sources else "none",
+        "parent": "chemistry",
+        "subcategory": "extraction-root",
+        "related_to": json.dumps(sorted({e["relation"] for e in ordered})),
+        "causes": "none",
+        "requires": "allowlisted chemistry sources",
+        "part_of": "symbolic-floor molecule wheel",
+        "next_step": _tile_id(conversation_id,
+                              f"{molecule}/{ordered[0]['relation']}/1") if ordered else "none",
+        "previous_step": "none",
+        "connectors": json.dumps(["chemistry", "from"]),
+    }
+    tid, created = write_tile(store, root)
+    if created:
+        written.append(tid)
+
+    for n, edge in enumerate(ordered, start=1):
+        emoji, verb_phrase, connectors = _RELATION_RENDER.get(
+            edge["relation"], ("🔗", edge["relation"].replace("_", " "), ["relates"]))
+        subj_h, obj_h = _human(edge["source"]), _human(edge["target"])
+        branch = f"{molecule}/{edge['relation']}/{n}"
+        prev_branch = (f"{molecule}/{ordered[n - 2]['relation']}/{n - 1}"
+                       if n > 1 else root_path)
+        next_branch = (f"{molecule}/{ordered[n]['relation']}/{n + 1}"
+                       if n < len(ordered) else None)
+        tile = {
+            **_base_molecule_tile(conversation_id, cid, name, branch, n, 1, root_id),
+            "id": _tile_id(conversation_id, branch),
+            "emoji": emoji,
+            "words": json.dumps([subj_h, verb_phrase, obj_h]),
+            "sentence": f"{subj_h} {verb_phrase} {obj_h}.",
+            "verb": verb_phrase.split()[0],
+            "action": edge["relation"],
+            "visual_representation": edge["target"],
+            "entities": json.dumps([edge["source"], edge["target"]]),
+            "svo_triple": json.dumps({"s": edge["source"], "v": edge["relation"],
+                                      "o": edge["target"]}),
+            "learning_objective": f"pin {edge['relation']} for {name}",
+            "visual_aids": edge["edge_id"],
+            "parent": molecule,
+            "subcategory": edge["relation"],
+            "related_to": json.dumps([edge["source"], edge["target"]]),
+            "causes": "none",
+            "requires": f"edge:{edge['edge_id']}",
+            "part_of": f"{name} chemistry trace",
+            "next_step": _tile_id(conversation_id, next_branch) if next_branch else "none",
+            "previous_step": _tile_id(conversation_id, prev_branch) if n > 1 else root_id,
+            "connectors": json.dumps(connectors),
+        }
+        tid, created = write_tile(store, tile)
+        if created:
+            written.append(tid)
+
+    return {"conversation_id": conversation_id, "root_tile": root_id,
+            "tiles_written": len(written), "tiles_total": 1 + len(ordered)}

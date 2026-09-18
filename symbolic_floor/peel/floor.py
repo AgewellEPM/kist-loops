@@ -36,6 +36,18 @@ BIO_RELATIONS = {
     "conflicts_with":     {"inverse": "conflicted_by",          "transitive": False, "category": "bio_evidential"},
 }
 
+# Slice-2 chemistry relations (the molecule wheel, PubChem). Functional flags are
+# the hard-veto doing real chemistry: a molecule has exactly ONE canonical formula,
+# IUPAC name, InChIKey, and weight — a second, different value for the same CID is a
+# CONTRADICTION the engine detects itself. Synonyms (known_as) are many, non-functional.
+CHEM_RELATIONS = {
+    "has_formula":    {"inverse": "formula_of",   "transitive": False, "category": "chem_identity", "functional": True},
+    "has_iupac_name": {"inverse": "iupac_name_of","transitive": False, "category": "chem_identity", "functional": True},
+    "known_as":       {"inverse": "synonym_of",   "transitive": False, "category": "chem_identity"},
+    "has_inchikey":   {"inverse": "inchikey_of",  "transitive": False, "category": "chem_identity", "functional": True},
+    "has_weight":     {"inverse": "weight_of",    "transitive": False, "category": "chem_identity", "functional": True},
+}
+
 
 @dataclass(frozen=True)
 class BioFloor:
@@ -47,8 +59,8 @@ class BioFloor:
 
 
 def register_bio_relations() -> None:
-    """Idempotently add the six bio relations to the engine's registry."""
-    for name, spec in BIO_RELATIONS.items():
+    """Idempotently add the bio + chemistry relations to the engine's registry."""
+    for name, spec in {**BIO_RELATIONS, **CHEM_RELATIONS}.items():
         RELATION_TYPES.setdefault(name, spec)
 
 
