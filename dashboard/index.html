@@ -16,6 +16,8 @@
     <button class="tab" id="tab-ledger">Ledger</button>
     <button class="tab" id="tab-notebook">Notebook</button>
     <button class="tab" id="tab-scientist">Scientist</button>
+    <button class="tab" id="tab-vision">Vision</button>
+    <button class="tab" id="tab-calendar">Calendar</button>
   </nav>
   <input type="text" id="nodesearch" placeholder="find node… (e.g. P69905)" list="nodelist">
   <datalist id="nodelist"></datalist>
@@ -85,12 +87,28 @@
     <div id="readypill" class="pill">checking…</div>
     <button class="btn wide accentbtn" id="newmind">🧠 Create New Mind</button>
   </div>
+  <div class="card"><h2>Research libraries — collect from</h2>
+    <div class="sub" style="margin-bottom:6px">Check which archives the wheel
+      pulls from. A narrowed run says so in its trace.</div>
+    <div id="libbox"></div></div>
   <div class="card"><h2>Minds — where the data is</h2><div id="dbs"></div></div>
   <div class="card"><h2>Where it was collected from</h2><div id="sources"></div></div>
 </aside>
 
 <!-- center: graph / ledger / notebook -->
-<main id="graphview"><canvas id="cv"></canvas><div id="legend"></div></main>
+<main id="graphview"><canvas id="cv"></canvas><div id="legend"></div>
+  <div id="graphctl">
+    <select id="gstyle" title="graph style">
+      <option value="orbit">🌌 3D orbit</option>
+      <option value="helix">🧬 helix</option>
+      <option value="sphere">🪐 sphere</option>
+      <option value="rings">🎯 rings</option>
+      <option value="flat">▦ classic 2D</option>
+    </select>
+    <button class="btn small" id="gspin" title="auto-spin on/off">🌀</button>
+    <button class="btn small" id="gfit" title="fit to view (also dbl-click)">⤢</button>
+  </div>
+</main>
 
 <div id="ledgerview">
   <div class="filters">
@@ -129,6 +147,24 @@
   </div>
   <div id="sciruns"></div>
   <div id="scidetail"></div>
+</div>
+
+<div id="visionview">
+  <div class="filters stagebar">
+    <span class="sub">the vision stage — every generated or illustrative view
+      banners itself; real data names its source</span>
+    <span style="flex:1"></span>
+    <nav class="tabs small">
+      <button class="tab active" id="vstage-journey">🎥 Cell journey</button>
+      <button class="tab" id="vstage-molecule">🧪 Molecule builder</button>
+      <button class="tab" id="vstage-mri">🩻 MRI volume</button>
+    </nav>
+  </div>
+  <div id="visionstage"></div>
+</div>
+
+<div id="calendarview">
+  <div id="calendarlane"></div>
 </div>
 
 <!-- column 4: Chat with Lois -->
@@ -172,6 +208,12 @@
   <div id="modalbody"></div>
 </div>
 
+<script src="/static/molecule.js"></script>
+<script src="/static/graph3d.js"></script>
+<script src="/static/conceptviz.js"></script>
+<script src="/static/cinema.js"></script>
+<script src="/static/mri.js"></script>
+<script src="/static/calendar.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

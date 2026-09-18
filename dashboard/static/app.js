@@ -50,11 +50,14 @@ async function pick(name) {
     (g.truncated ? ` (capped at ${g.edge_cap})` : "");
   if ($("tab-ledger").classList.contains("active")) runLedger(true);
   loadHarvest("");
-  const deep = new URLSearchParams(location.search).get("node");
+  const params = new URLSearchParams(location.search);
+  const deep = params.get("node");
   if (deep) {
     const hit = state.nodes.find(n => n.id === deep);
     if (hit) { state.sel = hit; showNode(hit.id); }
   }
+  const mol = params.get("mol");
+  if (mol) viewStructure(mol);
 }
 $("dbsel").onchange = ev => pick(ev.target.value);
 
@@ -70,7 +73,7 @@ function renderSources(data) {
 }
 
 /* ---------------- center tabs ---------------- */
-const TABS = ["graph", "ledger", "notebook", "scientist"];
+const TABS = ["graph", "ledger", "notebook", "scientist", "vision", "calendar"];
 function showTab(name) {
   for (const t of TABS) {
     $("tab-" + t).classList.toggle("active", t === name);
@@ -80,6 +83,14 @@ function showTab(name) {
   if (name === "ledger") runLedger(true);
   if (name === "notebook") loadNotebook();
   if (name === "scientist") loadScientist();
+  if (name === "vision") mountVision(visionStage || "journey");
+  else unmountVision();
+  if (name === "calendar") {
+    if (window.CalendarLane) CalendarLane.mount($("calendarlane"));
+    else $("calendarlane").innerHTML = '<div class="empty pad">calendar module failed to load</div>';
+  } else if (window.CalendarLane && CalendarLane.isMounted && CalendarLane.isMounted()) {
+    CalendarLane.unmount();
+  }
 }
 for (const t of TABS) $("tab-" + t).onclick = () => showTab(t);
 const wantTab = location.hash.slice(1);
@@ -102,9 +113,12 @@ function openModal(html) {
   $("modalbody").innerHTML = html;
   $("modal").style.display = "flex";
 }
-$("modal").onclick = ev => { if (ev.target === $("modal")) $("modal").style.display = "none"; };
+// Closing must EMPTY the modal, not just hide it — the 3D viewers stop their
+// animation loops by watching their canvas leave the DOM (conceptviz review).
+function closeModal() { $("modal").style.display = "none"; $("modalbody").innerHTML = ""; }
+$("modal").onclick = ev => { if (ev.target === $("modal")) closeModal(); };
 window.addEventListener("keydown", ev => {
-  if (ev.key === "Escape") $("modal").style.display = "none"; });
+  if (ev.key === "Escape") closeModal(); });
 
 /* ---------------- node search ---------------- */
 $("nodesearch").addEventListener("change", ev => {
@@ -112,17 +126,14 @@ $("nodesearch").addEventListener("change", ev => {
   if (!term) return;
   const hit = state.nodes.find(n => n.id.toLowerCase() === term) ||
               state.nodes.find(n => n.id.toLowerCase().includes(term));
-  if (hit) { state.sel = hit; showTab("graph"); showNode(hit.id); }
+  if (hit) { state.sel = hit; showTab("graph"); Graph3D.focus(hit.id); showNode(hit.id); }
   else chatCard(`<span class="empty">no node matching “${esc(ev.target.value)}”</span>`);
 });
 
-/* ---------------- graph (center) ---------------- */
-const cv = $("cv"), ctx = cv.getContext("2d");
+/* ---------------- graph (center) — engine lives in graph3d.js ---------------- */
 function startGraph(g) {
   const idx = new Map();
-  state.nodes = g.nodes.map((n, i) => { idx.set(n.id, i); return {
-    ...n, x: Math.cos(i*2.399)*(120+8*Math.sqrt(i)),
-    y: Math.sin(i*2.399)*(120+8*Math.sqrt(i)), vx: 0, vy: 0 }; });
+  state.nodes = g.nodes.map((n, i) => { idx.set(n.id, i); return { ...n }; });
   state.edges = g.edges.map(e => ({ ...e, si: idx.get(e.source), ti: idx.get(e.target) }));
   const degree = new Array(state.nodes.length).fill(0);
   state.edges.forEach(e => { degree[e.si]++; degree[e.ti]++; });
@@ -132,87 +143,99 @@ function startGraph(g) {
   $("legend").innerHTML = types.map(t =>
     `<span class="lg"><span class="dot" style="background:${color(t)}"></span>${t}</span>`).join("");
   $("nodelist").innerHTML = g.nodes.map(n => `<option value="${n.id}">`).join("");
+  // the engine picks each mind's signature style; reflect it in the switcher
+  $("gstyle").value = Graph3D.start(state, {
+    color, label: short,
+    onSelect: n => { state.sel = n; showNode(n.id); },
+  });
+}
+$("gstyle").onchange = ev => Graph3D.setStyle(ev.target.value);
+$("gspin").onclick = () => { Graph3D.setSpin(!Graph3D.spinning());
+  $("gspin").classList.toggle("off", !Graph3D.spinning()); };
+$("gfit").onclick = () => Graph3D.fit();
+
+/* ---------------- vision stage (center): cinema / molecule / MRI --------------
+   Modules own their stages (cinema.js, mri.js, conceptviz.js); this is only the
+   mounting glue. Everything generated banners itself inside the modules. */
+let visionStage = null;
+
+function unmountVision() {
+  if (window.CellJourney && CellJourney.isMounted && CellJourney.isMounted())
+    CellJourney.unmount();
+  if (window.MRIStage && MRIStage.unmount) MRIStage.unmount();
 }
 
-function step() {
-  const N = state.nodes, E = state.edges;
-  for (let i = 0; i < N.length; i++) for (let j = i+1; j < N.length; j++) {
-    const a = N[i], b = N[j];
-    let dx = b.x - a.x, dy = b.y - a.y;
-    let d2 = dx*dx + dy*dy || 1;
-    if (d2 < 40000) { const f = 900 / d2;
-      const d = Math.sqrt(d2); dx /= d; dy /= d;
-      a.vx -= dx*f; a.vy -= dy*f; b.vx += dx*f; b.vy += dy*f; }
-  }
-  for (const e of E) {
-    const a = N[e.si], b = N[e.ti];
-    if (!a || !b) continue;
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const d = Math.sqrt(dx*dx + dy*dy) || 1, f = (d - 90) * 0.004;
-    a.vx += dx/d*f; a.vy += dy/d*f; b.vx -= dx/d*f; b.vy -= dy/d*f;
-  }
-  for (const n of N) {
-    if (n === state.drag) continue;
-    n.vx *= 0.85; n.vy *= 0.85;
-    n.x += n.vx; n.y += n.vy;
-    n.x -= n.x * 0.002; n.y -= n.y * 0.002;
+function mountVision(stage) {
+  const box = $("visionstage");
+  if (!box) return;
+  unmountVision();
+  box.innerHTML = "";
+  visionStage = stage;
+  for (const s of ["journey", "molecule", "mri"])
+    $("vstage-" + s).classList.toggle("active", s === stage);
+  if (stage === "journey") {
+    if (!window.CellJourney) { box.innerHTML = '<div class="empty pad">cinema module failed to load</div>'; return; }
+    CellJourney.mount(box, {});
+    groundJourney();
+  } else if (stage === "mri") {
+    if (!window.MRIStage) { box.innerHTML = '<div class="empty pad">MRI module failed to load</div>'; return; }
+    // "what does it mean" NEVER answers here — it routes to the research gate
+    MRIStage.onResearch = prompt => {
+      $("ptab-research").click();
+      $("rq").value = prompt;
+      $("rq").focus();
+      chatCard("🩻 MRI feature routed to the Research gate — the answer comes " +
+               "with receipts or not at all.");
+    };
+    MRIStage.mount(box);
+  } else {
+    mountMoleculeStage(box);
   }
 }
 
-function draw() {
-  const w = cv.clientWidth, h = cv.clientHeight;
-  if (w && cv.width !== w*devicePixelRatio) { cv.width = w*devicePixelRatio; cv.height = h*devicePixelRatio; }
-  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  ctx.save(); ctx.translate(w/2, h/2);
-  for (const e of state.edges) {
-    const a = state.nodes[e.si], b = state.nodes[e.ti];
-    if (!a || !b) continue;
-    const hot = state.sel && (a === state.sel || b === state.sel);
-    ctx.strokeStyle = hot ? "#f5a623" : "#2c3644"; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+// Ground the journey in THIS mind's real data: prefer the selected protein,
+// else the first protein carrying a stored sequence; captions then show real
+// node ids and the backbone forms from the REAL residue string.
+async function groundJourney() {
+  const prots = state.nodes.filter(n => n.type === "protein");
+  const pick = (state.sel && state.sel.type === "protein") ? state.sel : prots[0];
+  if (!pick) return;
+  const nd = await api("/api/node", { db: state.db, id: pick.id }).catch(() => null);
+  if (!nd || !window.CellJourney || !CellJourney.isMounted()) return;
+  const edges = [...(nd.outgoing || []), ...(nd.incoming || [])];
+  const gene = edges.find(e => e.relation === "encodes" && e.source.startsWith("gene:"));
+  const seq = edges.find(e => e.relation === "has_sequence" && e.target.startsWith("sequence:"));
+  let residues = null;
+  if (seq) {
+    const d = await api("/api/sequence", { db: state.db, id: seq.target }).catch(() => null);
+    if (d && !d.error) residues = d.residues;
   }
-  for (const n of state.nodes) {
-    ctx.fillStyle = color(n.type);
-    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7); ctx.fill();
-    if (n === state.sel) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
-    if (n.r > 7 || n === state.sel) {
-      ctx.fillStyle = "#dbe2ea"; ctx.font = "11px sans-serif";
-      ctx.fillText(short(n.id), n.x + n.r + 3, n.y + 3);
-    }
-  }
-  ctx.restore();
-  step(); requestAnimationFrame(draw);
+  if (CellJourney.isMounted())
+    CellJourney.setContext({ gene: gene ? gene.source : null,
+                             protein: pick.id, residues });
 }
-requestAnimationFrame(draw);
 
-function nodeAt(mx, my) {
-  const x = mx - cv.clientWidth/2, y = my - cv.clientHeight/2;
-  for (let i = state.nodes.length - 1; i >= 0; i--) {
-    const n = state.nodes[i], dx = n.x - x, dy = n.y - y;
-    if (dx*dx + dy*dy <= (n.r+3)*(n.r+3)) return n;
-  }
-  return null;
+function mountMoleculeStage(box) {
+  const buildable = state.nodes.filter(n =>
+    n.type === "protein" || n.type === "sequence" || n.type === "structure");
+  box.innerHTML = `<div class="pad">
+    <div class="sub" style="margin:8px 0">Full 3D structural build from this
+      mind's stored data — a REAL archived structure when the graph holds one,
+      otherwise a generated concept computed from the REAL residue sequence
+      (and it will say so on a banner).</div>
+    ${buildable.length ? `
+      <select id="vmolpick" style="max-width:340px">${buildable.map(n =>
+        `<option value="${n.id}">${n.id}</option>`).join("")}</select>
+      <button class="btn" id="vmolgo">🧪 Build 3D</button>` :
+      '<div class="empty">this mind holds no protein / sequence / structure nodes — run the wheel or Import first</div>'}
+  </div>`;
+  const go = $("vmolgo");
+  if (go) go.onclick = () => { const v = $("vmolpick").value; if (v) viewConcept(v); };
 }
-cv.addEventListener("mousedown", ev => {
-  const r = cv.getBoundingClientRect();
-  const n = nodeAt(ev.clientX - r.left, ev.clientY - r.top);
-  if (n) state.drag = n;
-});
-cv.addEventListener("mousemove", ev => {
-  const r = cv.getBoundingClientRect();
-  if (state.drag) {
-    state.drag.x = ev.clientX - r.left - cv.clientWidth/2;
-    state.drag.y = ev.clientY - r.top - cv.clientHeight/2;
-  }
-  cv.style.cursor = nodeAt(ev.clientX - r.left, ev.clientY - r.top) ? "pointer" : "default";
-});
-window.addEventListener("mouseup", ev => {
-  const r = cv.getBoundingClientRect();
-  const n = nodeAt(ev.clientX - r.left, ev.clientY - r.top);
-  if (n && n === state.drag) { state.sel = n; showNode(n.id); }
-  state.drag = null;
-});
+
+$("vstage-journey").onclick = () => mountVision("journey");
+$("vstage-molecule").onclick = () => mountVision("molecule");
+$("vstage-mri").onclick = () => mountVision("mri");
 
 /* ---------------- node card -> chat column ---------------- */
 function chatCard(html, cls) {
@@ -234,7 +257,15 @@ async function showNode(id) {
           : `<div class="when">no provenance row</div>`}
     </div>`;
   };
-  openModal(`<h2>${d.node}</h2>` +
+  const molBtn = d.node.startsWith("structure:")
+    ? `<button class="btn" onclick="viewStructure('${d.node.slice(10)}')"
+         style="margin-bottom:8px">🧬 View 3D structure</button>` : "";
+  const conceptBtn = /^(gene|location|protein|sequence):/.test(d.node)
+    ? `<button class="btn" onclick="viewConcept('${d.node}')" style="margin-bottom:8px">${
+        d.node.startsWith("gene:") ? "🧬 DNA markup 3D"
+        : d.node.startsWith("location:") ? "🧫 Cell markup 3D"
+        : "🧪 3D view (real structure, or generated from sequence)"}</button>` : "";
+  openModal(`<h2>${d.node}</h2>` + molBtn + conceptBtn +
     (d.outgoing.length + d.incoming.length
       ? d.outgoing.map(e => edgeHtml(e, "out")).join("") +
         d.incoming.map(e => edgeHtml(e, "in")).join("")
@@ -340,8 +371,8 @@ async function runResearch() {
   try {
     d = await fetch("/api/research", { method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ db: state.db, prompt,
-                             model: $("modelsel").value }) }).then(r => r.json());
+      body: JSON.stringify({ db: state.db, prompt, model: $("modelsel").value,
+                             libraries: selectedLibraries() }) }).then(r => r.json());
   } catch (e) { d = { admitted: "request_failed", error: String(e) }; }
   window.lastReply = d;
   $("rgo").disabled = false;
@@ -500,7 +531,8 @@ async function sendMsg() {
     d = await fetch("/api/chat", { method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ db: state.db, chat_id: state.chatId, text,
-                             model: $("modelsel").value }) })
+                             model: $("modelsel").value,
+                             libraries: selectedLibraries() }) })
       .then(r => r.json());
   } catch (e) { d = { reply: { kind: "error", text: String(e) } }; }
   $("csend").disabled = false;
@@ -550,6 +582,7 @@ $("newmind").onclick = async () => {
   if (r.error) { openModal(`<h2>Create New Mind</h2><div class="empty">${esc(r.error)}</div>`); return; }
   await loadDbs(); pick(r.created);
 };
+
 $("exportbtn").onclick = () =>
   window.open("/api/export?" + new URLSearchParams({ db: state.db, format: "json" }), "_blank");
 $("importbtn").onclick = () => {
@@ -566,7 +599,8 @@ $("importbtn").onclick = () => {
     $("impout").innerHTML = '<div class="empty">running the wheel…</div>';
     const r = await fetch("/api/import", { method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ db: state.db, accessions: accs }) }).then(x => x.json());
+      body: JSON.stringify({ db: state.db, accessions: accs,
+        libraries: selectedLibraries() }) }).then(x => x.json());
     $("imprun").disabled = false;
     $("impout").innerHTML = r.error ? `<div class="empty">${esc(r.error)}</div>`
       : r.results.map(x => `<div class="edge-row">${x.accession} —
@@ -739,7 +773,8 @@ $("t-doc").onclick = () => {
       const r = await fetch("/api/import", { method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ db: state.db,
-          accessions: d.candidates.map(c => c.accession) }) }).then(x => x.json());
+          accessions: d.candidates.map(c => c.accession),
+          libraries: selectedLibraries() }) }).then(x => x.json());
       $("dout").innerHTML = r.results.map(x =>
         `<div class="edge-row">${x.accession} — <b>${x.status}</b>${
           x.edges_written != null ? ` · ${x.edges_written} new edges` : ""}</div>`).join("");
@@ -769,6 +804,34 @@ async function loadModels() {
   sel.value = d.models.includes("floor-proposer") ? "floor-proposer" : d.models[0];
 }
 
+/* ---------------- research libraries picker ---------------- */
+let LIBS = [];
+function selectedLibraries() {
+  const boxes = [...document.querySelectorAll("#libbox input[type=checkbox]")];
+  if (!boxes.length) return null;
+  const on = boxes.filter(b => b.checked).map(b => b.value);
+  return on.length === boxes.length ? null : on;   // null = all (default)
+}
+async function loadLibraries() {
+  const d = await api("/api/libraries", {});
+  LIBS = d.libraries;
+  const saved = JSON.parse(localStorage.getItem("loisLibs") || "null");
+  $("libbox").innerHTML = LIBS.map(l => `<label class="librow" title="${esc(l.role)}">
+      <input type="checkbox" value="${l.key}"
+        ${l.required ? "checked disabled" : ""}
+        ${!l.required && saved && !saved.includes(l.key) ? "" : "checked"}>
+      <b>${esc(l.name)}</b> <span class="when">${esc(l.host)}</span>
+      ${l.required ? '<span class="when">(root — always on)</span>' : ""}
+      <div class="sub">${esc(l.role)}</div>
+    </label>`).join("");
+  document.querySelectorAll("#libbox input").forEach(b => b.onchange = () => {
+    const on = [...document.querySelectorAll("#libbox input")]
+      .filter(x => x.checked).map(x => x.value);
+    localStorage.setItem("loisLibs", JSON.stringify(on));
+  });
+}
+
+loadLibraries();
 loadModels();
 pollHealth();
 loadChats();

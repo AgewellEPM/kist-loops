@@ -111,12 +111,14 @@ def _recall_reply(db_path: str, acc: str) -> dict:
             "data": r}
 
 
-def _gate_reply(db_path: str, text: str, model: str = "") -> dict:
+def _gate_reply(db_path: str, text: str, model: str = "",
+                libraries: set | None = None) -> dict:
     # Imported lazily so chat recall works with no model runtime present.
     from proposer.runtime import DEFAULT_MODEL, ProposerError, propose
     store = Store(db_path)
     try:
-        result = propose(store, text, model=model or DEFAULT_MODEL)
+        result = propose(store, text, model=model or DEFAULT_MODEL,
+                         libraries=libraries)
     except ProposerError as e:
         return {"kind": "error", "text": f"Local model unavailable: {e}",
                 "data": None}
@@ -149,7 +151,8 @@ def _gate_reply(db_path: str, text: str, model: str = "") -> dict:
     return {"kind": admitted or "error", "text": msg, "data": result}
 
 
-def reply(db_path: str, text: str, model: str = "") -> dict:
+def reply(db_path: str, text: str, model: str = "",
+          libraries: set | None = None) -> dict:
     """Route one user message: recall when it names an accession and reads
     like a question about stored knowledge; otherwise the gate."""
     accs = ACCESSION_RE.findall(text)
@@ -157,4 +160,4 @@ def reply(db_path: str, text: str, model: str = "") -> dict:
     if accs and any(h in lowered for h in RECALL_HINTS) \
             and "pull" not in lowered and "verify" not in lowered:
         return _recall_reply(db_path, accs[0].upper())
-    return _gate_reply(db_path, text, model=model)
+    return _gate_reply(db_path, text, model=model, libraries=libraries)

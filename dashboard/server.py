@@ -10,9 +10,12 @@ Mirrors the Jeeves desktop lanes:
                                  admitted THROUGH THE GATE (propose());
                                  the model never touches the graph
 
-Every read opens the SQLite file with ``mode=ro``. The single write lane
-is /api/research, and it writes only via the Store — the floor's one
-authorized author. stdlib only, localhost only.
+Every read opens the SQLite file with ``mode=ro``. Every write lane
+(/api/research, /api/import, /api/teach, /api/minds, /api/demo/import)
+writes only via the Store — the floor's one authorized author. The demo
+lane additionally only ever CREATES fresh DBs from allowlisted local
+Harvest packs; it never appends to an existing floor. stdlib only,
+localhost only.
 
 Run:  .venv/bin/python -m dashboard.server [--port 8977]
 """
@@ -315,6 +318,152 @@ def node_detail(db_name: str, node_id: str) -> dict:
         conn.close()
 
 
+# ---------------- science recorder + calendar lane ----------------
+# The science-LIST: an always-on recorder of THIS system (floor DBs, the lab
+# notebook, local scientist ledgers) built on LIST principles — the personal
+# LIST catalog is never read. Mechanism lives in symbolic_floor/science_list.py
+# (lazy-imported so the dashboard serves even before that module exists).
+
+SCIENCE_CATALOG = DATA_DIR / "science_list.sqlite"
+SCIENCE_CURSOR = DATA_DIR / "science_list_cursor.json"
+NOTEBOOK_PATH = DATA_DIR / "notebook.jsonl"
+# Local-only scientist ledgers: the PRO-G40 checkout EINTR-stalls under
+# training I/O and must never sit inside an automated tick.
+SCIENTIST_LOCAL = [Path.home() / ".scientist" / "runs"]
+
+
+def _notebook_days() -> dict:
+    """Notebook entries grouped by local day ('YYYY-MM-DD' from the ISO at)."""
+    from dogfood.notebook import Notebook
+    days: dict = {}
+    for e in Notebook(NOTEBOOK_PATH).entries():
+        day = str(e.get("at") or "")[:10]
+        if len(day) == 10:
+            days.setdefault(day, []).append(e)
+    return days
+
+
+def partner_tick() -> dict:
+    """One recorder heartbeat: observe the science system, auto-note any
+    change, catch up missing daily digests. Deterministic and model-free —
+    the notes write themselves, and say so."""
+    from datetime import date
+    from dogfood.notebook import Notebook
+    from symbolic_floor import science_list as sl
+    nb = Notebook(NOTEBOOK_PATH)
+    conn = sl.open_catalog(SCIENCE_CATALOG)
+    try:
+        tick = sl.tick(conn, DATA_DIR, NOTEBOOK_PATH,
+                       [p for p in SCIENTIST_LOCAL if p.is_dir()])
+        note = sl.write_partner_note(nb, conn, SCIENCE_CURSOR)
+        digests = sl.catch_up(nb, conn, date.today().isoformat())
+        return {"observed": tick.get("observations", 0),
+                "errors": tick.get("errors", []),
+                "auto_note": bool(note),
+                "digests_written": len(digests)}
+    finally:
+        conn.close()
+
+
+def calendar_month(month: str) -> dict:
+    """Per-day rollup for the Calendar tab: notebook note counts by kind,
+    recorder observation counts, digest presence."""
+    import re as _re
+    if not _re.fullmatch(r"\d{4}-\d{2}", month):
+        raise ValueError(f"month must be YYYY-MM, got {month!r}")
+    days: dict = {}
+    for day, entries in _notebook_days().items():
+        if not day.startswith(month):
+            continue
+        by_kind: dict = {}
+        has_digest = False
+        for e in entries:
+            by_kind[e.get("kind", "?")] = by_kind.get(e.get("kind", "?"), 0) + 1
+            if str(e.get("session") or "") == "science-list-daily":
+                has_digest = True
+        days[day] = {"notes": len(entries), "byKind": by_kind,
+                     "recorded": 0, "hasDigest": has_digest}
+    if SCIENCE_CATALOG.is_file():
+        try:
+            from symbolic_floor import science_list as sl
+            conn = sl.open_catalog(SCIENCE_CATALOG)
+            try:
+                rows = conn.execute(
+                    """SELECT substr(observed_at, 1, 10) AS d, count(*) AS n
+                         FROM observations WHERE observed_at LIKE ?
+                        GROUP BY d""", (month + "-%",)).fetchall()
+                for r in rows:
+                    days.setdefault(r["d"], {"notes": 0, "byKind": {},
+                                             "recorded": 0, "hasDigest": False})
+                    days[r["d"]]["recorded"] = r["n"]
+            finally:
+                conn.close()
+        except ImportError:
+            pass  # recorder module not landed yet — calendar still serves notes
+    return {"month": month, "days": days}
+
+
+def day_detail(date_str: str) -> dict:
+    """One day for the Calendar detail panel: digest, notes, recorder summary."""
+    import re as _re
+    if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+        raise ValueError(f"date must be YYYY-MM-DD, got {date_str!r}")
+    entries = _notebook_days().get(date_str, [])
+    digest = next((e for e in entries
+                   if str(e.get("session") or "") == "science-list-daily"), None)
+    recorder = {"total": 0, "by_event_type": {}, "by_subject": {}}
+    if SCIENCE_CATALOG.is_file():
+        try:
+            from symbolic_floor import science_list as sl
+            conn = sl.open_catalog(SCIENCE_CATALOG)
+            try:
+                recorder = sl.activity_summary(
+                    conn, date_str + "T00:00:00", date_str + "T23:59:59")
+            finally:
+                conn.close()
+        except ImportError:
+            pass
+    return {"date": date_str, "digest": digest,
+            "entries": [e for e in entries if e is not digest],
+            "recorder": recorder}
+
+
+def start_recorder_loop(interval_s: int = 300) -> None:
+    """The always-on lane: a daemon thread ticking the recorder so notes and
+    digests write themselves while the dashboard is up. Failures log and the
+    loop keeps breathing — one bad tick never kills the recorder."""
+    import sys
+    import threading
+    import time as _time
+
+    def loop():
+        while True:
+            try:
+                partner_tick()
+            except Exception as e:  # noqa: BLE001 — the loop must survive
+                print(f"science recorder tick failed: {e}", file=sys.stderr)
+            _time.sleep(interval_s)
+
+    threading.Thread(target=loop, daemon=True, name="science-recorder").start()
+
+
+def sequence_residues(db_name: str, node_id: str) -> dict:
+    """The REAL stored residue string for one sequence node — feeds the
+    front end's generated-molecule concept (which banners itself as
+    generated; the residues themselves are receipts-backed data)."""
+    conn = open_ro(_resolve_db(db_name))
+    try:
+        row = conn.execute(
+            "SELECT sequence_id, residues, length FROM sequences "
+            "WHERE sequence_id = ?", (node_id,)).fetchone()
+        if not row:
+            raise ValueError(f"no sequence stored for {node_id!r}")
+        return {"id": row["sequence_id"], "residues": row["residues"],
+                "length": row["length"]}
+    finally:
+        conn.close()
+
+
 def harvest(db_name: str, topic: str = "") -> dict:
     """The Jeeves Harvest lane: trace tiles grouped by topic. With a topic
     selected, every tile is returned in trace order together with the
@@ -361,7 +510,16 @@ def harvest(db_name: str, topic: str = "") -> dict:
         conn.close()
 
 
-def research(db_name: str, prompt: str, model: str = "") -> dict:
+def _lib_set(libraries) -> set | None:
+    """None = all libraries; a list narrows the wheel (validated by
+    extract_protein itself — unknown names are rejected there)."""
+    if not libraries:
+        return None
+    return {str(x) for x in libraries}
+
+
+def research(db_name: str, prompt: str, model: str = "",
+             libraries: list | None = None) -> dict:
     """The Jeeves Research lane on the floor: prompt -> local proposer ->
     strict parse -> floor admission. Writes exclusively through the
     Store/gate."""
@@ -373,7 +531,8 @@ def research(db_name: str, prompt: str, model: str = "") -> dict:
     db_path = _resolve_db(db_name)
     store = Store(str(db_path))
     try:
-        return propose(store, prompt.strip(), model=model or DEFAULT_MODEL)
+        return propose(store, prompt.strip(), model=model or DEFAULT_MODEL,
+                       libraries=_lib_set(libraries))
     except ProposerError as e:
         return {"admitted": "model_unavailable", "error": str(e)}
     finally:
@@ -435,7 +594,8 @@ def models() -> dict:
 MAX_IMPORT = 10
 
 
-def import_accessions(db_name: str, accessions: list) -> dict:
+def import_accessions(db_name: str, accessions: list,
+                      libraries: list | None = None) -> dict:
     """The Import lane: a pasted accession list runs the bio wheel directly
     (the CLI seed lane — no model involved; every edge still provenanced).
     Capped per request, cap reported, never silent."""
@@ -456,13 +616,33 @@ def import_accessions(db_name: str, accessions: list) -> dict:
                 results.append({"accession": acc, "status": "INVALID",
                                 "error": str(e)})
                 continue
-            r = extract_protein(store, acc)
+            r = extract_protein(store, acc, enabled=_lib_set(libraries))
             results.append({"accession": acc, "status": r["status"],
                             "edges_written": len(r.get("edges_written", []))})
     finally:
         store.close()
     return {"db": db_name, "requested": len(accs), "processed": len(capped),
             "cap": MAX_IMPORT, "results": results}
+
+
+def libraries_catalog() -> dict:
+    """Every research library the wheel can collect from, with its host and
+    role. Only libraries the wheel is actually wired to appear here — a
+    checkbox that does nothing is a lie."""
+    return {"libraries": [
+        {"key": "uniprot", "name": "UniProtKB", "host": "rest.uniprot.org",
+         "role": "entry facts: gene, organism, location, disease, domain",
+         "required": True},
+        {"key": "sequence", "name": "UniProt FASTA", "host": "rest.uniprot.org",
+         "role": "canonical residue sequence (content-addressed)",
+         "required": False},
+        {"key": "pdb", "name": "RCSB PDB", "host": "data.rcsb.org",
+         "role": "experimental structures (confirmed per entry)",
+         "required": False},
+        {"key": "alphafold", "name": "AlphaFold DB", "host": "alphafold.ebi.ac.uk",
+         "role": "predicted structure",
+         "required": False},
+    ]}
 
 
 def teach(db_name: str, subject: str, relation: str, obj: str,
@@ -611,6 +791,109 @@ def create_mind(name: str) -> dict:
     return {"created": path.name, "path": str(path)}
 
 
+# Demo lane: only packs under this root are importable — the browser never
+# sends a filesystem path, only a pack NAME resolved against this allowlist.
+HARVEST_ROOT = Path.home() / "Desktop" / "Harvest"
+
+
+def _seen_packs_path() -> Path:
+    return DATA_DIR / "demo_packs_seen.json"
+
+
+def _seen_packs() -> list[str]:
+    try:
+        return sorted(set(json.loads(_seen_packs_path().read_text())))
+    except (OSError, ValueError):
+        return []
+
+
+def _remember_pack(name: str) -> None:
+    names = set(_seen_packs())
+    if name not in names:
+        names.add(name)
+        _seen_packs_path().write_text(json.dumps(sorted(names)))
+
+
+def _probe_pack(name: str) -> dict | None:
+    """Stat one pack subdir DIRECTLY (child paths answer even while the
+    Harvest root itself refuses enumeration — see demo_packs)."""
+    from symbolic_floor.harvest_pack import pack_summary
+    name = str(name).strip()
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        raise ValueError(f"bad pack name: {name!r}")
+    p = HARVEST_ROOT / name
+    if not p.is_dir():
+        return None
+    summary = pack_summary(p)
+    if summary["files"]:
+        _remember_pack(name)
+        return summary
+    return None
+
+
+def demo_packs() -> dict:
+    """The importable Harvest packs on this machine, filename-level counts.
+
+    The Harvest ROOT on this Mac is persistently un-enumerable while the
+    harvester churns it (getdirentries EINTRs forever), while its child
+    directories answer instantly. So: enumerate when the root allows it,
+    and otherwise fall back to probing every pack name that has ever been
+    seen (registry in data/demo_packs_seen.json, fed by probes + imports).
+    `enumerable` tells the UI which world it is in — never a silent blank."""
+    from symbolic_floor.harvest_pack import eintr_retry, pack_summary
+    packs, enumerable = [], True
+    if HARVEST_ROOT.is_dir():
+        try:
+            entries = sorted(eintr_retry(
+                lambda: list(HARVEST_ROOT.iterdir()), attempts=3, delay=0.1))
+            for p in entries:
+                if p.is_dir() and not p.name.startswith("."):
+                    summary = pack_summary(p)
+                    if summary["files"]:
+                        _remember_pack(p.name)
+                        packs.append(summary)
+        except InterruptedError:
+            enumerable = False
+            for name in _seen_packs():
+                probed = _probe_pack(name)
+                if probed:
+                    packs.append(probed)
+    return {"root": str(HARVEST_ROOT), "packs": packs, "enumerable": enumerable}
+
+
+def demo_import(pack: str, mind: str) -> dict:
+    """Import one allowlisted pack into a COMPLETELY NEW floor DB — a fresh
+    demo area every time. An existing DB name is refused (never appended to),
+    and a failed import removes the partial DB so the retry starts clean.
+    Every tile is written through the Store via write_tile (37/37 enforced)."""
+    import re as _re
+    from symbolic_floor.harvest_pack import import_pack
+    from symbolic_floor.store import Store
+    pack = str(pack).strip()
+    if not pack or "/" in pack or "\\" in pack or pack.startswith("."):
+        raise ValueError(f"bad pack name: {pack!r}")
+    pack_dir = HARVEST_ROOT / pack
+    if not pack_dir.is_dir():
+        raise ValueError(f"no such pack under {HARVEST_ROOT}: {pack!r}")
+    slug = str(mind).strip().lower()
+    if not _re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,40}", slug):
+        raise ValueError("demo mind name must be 2-41 chars: a-z 0-9 _ -")
+    path = DATA_DIR / f"{slug}.db"
+    if path.exists():
+        raise ValueError(
+            f"mind {slug!r} already exists — the demo area must be completely new")
+    store = Store(str(path))
+    try:
+        result = import_pack(store, pack_dir)
+    except Exception:
+        store.close()
+        path.unlink(missing_ok=True)
+        raise
+    store.close()
+    _remember_pack(pack)
+    return {"created": path.name, **result}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet: it's a local dashboard
         pass
@@ -646,6 +929,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "not found"}, 404)
                 else:
                     self._file(target, STATIC_TYPES[target.suffix])
+            elif url.path == "/api/calendar":
+                self._json(calendar_month((q.get("month") or [""])[0]))
+            elif url.path == "/api/day":
+                self._json(day_detail((q.get("date") or [""])[0]))
+            elif url.path == "/api/demo/packs":
+                self._json(demo_packs())
+            elif url.path == "/api/demo/probe":
+                probed = _probe_pack((q.get("pack") or [""])[0])
+                self._json({"found": bool(probed), "pack": probed})
             elif url.path == "/api/dbs":
                 self._json(list_dbs())
             elif url.path == "/api/sources":
@@ -654,6 +946,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(graph(db))
             elif url.path == "/api/node":
                 self._json(node_detail(db, (q.get("id") or [""])[0]))
+            elif url.path == "/api/sequence":
+                self._json(sequence_residues(db, (q.get("id") or [""])[0]))
             elif url.path in ("/api/ledger", "/api/export"):
                 led = ledger(
                     db,
@@ -713,6 +1007,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(health())
             elif url.path == "/api/models":
                 self._json(models())
+            elif url.path == "/api/libraries":
+                self._json(libraries_catalog())
+            elif url.path == "/api/structure":
+                from .structures import fetch_structure
+                self._json(fetch_structure((q.get("id") or [""])[0]))
             elif url.path == "/api/diagnostics":
                 self._json(diagnostics(db))
             elif url.path == "/api/session":
@@ -741,7 +1040,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/research":
                 self._json(research(str(body.get("db") or ""),
                                     str(body.get("prompt") or ""),
-                                    str(body.get("model") or "")))
+                                    str(body.get("model") or ""),
+                                    body.get("libraries")))
             elif url.path == "/api/chat":
                 from .chat import ChatStore, reply
                 text = str(body.get("text") or "").strip()
@@ -753,7 +1053,8 @@ class Handler(BaseHTTPRequestHandler):
                 cs.append(chat_id, {"role": "user", "text": text,
                                     "at": utc_now_iso_local()})
                 r = reply(str(db_path), text,
-                          model=str(body.get("model") or ""))
+                          model=str(body.get("model") or ""),
+                          libraries=_lib_set(body.get("libraries")))
                 cs.append(chat_id, {"role": "floor", "at": utc_now_iso_local(),
                                     **r})
                 self._json({"chat_id": chat_id, "reply": r})
@@ -771,7 +1072,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             elif url.path == "/api/import":
                 self._json(import_accessions(str(body.get("db") or ""),
-                                             body.get("accessions") or []))
+                                             body.get("accessions") or [],
+                                             body.get("libraries")))
+            elif url.path == "/api/demo/import":
+                self._json(demo_import(str(body.get("pack") or ""),
+                                       str(body.get("mind") or "")))
+            elif url.path == "/api/partner/tick":
+                self._json(partner_tick())
             elif url.path == "/api/minds":
                 self._json(create_mind(str(body.get("name") or "")))
             elif url.path == "/api/teach":
@@ -797,6 +1104,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = ap.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    start_recorder_loop()
     print(f"floor dashboard (read-only) -> http://127.0.0.1:{args.port}")
     server.serve_forever()
 
