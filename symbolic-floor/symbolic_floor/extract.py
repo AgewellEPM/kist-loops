@@ -13,7 +13,7 @@ edge, and everything written is listed in the returned trace.
 
 from __future__ import annotations
 
-from .connectors import alphafold, uniprot
+from .connectors import alphafold, ensembl, pubchem, uniprot
 from .connectors.base import Transport
 from .connectors.pdb import RCSB_ENTRY_URL
 from .connectors.base import http_get
@@ -233,3 +233,220 @@ def extract_protein(store: Store, accession: str, *,
         "sources_fetched": sources,
         "peel_trace": trace,
     }
+
+
+def _molecule_facts(props: dict, cid: int) -> list[tuple[str, str, str, str]]:
+    """(source, relation, target, label) tuples from PubChem property JSON.
+    Pure function — no I/O. Formula/InChIKey/weight are case-kept exactly as the
+    source returned them; the IUPAC name is slugged into a compound node."""
+    molecule = f"molecule:{cid}"
+    facts: list[tuple[str, str, str, str]] = []
+
+    formula = props.get("MolecularFormula")
+    if formula:
+        facts.append((molecule, "has_formula", f"formula:{formula}",
+                      f"CID {cid} molecular formula {formula}"))
+
+    iupac = props.get("IUPACName")
+    if iupac:
+        try:
+            facts.append((molecule, "has_iupac_name", f"compound:{slug(iupac)}",
+                          f"CID {cid} IUPAC name {iupac}"))
+        except ValidationError:
+            pass  # un-sluggable IUPAC string -> no edge, never a crash
+
+    inchikey = props.get("InChIKey")
+    if inchikey:
+        facts.append((molecule, "has_inchikey", f"inchikey:{inchikey}",
+                      f"CID {cid} InChIKey {inchikey}"))
+
+    weight = props.get("MolecularWeight")
+    if weight:
+        facts.append((molecule, "has_weight", f"weight:{weight}",
+                      f"CID {cid} molecular weight {weight} g/mol"))
+    return facts
+
+
+def extract_molecule(store: Store, cid: int, *, name: str | None = None,
+                     transport: Transport | None = None,
+                     synonym_cap: int = 8) -> dict:
+    """The molecule wheel: one PubChem CID -> typed chemistry facts + a PEEL
+    trace, every edge pinned to the exact pubchem URL fetched. Deterministic and
+    idempotent (re-running writes nothing new). ``name`` is a cosmetic label for
+    the trace; the facts come only from PubChem."""
+    label_name = (name or f"CID {cid}").strip()
+    fetched = pubchem.fetch_properties(cid, transport=transport)
+    if fetched["status"] == "NOT_FOUND":
+        return {"status": "NOT_FOUND", "cid": cid,
+                "edges_written": [], "sources_fetched": [fetched["url"]]}
+
+    prop_url = fetched["url"]
+    props = fetched["props"]
+    sources = [prop_url]
+    written: list[dict] = []
+    skipped: list[dict] = []
+    existing = 0
+
+    def _add(src: str, rel: str, dst: str, label: str, provenance: dict) -> None:
+        nonlocal existing
+        try:
+            edge_id, created = store.add_edge(src, rel, dst, provenance, label=label)
+        except ValidationError as e:
+            skipped.append({"source": src, "relation": rel, "target": dst,
+                            "reason": str(e)})
+            return
+        if created:
+            written.append({"edge_id": edge_id, "source": src,
+                            "relation": rel, "target": dst})
+        else:
+            existing += 1
+
+    # 1) Canonical identity facts (formula / IUPAC name / InChIKey / weight).
+    prop_prov = {"source": "pubchem", "url": prop_url,
+                 "retrieved_at": utc_now_iso(), "raw_id": str(cid)}
+    for src, rel, dst, label in _molecule_facts(props, cid):
+        _add(src, rel, dst, label, dict(prop_prov))
+
+    # 2) Synonyms (capped, reported). Each is a known_as edge to a compound node.
+    syn = pubchem.fetch_synonyms(cid, transport=transport, cap=synonym_cap)
+    synonyms_total = 0
+    if syn["status"] == "OK":
+        sources.append(syn["url"])
+        synonyms_total = len(syn["synonyms"])
+        syn_prov = {"source": "pubchem", "url": syn["url"],
+                    "retrieved_at": utc_now_iso(), "raw_id": str(cid)}
+        for name_str in syn["synonyms"]:
+            try:
+                node = f"compound:{slug(name_str)}"
+            except ValidationError:
+                continue  # un-sluggable synonym -> skip, never crash
+            _add(f"molecule:{cid}", "known_as", node,
+                 f"CID {cid} also known as {name_str}", dict(syn_prov))
+
+    # 3) Canonical-37 PEEL trace over the WHOLE evidence base for this molecule.
+    from .peel_tiles import write_molecule_extraction_trace
+    all_edges = [
+        {"edge_id": e["id"], "source": e["subject"],
+         "relation": e["relation_type"], "target": e["object"]}
+        for e in store.get_edges(source=f"molecule:{cid}")
+    ]
+    trace = write_molecule_extraction_trace(store, cid, label_name, all_edges, sources)
+
+    return {
+        "status": "OK",
+        "cid": cid,
+        "name": label_name,
+        "edges_written": written,
+        "edges_already_present": existing,
+        "skipped": skipped,
+        "synonyms_total": synonyms_total,
+        "synonym_cap": synonym_cap,
+        "sources_fetched": sources,
+        "peel_trace": trace,
+    }
+
+
+def research_molecule(store: Store, query: str, *,
+                      transport: Transport | None = None,
+                      synonym_cap: int = 8) -> dict:
+    """Native 'research this molecule' path: resolve a common NAME to a PubChem
+    CID, then run the molecule wheel. No model, no MCP — the name resolves and
+    the facts pull deterministically from the curated PubChem aggregator, or the
+    query is honestly NOT_FOUND. This is what makes `research water` return real
+    chemistry (H2O, oxidane, InChIKey, 18.015 g/mol) instead of nothing."""
+    resolved = pubchem.resolve_cid(query, transport=transport)
+    if resolved["status"] == "NOT_FOUND":
+        return {"status": "NOT_FOUND", "query": query,
+                "sources_fetched": [resolved["url"]]}
+    cid = resolved["cid"]
+    result = extract_molecule(store, cid, name=query.strip(),
+                              transport=transport, synonym_cap=synonym_cap)
+    result["query"] = query.strip()
+    result["resolved_cid"] = cid
+    result.setdefault("sources_fetched", []).insert(0, resolved["url"])
+    return result
+
+
+def extract_gene(store: Store, symbol: str, *, species: str = "homo_sapiens",
+                 transport: Transport | None = None) -> dict:
+    """The gene wheel: one gene symbol -> typed genomics facts (chromosome,
+    biotype, encoded proteins) + a PEEL trace, every edge pinned to the exact
+    ensembl URL. Deterministic and idempotent."""
+    sym = symbol.strip()
+    lookup = ensembl.lookup_symbol(sym, species=species, transport=transport)
+    if lookup["status"] == "NOT_FOUND":
+        return {"status": "NOT_FOUND", "symbol": sym,
+                "edges_written": [], "sources_fetched": [lookup["url"]]}
+
+    gene = f"gene:{sym}"
+    sources = [lookup["url"]]
+    written: list[dict] = []
+    skipped: list[dict] = []
+    existing = 0
+
+    def _add(src: str, rel: str, dst: str, label: str, provenance: dict) -> None:
+        nonlocal existing
+        try:
+            edge_id, created = store.add_edge(src, rel, dst, provenance, label=label)
+        except ValidationError as e:
+            skipped.append({"source": src, "relation": rel, "target": dst,
+                            "reason": str(e)})
+            return
+        if created:
+            written.append({"edge_id": edge_id, "source": src,
+                            "relation": rel, "target": dst})
+        else:
+            existing += 1
+
+    # 1) Gene metadata (chromosome, biotype) from the lookup record.
+    lk_prov = {"source": "ensembl", "url": lookup["url"],
+               "retrieved_at": utc_now_iso(), "raw_id": sym}
+    if lookup.get("chromosome"):
+        _add(gene, "on_chromosome", f"chromosome:{lookup['chromosome']}",
+             f"{sym} on chromosome {lookup['chromosome']}", dict(lk_prov))
+    if lookup.get("biotype"):
+        try:
+            bt = f"biotype:{slug(lookup['biotype'])}"
+            _add(gene, "has_biotype", bt, f"{sym} biotype {lookup['biotype']}", dict(lk_prov))
+        except ValidationError:
+            pass
+
+    # 2) Encoded proteins (Ensembl -> UniProt xrefs).
+    xref = ensembl.xref_uniprot(sym, species=species, transport=transport)
+    if xref["status"] == "OK" and xref["accessions"]:
+        sources.append(xref["url"])
+        xr_prov = {"source": "ensembl", "url": xref["url"],
+                   "retrieved_at": utc_now_iso(), "raw_id": sym}
+        for acc in xref["accessions"]:
+            _add(gene, "encodes", f"protein:{acc}",
+                 f"{sym} encodes {acc}", dict(xr_prov))
+
+    # 3) Canonical-37 PEEL trace over the gene's whole evidence base.
+    from .peel_tiles import write_gene_extraction_trace
+    all_edges = [
+        {"edge_id": e["id"], "source": e["subject"],
+         "relation": e["relation_type"], "target": e["object"]}
+        for e in store.get_edges(source=gene)
+    ]
+    trace = write_gene_extraction_trace(store, sym, all_edges, sources)
+
+    return {
+        "status": "OK",
+        "symbol": sym,
+        "ensembl_id": lookup.get("ensembl_id"),
+        "edges_written": written,
+        "edges_already_present": existing,
+        "skipped": skipped,
+        "sources_fetched": sources,
+        "peel_trace": trace,
+    }
+
+
+def research_gene(store: Store, symbol: str, *, species: str = "homo_sapiens",
+                  transport: Transport | None = None) -> dict:
+    """Native 'research this gene' path: a bare gene symbol -> the gene wheel.
+    No model, no MCP — Ensembl resolves the symbol and the facts pull
+    deterministically, or the symbol is honestly NOT_FOUND."""
+    result = extract_gene(store, symbol, species=species, transport=transport)
+    result["query"] = symbol.strip()
+    return result

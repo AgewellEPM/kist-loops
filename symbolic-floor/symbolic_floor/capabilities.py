@@ -49,12 +49,19 @@ CAPABILITIES: dict[str, dict[str, tuple]] = {
 
 
 def validate_call(capability: str, params: dict) -> dict:
-    """Validate one capability invocation against the affordance schema.
+    """Validate one capability invocation against the built-in affordance schema.
     Returns the params (canonical) or raises ValidationError naming the field."""
-    schema = CAPABILITIES.get(capability)
+    return validate_call_against(CAPABILITIES, capability, params)
+
+
+def validate_call_against(registry: dict, capability: str, params: dict) -> dict:
+    """Validate a call against a GIVEN registry — the effective registry (built-in
+    + runtime-molded capabilities) flows through here, so molded affordances get
+    the identical fail-fast typed/bounded check as built-ins."""
+    schema = registry.get(capability)
     if schema is None:
         raise ValidationError(
-            f"unknown capability {capability!r}; known: {sorted(CAPABILITIES)}"
+            f"unknown capability {capability!r}; known: {sorted(registry)}"
         )
     if not isinstance(params, dict):
         raise ValidationError(f"{capability}: params must be a dict")

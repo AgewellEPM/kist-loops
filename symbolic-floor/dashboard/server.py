@@ -11,11 +11,13 @@ Mirrors the Jeeves desktop lanes:
                                  the model never touches the graph
 
 Every read opens the SQLite file with ``mode=ro``. Every write lane
-(/api/research, /api/import, /api/teach, /api/minds, /api/demo/import)
-writes only via the Store — the floor's one authorized author. The demo
-lane additionally only ever CREATES fresh DBs from allowlisted local
-Harvest packs; it never appends to an existing floor. stdlib only,
-localhost only.
+(/api/research, /api/import, /api/teach, /api/minds, /api/demo/import,
+/api/mold) writes only via the Store — the floor's one authorized author.
+/api/mold is the adaptive runtime: it admits a researcher-molded typed
+capability through the PEEL invariant gate (safety-enveloped, idempotent) —
+a schema, never code. The demo lane additionally only ever CREATES fresh DBs
+from allowlisted local Harvest packs; it never appends to an existing floor.
+stdlib only, localhost only.
 
 Run:  .venv/bin/python -m dashboard.server [--port 8977]
 """
@@ -447,6 +449,70 @@ def start_recorder_loop(interval_s: int = 300) -> None:
     threading.Thread(target=loop, daemon=True, name="science-recorder").start()
 
 
+def capabilities_view(db_name: str) -> dict:
+    """The floor's effective execution vocabulary for one mind: built-in
+    affordances plus every runtime-molded capability, each with its typed,
+    bounded schema — what the researcher can compose right now."""
+    from symbolic_floor.molding import effective_capabilities, list_molded
+    from symbolic_floor.store import Store
+    store = Store(str(_resolve_db(db_name)))
+    try:
+        eff = effective_capabilities(store)
+        molded = {m["name"] for m in list_molded(store)}
+    finally:
+        store.close()
+    caps = []
+    for name in sorted(eff):
+        params = {p: {"type": t, "constraint": list(c)}
+                  for p, (t, c) in eff[name].items()}
+        caps.append({"name": name, "molded": name in molded, "params": params})
+    return {"db": db_name, "capabilities": caps,
+            "molded_count": len(molded), "builtin_count": len(caps) - len(molded)}
+
+
+def mold(db_name: str, name: str, params: dict, intent: str) -> dict:
+    """The adaptive runtime write lane: mold a new typed capability into one
+    mind through the PEEL invariant gate. Idempotent by name; refuses (raises,
+    surfaced as a 400) anything out of the floor's safety envelope."""
+    from symbolic_floor.molding import mold_capability
+    from symbolic_floor.store import Store
+    store = Store(str(_resolve_db(db_name)))
+    try:
+        return mold_capability(store, str(name or ""), params or {}, str(intent or ""))
+    finally:
+        store.close()
+
+
+def invoke(db_name: str, name: str, params: dict) -> dict:
+    """Admit one call against the effective (built-in + molded) registry — the
+    execution binding, fail-fast typed/bounded, no model, no side effects."""
+    from symbolic_floor.molding import invoke_molded
+    from symbolic_floor.store import Store
+    store = Store(str(_resolve_db(db_name)))
+    try:
+        return invoke_molded(store, str(name or ""), params or {})
+    finally:
+        store.close()
+
+
+def resolve_subject(user_text: str) -> dict:
+    """The canonical anti-hallucination gate, live: run proposer/resolver.py's
+    grounding on the user's words and report the verdict. Read-only, no model —
+    this is the Python layer the browser Resolver tab ports, exposed so the port
+    can prove itself against the real thing."""
+    from proposer.resolver import grounded_accessions
+    text = str(user_text or "")
+    grounded = sorted(grounded_accessions(text))
+    if len(grounded) == 1:
+        verdict, acc = "bind", grounded[0]
+    elif len(grounded) > 1:
+        verdict, acc = "ambiguous", None
+    else:
+        verdict, acc = "abstain", None
+    return {"query": text, "verdict": verdict, "accession": acc,
+            "grounded": grounded, "engine": "proposer/resolver.py (canonical)"}
+
+
 def sequence_residues(db_name: str, node_id: str) -> dict:
     """The REAL stored residue string for one sequence node — feeds the
     front end's generated-molecule concept (which banners itself as
@@ -518,20 +584,67 @@ def _lib_set(libraries) -> set | None:
     return {str(x) for x in libraries}
 
 
+# A bare UniProt accession -> the protein proposer lane. Anything else is tried
+# as a molecule NAME first (native PubChem wheel, no model), because that is what
+# makes `research water` return real chemistry. Non-molecules fall through to the
+# proposer, which resolves protein accessions / honestly abstains.
+_UNIPROT_ACC_RE = None
+
+
+def _looks_like_accession(text: str) -> bool:
+    global _UNIPROT_ACC_RE
+    if _UNIPROT_ACC_RE is None:
+        import re
+        from symbolic_floor.schema import _UNIPROT_ACC
+        _UNIPROT_ACC_RE = re.compile(rf"^{_UNIPROT_ACC}$")
+    return bool(_UNIPROT_ACC_RE.match(text.strip().upper()))
+
+
+def research_molecule_native(db_name: str, query: str) -> dict:
+    """Native molecule research: resolve a NAME to a PubChem CID and run the
+    molecule wheel through the floor gate. No model, no MCP — deterministic pull
+    from the curated PubChem aggregator, every edge provenance-pinned."""
+    from symbolic_floor import extract
+    from symbolic_floor.store import Store
+    db_path = _resolve_db(db_name)
+    store = Store(str(db_path))
+    try:
+        result = extract.research_molecule(store, query.strip())
+        if result["status"] == "OK":
+            result["admitted"] = "molecule"
+            result["lane"] = "native-pubchem"
+        return result
+    finally:
+        store.close()
+
+
 def research(db_name: str, prompt: str, model: str = "",
              libraries: list | None = None) -> dict:
-    """The Jeeves Research lane on the floor: prompt -> local proposer ->
-    strict parse -> floor admission. Writes exclusively through the
-    Store/gate."""
+    """The Research lane on the floor: writes exclusively through the Store/gate.
+
+    Routing: a UniProt accession -> the protein proposer lane. Any other query is
+    tried as a molecule NAME first (native PubChem wheel, no model). Only if the
+    name doesn't resolve to a molecule does it fall through to the proposer."""
     if not prompt.strip():
         raise ValueError("empty research prompt")
+    query = prompt.strip()
+
+    # Molecule-name lane (native, deterministic) — the fix for `research water`.
+    if not _looks_like_accession(query):
+        try:
+            mol = research_molecule_native(db_name, query)
+            if mol.get("status") == "OK":
+                return mol
+        except Exception:  # never let the chem lane break the proposer fallback
+            pass
+
     # Imported lazily: the read lanes must work even with no model runtime.
     from proposer.runtime import DEFAULT_MODEL, ProposerError, propose
     from symbolic_floor.store import Store
     db_path = _resolve_db(db_name)
     store = Store(str(db_path))
     try:
-        return propose(store, prompt.strip(), model=model or DEFAULT_MODEL,
+        return propose(store, query, model=model or DEFAULT_MODEL,
                        libraries=_lib_set(libraries))
     except ProposerError as e:
         return {"admitted": "model_unavailable", "error": str(e)}
@@ -542,13 +655,14 @@ def research(db_name: str, prompt: str, model: str = "",
 def rules() -> dict:
     """The floor's actual law, straight from the schema constants — the
     Rules popout renders THIS, so it can never drift from the code."""
-    from symbolic_floor.schema import (ALLOWED_HOSTS, CORE_RELATIONS,
-                                       EXTRACTION_RELATIONS)
+    from symbolic_floor.schema import (ALLOWED_HOSTS, CHEMISTRY_RELATIONS,
+                                       CORE_RELATIONS, EXTRACTION_RELATIONS)
     rel = lambda d: [{"relation": r, "source": s, "target": t}  # noqa: E731
                      for r, (s, t) in d.items()]
     return {
         "core_relations": rel(CORE_RELATIONS),
         "extraction_relations": rel(EXTRACTION_RELATIONS),
+        "chemistry_relations": rel(CHEMISTRY_RELATIONS),
         "laws": [
             "Directionality is FIXED per relation — wrong direction is rejected, never flipped.",
             "Every edge REQUIRES provenance (source, url, retrieved_at, raw_id) written in the same transaction.",
@@ -948,6 +1062,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(node_detail(db, (q.get("id") or [""])[0]))
             elif url.path == "/api/sequence":
                 self._json(sequence_residues(db, (q.get("id") or [""])[0]))
+            elif url.path == "/api/resolve":
+                self._json(resolve_subject((q.get("q") or [""])[0]))
+            elif url.path == "/api/capabilities":
+                self._json(capabilities_view(db))
             elif url.path in ("/api/ledger", "/api/export"):
                 led = ledger(
                     db,
@@ -1079,6 +1197,15 @@ class Handler(BaseHTTPRequestHandler):
                                        str(body.get("mind") or "")))
             elif url.path == "/api/partner/tick":
                 self._json(partner_tick())
+            elif url.path == "/api/mold":
+                self._json(mold(str(body.get("db") or ""),
+                                str(body.get("name") or ""),
+                                body.get("params") or {},
+                                str(body.get("intent") or "")))
+            elif url.path == "/api/invoke":
+                self._json(invoke(str(body.get("db") or ""),
+                                  str(body.get("name") or ""),
+                                  body.get("params") or {}))
             elif url.path == "/api/minds":
                 self._json(create_mind(str(body.get("name") or "")))
             elif url.path == "/api/teach":

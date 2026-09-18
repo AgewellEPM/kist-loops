@@ -73,7 +73,7 @@ function renderSources(data) {
 }
 
 /* ---------------- center tabs ---------------- */
-const TABS = ["graph", "ledger", "notebook", "scientist", "vision", "calendar"];
+const TABS = ["graph", "ledger", "notebook", "scientist", "vision", "calendar", "resolver"];
 function showTab(name) {
   for (const t of TABS) {
     const active = t === name;
@@ -727,6 +727,51 @@ $("t-teach").onclick = async () => {
       ? `<div class="edge-row">✅ ${out.created ? "written" : "already known"} — edge ${out.edge_id.slice(0, 8)}</div>`
       : `<div class="edge-row">❌ rejected: ${esc(out.rejected || out.error)}</div>`;
     if (out.ok) pick(state.db);
+  };
+};
+
+$("t-mold").onclick = async () => {
+  // The adaptive runtime: "mold this around X, I need it to do Y." A molded
+  // capability is a TYPED, bounded schema admitted through the PEEL gate — the
+  // interface adapts while the floor still refuses anything out of envelope.
+  const cur = await api("/api/capabilities", { db: state.db }).catch(() => ({ capabilities: [] }));
+  const chips = (cur.capabilities || []).map(c =>
+    `<span class="chip${c.molded ? " on" : ""}" title="${esc(JSON.stringify(c.params))}">${esc(c.name)}${c.molded ? " ●" : ""}</span>`).join("");
+  const template = JSON.stringify({
+    target: { type: "string", constraint: ["nonempty"] },
+    rpm: { type: "integer", constraint: ["range", 100, 3000] },
+  }, null, 2);
+  openModal(`<h2>🧩 Mold a capability</h2>
+    <div class="sub">Extend the runtime: name a new typed capability and say what
+    you need it to do. It is admitted only through the PEEL gate — typed, finitely
+    bounded, and (for physical quantities like temp_c / volume_ul / ph) inside the
+    floor's safety envelope. A schema, never code; idempotent by name.</div>
+    <div style="display:grid;gap:6px;margin:10px 0">
+      <input type="text" id="mname" placeholder="capability name, e.g. vortex">
+      <input type="text" id="mintent" placeholder="intent — what you need it to do">
+      <textarea id="mspec" rows="8" style="width:100%;background:var(--bg);color:var(--ink);
+        border:1px solid var(--line);border-radius:6px;padding:6px;font-family:monospace;font-size:12px">${esc(template)}</textarea>
+    </div>
+    <button class="btn accentbtn" id="mgo">Mold it</button>
+    <div id="mout" style="margin-top:8px"></div>
+    <div class="sub" style="margin-top:12px">Current vocabulary (● = molded):</div>
+    <div id="mcaps" style="margin-top:4px">${chips}</div>`);
+  $("mgo").onclick = async () => {
+    let params;
+    try { params = JSON.parse($("mspec").value); }
+    catch (e) { $("mout").innerHTML = `<div class="edge-row">❌ params must be valid JSON: ${esc(e.message)}</div>`; return; }
+    const r = await fetch("/api/mold", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db: state.db, name: $("mname").value,
+        intent: $("mintent").value, params }) }).then(x => x.json());
+    $("mout").innerHTML = r.molded
+      ? `<div class="edge-row">✅ molded <b>${esc(r.molded)}</b> — ${esc(r.note)} (mold #${r.mold_count})</div>`
+      : `<div class="edge-row">🛡️ PEEL gate refused: ${esc(r.error || "unknown")}</div>`;
+    if (r.molded && $("mcaps")) {          // refresh the vocabulary list in place
+      const c2 = await api("/api/capabilities", { db: state.db }).catch(() => null);
+      if (c2 && $("mcaps")) $("mcaps").innerHTML = c2.capabilities.map(c =>
+        `<span class="chip${c.molded ? " on" : ""}" title="${esc(JSON.stringify(c.params))}">${esc(c.name)}${c.molded ? " ●" : ""}</span>`).join("");
+    }
   };
 };
 

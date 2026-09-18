@@ -44,6 +44,11 @@ from .schema import ValidationError
 MAX_FILES_DEFAULT = 400
 MAX_TILES_DEFAULT = 300_000
 
+# The eight PEEL connectors — a topic's own relationship graph, carried on
+# EVERY canonical-37 tile. Populated per topic (see normalize_tile).
+CONNECTOR_FIELDS = ("parent", "subcategory", "related_to", "causes",
+                    "requires", "part_of", "next_step", "previous_step")
+
 
 def eintr_retry(fn, attempts: int = 6, delay: float = 0.25):
     """This Mac interrupts directory scans under heavy training I/O —
@@ -222,6 +227,22 @@ def normalize_tile(src: dict, *, pack: str, file_name: str, json_path: str,
             tile[field] = json.dumps(value, ensure_ascii=False)
         elif isinstance(value, (int, float)) or str(value).strip():
             tile[field] = value
+
+    # THE FLOOR'S LAW: the eight connectors are the tile's topic-specific
+    # relationships (Biology genetics → RNA transcription / cell structure;
+    # Comics → Marvel/DC lore). They live NESTED under "connectors" in every
+    # harvest generation, so lift them into the flattened canonical fields
+    # instead of leaving generic scaffolding. A topic's own 37 travel intact.
+    conn = src.get("connectors")
+    if isinstance(conn, dict):
+        for key in CONNECTOR_FIELDS:
+            v = conn.get(key)
+            if v is None:
+                continue
+            if isinstance(v, (list, dict)):
+                tile[key] = json.dumps(v, ensure_ascii=False) if v else "none"
+            elif str(v).strip():
+                tile[key] = str(v).strip()
     return tile
 
 
@@ -261,8 +282,11 @@ def import_pack(store, pack_dir: Path, *, max_files: int = MAX_FILES_DEFAULT,
                 sources = sources[:max(0, max_tiles - tiles_seen)]
                 hit_tile_cap = True
             tiles_seen += len(sources)
-            # Normalize the whole record first so next/previous chain BOTH ways
-            # (write-as-you-go can never know the next tile's id).
+            # The TREE structure travels on parent_tile_id + branch_path +
+            # depth_level + turn_number — NOT on next_step/previous_step, which
+            # are the topic's own connectors (the floor's law). So we only set
+            # parent_tile_id here and leave the connectors that normalize_tile
+            # lifted from the source untouched.
             parent_by_depth = {-1: "root"}
             tiles: list[dict] = []
             for turn, (json_path, depth, src) in enumerate(sources):
@@ -275,11 +299,6 @@ def import_pack(store, pack_dir: Path, *, max_files: int = MAX_FILES_DEFAULT,
                     parent_tile_id=parent_by_depth.get(depth - 1, "root"))
                 parent_by_depth[depth] = tile["id"]
                 tiles.append(tile)
-            for i, tile in enumerate(tiles):
-                if i > 0:
-                    tile["previous_step"] = tiles[i - 1]["id"]
-                if i + 1 < len(tiles):
-                    tile["next_step"] = tiles[i + 1]["id"]
             for tile in tiles:
                 try:
                     _, is_new = write_tile(store, tile)
