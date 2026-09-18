@@ -91,7 +91,7 @@ canvas { display: block; width: 100%; height: 100%; }
           font-size: 12px; display: flex; flex-wrap: wrap; gap: 8px; max-width: 70%; }
 .lg { display: flex; align-items: center; gap: 5px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; }
-#ledgerview, #notebookview, #scientistview, #visionview, #calendarview { grid-area: center; overflow-y: auto;
+#ledgerview, #notebookview, #scientistview, #visionview, #calendarview, #resolverview { grid-area: center; overflow-y: auto;
                              padding: 14px; display: none; }
 .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
            align-items: center; }

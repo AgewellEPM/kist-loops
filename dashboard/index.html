@@ -18,6 +18,7 @@
     <button class="tab" id="tab-scientist">Scientist</button>
     <button class="tab" id="tab-vision">Vision</button>
     <button class="tab" id="tab-calendar">Calendar</button>
+    <button class="tab" id="tab-resolver">Resolver</button>
   </nav>
   <input type="text" id="nodesearch" placeholder="find node… (e.g. P69905)" list="nodelist">
   <datalist id="nodelist"></datalist>
@@ -167,6 +168,9 @@
   <div id="calendarlane"></div>
 </div>
 
+<!-- Resolver: the anti-hallucination layer, live in the browser (no model) -->
+<div id="resolverview"></div>
+
 <!-- column 4: Chat with Lois -->
 <section id="chatcol">
   <div class="colhead">Chat with Lois
@@ -215,5 +219,6 @@
 <script src="/static/mri.js"></script>
 <script src="/static/calendar.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/resolver-demo.js"></script>
 </body>
 </html>

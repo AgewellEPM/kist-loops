@@ -73,7 +73,7 @@ function renderSources(data) {
 }
 
 /* ---------------- center tabs ---------------- */
-const TABS = ["graph", "ledger", "notebook", "scientist", "vision", "calendar"];
+const TABS = ["graph", "ledger", "notebook", "scientist", "vision", "calendar", "resolver"];
 function showTab(name) {
   for (const t of TABS) {
     const active = t === name;
