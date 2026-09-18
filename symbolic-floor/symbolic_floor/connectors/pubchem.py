@@ -44,10 +44,15 @@ def resolve_cid(name: str, *, transport: Transport | None = None) -> dict:
     if status != 200:
         raise ConnectorError(f"PubChem name->CID for {clean!r}: unexpected HTTP {status}")
     try:
-        cids = (json.loads(body).get("IdentifierList") or {}).get("CID") or []
+        parsed = json.loads(body)
     except ValueError as e:
         raise ConnectorError(f"PubChem name->CID for {clean!r}: unparseable body") from e
-    ints = sorted({int(c) for c in cids if str(c).isdigit()})
+    if not isinstance(parsed, dict):  # array/string/number/null body — not the API shape
+        raise ConnectorError(f"PubChem name->CID for {clean!r}: non-object JSON body")
+    cids = (parsed.get("IdentifierList") or {}).get("CID") or []
+    # ASCII decimals only: str.isdigit() also passes superscripts (crash int()) and
+    # non-ASCII digits (silently become a DIFFERENT integer) — reject both.
+    ints = sorted({int(c) for c in cids if str(c).isascii() and str(c).isdigit()})
     if not ints:
         return {"status": "NOT_FOUND", "name": clean, "url": url}
     return {"status": "OK", "cid": ints[0], "url": url}
@@ -69,9 +74,12 @@ def fetch_properties(cid: int, *, transport: Transport | None = None) -> dict:
     if status != 200:
         raise ConnectorError(f"PubChem properties for CID {cid}: unexpected HTTP {status}")
     try:
-        table = (json.loads(body).get("PropertyTable") or {}).get("Properties") or []
+        parsed = json.loads(body)
     except ValueError as e:
         raise ConnectorError(f"PubChem properties for CID {cid}: unparseable body") from e
+    if not isinstance(parsed, dict):
+        raise ConnectorError(f"PubChem properties for CID {cid}: non-object JSON body")
+    table = (parsed.get("PropertyTable") or {}).get("Properties") or []
     if not table:
         return {"status": "NOT_FOUND", "cid": cid, "url": url}
     row = table[0]
@@ -91,9 +99,12 @@ def fetch_synonyms(cid: int, *, transport: Transport | None = None, cap: int = 8
     if status != 200:
         raise ConnectorError(f"PubChem synonyms for CID {cid}: unexpected HTTP {status}")
     try:
-        info = (json.loads(body).get("InformationList") or {}).get("Information") or []
+        parsed = json.loads(body)
     except ValueError as e:
         raise ConnectorError(f"PubChem synonyms for CID {cid}: unparseable body") from e
+    if not isinstance(parsed, dict):
+        raise ConnectorError(f"PubChem synonyms for CID {cid}: non-object JSON body")
+    info = (parsed.get("InformationList") or {}).get("Information") or []
     names = (info[0].get("Synonym") if info else []) or []
     trimmed = [str(n).strip() for n in names[:cap] if str(n).strip()]
     return {"status": "OK", "cid": cid, "url": url, "synonyms": trimmed}

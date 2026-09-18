@@ -12,6 +12,7 @@ nothing else is contacted.
 
 from __future__ import annotations
 
+import json
 import re
 import urllib.request
 from pathlib import Path
@@ -23,20 +24,52 @@ AF_ID_RE = re.compile(r"^AF-([OPQ][0-9][A-Z0-9]{3}[0-9]"
                       r"|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9])-F[0-9]+$")
 
 RCSB_FILE_URL = "https://files.rcsb.org/download/{pdb_id}.pdb"
-AF_FILE_URL = "https://alphafold.ebi.ac.uk/files/{af_id}-model_v4.pdb"
+# AlphaFold bumps its model version (v4→v6 as of 2026); pin only as a last-resort
+# fallback — fetch_structure resolves the authoritative URL from the API so a
+# future version bump never breaks the lane again.
+AF_MODEL_VERSION = "v6"
+AF_FILE_URL = "https://alphafold.ebi.ac.uk/files/{af_id}-model_" + AF_MODEL_VERSION + ".pdb"
+AF_API_URL = "https://alphafold.ebi.ac.uk/api/prediction/{acc}"
 
 MAX_CA_ATOMS = 6000   # backbone cap; reported when hit, never silent
 TIMEOUT_S = 20.0
 
 
+def af_accession(structure_id: str) -> str | None:
+    """AF-P69905-F1 -> P69905 (the UniProt accession), or None if not an AF id."""
+    sid = structure_id.strip().upper().removeprefix("STRUCTURE:")
+    m = AF_ID_RE.fullmatch(sid)
+    return m.group(1) if m else None
+
+
 def resolve_url(structure_id: str) -> str:
-    """structure node value -> the one archive URL it may be fetched from."""
+    """structure node value -> the one archive URL it may be fetched from.
+    Pure (no network): for AlphaFold this is the version-pinned fallback; the
+    authoritative, version-current URL comes from _af_pdb_url() at fetch time."""
     sid = structure_id.strip().upper().removeprefix("STRUCTURE:")
     if PDB_ID_RE.fullmatch(sid):
         return RCSB_FILE_URL.format(pdb_id=sid)
     if AF_ID_RE.fullmatch(sid):
         return AF_FILE_URL.format(af_id=sid)
     raise ValueError(f"not a known structure id shape: {structure_id!r}")
+
+
+def _af_pdb_url(structure_id: str) -> str:
+    """Authoritative AlphaFold PDB URL for an AF id, from the prediction API
+    (survives model-version bumps). Falls back to the version-pinned URL if the
+    API is unreachable or shapeless — same allowlisted host either way."""
+    acc = af_accession(structure_id)
+    if not acc:
+        return resolve_url(structure_id)
+    try:
+        with urllib.request.urlopen(AF_API_URL.format(acc=acc), timeout=TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        url = data[0].get("pdbUrl") if isinstance(data, list) and data else None
+        if isinstance(url, str) and url.startswith("https://alphafold.ebi.ac.uk/"):
+            return url
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    return AF_FILE_URL.format(af_id=structure_id.strip().upper().removeprefix("STRUCTURE:"))
 
 
 def parse_ca_atoms(pdb_text: str, *, cap: int = MAX_CA_ATOMS) -> dict:
@@ -73,8 +106,9 @@ def parse_ca_atoms(pdb_text: str, *, cap: int = MAX_CA_ATOMS) -> dict:
 def fetch_structure(structure_id: str) -> dict:
     """Cached fetch + parse. The returned payload names its exact source
     URL and whether it came from cache — receipts, as everywhere."""
-    url = resolve_url(structure_id)
     sid = structure_id.strip().upper().removeprefix("STRUCTURE:")
+    # AlphaFold ids resolve their version-current URL from the API; PDB is static.
+    url = _af_pdb_url(structure_id) if af_accession(structure_id) else resolve_url(structure_id)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache = CACHE_DIR / f"{sid}.pdb"
     cached = cache.is_file()

@@ -114,8 +114,18 @@ GENE_RELATIONS: dict[str, tuple[str, str]] = {
     "has_biotype":   ("gene", "biotype"),       # protein_coding / lncRNA / ... (functional)
 }
 
+# Slice-4 mechanistic relations — the first edges BETWEEN two entities of the same
+# type (not annotation). interacts_with is a curated binary protein-protein
+# interaction from UniProt's own INTERACTION annotations (accession-native). NON
+# functional (a protein has many interactors); it's what lets the traversal find
+# mechanistic convergence (shared interactors), not just shared annotation.
+INTERACTION_RELATIONS: dict[str, tuple[str, str]] = {
+    "interacts_with": ("protein", "protein"),
+}
+
 RELATION_DIRECTIONS: dict[str, tuple[str, str]] = {
     **CORE_RELATIONS, **EXTRACTION_RELATIONS, **CHEMISTRY_RELATIONS, **GENE_RELATIONS,
+    **INTERACTION_RELATIONS,
 }
 
 ALLOWED_RELATIONS = frozenset(RELATION_DIRECTIONS)

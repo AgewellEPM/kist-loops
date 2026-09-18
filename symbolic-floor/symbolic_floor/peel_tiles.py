@@ -44,6 +44,7 @@ _RELATION_RENDER = {
     "has_part":           ("🧩", "has domain", ["has", "part"]),
     "supports_claim":     ("✅", "supports claim", ["supports"]),
     "conflicts_with":     ("⚠️", "conflicts with claim", ["conflicts", "with"]),
+    "interacts_with":     ("🤝", "interacts with", ["interacts", "with"]),
     # Slice-2 chemistry (the molecule wheel).
     "has_formula":        ("⚗️", "has molecular formula", ["has", "formula"]),
     "has_iupac_name":     ("🏷️", "has IUPAC name", ["iupac", "name"]),

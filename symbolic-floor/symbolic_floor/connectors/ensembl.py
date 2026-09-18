@@ -42,6 +42,8 @@ def lookup_symbol(symbol: str, *, species: str = "homo_sapiens",
         rec = json.loads(body)
     except ValueError as e:
         raise ConnectorError(f"Ensembl lookup for {clean!r}: unparseable body") from e
+    if not isinstance(rec, dict):  # array/scalar body — not the lookup shape
+        raise ConnectorError(f"Ensembl lookup for {clean!r}: non-object JSON body")
     out = {"status": "OK", "symbol": clean, "url": url}
     if rec.get("id"):
         out["ensembl_id"] = str(rec["id"])
@@ -73,6 +75,8 @@ def xref_uniprot(symbol: str, *, species: str = "homo_sapiens",
         rows = json.loads(body)
     except ValueError as e:
         raise ConnectorError(f"Ensembl xrefs for {clean!r}: unparseable body") from e
+    if not isinstance(rows, list):  # xrefs is an ARRAY; a dict/scalar is a wrong shape
+        raise ConnectorError(f"Ensembl xrefs for {clean!r}: non-array JSON body")
     accs = sorted({str(r.get("primary_id")).strip()
                    for r in rows if isinstance(r, dict)
                    and r.get("dbname") in _UNIPROT_DBS and r.get("primary_id")})

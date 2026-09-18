@@ -56,6 +56,12 @@ GENE_RELATIONS = {
     "has_biotype":   {"inverse": "biotype_of",  "transitive": False, "category": "bio_genomic", "functional": True},
 }
 
+# Slice-4 mechanistic: curated binary protein-protein interaction (UniProt). NOT
+# functional (many interactors); the first edge between two same-type entities.
+INTERACTION_RELATIONS = {
+    "interacts_with": {"inverse": "interactor_of", "transitive": False, "category": "bio_interaction"},
+}
+
 
 @dataclass(frozen=True)
 class BioFloor:
@@ -67,8 +73,9 @@ class BioFloor:
 
 
 def register_bio_relations() -> None:
-    """Idempotently add the bio + chemistry + genomics relations to the registry."""
-    for name, spec in {**BIO_RELATIONS, **CHEM_RELATIONS, **GENE_RELATIONS}.items():
+    """Idempotently add the bio + chemistry + genomics + interaction relations."""
+    for name, spec in {**BIO_RELATIONS, **CHEM_RELATIONS, **GENE_RELATIONS,
+                       **INTERACTION_RELATIONS}.items():
         RELATION_TYPES.setdefault(name, spec)
 
 

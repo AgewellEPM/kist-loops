@@ -87,6 +87,26 @@ def _entry_facts(entry: dict, acc: str) -> list[tuple[str, str, str, str]]:
                     seen.add(node)
                     facts.append((protein, "has_part", node,
                                   f"{acc} domain: {desc}"))
+
+    # Curated binary protein-protein interactions (UniProt's own INTERACTION
+    # comment). The partner is whichever interactant is NOT this entry; self- and
+    # malformed-accession partners are skipped (the wheel's _add reports the skip).
+    for comment in entry.get("comments") or []:
+        if (comment or {}).get("commentType") != "INTERACTION":
+            continue
+        for interaction in comment.get("interactions") or []:
+            accs = [((interaction.get(side) or {}).get("uniProtKBAccession") or "").strip().upper()
+                    for side in ("interactantOne", "interactantTwo")]
+            partners = [a for a in accs if a and a != acc]
+            for partner in partners:
+                node = f"protein:{partner}"
+                if node in seen:
+                    continue
+                seen.add(node)
+                n_exp = interaction.get("numberOfExperiments")
+                facts.append((protein, "interacts_with", node,
+                              f"{acc} interacts with {partner}"
+                              + (f" ({n_exp} experiments)" if n_exp else "")))
     return facts
 
 
