@@ -42,9 +42,10 @@ _ACCESSION_RE = re.compile(
 # Word boundaries already handle fused forms ('proinsulin').
 _EXTENSION_WORDS = frozenset({
     "receptor", "receptors", "subunit", "ligase", "oxidase", "kinase",
-    "reductase", "synthase", "phosphatase", "protein", "beta", "gamma",
-    "delta", "epsilon", "ii", "iii", "iv", "like", "variant", "precursor",
-    "isoform", "homolog", "family",
+    "reductase", "synthase", "phosphatase", "protein", "alpha", "beta",
+    "gamma", "delta", "epsilon", "zeta", "eta", "theta", "kappa", "sigma",
+    "omega", "ii", "iii", "iv", "like", "variant", "precursor", "isoform",
+    "homolog", "family", "chain", "complex",
 })
 
 _ABSTAIN_UNGROUNDED = ("no accession for this subject is grounded in the "

@@ -101,6 +101,32 @@ def test_model_abstain_passes_through_untouched():
     "insulin receptor",       # would otherwise bind insulin
     "myoglobin II",           # would otherwise bind myoglobin
     "lysozyme C variant",     # would otherwise bind lysozyme C
+    "myoglobin chain A",      # verify-eng: PDB-style chain label
+    "myoglobin alpha oxidase",  # verify-eng: greek-suffix compound
+    "insulin complex",        # verify-eng: compound assembly
 ])
 def test_extended_mentions_do_not_bind_the_shorter_curated_name(phrase):
     assert grounded_accessions(f"Verify the structure of {phrase}.") == set()
+
+
+def test_greek_extension_does_not_break_curated_names_ending_in_greek():
+    """'alpha' is an extension word, but curated names CONTAINING alpha
+    ('hemoglobin alpha', 'hemoglobin subunit alpha') must still bind —
+    blocking applies to the word AFTER the match, not inside it."""
+    assert "P69905" in grounded_accessions("Verify hemoglobin alpha.")
+    assert "P69905" in grounded_accessions("Verify hemoglobin subunit alpha.")
+
+
+def test_repair_boundary_incidental_mention_binds_the_mentioned_protein():
+    """Documented trade-off (verify-eng finding 1): if the user's text
+    grounds exactly ONE curated protein while the model invents a valid-form
+    subject for something the text never grounds, repair binds the MENTIONED
+    protein. Repair only fires post-parse (valid accession, single
+    grounding); the alternative — trusting the model's ungrounded accession
+    — is the exact failure this layer exists to kill. If this contract
+    changes, change this pin deliberately."""
+    got, action = resolve(
+        "In studying cytochrome c, we also care about the uncharacterized "
+        "membrane protein. Can you extract its structure?",
+        {"kind": "extract", "subject": "Q5VSL9"})
+    assert action == "repaired" and got["subject"] == "P99999"

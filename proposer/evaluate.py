@@ -29,7 +29,12 @@ from .runtime import admit, ask_model
 
 
 def evaluate(store: Store, eval_path: str | Path, *, model: str,
-             limit: int | None = None, resolver: bool = False) -> dict:
+             limit: int | None = None, resolver: bool = True) -> dict:
+    """resolver=True scores the DEPLOYED lane (symbolic subject binding, as
+    propose() applies it) and is the default so casual scoring runs cannot
+    quietly exercise the pre-resolver path — which, for extract golds, writes
+    real connector edges for whatever subject the raw model invented.
+    Pass resolver=False only to measure the raw model, on a throwaway store."""
     rows = [json.loads(line) for line in Path(eval_path).read_text().splitlines()]
     if limit:
         rows = rows[:limit]
