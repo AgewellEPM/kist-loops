@@ -447,6 +447,24 @@ def start_recorder_loop(interval_s: int = 300) -> None:
     threading.Thread(target=loop, daemon=True, name="science-recorder").start()
 
 
+def resolve_subject(user_text: str) -> dict:
+    """The canonical anti-hallucination gate, live: run proposer/resolver.py's
+    grounding on the user's words and report the verdict. Read-only, no model —
+    this is the Python layer the browser Resolver tab ports, exposed so the port
+    can prove itself against the real thing."""
+    from proposer.resolver import grounded_accessions
+    text = str(user_text or "")
+    grounded = sorted(grounded_accessions(text))
+    if len(grounded) == 1:
+        verdict, acc = "bind", grounded[0]
+    elif len(grounded) > 1:
+        verdict, acc = "ambiguous", None
+    else:
+        verdict, acc = "abstain", None
+    return {"query": text, "verdict": verdict, "accession": acc,
+            "grounded": grounded, "engine": "proposer/resolver.py (canonical)"}
+
+
 def sequence_residues(db_name: str, node_id: str) -> dict:
     """The REAL stored residue string for one sequence node — feeds the
     front end's generated-molecule concept (which banners itself as
@@ -996,6 +1014,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(node_detail(db, (q.get("id") or [""])[0]))
             elif url.path == "/api/sequence":
                 self._json(sequence_residues(db, (q.get("id") or [""])[0]))
+            elif url.path == "/api/resolve":
+                self._json(resolve_subject((q.get("q") or [""])[0]))
             elif url.path in ("/api/ledger", "/api/export"):
                 led = ledger(
                     db,

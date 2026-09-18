@@ -228,6 +228,32 @@
       box.appendChild(el("div", null, T.emptyNote));
     }
     out.appendChild(box);
+    verifyCanonical(out, text, v, ++renderSeq);
+  }
+
+  // Live self-proof: on the local floor (where the server exists) call the
+  // canonical Python resolver and show that this browser port agrees exactly.
+  // On the static demo /api/resolve returns the read-only notice, so we simply
+  // stay silent — the port stands on its own there. renderSeq drops stale
+  // badges from earlier keystrokes.
+  let renderSeq = 0;
+  async function verifyCanonical(out, text, v, seq) {
+    let r;
+    try {
+      r = await fetch("/api/resolve?q=" + encodeURIComponent(text)).then((x) => x.json());
+    } catch (e) { return; }
+    if (seq !== renderSeq || !r || r.error || !r.verdict) return;
+    const browser = v.kind === "bind" ? "bind" : (v.why === "ambiguous" ? "ambiguous" : "abstain");
+    const match = browser === r.verdict &&
+      (r.verdict !== "bind" || r.accession === v.acc);
+    const badge = el("div");
+    badge.style.cssText = "margin-top:8px;padding:5px 9px;border-radius:6px;font-size:11px;" +
+      (match ? "color:#4cc38a;border:1px solid #2b5f43;background:rgba(76,195,138,.10)"
+             : "color:#e5534b;border:1px solid #5f2b2b;background:rgba(229,83,75,.10)");
+    badge.textContent = match
+      ? `✓ verified against the canonical Python resolver — identical verdict`
+      : `⚠ mismatch — browser: ${browser}${v.acc ? " " + v.acc : ""} · canonical: ${r.verdict}${r.accession ? " " + r.accession : ""}`;
+    out.appendChild(badge);
   }
 
   function build() {
