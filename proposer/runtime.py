@@ -66,19 +66,23 @@ def ask_model(prompt: str, *, model: str = DEFAULT_MODEL,
     return content
 
 
-def admit(store: Store, proposal: dict, *, environment: str = "simulation") -> dict:
+def admit(store: Store, proposal: dict, *, environment: str = "simulation",
+          libraries: set[str] | None = None) -> dict:
     """Route a PARSED proposal through the floor. Read-only except `extract`
     (which writes only provenance-pinned connector evidence). Never dispatches
-    a physical hand-off — that remains a separate, deliberate action."""
+    a physical hand-off — that remains a separate, deliberate action.
+    ``libraries`` narrows which wheel libraries an extract collects from
+    (None = all); the extraction trace reports what was disabled."""
     kind = proposal["kind"]
     if kind == "abstain":
         return {"admitted": "abstain", "proposal": proposal}
 
     if kind == "extract":
-        result = extract_protein(store, proposal["subject"])
+        result = extract_protein(store, proposal["subject"], enabled=libraries)
         return {"admitted": "extract", "proposal": proposal,
                 "extraction": {k: result[k] for k in
-                               ("status", "edges_already_present", "pdb_xrefs_total")
+                               ("status", "edges_already_present",
+                                "pdb_xrefs_total", "libraries_disabled")
                                if k in result} | {"edges_written": len(result.get("edges_written", []))}}
 
     if kind == "claim":
@@ -95,7 +99,8 @@ def admit(store: Store, proposal: dict, *, environment: str = "simulation") -> d
 
 
 def propose(store: Store, prompt: str, *, model: str = DEFAULT_MODEL,
-            environment: str = "simulation") -> dict:
+            environment: str = "simulation",
+            libraries: set[str] | None = None) -> dict:
     """Full lane: model -> strict parse -> floor admission.
 
     A reply that fails the grammar is REJECTED_UNPARSEABLE — reported
@@ -108,7 +113,8 @@ def propose(store: Store, prompt: str, *, model: str = DEFAULT_MODEL,
         return {"admitted": "rejected_unparseable", "error": str(e),
                 "raw_reply": reply[:500]}
     try:
-        return admit(store, proposal, environment=environment)
+        return admit(store, proposal, environment=environment,
+                     libraries=libraries)
     except ValidationError as e:
         # Parsed but the floor refused it (bad params, unknown claim, ...).
         return {"admitted": "rejected_by_floor", "proposal": proposal,

@@ -98,11 +98,31 @@ def _pdb_xrefs(entry: dict) -> list[str]:
     return ids
 
 
+# Selectable wheel libraries. "uniprot" is the wheel's root (the entry JSON
+# drives every other block) and cannot be disabled.
+WHEEL_LIBRARIES = ("uniprot", "sequence", "pdb", "alphafold")
+
+
 def extract_protein(store: Store, accession: str, *,
                     transport: Transport | None = None,
-                    max_structures: int = MAX_CONFIRMED_STRUCTURES) -> dict:
-    """Run the full wheel for one accession. Returns the extraction trace:
-    every edge written (id + triple), everything skipped, sources fetched."""
+                    max_structures: int = MAX_CONFIRMED_STRUCTURES,
+                    enabled: set[str] | None = None) -> dict:
+    """Run the wheel for one accession. Returns the extraction trace:
+    every edge written (id + triple), everything skipped, sources fetched.
+
+    ``enabled`` selects which libraries the wheel collects from (subset of
+    WHEEL_LIBRARIES; None = all). Disabled libraries are simply not
+    fetched — and the trace names them, so a narrowed run is never
+    mistaken for a full one."""
+    if enabled is None:
+        enabled = set(WHEEL_LIBRARIES)
+    unknown = enabled - set(WHEEL_LIBRARIES)
+    if unknown:
+        raise ValidationError(f"unknown wheel libraries: {sorted(unknown)}")
+    if "uniprot" not in enabled:
+        raise ValidationError("the uniprot library is the wheel's root and "
+                              "cannot be disabled")
+    disabled = sorted(set(WHEEL_LIBRARIES) - enabled)
     fetched = uniprot.fetch_entry_json(accession, transport=transport)
     acc = fetched["accession"]
     if fetched["status"] == "NOT_FOUND":
@@ -140,21 +160,22 @@ def extract_protein(store: Store, accession: str, *,
         _add(src, rel, dst, label, dict(entry_prov))
 
     # 2) Sequence (FASTA route, content-addressed).
-    seq = uniprot.fetch_sequence(store, acc, transport=transport)
-    if seq["status"] == "OK":
-        sources.append(uniprot.FASTA_URL.format(accession=acc))
-        if seq["created"]:
-            written.append({"edge_id": seq["edge_id"], "source": f"protein:{acc}",
-                            "relation": "has_sequence", "target": seq["sequence_id"]})
-        else:
-            existing += 1
+    if "sequence" in enabled:
+        seq = uniprot.fetch_sequence(store, acc, transport=transport)
+        if seq["status"] == "OK":
+            sources.append(uniprot.FASTA_URL.format(accession=acc))
+            if seq["created"]:
+                written.append({"edge_id": seq["edge_id"], "source": f"protein:{acc}",
+                                "relation": "has_sequence", "target": seq["sequence_id"]})
+            else:
+                existing += 1
 
     # 3) Experimental structures: ALL xrefs are the link graph; confirm the
     #    first max_structures against RCSB (each confirmed one becomes an edge
     #    with RCSB provenance). The cap is reported, never silent.
     xrefs = _pdb_xrefs(entry)
     confirmed = 0
-    for pdb_id in xrefs[:max_structures]:
+    for pdb_id in (xrefs[:max_structures] if "pdb" in enabled else []):
         entry_url_rcsb = RCSB_ENTRY_URL.format(pdb_id=pdb_id)
         status, body = http_get(entry_url_rcsb, transport=transport)
         sources.append(entry_url_rcsb)
@@ -173,14 +194,15 @@ def extract_protein(store: Store, accession: str, *,
         confirmed += 1
 
     # 4) Predicted structure (AlphaFold).
-    pred = alphafold.fetch_prediction(store, acc, transport=transport)
-    if pred["status"] == "OK":
-        sources.append(alphafold.PREDICTION_URL.format(accession=acc))
-        if pred["created"]:
-            written.append({"edge_id": pred["edge_id"], "source": f"protein:{acc}",
-                            "relation": "predicts_structure", "target": pred["structure_id"]})
-        else:
-            existing += 1
+    if "alphafold" in enabled:
+        pred = alphafold.fetch_prediction(store, acc, transport=transport)
+        if pred["status"] == "OK":
+            sources.append(alphafold.PREDICTION_URL.format(accession=acc))
+            if pred["created"]:
+                written.append({"edge_id": pred["edge_id"], "source": f"protein:{acc}",
+                                "relation": "predicts_structure", "target": pred["structure_id"]})
+            else:
+                existing += 1
 
     # Canonical-37 PEEL trace: root + one tile per fact currently stored for
     # this protein (both newly-written AND already-present edges belong to the
@@ -207,6 +229,7 @@ def extract_protein(store: Store, accession: str, *,
         "pdb_xrefs_total": len(xrefs),
         "pdb_confirmed": confirmed,
         "pdb_confirm_cap": max_structures,
+        "libraries_disabled": disabled,
         "sources_fetched": sources,
         "peel_trace": trace,
     }
