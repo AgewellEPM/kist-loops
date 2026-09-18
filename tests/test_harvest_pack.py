@@ -124,18 +124,66 @@ def test_source_fields_pass_through_verbatim(store, tmp_path):
     assert row["conversation_id"].startswith("demo:MiniPack:")  # the receipt
 
 
-def test_sibling_tiles_chain_both_ways(store, tmp_path):
+def test_next_previous_are_connectors_not_tile_chain(store, tmp_path):
+    """Regression on the floor's-law fix: next_step/previous_step must NEVER be
+    overwritten with tile ids — they carry the topic connector (or "none"),
+    and the tree walk lives in parent_tile_id/branch_path/depth instead."""
     import_pack(store, _mini_pack(tmp_path))
-    root = store.db.execute(
+    for row in store.db.execute("SELECT next_step, previous_step FROM responses"):
+        assert not str(row["next_step"]).startswith("tile:")
+        assert not str(row["previous_step"]).startswith("tile:")
+
+
+def test_topic_connectors_are_lifted_from_the_source(store, tmp_path):
+    """THE FLOOR'S LAW: a topic's own 37 connectors survive import — the eight
+    flattened connector fields come from the source tile's nested `connectors`
+    (Biology genetics, not generic scaffolding)."""
+    import json as _json
+    pack = tmp_path / "BioPack"
+    pack.mkdir()
+    (pack / "aac_Biology.json").write_text(_json.dumps([{
+        "topic": "Biology",
+        "initial_statement": {
+            "sentence": "DNA carries genetic information.",
+            "connectors": {
+                "parent": "Biology", "subcategory": "Genetics",
+                "related_to": ["genes", "cells"], "causes": ["inheritance"],
+                "requires": ["replication"], "part_of": ["molecular biology"],
+                "next_step": ["RNA transcription"], "previous_step": ["cell structure"],
+            },
+        },
+    }]))
+    import_pack(store, pack)
+    row = store.db.execute(
         "SELECT * FROM responses WHERE sentence = ?",
-        ("How bad is the pain?",)).fetchone()
-    child = store.db.execute(
-        "SELECT * FROM responses WHERE sentence = ?",
-        ("It is very bad.",)).fetchone()
-    assert root["next_step"] == child["id"]
-    assert child["previous_step"] == root["id"]
-    assert root["previous_step"] == "none"
-    assert child["next_step"] == "none"
+        ("DNA carries genetic information.",)).fetchone()
+    assert row["parent"] == "Biology"                    # not "harvest:BioPack"
+    assert row["subcategory"] == "Genetics"
+    assert _json.loads(row["related_to"]) == ["genes", "cells"]
+    assert _json.loads(row["causes"]) == ["inheritance"]
+    assert _json.loads(row["requires"]) == ["replication"]
+    assert _json.loads(row["part_of"]) == ["molecular biology"]
+    assert _json.loads(row["next_step"]) == ["RNA transcription"]
+    assert _json.loads(row["previous_step"]) == ["cell structure"]
+    # the raw connectors object is preserved too
+    assert _json.loads(row["connectors"])["subcategory"] == "Genetics"
+
+
+def test_empty_connectors_fall_back_without_faking(store, tmp_path):
+    """A genuinely-empty connector list becomes "none" (37/37 needs non-empty),
+    never invented content."""
+    import json as _json
+    pack = tmp_path / "SparsePack"
+    pack.mkdir()
+    (pack / "aac_Sparse.json").write_text(_json.dumps([{
+        "topic": "Sparse",
+        "initial_statement": {"sentence": "A lone fact.",
+                              "connectors": {"parent": "Sparse", "causes": []}},
+    }]))
+    import_pack(store, pack)
+    row = store.db.execute("SELECT * FROM responses WHERE sentence = 'A lone fact.'").fetchone()
+    assert row["parent"] == "Sparse"
+    assert row["causes"] == "none"      # empty list → honest placeholder
 
 
 def test_two_records_in_one_file_never_collide(store, tmp_path):
