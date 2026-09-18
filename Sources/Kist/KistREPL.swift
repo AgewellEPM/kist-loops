@@ -33,6 +33,19 @@ final class KistREPL {
     /// "Lois" wake word state: while active, research runs REQUIRE the symbolic PEEL proof gate.
     /// Shared box (not a plain var) so the runner-built research closure observes REPL-time toggles.
     let peelMode = LoisPeelMode()
+    /// Science-loops profile (Luke 2026-09-18): the `science` launcher sets KIST_SCIENCE_PROFILE=1
+    /// so the SAME REPL presents the science identity — green `science` brand in the startup
+    /// header and the SCIENCE status block printed at launch. Presentation only: no behavior,
+    /// tool, or gate changes ride on this flag.
+    var scienceProfile: Bool = KistREPL.scienceProfileDefault()
+
+    /// Only "1" opts in — any other value (or absence) is the plain kist identity, so a stray
+    /// exported variable can't half-arm the profile.
+    static func scienceProfileDefault(
+        env: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        env["KIST_SCIENCE_PROFILE"] == "1"
+    }
     /// `/dive` — a LOCAL, repo-scoped multi-model read of OUR OWN code (no web, no cross-repo estate sweep).
     /// Grounds a dossier in the actual files under the project root, then fans it to every reachable model.
     var dive: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
@@ -236,7 +249,15 @@ final class KistREPL {
         let headerMode = autoRouting ? "auto-routing"
             : (TeamLanguage.describeTeam(roleSelection.bindings)
                ?? Self.render(roleSelection.fallback))
-        print(StartupHeader.render(mode: headerMode, projectRoot: projectRoot, planMode: loop.isPlanMode))
+        print(StartupHeader.render(mode: headerMode, projectRoot: projectRoot, planMode: loop.isPlanMode,
+                                   science: scienceProfile))
+        if scienceProfile {
+            // The science launch leads with the science system itself — the same honest block the
+            // `peel` word prints, so gate/lane/ledger state is visible before the first prompt.
+            print(PeelScienceStatus.render(peelActive: peelMode.isActive,
+                                           researchAvailable: research != nil,
+                                           projectRoot: projectRoot))
+        }
         if loop.isPlanMode { print("\u{001B}[33m⚑ plan mode ON — read-only; the agent proposes a plan. /plan off to execute.\u{001B}[0m") }
         // R2b: pin the input panel to the bottom (scroll-region). Activated AFTER the header so the
         // header lands in normal scrollback; deactivated on EVERY exit path so the shell is never left

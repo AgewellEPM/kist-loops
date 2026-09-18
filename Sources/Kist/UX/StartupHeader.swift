@@ -4,15 +4,23 @@ import Foundation
 /// "operator panel" — just what model state you're in, where you are, and how to start.
 enum StartupHeader {
     /// `mode` is "auto-routing" (kist picks per request) or a pinned model id.
-    static func render(mode: String, projectRoot: String, planMode: Bool, color: Bool = true) -> String {
+    /// `science` = the science-loops profile (Luke 2026-09-18): identical layout, but the brand
+    /// is the green `science` wordmark and the hint line teaches the science words (peel/lois)
+    /// instead of leading with coding surfaces.
+    static func render(mode: String, projectRoot: String, planMode: Bool, color: Bool = true,
+                       science: Bool = false) -> String {
         func c(_ code: String, _ s: String) -> String { color ? "\u{001B}[\(code)m\(s)\u{001B}[0m" : s }
         let pin = mode == "auto-routing" ? "/model to pin" : "/model to change"
         let plan = planMode ? c("33", " · plan mode (read-only)") : ""
+        let brand = science ? c("32;1", "science") : c("36;1", "kist")
+        let hint = science
+            ? "↳ just type · peel = science status · lois = arm the PEEL gate · " + pin + " · /help"
+            : "↳ just type · " + pin + " · /help"
         // Product version is immutable source metadata; deployment identity lives in the
         // authenticated installed manifest rather than a self-rewriting source stamp.
         return """
-        \(c("36;1", "kist")) \(c("2", "·")) \(c("32", KistBuildInfo.startupLabel)) \(c("2", "·")) \(c("35", mode)) \(c("2", "·")) \(c("2", abbreviate(projectRoot)))\(plan)
-        \(c("2", "↳ just type · " + pin + " · /help"))
+        \(brand) \(c("2", "·")) \(c("32", KistBuildInfo.startupLabel)) \(c("2", "·")) \(c("35", mode)) \(c("2", "·")) \(c("2", abbreviate(projectRoot)))\(plan)
+        \(c("2", hint))
         """
     }
 
