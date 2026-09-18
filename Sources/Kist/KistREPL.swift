@@ -510,6 +510,16 @@ final class KistREPL {
                 }
             }
 
+            // PEEL STATUS WORD: "peel" displays SCIENCE + the science tool-system status (gate armed?
+            // research lane wired? scientist ledger present?). Read-only sibling of the Lois wake
+            // word — it reports the mode, never flips it. Deterministic interceptor, no LLM turn.
+            if !submittedIsDelegation, PeelIntent.parse(input) != nil {
+                print(PeelScienceStatus.render(peelActive: peelMode.isActive,
+                                               researchAvailable: research != nil,
+                                               projectRoot: projectRoot))
+                continue
+            }
+
             // NATURAL-LANGUAGE SANDBOX CONTROL: "run it headless" / "run it in a small window at the
             // top of my screen" drive the isolated macOS-guest sandbox (~/bin/vmsandbox) directly —
             // deterministic device command, no LLM turn. Conservative parser; see SandboxIntent.
