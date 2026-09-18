@@ -69,13 +69,20 @@ public struct MCPServerConfig: Sendable, Equatable {
     public let url: String?
     public let headers: [String: String]
     public let computerUsePolicy: MCPComputerUsePolicy
+    /// Raw server tool names the OWNER declared `"readOnly"` in this server's `toolEffects` config map.
+    /// This is a host-side declaration (the user wrote it in ~/.mcp.json), never server-supplied — it
+    /// lets inspect-only turns keep declared-read-only remote tools without trusting the server.
+    /// Undeclared tools default to effectful (fail-closed: excluded from read-only turns).
+    public let declaredReadOnlyTools: Set<String>
 
     public init(name: String, command: String = "", args: [String] = [], env: [String: String] = [:],
                 url: String? = nil, headers: [String: String] = [:],
-                computerUsePolicy: MCPComputerUsePolicy = .legacyNameHeuristic) {
+                computerUsePolicy: MCPComputerUsePolicy = .legacyNameHeuristic,
+                declaredReadOnlyTools: Set<String> = []) {
         self.name = name; self.command = command; self.args = args; self.env = env
         self.url = url; self.headers = headers
         self.computerUsePolicy = computerUsePolicy
+        self.declaredReadOnlyTools = declaredReadOnlyTools
     }
 
     /// True for the HTTP transport (vs stdio subprocess).
@@ -231,6 +238,7 @@ public enum MCPClientConfig {
     /// live in the environment, not the config file on disk.
     private static func validateHTTP(name: String, entry: [String: Any],
                                      computerUsePolicy: MCPComputerUsePolicy,
+                                     declaredReadOnlyTools: Set<String>,
                                      hostEnvironment: [String: String],
                                      ssrfBlockReason: (String) -> String?) -> ValidationOutcome {
         guard let urlStr = (entry["url"] as? String)?.trimmingCharacters(in: .whitespaces), !urlStr.isEmpty else {
@@ -273,7 +281,8 @@ public enum MCPClientConfig {
             return .failure(reason: "http (cleartext) url is refused for a non-loopback MCP server — use https (also the DNS-rebinding pin)")
         }
         return .success(MCPServerConfig(name: name, url: urlStr, headers: headers,
-                                        computerUsePolicy: computerUsePolicy), warnings: warnings)
+                                        computerUsePolicy: computerUsePolicy,
+                                        declaredReadOnlyTools: declaredReadOnlyTools), warnings: warnings)
     }
 
     /// True when a host explicitly names loopback (localhost / 127.0.0.0/8 / ::1) — a user's own local
@@ -323,6 +332,31 @@ public enum MCPClientConfig {
         return out
     }
 
+    private enum DeclaredEffectsOutcome {
+        case success(Set<String>)
+        case failure(reason: String)
+    }
+
+    /// Parse the optional per-server `toolEffects` map: `{"<raw tool name>": "readOnly"|"projectMutation"}`.
+    /// Only `"readOnly"` grants anything (admission into inspect-only turns); other valid values are
+    /// documentation. Unknown effect strings are REJECTED loudly — a typo like "readonly" would otherwise
+    /// fail closed silently and read as "the config is being ignored".
+    private static func declaredReadOnlyTools(from entry: [String: Any]) -> DeclaredEffectsOutcome {
+        guard let raw = entry["toolEffects"] else { return .success([]) }
+        guard let dict = raw as? [String: String] else {
+            return .failure(reason: "'toolEffects' must be an object of {toolName: \"readOnly\"|\"projectMutation\"}")
+        }
+        let knownEffects: Set<String> = ["readOnly", "projectMutation"]
+        var readOnly: Set<String> = []
+        for (tool, effect) in dict {
+            guard knownEffects.contains(effect) else {
+                return .failure(reason: "'toolEffects' has unknown effect '\(effect)' for tool '\(tool)' (use readOnly or projectMutation)")
+            }
+            if effect == "readOnly" { readOnly.insert(tool) }
+        }
+        return .success(readOnly)
+    }
+
     private static func validate(name: String, entry: [String: Any],
                                  hostEnvironment: [String: String],
                                  ssrfBlockReason: (String) -> String?) -> ValidationOutcome {
@@ -334,11 +368,17 @@ public enum MCPClientConfig {
         case .success(let policy): computerUsePolicy = policy
         case .failure(let reason): return .failure(reason: reason)
         }
+        let declaredReadOnly: Set<String>
+        switch Self.declaredReadOnlyTools(from: entry) {
+        case .success(let set): declaredReadOnly = set
+        case .failure(let reason): return ValidationOutcome.failure(reason: reason)
+        }
         // HTTP (Streamable-HTTP) transport: a `url` is present, or transport is http/streamable-http/sse.
         let transport = (entry["transport"] as? String)?.lowercased()
         if entry["url"] != nil || transport == "http" || transport == "streamable-http" || transport == "sse" {
             return validateHTTP(
                 name: name, entry: entry, computerUsePolicy: computerUsePolicy,
+                declaredReadOnlyTools: declaredReadOnly,
                 hostEnvironment: hostEnvironment,
                 ssrfBlockReason: ssrfBlockReason)
         }
@@ -396,7 +436,8 @@ public enum MCPClientConfig {
         }
 
         return .success(MCPServerConfig(name: name, command: command, args: args, env: env,
-                                        computerUsePolicy: computerUsePolicy), warnings: warnings)
+                                        computerUsePolicy: computerUsePolicy,
+                                        declaredReadOnlyTools: declaredReadOnly), warnings: warnings)
     }
 
     /// Final environment for `Process`: allowlisted host vars + the server's explicit

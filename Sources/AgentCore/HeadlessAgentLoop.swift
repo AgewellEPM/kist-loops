@@ -451,6 +451,7 @@ public struct HeadlessAgentLoop: Sendable {
                     || implementation is any DelegationAgentTool
                     || implementation is ManageTasksTool
                     || implementation is BrowserTool
+                    || Self.hostDeclaredReadOnly(implementation)
             }
             return kept.count == tools.all().count ? tools : ToolRegistry(capabilityScoped: kept)
         case .chat, .review, .research, .plan:
@@ -460,8 +461,18 @@ public struct HeadlessAgentLoop: Sendable {
             implementation is any ReadOnlyAgentTool
                 || implementation is ManageTasksTool
                 || implementation is BrowserTool
+                || Self.hostDeclaredReadOnly(implementation)
         }
         return kept.count == tools.all().count ? tools : ToolRegistry(capabilityScoped: kept)
+    }
+
+    /// Remote MCP tools can never be `ReadOnlyAgentTool` (their implementation is an untrusted external
+    /// process), so inspect-only turns admit them ONLY when the host owner's config declared the tool
+    /// `"readOnly"` (per-server `toolEffects` map in ~/.mcp.json). Undeclared/absent → effectful →
+    /// excluded (fail-closed). This is the fix for "the 44 bio-research tools are inventoried but
+    /// unreachable from chat turns" (bio-scientist audit, 2026-09-18).
+    static func hostDeclaredReadOnly(_ implementation: (any AgentTool)?) -> Bool {
+        (implementation as? any HostDeclaredEffectTool)?.hostDeclaredReadOnly ?? false
     }
 
     /// Result of the native loop: either it finished (success or honest failure), or it asks to be
@@ -1278,10 +1289,14 @@ public struct HeadlessAgentLoop: Sendable {
         return (actions as? [Any])?.isEmpty == true
     }
 
-    private static func isTrustedReadOnlyCall(registry: ToolRegistry, tool: String,
-                                              args: [String: Any]) -> Bool {
+    static func isTrustedReadOnlyCall(registry: ToolRegistry, tool: String,
+                                      args: [String: Any]) -> Bool {
         guard let implementation = registry.tool(named: tool) else { return false }
         if implementation is any ReadOnlyAgentTool { return true }
+        // Owner-declared read-only remote MCP tools (per-server `toolEffects` config): the registry
+        // filter admits them into inspect-only turns, so the call-time effect contract must agree —
+        // otherwise the tool is visible but every call is denied (bio-scientist audit, 2026-09-18).
+        if Self.hostDeclaredReadOnly(implementation) { return true }
         if implementation is ManageTasksTool {
             return isReadOnlyTasksCall(tool: tool, args: args)
         }
@@ -1412,7 +1427,9 @@ public struct HeadlessAgentLoop: Sendable {
         // ACT-vs-ASK: classify the action's reversibility. `.safe` never prompts; `.dangerous`
         // (irreversible/high-blast-radius) ALWAYS prompts — even when the tool isn't in the configured
         // approval set and even past a session "allow all"; `.mutating` follows the normal approval set.
-        let risk = ReversibilityClassifier.assess(tool: tool, args: args, projectRoot: context.projectRoot)
+        let risk = ReversibilityClassifier.assess(
+            tool: tool, args: args, projectRoot: context.projectRoot,
+            hostDeclaredReadOnly: Self.hostDeclaredReadOnly(tools.tool(named: tool)))
         if risk == .safe { return true }
         guard risk == .dangerous || approvalTools.contains(tool) else { return true }
         let desc = (risk == .dangerous ? "⚠ IRREVERSIBLE — " : "") + "\(tool)(\(Self.compactArgs(args)))"
