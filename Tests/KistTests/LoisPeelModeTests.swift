@@ -34,6 +34,27 @@ final class LoisPeelModeTests: XCTestCase {
                        .research("off the record what is x"))
     }
 
+    /// Multilingual research (Luke 2026-09-18: "our models must understand fluent Chinese/Mandarin/
+    /// Japanese"). The research question is carried VERBATIM to the model — the science entry point
+    /// must preserve CJK bytes exactly (no ASCII-only truncation, no mojibake) so the model receives
+    /// the real question. Model fluency is verified live; this pins the SYSTEM round-trip.
+    func testCJKResearchQuestionPreservedVerbatim() {
+        XCTAssertEqual(LoisIntent.parse("lois 血红蛋白如何运输氧气"),
+                       .research("血红蛋白如何运输氧气"), "Mandarin question preserved")
+        XCTAssertEqual(LoisIntent.parse("Lois ミオグロビンとは何ですか"),
+                       .research("ミオグロビンとは何ですか"), "Japanese question preserved")
+        XCTAssertEqual(LoisIntent.parse("lois 蛋白質の構造を説明して"),
+                       .research("蛋白質の構造を説明して"), "mixed Han+Kana preserved")
+    }
+
+    func testPureCJKMessageIsNotAWakeWord() {
+        // A bare CJK message (no leading "lois") must fall through to a normal model turn, not the
+        // gate — the wake word is an explicit ASCII token, never triggered by non-Latin prose.
+        for msg in ["血红蛋白是什么", "ミオグロビンとは", "こんにちは"] {
+            XCTAssertNil(LoisIntent.parse(msg), "\(msg) must not trip the wake word")
+        }
+    }
+
     func testNonWakeInputsNeverFire() {
         let cases = ["loisy", "lois's engine", "ask lois later", "hello lois",
                      "eloise", "/lois", "", "   ", "build the login page"]

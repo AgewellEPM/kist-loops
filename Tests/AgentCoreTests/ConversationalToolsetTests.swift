@@ -87,11 +87,73 @@ final class ConversationalToolsetTests: XCTestCase {
             ToolRegistry([StubTool(name: "spawn_agent")]), intent: .delegate)
         XCTAssertNil(out.tool(named: "spawn_agent"))
     }
+
+    // MARK: host-declared read-only MCP tools (bio-scientist audit fix, 2026-09-18)
+    // Remote MCP tools can't be ReadOnlyAgentTool (untrusted external implementation); the owner's
+    // per-server `toolEffects` declaration admits them instead. Per the multi-site rule, BOTH filter
+    // sites are pinned: the chat/review/research/plan branch AND the .delegate branch.
+
+    func testHostDeclaredReadOnlyMCPToolSurvivesEveryInspectOnlyIntent() {
+        let reg = ToolRegistry([StubHostDeclaredTool(name: "bio-research__pubmed_search", hostDeclaredReadOnly: true),
+                                StubHostDeclaredTool(name: "bio-research__run_python", hostDeclaredReadOnly: false),
+                                StubTool(name: "bio-research__wetware_remove")])
+        for intent in [TaskBrief.Intent.chat, .review, .research, .plan] {
+            let out = names(HeadlessAgentLoop.conversationalToolset(reg, intent: intent))
+            XCTAssertTrue(out.contains("bio-research__pubmed_search"),
+                          "\(intent): owner-declared readOnly MCP tool must stay reachable")
+            XCTAssertFalse(out.contains("bio-research__run_python"),
+                           "\(intent): declared-effectful MCP tool must be excluded")
+            XCTAssertFalse(out.contains("bio-research__wetware_remove"),
+                           "\(intent): UNdeclared MCP tool defaults to effectful (fail-closed)")
+        }
+    }
+
+    func testHostDeclaredReadOnlyMCPToolSurvivesDelegateBranch() {
+        let reg = ToolRegistry([StubHostDeclaredTool(name: "jeeves-floor__symbolic_query", hostDeclaredReadOnly: true),
+                                StubHostDeclaredTool(name: "jeeves-floor__teach_relation", hostDeclaredReadOnly: false)])
+        let out = names(HeadlessAgentLoop.conversationalToolset(reg, intent: .delegate))
+        XCTAssertTrue(out.contains("jeeves-floor__symbolic_query"),
+                      "delegate branch (site 2 of 2) must also honor the owner's readOnly declaration")
+        XCTAssertFalse(out.contains("jeeves-floor__teach_relation"))
+    }
+
+    func testEffectfulIntentsKeepAllMCPToolsRegardlessOfDeclaration() {
+        let reg = ToolRegistry([StubHostDeclaredTool(name: "bio-research__run_python", hostDeclaredReadOnly: false)])
+        for intent in [TaskBrief.Intent.build, .fleet, .desktop] {
+            let out = names(HeadlessAgentLoop.conversationalToolset(reg, intent: intent))
+            XCTAssertTrue(out.contains("bio-research__run_python"), "\(intent) retains effectful MCP tools")
+        }
+    }
+
+    func testCallTimeEffectContractHonorsHostDeclaration() {
+        // Site 3 of 3: the call-time effect contract (isTrustedReadOnlyCall) must agree with the
+        // registry filter, or the tool is visible but every call is "Policy denied" (the exact
+        // live failure this fix closes).
+        let reg = ToolRegistry([StubHostDeclaredTool(name: "bio-research__uniprot_entry", hostDeclaredReadOnly: true),
+                                StubHostDeclaredTool(name: "bio-research__run_python", hostDeclaredReadOnly: false)])
+        XCTAssertTrue(HeadlessAgentLoop.isTrustedReadOnlyCall(
+            registry: reg, tool: "bio-research__uniprot_entry", args: [:]),
+            "declared-readOnly MCP tool must pass the call-time read-only contract")
+        XCTAssertFalse(HeadlessAgentLoop.isTrustedReadOnlyCall(
+            registry: reg, tool: "bio-research__run_python", args: [:]),
+            "declared-effectful MCP tool must still be denied at call time")
+    }
 }
 
 private struct StubTool: AgentTool {
     let name: String
     var description: String { "test tool" }
+    var parameters: [ToolParameter] { [] }
+    func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
+        ToolResult(success: true, output: "ok")
+    }
+}
+
+/// Mirrors RemoteMCPTool's shape: a plain AgentTool carrying the owner's config declaration.
+private struct StubHostDeclaredTool: AgentTool, HostDeclaredEffectTool {
+    let name: String
+    let hostDeclaredReadOnly: Bool
+    var description: String { "test MCP tool" }
     var parameters: [ToolParameter] { [] }
     func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         ToolResult(success: true, output: "ok")

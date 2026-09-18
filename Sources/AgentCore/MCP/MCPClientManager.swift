@@ -113,7 +113,8 @@ public actor MCPClientManager {
                 let specs = try await connection.listTools()
                 for spec in specs {
                     wrappers.append(RemoteMCPTool(serverName: cfg.name, spec: spec, manager: self,
-                                                  computerUsePolicy: cfg.computerUsePolicy))
+                                                  computerUsePolicy: cfg.computerUsePolicy,
+                                                  hostDeclaredReadOnly: cfg.declaredReadOnlyTools.contains(spec.name)))
                 }
                 MCPLog.info("server '\(cfg.name)': discovered \(specs.count) tool(s)")
             } catch {

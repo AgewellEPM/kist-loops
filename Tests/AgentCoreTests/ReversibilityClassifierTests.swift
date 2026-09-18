@@ -225,4 +225,30 @@ final class ReversibilityClassifierTests: XCTestCase {
         XCTAssertEqual(assess("read_file", ["path": "a"]), .safe)
         XCTAssertEqual(assess("edit_file", ["path": "a.swift"]), .mutating)   // in-project, confined
     }
+
+    // MARK: owner-declared read-only MCP tools (bio-scientist audit fix, 2026-09-18)
+
+    func testHostDeclaredReadOnlyMCPToolIsSafeDespiteNonReadVerb() {
+        // The exact live failure: bio-research__uniprot_entry leaf first-token "uniprot" is not a read
+        // verb, so the name gate → .dangerous → approval → declined headless. The owner's toolEffects
+        // readOnly declaration must make it .safe.
+        XCTAssertEqual(
+            ReversibilityClassifier.assess(tool: "bio-research__uniprot_entry", args: [:],
+                                           projectRoot: "/tmp", hostDeclaredReadOnly: true),
+            .safe, "owner-declared readOnly overrides the name-based default-deny")
+        // Without the declaration it stays gated (default-deny preserved).
+        XCTAssertEqual(
+            ReversibilityClassifier.assess(tool: "bio-research__uniprot_entry", args: [:],
+                                           projectRoot: "/tmp", hostDeclaredReadOnly: false),
+            .dangerous, "undeclared bio tool still default-denied")
+    }
+
+    func testHostDeclaredFlagCannotWhitelistANonMCPMutator() {
+        // The override only applies inside the MCP branch — it must not make a real in-project
+        // mutator look safe (a stray declaration can't disarm the confined-tool switch).
+        XCTAssertEqual(
+            ReversibilityClassifier.assess(tool: "edit_file", args: ["path": "a.swift"],
+                                           projectRoot: "/tmp", hostDeclaredReadOnly: true),
+            .mutating, "non-MCP tools ignore the MCP-only owner declaration")
+    }
 }
