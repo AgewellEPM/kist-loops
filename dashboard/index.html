@@ -2,26 +2,32 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
 <title>Lois — the Jeeves system, online</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
 <header>
-  <h1>🧬 <span>lois</span> dashboard</h1>
-  <span class="sub">every sentence walks back to a receipt</span>
-  <select id="dbsel" title="minds — one floor DB each"></select>
-  <nav class="tabs">
-    <button class="tab active" id="tab-graph">Graph</button>
-    <button class="tab" id="tab-ledger">Ledger</button>
-    <button class="tab" id="tab-notebook">Notebook</button>
-    <button class="tab" id="tab-scientist">Scientist</button>
-    <button class="tab" id="tab-vision">Vision</button>
-    <button class="tab" id="tab-calendar">Calendar</button>
+  <div class="hzone brand">
+    <h1>🧬 <span>lois</span> dashboard</h1>
+    <span class="sub">every sentence walks back to a receipt</span>
+  </div>
+  <nav class="tabs hzone" role="tablist" aria-label="Workspace views">
+    <button class="tab active" id="tab-graph" role="tab" aria-selected="true">Graph</button>
+    <button class="tab" id="tab-ledger" role="tab" aria-selected="false">Ledger</button>
+    <button class="tab" id="tab-notebook" role="tab" aria-selected="false">Notebook</button>
+    <button class="tab" id="tab-scientist" role="tab" aria-selected="false">Scientist</button>
+    <button class="tab" id="tab-vision" role="tab" aria-selected="false">Vision</button>
+    <button class="tab" id="tab-calendar" role="tab" aria-selected="false">Calendar</button>
   </nav>
-  <input type="text" id="nodesearch" placeholder="find node… (e.g. P69905)" list="nodelist">
-  <datalist id="nodelist"></datalist>
-  <span class="sub" id="dbstat"></span>
+  <div class="hzone tools">
+    <select id="dbsel" title="minds — one floor DB each" aria-label="Active mind"></select>
+    <input type="text" id="nodesearch" placeholder="find node… (e.g. P69905)" list="nodelist" aria-label="Find a node">
+    <datalist id="nodelist"></datalist>
+    <span class="sub" id="dbstat" aria-live="polite"></span>
+  </div>
 </header>
 
 <!-- column 1: conversations (Jeeves Chats) -->
@@ -105,8 +111,8 @@
       <option value="rings">🎯 rings</option>
       <option value="flat">▦ classic 2D</option>
     </select>
-    <button class="btn small" id="gspin" title="auto-spin on/off">🌀</button>
-    <button class="btn small" id="gfit" title="fit to view (also dbl-click)">⤢</button>
+    <button class="tool" id="gspin" title="auto-spin on/off" aria-label="Toggle auto-spin">🌀</button>
+    <button class="tool" id="gfit" title="fit to view (also dbl-click)" aria-label="Fit graph to view">⤢</button>
   </div>
 </main>
 
@@ -179,29 +185,52 @@
     node or a tile card pops its inspection out.
   </div></div>
   <div id="toolrow">
-    <button class="tool" id="t-new" title="New conversation">➕</button>
-    <button class="tool" id="t-history" title="Conversation history">🕰</button>
-    <button class="tool" id="t-run" title="Run a research session (live in Notebook)">▶</button>
-    <button class="tool" id="t-report" title="Session report">📖</button>
-    <button class="tool" id="t-diag" title="Diagnostics — integrity invariants">🔧</button>
-    <button class="tool" id="t-teach" title="Teach — add a cited manual edge">✏️</button>
-    <button class="tool" id="t-hypo" title="Hypothesis — claim through the gate">🧪</button>
-    <button class="tool" id="t-doc" title="Document scan — find accessions in pasted text">📄</button>
-    <button class="tool" id="t-learn" title="Learnings — what the system has learned">🧠</button>
-    <button class="tool" id="t-rules" title="Rules — the floor's law">📜</button>
-    <button class="tool" id="t-sources" title="Sources — where the data came from">🌐</button>
-    <button class="tool" id="t-notebook" title="Notebook — live journal">📓</button>
-    <button class="tool" id="t-raw" title="Raw data of the last reply">&lt;/&gt;</button>
-    <button class="tool" id="t-rec" title="Export this conversation">⏺</button>
-    <button class="tool" id="t-focus" title="Focus mode — graph only">▯▯</button>
-    <button class="tool" id="t-theme" title="Toggle theme">🎨</button>
-    <button class="tool" id="t-find" title="Find a node">🔍</button>
+    <div class="tool-group" role="group" aria-label="Conversation">
+      <button class="tool" id="t-new" title="New conversation" aria-label="New conversation">➕</button>
+      <button class="tool" id="t-history" title="Conversation history" aria-label="Conversation history">🕰</button>
+      <button class="tool" id="t-rec" title="Export this conversation" aria-label="Export this conversation">⬇︎</button>
+    </div>
+    <span class="tool-sep" aria-hidden="true"></span>
+    <div class="tool-group" role="group" aria-label="Run and inspect">
+      <button class="tool" id="t-run" title="Run a research session (live in Notebook)" aria-label="Run a research session">▶</button>
+      <button class="tool" id="t-report" title="Session report" aria-label="Session report">📖</button>
+      <button class="tool" id="t-diag" title="Diagnostics — integrity invariants" aria-label="Diagnostics">🔧</button>
+      <button class="tool" id="t-raw" title="Raw data of the last reply" aria-label="Raw data of the last reply">&lt;/&gt;</button>
+    </div>
+    <span class="tool-sep" aria-hidden="true"></span>
+    <div class="tool-group" role="group" aria-label="Author">
+      <button class="tool" id="t-teach" title="Teach — add a cited manual edge" aria-label="Teach a cited edge">✏️</button>
+      <button class="tool" id="t-hypo" title="Hypothesis — claim through the gate" aria-label="Propose a hypothesis">🧪</button>
+      <button class="tool" id="t-doc" title="Document scan — find accessions in pasted text" aria-label="Scan a document for accessions">📄</button>
+    </div>
+    <span class="tool-sep" aria-hidden="true"></span>
+    <div class="tool-group" role="group" aria-label="Reference">
+      <button class="tool" id="t-learn" title="Learnings — what the system has learned" aria-label="Learnings">🧠</button>
+      <button class="tool" id="t-rules" title="Rules — the floor's law" aria-label="Rules">📜</button>
+      <button class="tool" id="t-sources" title="Sources — where the data came from" aria-label="Sources">🌐</button>
+      <button class="tool" id="t-notebook" title="Notebook — live journal" aria-label="Notebook">📓</button>
+    </div>
+    <span class="tool-sep" aria-hidden="true"></span>
+    <div class="tool-group" role="group" aria-label="View">
+      <button class="tool" id="t-focus" title="Focus mode — graph only" aria-label="Focus mode">▯▯</button>
+      <button class="tool" id="t-theme" title="Toggle theme" aria-label="Toggle light/dark theme">🎨</button>
+      <button class="tool" id="t-find" title="Find a node" aria-label="Find a node">🔍</button>
+    </div>
   </div>
   <div id="chatbar">
     <input type="text" id="cmsg" placeholder="Message Lois">
-    <button class="btn" id="csend">➤</button>
+    <button class="btn" id="csend" aria-label="Send message">➤</button>
   </div>
 </section>
+
+<!-- mobile: backdrop + bottom nav (shown only on narrow screens via CSS) -->
+<div id="mbackdrop" hidden></div>
+<nav id="mobilebar" aria-label="Mobile navigation">
+  <button class="mbtn" data-pane="chats" aria-label="Chats">💬<span>Chats</span></button>
+  <button class="mbtn" data-pane="peel" aria-label="PEEL tools">🧠<span>PEEL</span></button>
+  <button class="mbtn active" data-pane="stage" aria-label="Main stage">◈<span>Stage</span></button>
+  <button class="mbtn" data-pane="chat" aria-label="Chat with Lois">🗨<span>Chat</span></button>
+</nav>
 
 <!-- popout (Jeeves inspector) -->
 <div id="modal" style="display:none">
@@ -215,5 +244,6 @@
 <script src="/static/mri.js"></script>
 <script src="/static/calendar.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/mobilenav.js"></script>
 </body>
 </html>

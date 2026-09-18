@@ -76,9 +76,11 @@ function renderSources(data) {
 const TABS = ["graph", "ledger", "notebook", "scientist", "vision", "calendar"];
 function showTab(name) {
   for (const t of TABS) {
-    $("tab-" + t).classList.toggle("active", t === name);
+    const active = t === name;
+    $("tab-" + t).classList.toggle("active", active);
+    $("tab-" + t).setAttribute("aria-selected", active ? "true" : "false");
     $(t + "view").style.display =
-      t === name ? (t === "graph" ? "" : "block") : "none";
+      active ? (t === "graph" ? "" : "block") : "none";
   }
   if (name === "ledger") runLedger(true);
   if (name === "notebook") loadNotebook();
