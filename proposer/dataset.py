@@ -121,6 +121,15 @@ _CLAIM_TEMPLATES = [
     "Has {name} been structurally validated?",
 ]
 
+# Contrast pairs for the malformed-accession abstains: the same
+# "accession <id>" surface form with VALID curated accessions must stay a
+# claim, or the word "accession" itself becomes an abstain marker (observed
+# in the v2 run: false abstains on curated names and bare valid accessions).
+_ACCESSION_CLAIM_TEMPLATES = [
+    "Verify the structural consistency of accession {acc}.",
+    "Has accession {acc} been structurally validated?",
+]
+
 _EXTRACT_TEMPLATES = [
     "We have no evidence on {acc} yet — gather what's known.",
     "Pull the available evidence for {acc} into the floor.",
@@ -156,12 +165,14 @@ def generate_pairs(store: Store, *, seed: int = 20260917) -> list[dict]:
                     "SELECT DISTINCT subject FROM typed_relations "
                     "WHERE subject LIKE 'protein:%'").fetchall()}
 
-    # 1) claim pairs — names AND bare accessions.
+    # 1) claim pairs — names, bare accessions, and "accession <id>" phrasing.
     for name, acc in sorted(KNOWN_PROTEINS.items()):
+        expect = "an experimental structure and a prediction exist for the same accession"
         for tpl in _CLAIM_TEMPLATES:
-            expect = "an experimental structure and a prediction exist for the same accession"
             pairs.append((tpl.format(name=name), _claim(acc, expect)))
             pairs.append((tpl.format(name=acc), _claim(acc, expect)))
+        for tpl in _ACCESSION_CLAIM_TEMPLATES:
+            pairs.append((tpl.format(acc=acc), _claim(acc, expect)))
 
     # 2) extract pairs — accessions the floor does NOT hold yet (checked live
     #    against this store so the pair is witnessed-correct at build time).
@@ -207,8 +218,10 @@ def generate_pairs(store: Store, *, seed: int = 20260917) -> list[dict]:
         for tpl in _CLAIM_TEMPLATES[:3]:
             pairs.append((tpl.format(name=name),
                           _abstain(f"no verified UniProt accession is known for '{name}'")))
+    # Two templates, not three: the v2 run showed near-miss density bleeding
+    # into false abstains on the curated cousins themselves.
     for name in NEAR_MISS_NAMES:
-        for tpl in _CLAIM_TEMPLATES[:3]:
+        for tpl in _CLAIM_TEMPLATES[:2]:
             pairs.append((tpl.format(name=name),
                           _abstain(f"no verified UniProt accession is known for '{name}'; guessing a related protein's accession would be wrong")))
     for q in OFF_DOMAIN:

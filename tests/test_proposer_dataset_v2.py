@@ -33,7 +33,20 @@ def test_abstain_share_is_heavy_but_not_dominant(store):
     this bound's job at build)."""
     rows = generate_pairs(store, seed=1)
     share = sum(1 for r in rows if _kind(r) == "abstain") / len(rows)
-    assert 0.35 <= share <= 0.55, f"abstain share {share:.2f} out of band"
+    assert 0.30 <= share <= 0.50, f"abstain share {share:.2f} out of band"
+
+
+def test_accession_phrasing_has_claim_contrast_pairs(store):
+    """v2 lesson: malformed 'accession <id>' abstains with no valid-accession
+    counterpart taught 'accession' as an abstain marker (false abstains on
+    P69905 itself). Pin that every curated accession appears in a CLAIM with
+    that exact phrasing — per-accession assertion names the missing one."""
+    rows = generate_pairs(store, seed=1)
+    claim_users = [r["messages"][1]["content"]
+                   for r in rows if _kind(r) == "claim"]
+    for acc in sorted(set(KNOWN_PROTEINS.values())):
+        assert any(f"accession {acc}" in u for u in claim_users), \
+            f"no 'accession {acc}' claim contrast pair"
 
 
 def test_near_miss_names_are_not_curated():

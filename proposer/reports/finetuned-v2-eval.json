@@ -1,0 +1,18 @@
+{
+  "model": "floor-proposer-v2",
+  "n": 27,
+  "parse_rate": 0.963,
+  "kind_accuracy": 0.741,
+  "subject_accuracy": 0.818,
+  "abstain_recall": 0.4,
+  "false_abstains": 3,
+  "floor_admission_rate": 1.0,
+  "elapsed_s": 52.1,
+  "parse_failures": [
+    {
+      "prompt": "Measure the absorbance of well:D3 at 280 nm. (sample of cytochrome c)",
+      "error": "intent proposal requires predicted_outcome",
+      "reply": "{\"intent\": \"measure_sample\", \"kind\": \"intent\", \"params\": {\"target\": \"well:D3\", \"wavelength_nm\": 280}, \"subject\": \"P99999"
+    }
+  ]
+}
