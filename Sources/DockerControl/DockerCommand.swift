@@ -29,7 +29,7 @@ public enum DockerCommand {
         for (k, v) in spec.env.sorted(by: { $0.key < $1.key }) { argv += ["-e", "\(k)=\(v)"] }
         for p in spec.ports { argv += ["-p", "\(p.host):\(p.container)"] }
         for v in spec.volumes { argv += ["-v", "\(v.hostPath):\(v.containerPath)\(v.readOnly ? ":ro" : "")"] }
-        argv += [spec.image]
+        argv += ["--", spec.image]
         argv += command
         return argv
     }

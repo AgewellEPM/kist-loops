@@ -559,7 +559,7 @@ final class ToolsTests: XCTestCase {
         // Merged headless set: file/search/shell tools + notebook/jobs + ast-grep/git/symbols
         // + context/custom/research tools.
         XCTAssertEqual(names, [
-            "read_file", "write_file", "edit_file", "notebook_edit", "apply_patch",
+            "read_file", "read_files", "write_file", "edit_file", "notebook_edit", "apply_patch",
             "move_file", "make_dir", "list_files", "glob_files", "search_code",
             "ast_grep", "ast_grep_apply", "git", "symbols", "context_brain",
             "custom_tool", "research_run", "jeeves_research", "run_command", "job"
@@ -577,7 +577,7 @@ final class ToolsTests: XCTestCase {
 
     func testRegistry_jsonSchemaShape() {
         let json = ToolRegistry.headless().asJSON()
-        XCTAssertEqual(json.count, 20)   // R6: + jeeves_research
+        XCTAssertEqual(json.count, 21)   // Includes the bounded read_files observation tool.
         let first = json.first { ($0["function"] as? [String: Any])?["name"] as? String == "read_file" }
         XCTAssertNotNil(first)
         let fn = first!["function"] as! [String: Any]

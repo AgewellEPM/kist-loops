@@ -9,10 +9,8 @@ import Foundation
 /// this lease; tasks created by other leases stay invisible to it, so two hosts sharing one store
 /// cannot approve or roll back each other's work by accident.
 ///
-/// Task binding is optimistic at resolution time: a creating command's task is bound before the
-/// gateway admits it. A bound-but-never-created task grants nothing exploitable — every later
-/// command still crosses the full admission gates, and a task ID that was never created fails in
-/// the runtime, not in authority.
+/// A creating command may present its new task ID for that command only. The gateway binds it
+/// to the session after creation succeeds, so failed commands cannot alter session ownership.
 public enum SMLRuntimeLeaseRegistry {
     /// Operations whose command names a NEW task the lease should adopt.
     public static let taskCreatingOperations: Set<String> = [
@@ -41,10 +39,10 @@ public enum SMLRuntimeLeaseRegistry {
         /// adopt the command's own task; everything else is confined to already-bound tasks plus
         /// the synthetic runtime-metadata task.
         public func authorizedTasks(for command: SMLCommandEnvelope) -> Set<String> {
-            if SMLRuntimeLeaseRegistry.taskCreatingOperations.contains(command.op) {
-                boundTasks.insert(command.task)
-            }
             var tasks = boundTasks
+            if SMLRuntimeLeaseRegistry.taskCreatingOperations.contains(command.op) {
+                tasks.insert(command.task)
+            }
             tasks.insert(SMLRuntimeLeaseRegistry.runtimeMetadataTask)
             return tasks
         }

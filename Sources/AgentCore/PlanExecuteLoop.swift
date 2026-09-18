@@ -204,9 +204,13 @@ public struct PlanExecuteLoop: Sendable {
         // Add the CODER-bound `generate` tool so a step can produce content via the coder vendor
         // (the third teammate), metered + traced like the planner/critic. Built once; used for BOTH
         // the planner prompt and execution.
+        let downstream = (sink as? AgentHistoryEventSink)?.downstream ?? sink
+        let eventSink: RuntimeEventSink = context.agentMemory.map {
+            AgentHistoryEventSink(downstream: downstream, access: $0, health: AgentHistoryHealth()) as RuntimeEventSink
+        } ?? downstream
         self.tools = ToolRegistry(tools.all() + [GenerateTool(providers: providers, binding: roles.binding(for: .coder),
-                                                              recorder: recorder, budget: budget, sink: sink)])
-        self.context = context; self.sink = sink
+                                                              recorder: recorder, budget: budget, sink: eventSink)])
+        self.context = context; self.sink = eventSink
         self.interactor = interactor; self.requireApproval = requireApproval
         self.maxPlanRepairs = maxPlanRepairs; self.maxReplans = maxReplans; self.verifyGoal = verifyGoal
         self.launchMode = launchMode
@@ -226,6 +230,19 @@ public struct PlanExecuteLoop: Sendable {
     /// A role-bound completion that RECORDS a span + METERS tokens (estimate fallback when the
     /// provider omits usage). The single choke point for planner/critic model calls.
     private func meteredComplete(role: AgentRole, messages: [ChatMessage], settings: ModelSettings) async throws -> String {
+        if let access = context.agentMemory {
+            if let error = (sink as? AgentHistoryEventSink)?.health.error {
+                throw ToolError.execution("agent history durability failed: \(error)")
+            }
+            return try await access.withModelCall(role: role.rawValue, executionRoot: context.projectRoot,
+                                                 messages: messages, summarize: { $0 }) { supplied in
+                try await meteredCompleteCore(role: role, messages: supplied, settings: settings)
+            }
+        }
+        return try await meteredCompleteCore(role: role, messages: messages, settings: settings)
+    }
+
+    private func meteredCompleteCore(role: AgentRole, messages: [ChatMessage], settings: ModelSettings) async throws -> String {
         let binding = roles.binding(for: role)
         let started = Date()
         // Atomic reserve BEFORE the call (C2): under a shared fleet ledger, parallel workers can't both
@@ -311,6 +328,27 @@ public struct PlanExecuteLoop: Sendable {
     }
 
     public func run(goal: String, checkpointGoal: String? = nil) async -> PlanOutcome {
+        guard let access = context.agentMemory else { return await runWithLineage(goal: goal, checkpointGoal: checkpointGoal) }
+        do {
+            let identity = try access.identity(runID: "plan-mission-" + missionInstanceID.rawValue,
+                                               role: "plan-execute", executionRoot: context.projectRoot)
+            return try await AgentExecutionScope.$current.withValue(identity) {
+                try access.history.append(agent: identity, kind: "run_started", detail: checkpointGoal ?? goal)
+                let result = await runWithLineage(goal: goal, checkpointGoal: checkpointGoal)
+                try access.history.append(agent: identity, kind: "run_finished",
+                                           detail: "success=\(result.success); interrupted=\(result.interrupted)\n\(result.message)")
+                if let error = (sink as? AgentHistoryEventSink)?.health.error {
+                    throw ToolError.execution("agent history durability failed: \(error)")
+                }
+                return result
+            }
+        } catch {
+            return PlanOutcome(success: false, plan: nil, execution: nil,
+                               message: "shared plan-agent history failed: \(error)", replansUsed: 0)
+        }
+    }
+
+    private func runWithLineage(goal: String, checkpointGoal: String?) async -> PlanOutcome {
         let missionInstanceID = self.missionInstanceID.rawValue
         let runID = "plan-mission-" + missionInstanceID
         let checkpointGoal = checkpointGoal ?? goal

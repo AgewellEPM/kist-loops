@@ -42,6 +42,7 @@ public enum SMLWorkflowControlAction: String, Sendable, Codable, Equatable, Hash
     case approve
     case refuse
     case rollback
+    case reconcile
     case receipts
 
     var runtimeOperation: String {
@@ -52,6 +53,7 @@ public enum SMLWorkflowControlAction: String, Sendable, Codable, Equatable, Hash
         case .approve: return SMLRuntimeCommandOperation.taskApprove
         case .refuse: return SMLRuntimeCommandOperation.taskRefuse
         case .rollback: return SMLRuntimeCommandOperation.taskRollback
+        case .reconcile: return SMLRuntimeCommandOperation.taskReconcile
         case .receipts: return SMLRuntimeCommandOperation.receiptsList
         }
     }
@@ -132,6 +134,7 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
             .init(action: .approve, verb: "approve", summary: "Approve the task's current human gate", requiresTask: true, changesTaskState: true),
             .init(action: .refuse, verb: "refuse", summary: "Refuse the task's current human gate", requiresTask: true, changesTaskState: true),
             .init(action: .rollback, verb: "rollback", summary: "Request terminal operator rollback", requiresTask: true, changesTaskState: true),
+            .init(action: .reconcile, verb: "reconcile", summary: "Close an interrupted earlier-session dispatch as failed without replay", requiresTask: true, changesTaskState: true),
             .init(action: .receipts, verb: "receipts", summary: "List task receipts", requiresTask: true, changesTaskState: false),
         ]
         return SMLWorkflowSurface(
@@ -181,6 +184,7 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
             case .approve: return "approve TASK_ID {\"task_revision\":N}"
             case .refuse: return "refuse TASK_ID {\"task_revision\":N}"
             case .rollback: return "rollback TASK_ID {\"task_revision\":N}"
+            case .reconcile: return #"reconcile TASK_ID {"task_revision":N,"dispatch_id":"DISPATCH_ID","note":"Operator explanation"}"#
             case .receipts: return "receipts TASK_ID"
             }
         }
@@ -331,6 +335,13 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
                 verb: "approve",
                 line: #"approve TASK-ID {"task_revision":0}"#,
                 summary: "Approve the current gate with the latest task revision."
+            ))
+        }
+        if allowed.contains(.reconcile) {
+            examples.append(SMLWorkflowREPLExample(
+                verb: "reconcile",
+                line: #"reconcile TASK-ID {"task_revision":2,"dispatch_id":"DISPATCH-ID","note":"Stopped previous host; retiring interrupted task"}"#,
+                summary: "After restarting the host, retire an interrupted claim without replay."
             ))
         }
         if allowed.contains(.receipts) {
@@ -555,7 +566,7 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
     private func replAliases(for action: SMLWorkflowControlAction) -> [String] {
         switch action {
         case .start: return ["run"]
-        case .describe, .watch, .approve, .refuse, .rollback, .receipts:
+        case .describe, .watch, .approve, .refuse, .rollback, .reconcile, .receipts:
             return []
         }
     }
@@ -568,6 +579,7 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
         case .approve: return #"approve TASK_ID {"task_revision":N}"#
         case .refuse: return #"refuse TASK_ID {"task_revision":N}"#
         case .rollback: return #"rollback TASK_ID {"task_revision":N}"#
+        case .reconcile: return #"reconcile TASK_ID {"task_revision":N,"dispatch_id":"DISPATCH_ID","note":"Operator explanation"}"#
         case .receipts: return "receipts TASK_ID"
         }
     }
@@ -575,7 +587,7 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
     private func replJSONBodyKind(for action: SMLWorkflowControlAction) -> SMLWorkflowREPLJSONBodyKind {
         switch action {
         case .start: return .workflowInput
-        case .approve, .refuse, .rollback: return .expectedState
+        case .approve, .refuse, .rollback, .reconcile: return .expectedState
         case .describe, .watch, .receipts: return .none
         }
     }
@@ -584,6 +596,12 @@ public struct SMLWorkflowSurface: Sendable, Equatable {
         switch action {
         case .start:
             return inputs
+        case .reconcile:
+            return [
+                SMLWorkflowFieldDescriptor(SMLStateField(name: "task_revision", type: .integer, description: "Latest task revision returned by watch.")),
+                SMLWorkflowFieldDescriptor(SMLStateField(name: "dispatch_id", type: .string, description: "Exact interrupted dispatch ID returned by watch.")),
+                SMLWorkflowFieldDescriptor(SMLStateField(name: "note", type: .string, description: "Operator explanation; external outcome remains unknown.")),
+            ]
         case .approve, .refuse, .rollback:
             return [
                 SMLWorkflowFieldDescriptor(SMLStateField(
@@ -776,7 +794,7 @@ public struct SMLWorkflowCommandCompiler: Sendable {
         case .start:
             task = requestedTask ?? taskID()
             try surface.validateInitialState(initialState)
-        case .watch, .approve, .refuse, .rollback, .receipts:
+        case .watch, .approve, .refuse, .rollback, .reconcile, .receipts:
             guard let requestedTask else {
                 throw SMLWorkflowSurfaceError.taskRequired(action.rawValue)
             }
@@ -786,7 +804,7 @@ public struct SMLWorkflowCommandCompiler: Sendable {
               action == .describe || task != "runtime" else {
             throw SMLWorkflowSurfaceError.invalidTask(task)
         }
-        if [.approve, .refuse, .rollback].contains(action),
+        if [.approve, .refuse, .rollback, .reconcile].contains(action),
            !Self.validTaskRevision(expectedState["task_revision"]) {
             throw SMLWorkflowSurfaceError.taskRevisionRequired
         }
@@ -798,6 +816,20 @@ public struct SMLWorkflowCommandCompiler: Sendable {
         if action == .start, !initialState.isEmpty {
             arguments["initial_state"] = .object(initialState)
         }
+        var commandExpectedState = expectedState
+        if action == .reconcile {
+            guard case .string(let dispatchID)? = commandExpectedState.removeValue(forKey: "dispatch_id"),
+                  SMLValidationSupport.identifierIsValid(dispatchID),
+                  case .string(let rawNote)? = commandExpectedState.removeValue(forKey: "note") else {
+                throw SMLWorkflowSurfaceError.invalidEnvelope(["reconcile requires dispatch_id and an operator note"])
+            }
+            let note = rawNote.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !note.isEmpty, note.utf8.count <= 4_096 else {
+                throw SMLWorkflowSurfaceError.invalidEnvelope(["reconciliation note must contain 1...4096 UTF-8 bytes"])
+            }
+            arguments["dispatch_id"] = .string(dispatchID)
+            arguments["note"] = .string(note)
+        }
         let envelope = SMLCommandEnvelope(
             commandID: commandID(),
             actor: actor,
@@ -806,7 +838,7 @@ public struct SMLWorkflowCommandCompiler: Sendable {
             op: action.runtimeOperation,
             arguments: arguments,
             scope: scope,
-            expectedState: expectedState,
+            expectedState: commandExpectedState,
             issuedAtEpoch: issuedAtEpoch
         )
         let report = envelope.validate()
@@ -847,13 +879,19 @@ public struct SMLCommandGateway: Sendable {
         authority: SMLCommandAuthority,
         nowEpoch: Double
     ) async throws -> SMLCommandResult {
+        try SMLCommandAdmission.preflight(command, authority: authority, nowEpoch: nowEpoch)
+        try await runtime.preflightAdmission(command, authority: authority, nowEpoch: nowEpoch)
         let admitted = try await SMLCommandAdmission.admit(
             command,
             authority: authority,
             nowEpoch: nowEpoch,
             replayGuard: replayGuard
         )
-        return try await runtime.submit(admitted)
+        let result = try await runtime.submit(admitted)
+        if SMLRuntimeLeaseRegistry.taskCreatingOperations.contains(command.op) {
+            await authority.taskLease?.adopt(taskID: command.task)
+        }
+        return result
     }
 
     /// Capability dispatch has a distinct path because the opaque claim must be returned to the

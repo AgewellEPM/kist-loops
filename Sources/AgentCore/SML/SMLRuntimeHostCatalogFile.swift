@@ -42,84 +42,97 @@ public enum SMLRuntimeHostCatalogFile {
         }
     }
 
-    private struct FileFormat: Decodable {
-        let schemaVersion: Int
-        let observationSources: [String]?
-        let retrievalSources: [String]?
-        let toolCapabilities: [String]?
-        let modelPurposes: [String]?
-        let modelOutputSchemas: [String]?
-        let vCards: [String]?
-        let workflows: [String]?
-        let verifiers: [String]?
-        let rollbackProcedures: [String]?
-        let approvalAuthorities: [String]?
-
-        enum CodingKeys: String, CodingKey {
-            case schemaVersion = "schema_version"
-            case observationSources = "observation_sources"
-            case retrievalSources = "retrieval_sources"
-            case toolCapabilities = "tool_capabilities"
-            case modelPurposes = "model_purposes"
-            case modelOutputSchemas = "model_output_schemas"
-            case vCards = "v_cards"
-            case workflows
-            case verifiers
-            case rollbackProcedures = "rollback_procedures"
-            case approvalAuthorities = "approval_authorities"
-        }
-    }
-
     public static func defaultURL(projectRoot: String) -> URL {
         URL(fileURLWithPath: projectRoot).appendingPathComponent(relativePath)
     }
 
     public static func load(projectRoot: String) throws -> SMLExecutionAdmissionCatalog {
-        try load(fileURL: defaultURL(projectRoot: projectRoot))
+        let path = defaultURL(projectRoot: projectRoot).path
+        return try load(path: path) {
+            try SMLHostConfigurationFile.read(
+                projectRoot: projectRoot,
+                relativePath: relativePath
+            )
+        }
     }
 
     public static func load(fileURL: URL) throws -> SMLExecutionAdmissionCatalog {
         let path = fileURL.path
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw LoadError.missing(path: path)
-        }
+        return try load(path: path) { try SMLHostConfigurationFile.read(fileURL: fileURL) }
+    }
+
+    private static func load(
+        path: String,
+        read: () throws -> Data
+    ) throws -> SMLExecutionAdmissionCatalog {
         let data: Data
         do {
-            data = try Data(contentsOf: fileURL)
+            data = try read()
+        } catch SMLHostConfigurationFile.ReadError.missing {
+            throw LoadError.missing(path: path)
         } catch {
             throw LoadError.unreadable(path: path, reason: String(describing: error))
         }
-        let decoded: FileFormat
+
         do {
-            decoded = try JSONDecoder().decode(FileFormat.self, from: data)
+            let root = try SMLHostConfigurationFile.decodeRoot(from: data)
+            let fields: Set<String> = [
+                "schema_version", "observation_sources", "retrieval_sources",
+                "tool_capabilities", "model_purposes", "model_output_schemas", "v_cards",
+                "workflows", "verifiers", "rollback_procedures", "approval_authorities",
+            ]
+            try SMLHostConfigurationFile.requireOnlyKeys(root, allowed: fields, path: "catalog")
+            let version = try SMLHostConfigurationFile.requiredInteger(
+                root["schema_version"], path: "catalog.schema_version")
+            guard version == schemaVersion else {
+                throw LoadError.unsupportedSchemaVersion(version)
+            }
+
+            var totalEntries = 0
+            func entries(_ field: String) throws -> Set<String> {
+                guard let value = root[field] else { return [] }
+                let values = try entrySet(field, value)
+                totalEntries += values.count
+                guard totalEntries <= 4_096 else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "catalog exceeds 4096 total admission entries")
+                }
+                return values
+            }
+
+            return SMLExecutionAdmissionCatalog(
+                observationSources: try entries("observation_sources"),
+                retrievalSources: try entries("retrieval_sources"),
+                toolCapabilities: try entries("tool_capabilities"),
+                modelPurposes: try entries("model_purposes"),
+                modelOutputSchemas: try entries("model_output_schemas"),
+                vCards: try entries("v_cards"),
+                workflows: try entries("workflows"),
+                verifiers: try entries("verifiers"),
+                rollbackProcedures: try entries("rollback_procedures"),
+                approvalAuthorities: try entries("approval_authorities")
+            )
+        } catch let error as LoadError {
+            throw error
         } catch {
             throw LoadError.malformed(path: path, reason: String(describing: error))
         }
-        guard decoded.schemaVersion == schemaVersion else {
-            throw LoadError.unsupportedSchemaVersion(decoded.schemaVersion)
-        }
-        return SMLExecutionAdmissionCatalog(
-            observationSources: try entrySet("observation_sources", decoded.observationSources),
-            retrievalSources: try entrySet("retrieval_sources", decoded.retrievalSources),
-            toolCapabilities: try entrySet("tool_capabilities", decoded.toolCapabilities),
-            modelPurposes: try entrySet("model_purposes", decoded.modelPurposes),
-            modelOutputSchemas: try entrySet("model_output_schemas", decoded.modelOutputSchemas),
-            vCards: try entrySet("v_cards", decoded.vCards),
-            workflows: try entrySet("workflows", decoded.workflows),
-            verifiers: try entrySet("verifiers", decoded.verifiers),
-            rollbackProcedures: try entrySet("rollback_procedures", decoded.rollbackProcedures),
-            approvalAuthorities: try entrySet("approval_authorities", decoded.approvalAuthorities)
-        )
     }
 
-    private static func entrySet(_ field: String, _ values: [String]?) throws -> Set<String> {
-        var out: Set<String> = []
-        for value in values ?? [] {
-            guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw LoadError.invalidEntry(field: field, value: value)
+    private static func entrySet(_ field: String, _ value: SMLValue) throws -> Set<String> {
+        let values = try SMLHostConfigurationFile.stringArray(
+            value,
+            path: "catalog.\(field)"
+        ) { entry, path in
+            do {
+                _ = try SMLHostConfigurationFile.reference(entry, path: path)
+            } catch {
+                if entry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw LoadError.invalidEntry(field: field, value: entry)
+                }
+                throw error
             }
-            out.insert(value)
         }
-        return out
+        return Set(values)
     }
 }

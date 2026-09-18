@@ -1,0 +1,139 @@
+{
+  "cycles": [
+    {
+      "experiment_id": "exp-ab7ec005ab17",
+      "selection": {
+        "variable": "uniprot:P69905:sequence_length",
+        "prediction_ids": [
+          "prd-0ee438b9869e",
+          "prd-868f90b5668e"
+        ],
+        "hypothesis_ids": [
+          "hyp-4564009eb838",
+          "hyp-a89718234006"
+        ],
+        "discrimination": 2,
+        "prior_receipts": 0
+      },
+      "observations": {
+        "uniprot:P69905:sequence_length": 142
+      },
+      "verdicts": [
+        {
+          "id": "vrd-20491cdb5fe0",
+          "outcome": "REFUTED",
+          "predicted": 141,
+          "actual": 142,
+          "error": 1.0
+        },
+        {
+          "id": "vrd-b690ae1d4395",
+          "outcome": "PASSED",
+          "predicted": 142,
+          "actual": 142,
+          "error": 0.0
+        }
+      ],
+      "states": {
+        "hyp-4564009eb838": "REJECTED",
+        "hyp-a89718234006": "SUPPORTED"
+      },
+      "generated_hypotheses": [
+        {
+          "hypothesis_id": "hyp-895f8d914db8",
+          "blamed_assumption": "asm-2ca9174ff637",
+          "source_hypothesis": "hyp-4564009eb838"
+        }
+      ],
+      "knowledge": {
+        "experiment_id": "exp-ab7ec005ab17",
+        "credited": true,
+        "reason": "kn-v1: a refutation across 2 hypothesis(es)"
+      }
+    },
+    {
+      "experiment_id": "exp-0d05b55173a1",
+      "selection": {
+        "variable": "uniprot:P69905:initiator_met_removed",
+        "prediction_ids": [
+          "prd-011b26b7954e",
+          "prd-f0d3c4ca7497"
+        ],
+        "hypothesis_ids": [
+          "hyp-895f8d914db8",
+          "hyp-d0cc1de9da1e"
+        ],
+        "discrimination": 2,
+        "prior_receipts": 0
+      },
+      "observations": {
+        "uniprot:P69905:initiator_met_removed": true
+      },
+      "verdicts": [
+        {
+          "id": "vrd-8315ddc3266f",
+          "outcome": "PASSED",
+          "predicted": true,
+          "actual": true,
+          "error": null
+        },
+        {
+          "id": "vrd-72baf892d011",
+          "outcome": "REFUTED",
+          "predicted": false,
+          "actual": true,
+          "error": "mismatch"
+        }
+      ],
+      "states": {
+        "hyp-895f8d914db8": "SUPPORTED",
+        "hyp-d0cc1de9da1e": "REJECTED"
+      },
+      "generated_hypotheses": [
+        {
+          "hypothesis_id": "hyp-f6065d1550c1",
+          "blamed_assumption": "asm-279c68ac2894",
+          "source_hypothesis": "hyp-d0cc1de9da1e"
+        }
+      ],
+      "knowledge": {
+        "experiment_id": "exp-0d05b55173a1",
+        "credited": true,
+        "reason": "kn-v1: a refutation across 2 hypothesis(es)"
+      }
+    }
+  ],
+  "head_sha": "bffb0f4c29d3eca920ed67d43350f3616452bd73314000f66770e5144ea97f20",
+  "hypotheses": {
+    "hyp-4564009eb838": {
+      "state": "REJECTED",
+      "confidence": 0.05,
+      "statement": "P69905 sequence length is 141",
+      "origin": "operator"
+    },
+    "hyp-a89718234006": {
+      "state": "SUPPORTED",
+      "confidence": 0.666667,
+      "statement": "P69905 sequence length is 142",
+      "origin": "operator"
+    },
+    "hyp-895f8d914db8": {
+      "state": "SUPPORTED",
+      "confidence": 0.666667,
+      "statement": "Assumption is false: UniProt sequence length excludes the initiator methionine",
+      "origin": "generator:hyp-4564009eb838"
+    },
+    "hyp-d0cc1de9da1e": {
+      "state": "REJECTED",
+      "confidence": 0.05,
+      "statement": "the initiator methionine of P69905 is retained in the mature protein",
+      "origin": "operator"
+    },
+    "hyp-f6065d1550c1": {
+      "state": "PROPOSED",
+      "confidence": 0.5,
+      "statement": "Assumption is false: no post-translational Met removal on hemoglobin alpha",
+      "origin": "generator:hyp-d0cc1de9da1e"
+    }
+  }
+}

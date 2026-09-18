@@ -2,6 +2,40 @@ import XCTest
 @testable import AgentCore
 
 final class ProviderRetryTests: XCTestCase {
+    func testFallbackFailureNamesTheActualProviderAndPreservesFaultClassification() async throws {
+        for mode in 0..<3 {
+            let registry = ProviderRegistry(providers: [
+                FlakyProvider(id: "openai", attempts: AttemptCounter(), failure: .rateLimited, failAttempts: 99),
+                FlakyProvider(id: "ollama", attempts: AttemptCounter(),
+                    failure: .http(status: 404, body: "model missing"), failAttempts: 99)
+            ], fallbackProviderIds: ["openai": ["ollama"]], retryDelaysNanoseconds: [])
+            let messages = [ChatMessage(role: .user, content: "test")]
+            do {
+                if mode == 0 {
+                    _ = try await registry.complete(providerId: "openai", messages: messages,
+                        routePolicy: ProviderRoutePolicy(allowFallback: true, allowModelResolution: false,
+                                                         allowModelDiscovery: false))
+                } else {
+                    let policy = ProviderRoutePolicy(allowFallback: true, allowModelResolution: false,
+                                                     allowModelDiscovery: false)
+                    let stream = mode == 1
+                        ? try await registry.stream(providerId: "openai", model: nil, messages: messages,
+                            settings: ModelSettings(), routePolicy: policy)
+                        : try await registry.streamTools(providerId: "openai", model: nil, messages: messages,
+                            settings: ModelSettings(), tools: [], routePolicy: policy)
+                    _ = try await stream.collectText()
+                }
+                XCTFail("expected fallback failure")
+            } catch let error as ProviderRouteFailure {
+                XCTAssertEqual(error.provider, "ollama")
+                XCTAssertEqual(error.model, "f1")
+                XCTAssertEqual(error.requestedProvider, "openai")
+                XCTAssertFalse(ProviderFault.isProviderFault(error))
+                XCTAssertTrue(error.description.contains("provider 'ollama'"))
+            } catch { XCTFail("missing actual route: \(error)") }
+        }
+    }
+
     func testRetriesRetryableFailureThrownDuringStreamConsumption() async throws {
         let attempts = AttemptCounter()
         let registry = ProviderRegistry(

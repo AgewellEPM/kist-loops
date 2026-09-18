@@ -270,7 +270,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
             static func modelSubstitutionReplacement() {
                 _ = providerModels[candidate.providerId.lowercased()] == nil
             }
-            static func looksLikeHardSafetyStop() {}
+            static func looksLikeRefusalOrPermissionStop() {}
         }
         """, to: root + "/Sources/Kist/KistREPL+ModelSubstitution.swift")
         try write("""
@@ -634,7 +634,11 @@ final class OrganizationalLearningStoreTests: XCTestCase {
         }
         func testModelSubstitutionFallsBackToPriorityProviderWhenRolesDoNotHelp() {
             XCTAssertEqual("gemini", "gemini")
-            XCTAssertEqual("model refusal/non-cooperation", "model refusal/non-cooperation")
+            XCTAssertEqual("provider/protocol failure", "provider/protocol failure")
+        }
+        func testRefusalAndPermissionStopsDoNotSubstituteAcrossTextOneShotOrVisionLanes() {
+            XCTAssertTrue("permission denied oneShotSubstitution mediaSubstitutionDecision".contains("permission denied"))
+            XCTAssertNil(Optional<String>.none)
         }
         func testModelSubstitutionFallsBackOnTransientProviderFailure() {
             XCTAssertTrue("rate-limited".contains("rate"))

@@ -1,0 +1,41 @@
+[project]
+name = "bio-mcp"
+version = "0.1.0"
+description = "Typed bio-science research MCP server: grounded literature retrieval, structured bio data access, sandboxed bioinformatics compute, citation-pinned results"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+]
+# Installed into the SAME venv so run_python scripts can use them.
+compute = [
+    "biopython>=1.83",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    "numpy>=1.26",
+    "rdkit>=2024.3",  # cheminformatics: SMILES/mol parsing, descriptors, fingerprints
+]
+
+[project.scripts]
+bio-mcp = "bio_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bio_mcp*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "live: hits real public APIs (deselected by default; run with -m live)",
+]
+addopts = "-m 'not live'"

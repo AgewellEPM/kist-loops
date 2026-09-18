@@ -59,7 +59,7 @@ public struct EvolutionAutonomyReadiness: Sendable, Equatable {
 
 public enum EvolutionAutonomyReadinessAssessment {
     /// Honest status of the checked-in runtime. Pure contracts are not live authorities: the paired
-    /// fitness evaluator still lacks a host-owned oracle runner; no external CAS witness or witnessed
+    /// fitness referee is bound into benchmark authority, but lacks private-suite execution; no external CAS witness or witnessed
     /// budget ledger is configured; identity-distinct completion receipts are not yet canonicalized;
     /// and the current process runner is advisory rather than hard containment.
     public static var current: EvolutionAutonomyReadiness {
@@ -68,7 +68,7 @@ public enum EvolutionAutonomyReadinessAssessment {
             .init(
                 gate: .parentRelativeCapabilityFitness,
                 ready: false,
-                reason: "paired held-out contract exists, but no host-owned oracle runner can mint fitness"),
+                reason: EvolutionHeldOutOracle.unavailableReason),
             .init(
                 gate: .externalRollbackWitness,
                 ready: false,

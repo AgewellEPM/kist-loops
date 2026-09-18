@@ -174,6 +174,69 @@ public final class ConfinedRoot: Sendable {
         return data
     }
 
+    /// Read a bounded secret/configuration file through the confined descriptor walk and require
+    /// that it is private to the current effective user. This is intentionally stricter than
+    /// `readStableData`: every ancestor is still opened with `O_NOFOLLOW`, while the leaf must be
+    /// one regular link owned by this process with exactly the requested permission bits.
+    public func readStableOwnerOnlyData(
+        _ path: String,
+        maxBytes: Int,
+        permissions: UInt16 = 0o600
+    ) throws -> Data {
+        guard maxBytes >= 0, maxBytes < Int.max, permissions <= 0o777 else {
+            throw ToolError.execution("invalid private-file constraint for \(path)")
+        }
+        let comps = try relativeComponents(path)
+        let (parent, leaf) = try openParentDir(comps, createIntermediates: false)
+        defer { close(parent) }
+        guard let leaf else { throw ToolError.notFound(path) }
+        let fd = openat(parent, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { throw Self.openError(path: path, root: rootPath) }
+        defer { close(fd) }
+
+        var before = stat()
+        guard fstat(fd, &before) == 0 else {
+            throw ToolError.execution("cannot stat private file \(path): \(Self.strerr())")
+        }
+        guard Self.isOwnerOnlyRegular(before, permissions: permissions),
+              before.st_size >= 0, before.st_size <= maxBytes else {
+            throw ToolError.execution(
+                "not an owner-only \(String(format: "%03o", permissions)) regular file: \(path)")
+        }
+
+        var data = Data()
+        data.reserveCapacity(min(Int(before.st_size), maxBytes))
+        var buffer = [UInt8](repeating: 0, count: min(64 * 1_024, maxBytes + 1))
+        while true {
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                while true {
+                    let value = read(fd, raw.baseAddress, raw.count)
+                    if value < 0 && errno == EINTR { continue }
+                    return value
+                }
+            }
+            guard count >= 0 else {
+                throw ToolError.execution("cannot read private file \(path): \(Self.strerr())")
+            }
+            if count == 0 { break }
+            data.append(contentsOf: buffer.prefix(count))
+            guard data.count <= maxBytes else {
+                throw ToolError.execution("file exceeds \(maxBytes) bytes: \(path)")
+            }
+        }
+
+        var after = stat()
+        guard fstat(fd, &after) == 0,
+              Self.sameStableFile(before, after),
+              Self.isOwnerOnlyRegular(after, permissions: permissions),
+              before.st_uid == after.st_uid,
+              before.st_mode == after.st_mode,
+              data.count == Int(after.st_size) else {
+            throw ToolError.execution("private file changed while being read: \(path)")
+        }
+        return data
+    }
+
     /// Read at most `maxBytes` from a confined regular file without following symlinks. Unlike
     /// `readData(_:maxBytes:)`, this is a deliberate prefix capture: oversized files are returned
     /// with `truncated == true` instead of being rejected. The extra byte is read from the same
@@ -344,6 +407,78 @@ public final class ConfinedRoot: Sendable {
         guard Self.sync(parent) else {
             throw ToolError.execution("write directory fsync failed for \(path): \(Self.strerr())")
         }
+    }
+
+    /// Durable create-only publication for generated configuration. The target is never replaced:
+    /// an existing byte-identical regular file is accepted for idempotency, while any different,
+    /// symlinked, multiply-linked, or concurrently changed target fails closed.
+    ///
+    /// - Returns: `true` when this call created the file, `false` when an identical file existed.
+    @discardableResult
+    public func createDataIfMissing(
+        _ path: String,
+        _ data: Data,
+        createParents: Bool
+    ) throws -> Bool {
+        try requireWritable("create", path)
+        let comps = try relativeComponents(path)
+        guard !comps.isEmpty else { throw ToolError.execution("cannot create the root directory") }
+        let (parent, leafOpt) = try openParentDir(comps, createIntermediates: createParents)
+        defer { close(parent) }
+        guard let leaf = leafOpt else { throw ToolError.execution("invalid create path: \(path)") }
+
+        // Stage under an unpredictable private name. The public leaf never exposes partial bytes;
+        // linkat below is the atomic, no-replace publication operation on Darwin and Linux.
+        let temporary = ".agentcore-create-\(UUID().uuidString)"
+        let fd = openat(
+            parent, temporary,
+            O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            mode_t(0o600)
+        )
+        guard fd >= 0 else {
+            throw ToolError.execution("cannot stage create for \(path): \(Self.strerr())")
+        }
+        defer {
+            close(fd)
+            _ = unlinkat(parent, temporary, 0)
+        }
+        try Self.writeAll(data, to: fd, path: path)
+        guard fchmod(fd, mode_t(0o600)) == 0, Self.sync(fd) else {
+            throw ToolError.execution("cannot fsync staged create for \(path): \(Self.strerr())")
+        }
+        var stagedStatus = stat()
+        guard fstat(fd, &stagedStatus) == 0,
+              Self.isOwnerOnlyRegular(stagedStatus, permissions: 0o600),
+              Int(stagedStatus.st_size) == data.count else {
+            throw ToolError.execution("staged create changed before publication: \(path)")
+        }
+        let expectedDigest = Data(SHA256.hash(data: data))
+
+        guard linkat(parent, temporary, parent, leaf, 0) == 0 else {
+            let code = errno
+            guard code == EEXIST else {
+                throw ToolError.execution(
+                    "cannot publish create for \(path): \(Self.strerr(code))")
+            }
+            let existing = try Self.hashRegularLeaf(
+                parent: parent, leaf: leaf, path: path, maximumBytes: data.count)
+            guard Self.isOwnerOnlyRegular(existing.status, permissions: 0o600),
+                  Int(existing.status.st_size) == data.count,
+                  existing.digest == expectedDigest else {
+                throw ToolError.execution("create refused: target already exists with different bytes: \(path)")
+            }
+            return false
+        }
+        guard unlinkat(parent, temporary, 0) == 0, Self.sync(parent) else {
+            throw ToolError.execution("cannot persist created file \(path): \(Self.strerr())")
+        }
+        let published = try Self.hashRegularLeaf(parent: parent, leaf: leaf, path: path)
+        guard Self.isOwnerOnlyRegular(published.status, permissions: 0o600),
+              Self.sameIdentity(stagedStatus, published.status),
+              published.digest == expectedDigest else {
+            throw ToolError.execution("created file changed during publication: \(path)")
+        }
+        return true
     }
 
     /// Lease-bound compare-and-swap publication for verified artifacts. The target is read and
@@ -725,6 +860,28 @@ public final class ConfinedRoot: Sendable {
         }
     }
 
+    /// Pin a private runtime directory with the same no-follow walk as tool I/O. The caller owns
+    /// the returned fd and must close it. Used by checkpoint stores rooted in untrusted projects.
+    func openPrivateDirectoryDescriptor(_ path: String, create: Bool) throws -> Int32 {
+        if create { try requireWritable("create private runtime directory", path) }
+        let components = try relativeComponents(path)
+        let (parent, leaf) = try openParentDir(components, createIntermediates: create)
+        defer { close(parent) }
+        guard let leaf else { throw ToolError.execution("runtime directory must be below the confinement root") }
+        if create, mkdirat(parent, leaf, 0o700) != 0, errno != EEXIST {
+            throw Self.openError(path: path, root: rootPath)
+        }
+        let fd = openat(parent, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw Self.openError(path: path, root: rootPath) }
+        var status = stat()
+        guard fstat(fd, &status) == 0, status.st_uid == geteuid(),
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), status.st_mode & 0o022 == 0,
+              (!create || fchmod(fd, 0o700) == 0) else {
+            close(fd); throw ToolError.execution("unsafe private runtime directory: \(path)")
+        }
+        return fd
+    }
+
     /// (exists, isDir) via `fstatat` with `AT_SYMLINK_NOFOLLOW` — a symlinked leaf reports
     /// as itself (and isDir=false), never as its target.
     public func fileType(_ path: String) throws -> (exists: Bool, isDir: Bool) {
@@ -946,6 +1103,13 @@ public final class ConfinedRoot: Sendable {
             && changedNanos(lhs) == changedNanos(rhs)
     }
 
+    private static func isOwnerOnlyRegular(_ status: stat, permissions: UInt16) -> Bool {
+        status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+            && status.st_uid == geteuid()
+            && status.st_nlink == 1
+            && status.st_mode & mode_t(0o777) == mode_t(permissions)
+    }
+
     private static func sameIdentity(_ lhs: stat, _ rhs: stat) -> Bool {
         lhs.st_dev == rhs.st_dev
             && lhs.st_ino == rhs.st_ino
@@ -953,8 +1117,12 @@ public final class ConfinedRoot: Sendable {
             && rhs.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
     }
 
-    private static func hashRegularLeaf(parent: Int32, leaf: String,
-                                        path: String) throws -> (digest: Data, status: stat) {
+    private static func hashRegularLeaf(
+        parent: Int32,
+        leaf: String,
+        path: String,
+        maximumBytes: Int? = nil
+    ) throws -> (digest: Data, status: stat) {
         let fd = openat(parent, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         guard fd >= 0 else { throw openError(path: path, root: "confined root") }
         defer { close(fd) }
@@ -968,6 +1136,13 @@ public final class ConfinedRoot: Sendable {
         }
         guard before.st_nlink == 1 else {
             throw ToolError.execution("multiply-linked file refused: \(path)")
+        }
+        if let maximumBytes {
+            guard maximumBytes >= 0,
+                  before.st_size >= 0,
+                  before.st_size <= maximumBytes else {
+                throw ToolError.execution("file exceeds \(maximumBytes) bytes: \(path)")
+            }
         }
 
         var hasher = SHA256()

@@ -24,6 +24,16 @@ enum SMLWorkflowRuntimeOpenAPIGenerator {
                     ]),
                 ]),
             ]),
+            "SMLReconciliation": .object([
+                "type": .string("object"),
+                "additionalProperties": .bool(false),
+                "required": .array([.string("task_revision"), .string("dispatch_id"), .string("note")]),
+                "properties": .object([
+                    "task_revision": .object(["type": .string("integer"), "minimum": .number(0)]),
+                    "dispatch_id": .object(["type": .string("string"), "minLength": .number(1)]),
+                    "note": .object(["type": .string("string"), "minLength": .number(1), "maxLength": .number(4096)]),
+                ]),
+            ]),
             "SMLRuntimeMetadata": .object([
                 "type": .array([.string("object"), .string("array")]),
                 "additionalProperties": .bool(true),
@@ -299,7 +309,7 @@ enum SMLWorkflowRuntimeOpenAPIGenerator {
             ])
         case .expectedState:
             var jsonContent: SMLObject = [
-                "schema": .object(reference("SMLExpectedState")),
+                "schema": .object(reference(endpoint.action == .reconcile ? "SMLReconciliation" : "SMLExpectedState")),
             ]
             if let examples = requestBodyExamples(endpoint) {
                 jsonContent["examples"] = .object(examples)

@@ -54,6 +54,8 @@ extension KistREPL {
                             ask researcher/architect/coder/critic/UX/memory minds, save a kanban board,
                             and optionally hand the builder brief to plan-execute  [alias /consult]
           /research <g>     gather an evidence dossier, run council over it, and seed the task board
+          lois [g|off]      wake word (no slash): activate Peel — research must pass the symbolic
+                            PEEL proof gate (fail-closed); "lois <g>" researches now; "lois off" releases
           /competitive <t>  deep R&D cross-compare OUR project vs a competitor/product/URL  [alias /vs]
           /chain [list|run <name>]
                             automation center — opens a visual workflow builder (trigger→steps);

@@ -74,6 +74,32 @@ public enum SMLCapabilityDriverSupport {
     }
 }
 
+extension SMLCapabilityRouter {
+    /// A synthetic request for LAUNCH-TIME route probing only: hosts verify every admitted
+    /// catalog reference resolves to at most one driver before any task can run. The request
+    /// never reaches a driver's execute path — `driverID(for:)` is pure route selection.
+    public static func probeRequest(
+        operation: SMLInstructionOperation,
+        reference: String
+    ) -> SMLCapabilityRequest {
+        SMLCapabilityRequest(
+            taskID: "PROBE",
+            role: "probe-role",
+            workflowID: "probe.workflow",
+            workflowVersion: "0.0.0",
+            taskRevision: 0,
+            instructionID: "probe",
+            operation: operation,
+            reference: reference,
+            arguments: [:],
+            scope: [:],
+            expectedState: [:],
+            state: [:],
+            stateDigest: String(repeating: "0", count: 64)
+        )
+    }
+}
+
 public enum SMLCapabilityDriverConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidOutputField(instructionID: String)
     case unknownTool(capability: String)

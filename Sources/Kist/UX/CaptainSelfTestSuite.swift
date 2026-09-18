@@ -423,7 +423,7 @@ struct CaptainSelfTestSuite: Sendable {
             "modelSubstitutionDecision",
             "trajectorySafeToReplayForModelSubstitution",
             "modelSubstitutionReplacement",
-            "looksLikeHardSafetyStop",
+            "looksLikeRefusalOrPermissionStop",
             "providerModels[candidate.providerId.lowercased()] == nil"
         ]
         let sourceTextMarkers = [
@@ -439,7 +439,9 @@ struct CaptainSelfTestSuite: Sendable {
             ("testModelSubstitutionChoosesReadyRoleBackupForMalformedFailure",
              ["deepseek-v4-pro", "provider/protocol failure"]),
             ("testModelSubstitutionFallsBackToPriorityProviderWhenRolesDoNotHelp",
-             ["gemini", "model refusal/non-cooperation"]),
+             ["gemini", "provider/protocol failure"]),
+            ("testRefusalAndPermissionStopsDoNotSubstituteAcrossTextOneShotOrVisionLanes",
+             ["permission denied", "oneShotSubstitution", "mediaSubstitutionDecision", "XCTAssertNil"]),
             ("testModelSubstitutionFallsBackOnTransientProviderFailure",
              ["rate-limited", "provider/transient failure"]),
             ("testModelSubstitutionFallsBackOnProviderConnectivityFailure",
@@ -472,7 +474,7 @@ struct CaptainSelfTestSuite: Sendable {
         return [CaptainSelfTestCheck(title: "Model substitution regression coverage",
                                      status: issues.isEmpty ? .pass : .fail,
                                      detail: issues.isEmpty
-                                        ? "Model substitution failover is source-pinned and covered for malformed failures, refusal fallback, replay safety, catalog readiness, and hard safety stops."
+                                        ? "Model substitution failover is source-pinned and covered for malformed failures, refusal and permission stops, replay safety, and catalog readiness."
                                         : "Coverage issue(s): \(issues.joined(separator: ", ")).",
                                      fix: issues.isEmpty
                                         ? "No action needed."

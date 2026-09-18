@@ -1,4 +1,5 @@
 import Foundation
+import AgentCore
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -84,22 +85,32 @@ public struct DeepSeekReviewer: Reviewer {
 /// Codex reviewer — shells to the local `codex` CLI in non-interactive mode.
 public struct CodexReviewer: Reviewer {
     public let name = "codex"
-    public init() {}
+    private let executable: String
+    private let arguments: [String]
+    private let timeoutSeconds: Int
+    public init() {
+        self.init(executable: "/usr/bin/env", arguments: ["codex", "exec", "--skip-git-repo-check"], timeoutSeconds: 300)
+    }
+
+    init(executable: String, arguments: [String], timeoutSeconds: Int) {
+        self.executable = executable
+        self.arguments = arguments
+        self.timeoutSeconds = timeoutSeconds
+    }
 
     public func review(diff: String) async throws -> String {
         let prompt = TagTeam.reviewPrompt + "\n\nDIFF:\n" + diff
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["codex", "exec", "--skip-git-repo-check", prompt]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = Pipe()
-        do { try p.run() } catch { throw ReviewerError.tool("could not launch codex: \(error.localizedDescription)") }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        let out = String(data: data, encoding: .utf8) ?? ""
-        guard p.terminationStatus == 0 else { throw ReviewerError.tool("codex exited \(p.terminationStatus)") }
-        return out
+        let result = await BoundedProcessRunner.run(
+            executable: executable, arguments: arguments + [prompt],
+            cwd: FileManager.default.currentDirectoryPath,
+            environment: ProcessInfo.processInfo.environment,
+            timeoutSeconds: timeoutSeconds, maximumOutputBytes: 1_048_576
+        )
+        if result.cancelled { throw CancellationError() }
+        guard result.succeeded else {
+            throw ReviewerError.tool("codex review did not complete (exit \(result.exitCode), timeout \(result.timedOut), output truncated \(result.outputTruncated))")
+        }
+        return result.stdout
     }
 }
 

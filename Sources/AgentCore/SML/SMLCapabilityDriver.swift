@@ -558,8 +558,12 @@ public struct SMLCapabilityCoordinator: Sendable {
         self.clock = clock
     }
 
-    public func executeNext(taskID: String) async throws -> SMLCommandResult {
+    public func executeNext(taskID: String, expectedTaskRevision: Int? = nil) async throws -> SMLCommandResult {
+        try Task.checkCancellation()
         let request = try await runtime.pendingCapability(taskID: taskID)
+        if let expectedTaskRevision, request.taskRevision != expectedTaskRevision {
+            throw SMLRuntimeError.expectedStateMismatch("expected_state.task_revision")
+        }
         let driverID = try router.driverID(for: request)
 
         let claimTime = clock()
@@ -585,16 +589,20 @@ public struct SMLCapabilityCoordinator: Sendable {
             authority: preflightAuthority,
             nowEpoch: claimTime
         )
+        try Task.checkCancellation()
         let claimed = try await gateway.claimCapability(
             claimCommand, authority: claimAuthority, nowEpoch: claimTime
         )
 
+        try Task.checkCancellation()
         let routed = try await router.execute(claimed)
+        try Task.checkCancellation()
         let completionTime = clock()
         let completionCommand = try completionCompiler.compile(
             claimed: claimed, routed: routed, issuedAtEpoch: completionTime
         )
         let completionAuthority = try await authorityResolver(completionCommand)
+        try Task.checkCancellation()
         return try await gateway.completeCapability(
             completionCommand,
             claimed: claimed,

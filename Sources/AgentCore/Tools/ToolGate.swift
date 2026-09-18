@@ -118,6 +118,7 @@ public enum ToolGate {
     private static func valueMatchesSchema(_ value: Any, type: String) -> Bool {
         switch type {
         case "string": return value is String
+        case "object": return value is [String: Any]
         case "array": return value is [Any]
         case "boolean": return isBooleanValue(value)
         case "integer":
@@ -140,6 +141,12 @@ public enum ToolGate {
     /// Darwin. JSON integers must remain integers; only the CFBoolean singleton type is a boolean.
     private static func isBooleanValue(_ value: Any) -> Bool {
         guard let number = value as? NSNumber else { return value is Bool }
+        #if canImport(Darwin)
         return CFGetTypeID(number) == CFBooleanGetTypeID()
+        #else
+        // swift-corelibs-foundation has no CFBoolean type check; an NSNumber wrapping a Bool reports the
+        // ObjC type encoding "c" (char), which JSON integers/doubles never do.
+        return String(cString: number.objCType) == "c"
+        #endif
     }
 }

@@ -11,8 +11,14 @@ import Glibc
 enum KistRunner {
 
     // internal (not private) so sibling command files in the Kist module can reuse them.
-    static func err(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
-    static func note(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+    static func err(_ s: String) {
+        BuilderRunAudit.current?.replay.recordEvent(kind: "hostError", success: false, text: s)
+        FileHandle.standardError.write(Data((s + "\n").utf8))
+    }
+    static func note(_ s: String) {
+        BuilderRunAudit.current?.replay.recordEvent(kind: "hostNote", text: s)
+        FileHandle.standardError.write(Data((s + "\n").utf8))
+    }
 
     /// Built-in providers + any user-added custom providers, behind the default key resolver.
     /// Rebuilt after a model is added so the new one is immediately selectable.
@@ -116,16 +122,29 @@ enum KistRunner {
 
     /// Returns a process exit code (0 success, non-zero failure).
     static func run(_ opts: KistOptions) async -> Int32 {
+        if opts.operatorAction {
+            return await runOperatorAction(opts)
+        }
         // Route MCP diagnostics through the same terminal owner as stdout/stderr. Before a pinned
         // REPL exists the router preserves ordinary stderr behavior; during a sticky turn it joins
         // the coordinator's serialized transcript stream.
         MCPLog.installDiagnosticSink { TerminalScreenCoordinator.routeDiagnosticLine($0) }
         defer { MCPLog.resetDiagnosticSink() }
 
+        if opts.listLearningSync || opts.listLearningStatus {
+            return await runListLearning(opts)
+        }
+
         // Hidden, offline visual verification. Dispatch before registry/tool/MCP construction so this
         // cannot touch a provider, keychain, server, or network.
         if opts.stickyBarSelfTest {
             return await runStickyBarSelfTest()
+        }
+        if opts.smlOpenAPIImport != nil {
+            return runSMLOpenAPIImport(opts)
+        }
+        if opts.smlStoreAction != nil {
+            return await runSMLRuntimeMaintenance(opts)
         }
         if opts.smlRuntimeOpenAPI != nil {
             return await runSMLRuntimeOpenAPI(opts)
@@ -171,6 +190,9 @@ enum KistRunner {
         }
         if opts.smlRuntimeAttachments != nil {
             return await runSMLRuntimeAttachments(opts)
+        }
+        if opts.smlRuntimeServe != nil {
+            return await runSMLRuntimeServe(opts)
         }
         if opts.smlRuntimeREPLScript != nil {
             return await runSMLRuntimeREPLScript(opts)
@@ -293,13 +315,19 @@ enum KistRunner {
             }
             let auditRunID = "cli-" + UUID().uuidString.lowercased()
             let auditLog = AuditLog.forRun(root: root, runID: auditRunID)
+            let sharedMemory: AgentMemoryAccess?
+            do { sharedMemory = try Self.sharedAgentMemory(root: root, opts: opts) }
+            catch { err("shared agent memory setup failed: \(error)"); return 2 }
             let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
-                                      auditLog: auditLog, externalReadRoots: opts.allowReadPaths)
+                                      auditLog: auditLog, externalReadRoots: opts.allowReadPaths,
+                                      agentMemory: sharedMemory)
             note("tool audit · \(auditLog.path)")
             note("kist · resuming \(cp.title) · \(cp.providerId) · iter \(cp.iteration)")
             // Resume with the SAME full tool set as a fresh run (previously it lost browse/tasks/etc.).
             let resumeExtraTools = Self.buildExtraTools(root: root, fetchAllowedHosts: fetchAllowedHosts, opts: opts, registry: registry)
             return await withTools(projectRoot: root, fetchAllowedHosts: fetchAllowedHosts, extraTools: resumeExtraTools, enableComputerUse: opts.enableComputerUse) { tools in
+                let listLearning = Self.makeListLearning(root: root, opts: opts, tools: tools, context: context)
+                _ = await listLearning?.refresh()
                 let recorder = TrajectoryRecorder()
                 let lessonStore = opts.noMemory ? nil : LessonStore()
                 let traceRecorder = TraceRecorder(traceId: TraceID.make())
@@ -337,7 +365,9 @@ enum KistRunner {
         guard let providerId = goalPin?.providerId
             ?? resolveProvider(opts, registry, configProvider: config.provider,
                                verdicts: sessionVerdicts, policy: selectionPolicy) else { return 2 }
-        if let pinnedModel = goalPin?.model { model = pinnedModel }
+        model = startupModel(explicit: opts.model, selectedProvider: providerId,
+                             configProvider: config.provider, configModel: config.model,
+                             goalModel: goalPin?.model)
         guard let root = ToolContext.canonicalize(opts.project) else {
             err("error: project path does not exist: \(opts.project)"); return 2
         }
@@ -361,8 +391,12 @@ enum KistRunner {
         }
         let auditRunID = "cli-" + UUID().uuidString.lowercased()
         let auditLog = AuditLog.forRun(root: root, runID: auditRunID)
+        let sharedMemory: AgentMemoryAccess?
+        do { sharedMemory = try Self.sharedAgentMemory(root: root, opts: opts) }
+        catch { err("shared agent memory setup failed: \(error)"); return 2 }
         let context = ToolContext(projectRoot: root, shell: shell, sandbox: sandbox,
-                                  auditLog: auditLog, externalReadRoots: opts.allowReadPaths)
+                                  auditLog: auditLog, externalReadRoots: opts.allowReadPaths,
+                                  agentMemory: sharedMemory)
         note("tool audit · \(auditLog.path)")
         // Full tool set (media/data/temporal-memory/vision). Extracted so the
         // --resume path gets the SAME tools (it previously ran with only the headless set).
@@ -376,6 +410,8 @@ enum KistRunner {
                 return await runEvolveSession(opts, registry: registry, root: root, tools: tools,
                                               context: context, providerId: providerId, model: model)
             }
+            let listLearning = Self.makeListLearning(root: root, opts: opts, tools: tools, context: context)
+            if opts.goal?.isEmpty == false { _ = await listLearning?.refresh() }
             // No goal → interactive REPL (sensitive tools prompt for approval unless --yolo).
             guard let goal = opts.goal, !goal.isEmpty else {
                 // DEFAULT = open straight to the prompt with AUTO-ROUTING on (kist picks the best model
@@ -385,8 +421,9 @@ enum KistRunner {
                 let pick = (forcePicker && opts.providerId == nil && config.provider == nil)
                     ? await pickProvider(registry, config: config) : nil
                 if pick != nil { registry = makeRegistry(config: config) }   // pick up an allowed model added during the picker
-                let providerId = pick?.providerId ?? providerId
-                let model = pick?.model ?? model
+                let pickedProvider = pick?.providerId ?? providerId
+                let model = pick?.model ?? (pickedProvider == providerId ? model : nil)
+                let providerId = pickedProvider
                 let chosen = registry.provider(id: providerId)
                 // Auto-route unless the user pinned a provider. CLI flag / picker always pin; a
                 // config default provider pins too UNLESS config says `"autoRouting": true` — then
@@ -446,13 +483,14 @@ enum KistRunner {
                 if opts.tui, stdinIsTTY() {
                     let ui = TerminalUI()
                     let tuiSink = TUIEventSink(ui: ui, showReasoning: opts.extendedThinking)
-                    let tuiLoop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
+                    var tuiLoop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
                                            tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
                                     budget: opts.makeBudget(),
                                            interactor: TUIInteractor(ui: ui), approvalTools: opts.yolo ? [] : sensitiveTools,
                                            planMode: opts.planMode, extendedThinking: opts.extendedThinking, toolMode: toolMode,
                                            roles: roleSelection.bindings, delegationDepth: opts.delegationDepth,
                                            sinkOverride: tuiSink, recorder: recorder, traceRecorder: traceRecorder)
+                    tuiLoop.recallLessons = Self.listRecall(listLearning)
                     let memoryContext = Self.sessionMemory(root: root, opts: opts)
                     let personaMatcher = TaskPersonaMatcher(projectRoot: root)
                     let convo = TUIConversation(
@@ -520,21 +558,23 @@ enum KistRunner {
                 // P2 task-targeted self__ surfacing — OFF by default (advertisement-only, fail-open; only
                 // trims schema bloat once the self__ population is large). Opt in with KIST_SURFACE_SELFTOOLS=1.
                 let surfaceSelfTools = ProcessInfo.processInfo.environment["KIST_SURFACE_SELFTOOLS"] == "1"
+                let replBudget = opts.makeBudget()
                 var loop = makeLoop(registry: registry, providerId: providerId, model: model, context: context,
                                     tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
-                                    budget: opts.makeBudget(),
+                                    budget: replBudget,
                                     interactor: terminalInteractor, approvalTools: opts.yolo ? [] : sensitiveTools,
                                     planMode: opts.planMode, extendedThinking: opts.extendedThinking, toolMode: toolMode,
                                     roles: roleSelection.bindings, delegationDepth: opts.delegationDepth,
                                     showReasoning: opts.extendedThinking,   // --think → watch the reasoning inline
                                     sinkOverride: makeReplSink(showReasoning: opts.extendedThinking),
                                     recorder: recorder, traceRecorder: traceRecorder)
-                loop.recallLessons = recallInject   // P1: nil unless KIST_RECALL_INJECT=1 (default off)
+                loop.recallLessons = Self.listRecall(listLearning, alongside: recallInject)
                 loop.filterSelfToolsByRelevance = surfaceSelfTools   // P2: off unless KIST_SURFACE_SELFTOOLS=1
                 // CONVERSATIONAL ESCALATION: reach the fleet / plan-DAG from inside the chat, plus an
                 // auto-router that PROPOSES (never silently spends) when a plain message looks like a big build.
                 let specialistRegistry = registry
                 let repl = KistREPL(loop: loop, commands: KistCommands.load(projectRoot: root))
+                repl.advisoryMemoryEnabled = !opts.noMemory
                 repl.defaultAgents = opts.agents
                 repl.autoApproveClipboardVision = opts.auto
                 repl.pinnedBarEnabled = opts.pinnedBar   // R2b: bottom-glued input bar (default on for TTYs)
@@ -656,11 +696,27 @@ enum KistRunner {
                                                          verdicts: shVerdicts)
                         if strong != providerId { repairRoleDefault = ProviderBinding(providerId: strong) }
                     }
+                    let selectedTeam: AgentTeamTools.ChildFactory = { selected, selectedContext, ceiling, turnCap in
+                        AgentTeamTools.make(providers: specialistRegistry, binding: selected,
+                            baseTools: tools, context: selectedContext,
+                            sink: TerminalEventSink(showReasoning: false), interactor: terminalInteractor,
+                            approvalTools: approval, specialistApprovalTools: specSensitive,
+                            maxIterations: min(opts.maxIterations, turnCap),
+                            spawnLevels: max(0, opts.delegationDepth) + 1,
+                            extendedThinking: opts.extendedThinking, budget: replBudget,
+                            checkpoints: checkpoints, ceiling: ceiling)
+                    }
+                    let offered = selectedTeam(repairRoleDefault, context, nil, opts.maxIterations)
+                    let selectedTraceID = await traceRecorder.traceId
                     let spawner = SpecialistSpawner(
-                        providers: specialistRegistry, baseTools: tools, context: context,
+                        providers: specialistRegistry, baseTools: tools,
+                        context: context.withCorrelationID(selectedTraceID, traceRecorder: traceRecorder),
                         sink: TerminalEventSink(showReasoning: false), interactor: terminalInteractor,
                         aliasTable: [:], roleDefault: repairRoleDefault,
-                        defaultMaxIterations: opts.maxIterations, extendedThinking: opts.extendedThinking)
+                        defaultMaxIterations: opts.maxIterations, extendedThinking: opts.extendedThinking,
+                        budget: replBudget, childToolsFactory: selectedTeam,
+                        additionalToolNames: offered.names, checkpoints: checkpoints,
+                        delegationDepthRemaining: max(0, opts.delegationDepth) + 1)
                     return await spawner.run(specialist: def, task: task, approvalTools: approval, planMode: planMode).summary
                 }
                 // R2a: the drain chain — approval-deferred prompts first, then messages the user
@@ -703,14 +759,14 @@ enum KistRunner {
                     var l = makeLoop(registry: registry, providerId: defaultBinding.providerId, model: defaultBinding.model,
                              context: context,
                              tools: tools, checkpoints: checkpoints, maxIterations: opts.maxIterations,
-                                    budget: opts.makeBudget(),
+                             budget: replBudget,
                              interactor: terminalInteractor, approvalTools: opts.yolo ? [] : sensitiveTools,
                              planMode: planMode, extendedThinking: extendedThinking, toolMode: toolMode, roles: roles,
                              delegationDepth: opts.delegationDepth, showReasoning: showReasoning,
                              sinkOverride: makeReplSink(showReasoning: showReasoning),
                              recorder: recorder,
                              traceRecorder: traceRecorder)
-                    l.recallLessons = recallInject   // P1: carry the (flag-gated) read-back across /model & /roles rebuilds
+                    l.recallLessons = Self.listRecall(listLearning, alongside: recallInject)
                     l.filterSelfToolsByRelevance = surfaceSelfTools   // P2: carry the (flag-gated) surfacing filter too
                     return l
                 }
@@ -992,6 +1048,9 @@ enum KistRunner {
                         substantiveSummary: verifiedContext?.substantiveSummary,
                         artifactReferences: verifiedContext?.artifactReferences ?? [])
                 }
+                // Capture the box, not the REPL (repl.research → closure → repl would cycle). Read
+                // `isActive` at RUN time so "lois" toggles made after wiring are honored per run.
+                let loisPeelMode = repl.peelMode
                 repl.research = { g, roles in
                     // R1 sibling: same watcher for the research pipeline.
                     TurnInputQueue.shared.begin()
@@ -1010,7 +1069,8 @@ enum KistRunner {
                                           tools: tools, context: context,
                                           providerId: providerId, model: model,
                                           rolesOverride: roles, capture: researchCapture,
-                                          councilCapture: councilCapture)
+                                          councilCapture: councilCapture,
+                                          requirePEEL: loisPeelMode.isActive)
                     }
                     let verification: HeavyRouteResult.Verification
                     if interrupted.value != nil {

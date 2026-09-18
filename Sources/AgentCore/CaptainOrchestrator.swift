@@ -107,23 +107,24 @@ public final class CaptainOrchestrator: @unchecked Sendable {
     /// Returns the launch (does NOT supervise — that's the caller's explicit arming step).
     @discardableResult
     public func launchFleet(goal: String, repo: String, subtasks: [FleetSubtask],
-                            maxAgents: Int = 5, baseDir: URL, nowEpoch: Double) async -> FleetLaunch {
+                            maxAgents: Int = 5, baseDir: URL, nowEpoch: Double,
+                            fleetID: UUID = UUID()) async -> FleetLaunch {
         let legacyRoles = RoleBindings(default: ProviderBinding(providerId: "default"))
         let assigned = subtasks.map { subtask in
             AssignedFleetTask(subtask: subtask, roles: legacyRoles,
                               assignment: .legacy(taskTitle: subtask.title, roles: legacyRoles))
         }
         return await launchFleet(goal: goal, repo: repo, assignedTasks: assigned,
-                                 maxAgents: maxAgents, baseDir: baseDir, nowEpoch: nowEpoch)
+                                 maxAgents: maxAgents, baseDir: baseDir, nowEpoch: nowEpoch, fleetID: fleetID)
     }
 
     /// Validate assigned subtasks into disjoint leases, isolate worktrees, seed the board, then spawn each
     /// worker with its assigned model team + mint batons. Returns the launch (does NOT supervise).
     @discardableResult
     public func launchFleet(goal: String, repo: String, assignedTasks: [AssignedFleetTask],
-                            maxAgents: Int = 5, baseDir: URL, nowEpoch: Double) async -> FleetLaunch {
+                            maxAgents: Int = 5, baseDir: URL, nowEpoch: Double,
+                            fleetID: UUID = UUID()) async -> FleetLaunch {
         let trimmedRepo = repo.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fleetID = UUID()
         let fleetDir = baseDir.appendingPathComponent(fleetID.uuidString, isDirectory: true)
         // UNIQUE per-fleet integration branch (Codex HIGH): a hard-coded "integration" collides with a
         // stale branch of that name → mergeIntoIntegration returns .alreadyIntegrated and the fresh

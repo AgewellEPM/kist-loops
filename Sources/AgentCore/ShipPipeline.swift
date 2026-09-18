@@ -462,6 +462,13 @@ public struct ShipPipeline: Sendable {
     /// valid verification-only evidence packet; otherwise the council judges the real diff/tests.
     public func review(goal: String, build: BuildResult,
                        allowVerifiedReadOnly: Bool = false) async -> Decision {
+        // The council has an 8,000-character source allowance. A sealed packet must
+        // never silently lose changed lines when the model prompt is constructed.
+        if build.completionEvidence != nil && build.diffSummary.count > 8_000 {
+            return Decision(verdict: nil, canDeploy: false,
+                reason: "Complete review material exceeds the council input allowance; split the change before review",
+                evidencePacketDigest: build.completionEvidence?.packetDigest)
+        }
         if let failure = build.completionEvidence?.validationFailure {
             return Decision(verdict: nil, canDeploy: false,
                             reason: "host completion evidence rejected: \(failure)",

@@ -10,6 +10,22 @@ private struct SolApprovingCouncil: PromotionCouncil {
 }
 
 final class SolBuilderAssuranceRegressionTests: XCTestCase {
+    func testAuthorizedDisposableCodingDoesNotMintHighRiskAuthWork() {
+        for goal in ["create the authorized parser", "create an author field formatter"] {
+            let launch = KistRunner.builderCompatibilityLaunch(
+                for: KistOptions.parse(["--headless", "--auto", goal]), goal: goal)
+            XCTAssertEqual(launch.effectSafetyRisk, .low, goal)
+            XCTAssertTrue(launch.allowsFreshContextSameModelReviewCandidate, goal)
+        }
+        for goal in ["create auth middleware", "fix authorization", "edit paymentService",
+                     "update Authentication.swift", "apply database migrations"] {
+            let launch = KistRunner.builderCompatibilityLaunch(
+                for: KistOptions.parse(["--headless", "--auto", goal]), goal: goal)
+            XCTAssertEqual(launch.effectSafetyRisk, .high, goal)
+            XCTAssertFalse(launch.allowsFreshContextSameModelReviewCandidate, goal)
+        }
+    }
+
     func testFreshContextSameModelCapabilityAllowsDisposableComplexityButRejectsEffectRisk() {
         let safeGoal = "build and verify one isolated fixture file, diagnose the broken value, implement the smallest fix, then run one deterministic verifier inside the temporary workspace"
         let safe = KistRunner.builderCompatibilityLaunch(
@@ -188,6 +204,7 @@ final class SolBuilderAssuranceRegressionTests: XCTestCase {
             "Sources/Kist/KistRunner+BuilderPreflightV2.swift",
             "Sources/Kist/KistRunner+BuilderPipelineV2.swift",
             "Sources/Kist/KistRunner+BuilderVerificationV2.swift",
+            "Sources/Kist/KistRunner+BuilderReview.swift",
             "Sources/Kist/KistRunner+AutonomyMission.swift",
             "Sources/Kist/KistRunner+Cobolo.swift",
         ]

@@ -88,107 +88,150 @@ public struct SMLRuntimeAuthorityConfig: Sendable {
         }
     }
 
-    private struct FileFormat: Decodable {
-        struct ActorEntry: Decodable {
-            let id: String
-            let roles: [String]
-            let operations: [String]
-            let approvalAuthorities: [String]?
-            let scopeTemplate: SMLObject?
-
-            enum CodingKeys: String, CodingKey {
-                case id, roles, operations
-                case approvalAuthorities = "approval_authorities"
-                case scopeTemplate = "scope_template"
-            }
-        }
-
-        let schemaVersion: Int
-        let actors: [ActorEntry]
-
-        enum CodingKeys: String, CodingKey {
-            case schemaVersion = "schema_version"
-            case actors
-        }
-    }
-
     public static func defaultURL(projectRoot: String) -> URL {
         URL(fileURLWithPath: projectRoot).appendingPathComponent(relativePath)
     }
 
     public static func load(projectRoot: String) throws -> SMLRuntimeAuthorityConfig {
-        try load(fileURL: defaultURL(projectRoot: projectRoot))
+        let path = defaultURL(projectRoot: projectRoot).path
+        return try load(path: path) {
+            try SMLHostConfigurationFile.read(
+                projectRoot: projectRoot,
+                relativePath: relativePath
+            )
+        }
     }
 
     public static func load(fileURL: URL) throws -> SMLRuntimeAuthorityConfig {
         let path = fileURL.path
-        var status = stat()
-        guard lstat(path, &status) == 0 else {
-            throw LoadError.missing(path: path)
-        }
-        guard (status.st_mode & S_IFMT) == S_IFREG else {
-            throw LoadError.unreadable(path: path, reason: "not a regular file")
-        }
-        guard status.st_uid == geteuid() else {
-            throw LoadError.notOwnedByProcessUser(path: path)
-        }
-        let groupOtherBits = status.st_mode & 0o077
-        guard groupOtherBits == 0 else {
-            throw LoadError.insecurePermissions(
-                path: path,
-                mode: String(format: "%03o", status.st_mode & 0o777)
-            )
-        }
+        return try load(path: path) { try SMLHostConfigurationFile.read(fileURL: fileURL) }
+    }
+
+    private static func load(
+        path: String,
+        read: () throws -> Data
+    ) throws -> SMLRuntimeAuthorityConfig {
         let data: Data
         do {
-            data = try Data(contentsOf: fileURL)
+            data = try read()
+        } catch SMLHostConfigurationFile.ReadError.missing {
+            throw LoadError.missing(path: path)
         } catch {
-            throw LoadError.unreadable(path: path, reason: String(describing: error))
+            throw classifiedReadError(path: path, reason: String(describing: error))
         }
-        let decoded: FileFormat
+
         do {
-            decoded = try JSONDecoder().decode(FileFormat.self, from: data)
+            let root = try SMLHostConfigurationFile.decodeRoot(from: data)
+            try SMLHostConfigurationFile.requireOnlyKeys(
+                root,
+                allowed: ["schema_version", "actors"],
+                path: "authority"
+            )
+            let version = try SMLHostConfigurationFile.requiredInteger(
+                root["schema_version"], path: "authority.schema_version")
+            guard version == schemaVersion else {
+                throw LoadError.unsupportedSchemaVersion(version)
+            }
+            let entries = try SMLHostConfigurationFile.requiredArray(
+                root["actors"], path: "authority.actors")
+            guard !entries.isEmpty else { throw LoadError.noActors(path: path) }
+            guard entries.count <= SMLHostConfigurationFile.maximumBindings else {
+                throw SMLHostConfigurationFile.SchemaError(
+                    reason: "authority.actors exceeds "
+                        + "\(SMLHostConfigurationFile.maximumBindings) entries")
+            }
+
+            var actors: [String: ActorGrant] = [:]
+            for (index, value) in entries.enumerated() {
+                let entryPath = "authority.actors[\(index)]"
+                let entry = try SMLHostConfigurationFile.requiredObject(value, path: entryPath)
+                try SMLHostConfigurationFile.requireOnlyKeys(
+                    entry,
+                    allowed: [
+                        "id", "roles", "operations", "approval_authorities", "scope_template",
+                    ],
+                    path: entryPath
+                )
+                let id = try SMLHostConfigurationFile.requiredString(
+                    entry["id"], path: "\(entryPath).id")
+                guard SMLValidationSupport.identifierIsValid(id) else {
+                    throw LoadError.invalidActorID(id)
+                }
+                guard actors[id] == nil else { throw LoadError.duplicateActorID(id) }
+
+                let roles = try SMLHostConfigurationFile.stringArray(
+                    entry["roles"], path: "\(entryPath).roles", maximumCount: 128
+                ) { role, _ in
+                    guard SMLValidationSupport.identifierIsValid(role) else {
+                        throw LoadError.invalidRole(actor: id, role: role)
+                    }
+                }
+                guard !roles.isEmpty else { throw LoadError.emptyRoles(actor: id) }
+
+                let operations = try SMLHostConfigurationFile.stringArray(
+                    entry["operations"], path: "\(entryPath).operations", maximumCount: 128
+                ) { operation, _ in
+                    guard SMLRuntimeCommandOperation.all.contains(operation) else {
+                        throw LoadError.unknownOperation(actor: id, operation: operation)
+                    }
+                }
+
+                var approvalAuthorities: [String] = []
+                if let value = entry["approval_authorities"] {
+                    approvalAuthorities = try SMLHostConfigurationFile.stringArray(
+                        value,
+                        path: "\(entryPath).approval_authorities",
+                        maximumCount: 128
+                    ) { authority, _ in
+                        guard SMLValidationSupport.identifierIsValid(authority) else {
+                            throw LoadError.invalidApprovalAuthority(
+                                actor: id, authority: authority)
+                        }
+                    }
+                }
+
+                let scopeTemplate = try SMLHostConfigurationFile.optionalObject(
+                    entry["scope_template"], path: "\(entryPath).scope_template") ?? [:]
+                let scopeDiagnostics = SMLValidationSupport.inspectObject(
+                    scopeTemplate, path: "\(entryPath).scope_template")
+                guard scopeDiagnostics.isEmpty else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: scopeDiagnostics.map(\.description).joined(separator: "; "))
+                }
+
+                actors[id] = ActorGrant(
+                    id: id,
+                    roles: Set(roles),
+                    operations: Set(operations),
+                    approvalAuthorities: Set(approvalAuthorities),
+                    scopeTemplate: scopeTemplate
+                )
+            }
+            return SMLRuntimeAuthorityConfig(actors: actors)
+        } catch let error as LoadError {
+            throw error
         } catch {
             throw LoadError.malformed(path: path, reason: String(describing: error))
         }
-        guard decoded.schemaVersion == schemaVersion else {
-            throw LoadError.unsupportedSchemaVersion(decoded.schemaVersion)
-        }
-        guard !decoded.actors.isEmpty else {
-            throw LoadError.noActors(path: path)
-        }
+    }
 
-        var actors: [String: ActorGrant] = [:]
-        for entry in decoded.actors {
-            guard SMLValidationSupport.identifierIsValid(entry.id) else {
-                throw LoadError.invalidActorID(entry.id)
+    /// The descriptor-confined read decides acceptance. This pathname-only probe is diagnostics
+    /// after refusal, never a security decision, and preserves the existing actionable errors.
+    private static func classifiedReadError(path: String, reason: String) -> LoadError {
+        var status = stat()
+        if lstat(path, &status) == 0,
+           (status.st_mode & S_IFMT) == S_IFREG {
+            if status.st_uid != geteuid() {
+                return .notOwnedByProcessUser(path: path)
             }
-            guard actors[entry.id] == nil else {
-                throw LoadError.duplicateActorID(entry.id)
+            if status.st_mode & 0o077 != 0 {
+                return .insecurePermissions(
+                    path: path,
+                    mode: String(format: "%03o", status.st_mode & 0o777)
+                )
             }
-            guard !entry.roles.isEmpty else {
-                throw LoadError.emptyRoles(actor: entry.id)
-            }
-            for role in entry.roles where !SMLValidationSupport.identifierIsValid(role) {
-                throw LoadError.invalidRole(actor: entry.id, role: role)
-            }
-            for operation in entry.operations
-            where !SMLRuntimeCommandOperation.all.contains(operation) {
-                throw LoadError.unknownOperation(actor: entry.id, operation: operation)
-            }
-            for authority in entry.approvalAuthorities ?? []
-            where !SMLValidationSupport.identifierIsValid(authority) {
-                throw LoadError.invalidApprovalAuthority(actor: entry.id, authority: authority)
-            }
-            actors[entry.id] = ActorGrant(
-                id: entry.id,
-                roles: Set(entry.roles),
-                operations: Set(entry.operations),
-                approvalAuthorities: Set(entry.approvalAuthorities ?? []),
-                scopeTemplate: entry.scopeTemplate ?? [:]
-            )
         }
-        return SMLRuntimeAuthorityConfig(actors: actors)
+        return .unreadable(path: path, reason: reason)
     }
 
     /// Resolves one command against the configured grants and the session lease. Task authority is
@@ -209,7 +252,8 @@ public struct SMLRuntimeAuthorityConfig: Sendable {
             tasks: tasks,
             operations: grant.operations,
             approvalAuthorities: grant.approvalAuthorities,
-            scope: grant.scopeTemplate
+            scope: grant.scopeTemplate,
+            taskLease: lease
         )
     }
 }

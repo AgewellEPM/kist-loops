@@ -41,7 +41,8 @@ extension KistRunner {
                                      recorder: recorder,
                                      progress: progress,
                                      budget: runBudget,
-                                     requireStructuredCriticVerdict: true).run(goal: goal)
+                                     requireStructuredCriticVerdict: true,
+                                     agentMemory: opts.noMemory ? nil : context.agentMemory).run(goal: goal)
         let path: String
         do {
             path = try writeCouncilArtifact(result.markdown, goal: goal, root: root)
@@ -112,8 +113,11 @@ extension KistRunner {
         let reachable = registry.providers.filter { registry.hasKey(for: $0) }.count
         note("kist · dig in deep · consulting up to \(min(reachable, 5)) model(s) · \(root)")
         let runBudget = opts.makeBudget()
+        let agentMemory: AgentMemoryAccess?
+        do { agentMemory = try Self.sharedAgentMemory(root: root, opts: opts) }
+        catch { err("council shared memory setup failed: \(error)"); return 2 }
         let result = await AICouncil(providers: registry, roles: roles,
-                                     recorder: recorder, budget: runBudget).runWide(goal: goal)
+                                     recorder: recorder, budget: runBudget, agentMemory: agentMemory).runWide(goal: goal)
         let path: String
         do {
             path = try writeCouncilArtifact(result.markdown, goal: goal, root: root)

@@ -100,6 +100,16 @@ extension PlanExecuteLoop {
           its output in a later step via ${id} — do NOT fetch content from the web or search for it.
           Only use fetch_url/search_code when the goal genuinely needs live or repo-specific data.
           (A short fixed string may be written directly in a tool's arguments without `generate`.)
+        - Each `generate` call sees ONLY its own prompt. Include the actual task requirements and
+          relevant observed source through ${readStep} references, including on a repair. The coder
+          does not inherit this plan or earlier generation calls. Preserve the original repair scope.
+        - For code edits, obtain the complete relevant function before generating a patch. Separate
+          `read_file` steps can run without additional model calls; use explicit source ranges when
+          known. A `read_files` result with requestedWindowComplete=false requires its continuation;
+          success alone does not establish coverage. If the required source has not been observed,
+          return a bounded inspection plan first so the next plan can use the actual result.
+          Read headers, line-number gutters and JSON escaping are display syntax, not source bytes.
+          Patch context must match observed source exactly; never invent an unread suffix.
         - When a `generate` step's output is WRITTEN TO A FILE (a later write_file uses ${it}), its
           prompt MUST end with: "Output ONLY the raw file contents — no explanation, no markdown code
           fences, no ``` — just the exact bytes of the file." Otherwise the model's prose/fences get

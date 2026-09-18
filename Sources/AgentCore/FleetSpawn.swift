@@ -117,8 +117,9 @@ public struct InProcessAgentSpawner: AgentSpawner {
     }
     public func spawn(task: String, worktree: GitWorktree) async -> Bool {
         let work = self.work
+        let parent = AgentExecutionScope.current
         Task.detached(priority: .userInitiated) {
-            let summary = await work(task, worktree)
+            let summary = await AgentExecutionScope.$current.withValue(parent) { await work(task, worktree) }
             FleetSentinel.markDone(inWorktree: worktree.path, summary: summary)
         }
         return true

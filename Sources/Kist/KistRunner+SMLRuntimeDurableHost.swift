@@ -109,7 +109,8 @@ struct SMLRuntimeDurableHostEnvironment {
             let clock: @Sendable () -> Double = { Date().timeIntervalSince1970 }
             let store = SMLRuntimeStore(
                 fileURL: SMLRuntimeStore.defaultURL(projectRoot: projectRoot),
-                clock: clock
+                clock: clock,
+                admissionLimits: try SMLRuntimeAdmissionLimits.load(projectRoot: projectRoot)
             )
             let lease = SMLRuntimeLeaseRegistry.Session()
             // Adopt the store's existing tasks into this session's lease. Lease isolation exists
@@ -124,7 +125,23 @@ struct SMLRuntimeDurableHostEnvironment {
             }
             let resolver: @Sendable (SMLCommandEnvelope) async throws -> SMLCommandAuthority = {
                 command in
-                try await authorityConfig.resolveAuthority(for: command, lease: lease)
+                let authority = try await authorityConfig.resolveAuthority(for: command, lease: lease)
+                let historyOperations = [SMLRuntimeCommandOperation.taskWatch,
+                    SMLRuntimeCommandOperation.receiptsList]
+                if historyOperations.contains(command.op), authority.operations.contains(command.op),
+                   authority.roles.contains(command.role), !authority.tasks.contains(command.task),
+                   let archived = try await store.archivedTask(id: command.task),
+                   archived.task.role == command.role {
+                    // A verified archive leaf grants only this history command's task binding.
+                    // Do not load every retired ID into the live session or grant mutation access.
+                    return SMLCommandAuthority(authenticatedActor: authority.authenticatedActor,
+                        leaseID: authority.leaseID, roles: authority.roles,
+                        tasks: authority.tasks.union([command.task]), operations: [command.op],
+                        approvalAuthorities: authority.approvalAuthorities, scope: authority.scope,
+                        maximumCommandAgeSeconds: authority.maximumCommandAgeSeconds,
+                        maximumFutureSkewSeconds: authority.maximumFutureSkewSeconds)
+                }
+                return authority
             }
             return SMLRuntimeDurableHostEnvironment(
                 store: store,

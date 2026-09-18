@@ -62,7 +62,11 @@ public enum ResearchEvidencePolicy {
                 where: { host.contains($0) || path.contains($0) }) {
                 score += 8
             }
-            if path.hasSuffix(".pdf") { score -= 7 }
+            // Curated academia-bounded registry: real scholarly/medical hosts outrank the open
+            // web, and papers are legitimately PDFs there, so the PDF penalty does not apply.
+            let academic = AcademicSourceRegistry.isAcademicHost(host)
+            if academic { score += 14 }
+            if path.hasSuffix(".pdf") && !academic { score -= 7 }
             if ["reddit.com", "linkedin.com", "medium.com", "x.com", "facebook.com"]
                 .contains(where: { host == $0 || host.hasSuffix("." + $0) }) {
                 score -= 12
@@ -104,6 +108,14 @@ public enum ResearchEvidencePolicy {
                 contentSHA256: digest,
                 text: item.text)
         }
+    }
+
+    /// The academia-bounded pull: content-verified sources restricted to the curated academic
+    /// registry. Use when the caller wants real scholarly/medical evidence only.
+    public static func verifiedAcademicSources(
+        in evidence: [ResearchEvidence]
+    ) -> [VerifiedResearchPrimarySource] {
+        AcademicSourceRegistry.academicSources(in: verifiedPrimarySources(in: evidence))
     }
 
     public static func peelQuery(

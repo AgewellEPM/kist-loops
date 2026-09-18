@@ -14,6 +14,7 @@ final class TurnProofStore: @unchecked Sendable {
             // Turn-level facts emitted after semantic intent is resolved. These stay separate from
             // token/tool events so replay can distinguish supporting work from the one canonical result.
             case routeSelected, reviewAssessment, verificationAssessment, turnFinalized
+            case runtimeFacts
         }
         let kind: Kind
         let tool: String?
@@ -65,9 +66,11 @@ final class TurnProofStore: @unchecked Sendable {
         var lines: [String] = []
         lines.append("Details")
         if let goal, !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            lines.append("Goal: \(String(goal.prefix(160)))")
+            lines.append("Goal: \(Self.oneLine(goal, max: 160))")
         }
-        for entry in entries.prefix(limit) {
+        let count = max(0, limit)
+        if entries.count > count { lines.append("... \(entries.count - count) earlier event(s); /replay for the durable log") }
+        for entry in entries.suffix(count) {
             switch entry.kind {
             case .assistant:
                 lines.append("assistant: \(Self.oneLine(entry.text, max: 500))")
@@ -98,9 +101,10 @@ final class TurnProofStore: @unchecked Sendable {
                 lines.append("verification: \(Self.oneLine(entry.text, max: 500))")
             case .turnFinalized:
                 lines.append("final: \(Self.oneLine(entry.text, max: 700))")
+            case .runtimeFacts:
+                lines.append("runtime: \(Self.oneLine(entry.text, max: 5_000))")
             }
         }
-        if entries.count > limit { lines.append("... \(entries.count - limit) more event(s)") }
         return lines.joined(separator: "\n")
     }
 

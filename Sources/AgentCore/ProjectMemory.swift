@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -99,7 +100,14 @@ public struct ProjectMemory: Sendable {
     /// reinforces a memory.
     public func recentEpisodes(limit: Int = 5, now: Date = Date()) -> [Episode] {
         guard limit > 0, Self.isWireDate(now) else { return [] }
-        guard let data = boundedEpisodeTail(),
+        guard let data = boundedEpisodeTail() else { return [] }
+        return recentEpisodes(from: data, limit: limit, now: now)
+    }
+
+    /// Shared cross-project recall supplies a confined, stable byte snapshot. Decode it using the
+    /// same temporal projection as ordinary episodic recall without reopening any source path.
+    func recentEpisodes(from data: Data, limit: Int, now: Date) -> [Episode] {
+        guard limit > 0, Self.isWireDate(now), data.count <= maxEpisodeBytes,
               let text = String(data: data, encoding: .utf8) else { return [] }
 
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -161,6 +169,47 @@ public struct ProjectMemory: Sendable {
         }
     }
 
+    /// Explicit deletion uses a complete confined snapshot, never the compacting recall tail.
+    /// Match raw text and decoded JSON strings, preserve every unrelated physical row, and
+    /// report removals only after a durable conditional replacement succeeds under both locks.
+    func forgetEpisodes(containing needle: String, lease: WorkspaceExecutionLease) -> [Data]? {
+        let lowered = needle.lowercased()
+        guard !lowered.isEmpty else { return [] }
+        let path = ".mythos/memory/episodes.jsonl"
+        guard let confined = try? ConfinedRoot(root: root) else { return nil }
+        do { _ = try confined.readStableData(path, maxBytes: maxEpisodeBytes) }
+        catch ToolError.notFound { return [] }
+        catch { return nil }
+        var removed: [Data]?
+        withEpisodeFileLock(required: true) {
+            guard let existing = try? confined.readStableData(path, maxBytes: maxEpisodeBytes),
+                  String(data: existing, encoding: .utf8) != nil else { return }
+            let rows = [UInt8](existing)
+                .split(separator: UInt8(0x0A), omittingEmptySubsequences: false)
+                .map { Data($0) }
+            var body = Data()
+            var dropped: [Data] = []
+            for (index, row) in rows.enumerated() {
+                if MemoryForgetting.contentContains(row, term: lowered) {
+                    dropped.append(row)
+                } else {
+                    body.append(row)
+                    if index < rows.count - 1 { body.append(0x0A) }
+                }
+            }
+            guard !dropped.isEmpty else { removed = []; return }
+            do {
+                _ = try confined.conditionalReplace(path, with: body,
+                    expectedSHA256: .sha256(Data(SHA256.hash(data: existing))), lease: lease)
+                removed = dropped
+            } catch {
+                // A refused or failed write cannot become a claimed removal.
+                removed = nil
+            }
+        }
+        return removed
+    }
+
     /// Reads at most the configured byte budget. If a legacy/hostile file is
     /// larger, retain its newest row-aligned tail; never allocate the whole
     /// file merely to discover that it needs compaction.
@@ -191,15 +240,20 @@ public struct ProjectMemory: Sendable {
         }
     }
 
-    private func withEpisodeFileLock(_ body: () -> Void) {
+    private func withEpisodeFileLock(required: Bool = false, _ body: () -> Void) {
         let lockPath = episodesPath + ".lock"
-        let descriptor = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard descriptor >= 0 else { body(); return }
+        let descriptor = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
+                              S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { if !required { body() }; return }
         defer {
             _ = flock(descriptor, LOCK_UN)
             _ = close(descriptor)
         }
-        guard flock(descriptor, LOCK_EX) == 0 else { return }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), status.st_nlink == 1,
+              status.st_uid == geteuid(),
+              flock(descriptor, required ? LOCK_EX | LOCK_NB : LOCK_EX) == 0 else { return }
         body()
     }
 
@@ -240,7 +294,7 @@ public struct ProjectMemory: Sendable {
 
     /// Hydrate a legacy row from its one stable event timestamp. The shared defaults are deliberate:
     /// there is no fabricated evidence refresh, recurrence, pin, or external authority.
-    private static func episodeWithTemporalMetadata(_ episode: Episode) -> Episode? {
+    static func episodeWithTemporalMetadata(_ episode: Episode) -> Episode? {
         guard isWireDate(episode.at) else { return nil }
         let temporal: MemoryTemporalEnvelope
         if let stored = episode.temporal {
@@ -262,7 +316,7 @@ public struct ProjectMemory: Sendable {
 
     /// Application-time bounds may legitimately be in the future. Event/evidence/transaction clocks
     /// may not be more than the shared skew allowance ahead of the captured retrieval clock.
-    private static func hasFutureEvidence(_ episode: Episode, relativeTo now: Date) -> Bool {
+    static func hasFutureEvidence(_ episode: Episode, relativeTo now: Date) -> Bool {
         guard let temporal = episode.temporal else { return true }
         let evidenceClocks = [
             episode.at,
@@ -277,7 +331,7 @@ public struct ProjectMemory: Sendable {
         }
     }
 
-    private static func isWireDate(_ date: Date) -> Bool {
+    static func isWireDate(_ date: Date) -> Bool {
         let epoch = date.timeIntervalSince1970
         return epoch.isFinite
             && (MemoryTemporalEnvelope.minimumWireEpoch...MemoryTemporalEnvelope.maximumWireEpoch)

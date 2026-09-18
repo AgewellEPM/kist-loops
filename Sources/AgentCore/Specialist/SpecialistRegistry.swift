@@ -50,17 +50,14 @@ public struct SpecialistRegistry: Sendable {
         load().first { $0.name == name }
     }
 
-    /// Keyword-ranked candidates whose name/description best overlap the goal (retrieval only — never a
-    /// verdict). Ties break alphabetically for determinism. Returns at most `limit`.
+    /// Rank names and role descriptions with the same identifier-aware retrieval as source search.
+    /// This is advisory discovery, never a completion or permission verdict.
     public func matching(goal: String, limit: Int = 3) -> [SpecialistDefinition] {
-        let needles = Self.tokens(goal)
-        guard !needles.isEmpty else { return [] }
-        let scored = load().map { def -> (SpecialistDefinition, Int) in
-            let hay = Self.tokens(def.name + " " + def.description)
-            return (def, needles.intersection(hay).count)
-        }.filter { $0.1 > 0 }
-        return scored.sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.name < $1.0.name }
-                     .prefix(limit).map { $0.0 }
+        let definitions = load()
+        let byName = Dictionary(uniqueKeysWithValues: definitions.map { ($0.name, $0) })
+        return LexicalSearch.rank(definitions.map {
+            LexicalSearch.Document(id: $0.name, title: $0.name, text: $0.description)
+        }, query: goal, limit: limit).compactMap { byName[$0.id] }
     }
 
     /// Persist a specialist to the PROJECT dir as `<name>.md`. FAIL-CLOSED: refuses an invalid definition
@@ -103,9 +100,6 @@ public struct SpecialistRegistry: Sendable {
         }
     }
 
-    private static func tokens(_ s: String) -> Set<String> {
-        Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init).filter { $0.count > 2 })
-    }
 }
 
 public enum SpecialistRegistryError: Error, Equatable {

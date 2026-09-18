@@ -86,11 +86,19 @@ final class HardcodedFallbackRegressionTests: XCTestCase {
         }
     }
 
-    // Site: deployment-protocol test temp dir. The INSTALL_HOME="/Users/lukekist" substitution
-    // patterns elsewhere in the file are deliberate — they must match the production-identity pin
-    // in the deployment scripts (see DeploymentProvenanceTests) — so pin the mktemp site only.
+    // Site: shared deployment fixture temp dir. The INSTALL_HOME substitutions in the helper
+    // deliberately match the production-identity pin. Follow both callers to the extracted
+    // helper, then retain the original $HOME requirement at the actual mktemp site.
     func testDeploymentProtocolTempUsesHome() throws {
-        let src = try source("scripts/tests/kist-deployment-protocol.sh")
+        for path in ["scripts/tests/kist-deployment-protocol.sh",
+                     "scripts/tests/kist-resource-deployment.sh"] {
+            let entry = try source(path)
+            XCTAssertTrue(entry.contains("source \"$REPO_ROOT/scripts/tests/lib/deployment-fixture.sh\""),
+                          "\(path) must use the shared, repository-bound deployment fixture")
+            XCTAssertFalse(entry.contains("mktemp -d /Users/"),
+                           "\(path) must not add a user-specific temporary directory")
+        }
+        let src = try source("scripts/tests/lib/deployment-fixture.sh")
         XCTAssertFalse(src.contains("mktemp -d /Users/"),
                        "deployment-protocol mktemp must use $HOME, not a literal user path")
         XCTAssertTrue(src.contains("mktemp -d \"${HOME}/.kist-release-registry-test"),

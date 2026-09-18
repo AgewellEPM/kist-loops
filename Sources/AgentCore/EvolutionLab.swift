@@ -30,6 +30,8 @@ public struct EvolutionPolicy: Sendable, Codable, Equatable {
         "Sources/AgentCore/EvolutionLab.swift",
         "Sources/AgentCore/EvolutionAutonomyReadiness.swift",
         "Sources/AgentCore/EvolutionCapabilityFitness.swift",
+        "Sources/AgentCore/EvolutionHeldOutOracle.swift",
+        "Sources/AgentCore/EvolutionPairedBenchmarkCoordinator.swift",
         "Sources/AgentCore/EvolutionRollbackAnchor.swift",
         "Sources/AgentCore/HardProcessContainment.swift",
         "Sources/AgentCore/EvolutionArchiveAuthority.swift",
@@ -133,6 +135,7 @@ public struct EvolutionBenchmarkAuthorityReceipt: Sendable, Equatable {
 public struct EvolutionBenchmarkBatch: Sendable, Equatable {
     public let results: [EvolutionBenchmarkResult]
     public let authorityReceipt: EvolutionBenchmarkAuthorityReceipt
+    public let capabilityFitness: EvolutionCapabilityFitnessReceiptInput
 }
 
 #if DEBUG
@@ -314,6 +317,8 @@ public struct EvolutionCandidateRecord: Sendable, Codable, Equatable {
     public let evaluationReceiptDigest: String?
     public let evaluationReceiptSeal: String?
     public let evaluationContainmentExecutionDigest: String?
+    /// Positive exact-parent paired evidence; unsigned by itself and included in the host receipt seal.
+    public let capabilityFitness: EvolutionCapabilityFitnessReceiptInput?
     /// Host-minted archive authority. All-nil is a legacy/display-only row. A partial envelope is
     /// malformed and invalidates authority for the entire archive.
     public let archiveSchema: String?
@@ -348,6 +353,7 @@ public struct EvolutionCandidateRecord: Sendable, Codable, Equatable {
                 evaluationReceiptDigest: String? = nil,
                 evaluationReceiptSeal: String? = nil,
                 evaluationContainmentExecutionDigest: String? = nil,
+                capabilityFitness: EvolutionCapabilityFitnessReceiptInput? = nil,
                 archiveSchema: String? = nil,
                 projectIdentity: String? = nil,
                 archiveSequence: Int? = nil,
@@ -379,6 +385,7 @@ public struct EvolutionCandidateRecord: Sendable, Codable, Equatable {
         self.evaluationReceiptDigest = evaluationReceiptDigest
         self.evaluationReceiptSeal = evaluationReceiptSeal
         self.evaluationContainmentExecutionDigest = evaluationContainmentExecutionDigest
+        self.capabilityFitness = capabilityFitness
         self.archiveSchema = archiveSchema
         self.projectIdentity = projectIdentity
         self.archiveSequence = archiveSequence
@@ -402,6 +409,7 @@ public enum EvolutionEvaluator {
                                 hostStateDigest: String? = nil,
                                 committedDiff: String? = nil,
                                 benchmarkAuthority: EvolutionBenchmarkAuthorityReceipt? = nil,
+                                capabilityFitness: EvolutionCapabilityFitnessReceiptInput? = nil,
                                 changedFiles: [String],
                                 benchmarks: [EvolutionBenchmarkResult],
                                 policy: EvolutionPolicy,
@@ -431,6 +439,14 @@ public enum EvolutionEvaluator {
         } else {
             evidenceErrors = ["missing verifier policy or exact durable object/host binding"]
         }
+        if !EvolutionHeldOutOracle.validate(
+            capabilityFitness, baseSHA: baseSHA, commitSHA: commitSHA,
+            treeSHA: boundTree ?? "", gitControlDigest: boundControl ?? "") {
+            evidenceErrors.append("missing exact-parent positive held-out host fitness")
+        }
+        if committedDiff == nil {
+            evidenceErrors.append("missing committed diff and one-use host evaluation receipt")
+        }
         if !subprocessBenchmarks.isEmpty, committedDiff != nil {
             if let boundTree, let boundControl, let boundHost, let diffDigest {
                 if !EvolutionEvaluationAuthority.receiptMatches(
@@ -438,7 +454,8 @@ public enum EvolutionEvaluator {
                     treeSHA: boundTree, gitControlDigest: boundControl, branch: branch,
                     changedFiles: changedFiles.sorted(), committedDiffDigest: diffDigest,
                     hostStateDigest: boundHost, integrityDigest: integrityDigest,
-                    requiredCommands: requiredCommands, benchmarks: subprocessBenchmarks) {
+                    requiredCommands: requiredCommands, benchmarks: subprocessBenchmarks,
+                    capabilityFitness: capabilityFitness) {
                     evidenceErrors.append("missing or mismatched one-use host evaluation receipt")
                 }
             } else {
@@ -506,7 +523,8 @@ public enum EvolutionEvaluator {
             evaluationReceiptID: benchmarkAuthority?.id,
             evaluationReceiptDigest: benchmarkAuthority?.bindingDigest,
             evaluationReceiptSeal: benchmarkAuthority?.seal,
-            evaluationContainmentExecutionDigest: benchmarkAuthority?.containmentExecutionDigest
+            evaluationContainmentExecutionDigest: benchmarkAuthority?.containmentExecutionDigest,
+            capabilityFitness: capabilityFitness
         )
     }
 }
@@ -624,8 +642,10 @@ public enum EvolutionBenchmarkRunner {
         // `setsid`/`setpgid` descendants can escape them, and they do not enforce aggregate CPU, memory,
         // or process-count limits. Until a trusted backend returns and consumes a complete
         // `HardProcessContainmentReceipt`, production evolution must refuse before candidate code starts.
-        let status = HardProcessContainmentRuntime.currentAvailability
-        throw ExecutionError.hardContainmentUnavailable(status.reason)
+        return try await EvolutionPairedBenchmarkCoordinator.run(
+            commands: commands, candidate: candidate, worktree: worktree,
+            hostRoot: hostRoot, expectedHostState: expectedHostState,
+            timeoutSeconds: timeoutSeconds)
     }
 
     #if DEBUG

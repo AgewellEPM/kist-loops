@@ -444,7 +444,7 @@ public struct SMLWorkflowRuntimeModelAdapter: Sendable {
         case .watch, .receipts:
             return command.task != "runtime"
                 && command.arguments["initial_state"] == nil
-        case .approve, .refuse, .rollback:
+        case .approve, .refuse, .rollback, .reconcile:
             return command.task != "runtime"
                 && command.arguments["initial_state"] == nil
                 && validTaskRevision(command.expectedState["task_revision"])

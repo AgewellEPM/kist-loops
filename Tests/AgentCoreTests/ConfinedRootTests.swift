@@ -1,6 +1,11 @@
 import XCTest
 import Foundation
 @testable import AgentCore
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Adversarial suite for `ConfinedRoot` — the openat/O_NOFOLLOW filesystem-confinement
 /// layer that closes Codex HIGH#2 (TOCTOU). These tests pin the SECURITY PROPERTY the
@@ -370,5 +375,45 @@ final class ConfinedRootTests: XCTestCase {
         XCTAssertEqual(byName["realdir"], true)
         // The symlink is listed but must NEVER be reported as a directory (would invite traversal).
         XCTAssertEqual(byName["linkdir"], false)
+    }
+
+    func testCreateDataIfMissingIsIdempotentButNeverOverwrites() throws {
+        let c = try cr()
+        let expected = Data("reviewed".utf8)
+
+        XCTAssertTrue(try c.createDataIfMissing(
+            "generated/config.json", expected, createParents: true))
+        XCTAssertFalse(try c.createDataIfMissing(
+            "generated/config.json", expected, createParents: true))
+        XCTAssertThrowsError(try c.createDataIfMissing(
+            "generated/config.json", Data("different".utf8), createParents: true))
+        XCTAssertEqual(try c.readData("generated/config.json"), expected)
+    }
+
+    func testCreateDataIfMissingRefusesIdenticalButNonPrivateExistingFile() throws {
+        let c = try cr()
+        let path = root + "/public.json"
+        try Data("same".utf8).write(to: URL(fileURLWithPath: path))
+        XCTAssertEqual(chmod(path, 0o644), 0)
+
+        XCTAssertThrowsError(try c.createDataIfMissing(
+            "public.json", Data("same".utf8), createParents: false))
+        XCTAssertEqual(try c.readString("public.json"), "same")
+    }
+
+    func testCreateDataIfMissingRefusesSymlinkAndHardLinkTargets() throws {
+        let c = try cr()
+        try "outside".write(
+            toFile: external + "/target.json", atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(
+            atPath: root + "/link.json", withDestinationPath: external + "/target.json")
+        XCTAssertThrowsError(try c.createDataIfMissing(
+            "link.json", Data("outside".utf8), createParents: false))
+
+        XCTAssertTrue(try c.createDataIfMissing(
+            "real.json", Data("same".utf8), createParents: false))
+        XCTAssertEqual(link(root + "/real.json", root + "/alias.json"), 0)
+        XCTAssertThrowsError(try c.createDataIfMissing(
+            "real.json", Data("same".utf8), createParents: false))
     }
 }

@@ -78,6 +78,8 @@ public struct LoopCheckpoint: Codable, Sendable {
     /// Absolute number of concrete provider requests durably admitted for this run. Optional so
     /// pre-ledger checkpoints decode; legacy checkpoints conservatively seed it from `iteration`.
     public var providerRequestsConsumed: Int?
+    /// Durable parent/session/project lineage. Advisory identity, never an access grant.
+    public var agentIdentity: AgentRunIdentity?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -144,10 +146,12 @@ public final class LoopCheckpointRunLease: @unchecked Sendable {
 /// regular/single-link objects before use.
 public struct LoopCheckpointStore: Sendable {
     public let directory: String
+    private let confinementRoot: String?
     private static let maxCheckpointBytes = 64 * 1_024 * 1_024
 
-    public init(directory: String = LoopCheckpointStore.defaultDirectory()) {
+    public init(directory: String = LoopCheckpointStore.defaultDirectory(), confinementRoot: String? = nil) {
         self.directory = directory
+        self.confinementRoot = confinementRoot
     }
 
     public static func defaultDirectory() -> String {
@@ -280,6 +284,10 @@ public struct LoopCheckpointStore: Sendable {
     }
 
     private func secureDirectoryFD(create: Bool) throws -> Int32 {
+        if let confinementRoot {
+            return try ConfinedRoot(root: confinementRoot)
+                .openPrivateDirectoryDescriptor(directory, create: create)
+        }
         if create {
             try FileManager.default.createDirectory(
                 atPath: directory, withIntermediateDirectories: true,

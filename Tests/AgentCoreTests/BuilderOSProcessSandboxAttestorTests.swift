@@ -63,6 +63,58 @@ final class BuilderOSProcessSandboxAttestorTests: XCTestCase {
         #endif
     }
 
+    func testHomeCompilerTraversalAllowsMetadataButNotHomeListingsSiblingDataOrCompilerWrites() async throws {
+        #if os(macOS)
+        guard let node = RunCommandTool.resolveExecutable("node", env: ["PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin"]) else {
+            throw XCTSkip("installed Node is required for realpath integration")
+        }
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        let fixture = home.appendingPathComponent(".kist-compiler-traversal-\(UUID().uuidString)")
+        let compiler = fixture.appendingPathComponent("bundle")
+        let bin = compiler.appendingPathComponent("bin")
+        let lib = compiler.appendingPathComponent("lib")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try FileManager.default.createDirectory(at: lib, withIntermediateDirectories: true)
+        let canary = fixture.appendingPathComponent("private-canary.txt")
+        try Data("PRIVATE".utf8).write(to: canary)
+        let library = lib.appendingPathComponent("typescript.js")
+        try Data("compiler-readable".utf8).write(to: library)
+        func js(_ path: String) throws -> String { String(decoding: try JSONEncoder().encode(path), as: UTF8.self) }
+        let entry = bin.appendingPathComponent("tsc")
+        let program = """
+        const fs = require('fs');
+        if (fs.readFileSync(\(try js(library.path)), 'utf8') !== 'compiler-readable') process.exit(2);
+        function denied(action) {
+          try { action(); process.exit(3); }
+          catch (e) { if (e.code !== 'EPERM' && e.code !== 'EACCES') throw e; }
+        }
+        denied(() => fs.readdirSync(\(try js(home.path))));
+        denied(() => fs.readdirSync(\(try js(fixture.path))));
+        denied(() => fs.readFileSync(\(try js(canary.path))));
+        denied(() => fs.writeFileSync(\(try js(library.path)), 'changed'));
+        console.log('COMPILER_TRAVERSAL_OK');
+        """
+        try Data(program.utf8).write(to: entry)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: entry.path)
+        let selected = String(decoding: try JSONEncoder().encode([compiler.path]), as: UTF8.self)
+        let request = request()
+        let attestation = try await BuilderOSProcessSandboxAttestor(
+            toolchainParentEnvironment: ["KIST_BUILDER_TOOLCHAIN_ROOTS": selected]).attest(request)
+        let outcome = try await BuilderOSProcessSandboxAttestor.withRegisteredScope(
+            request: request, attestation: attestation) {
+                self.run(node, [entry.path])
+            }
+        XCTAssertEqual(outcome.exitCode, 0, outcome.combined)
+        XCTAssertEqual(outcome.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "COMPILER_TRAVERSAL_OK")
+        XCTAssertTrue(outcome.stderr.isEmpty, outcome.stderr)
+        XCTAssertEqual(try String(contentsOf: library, encoding: .utf8), "compiler-readable")
+        #else
+        throw XCTSkip("real Seatbelt integration requires macOS")
+        #endif
+    }
+
     func testGovernedSiblingAbsoluteWriteIsDeniedAndUnchanged() async throws {
         #if os(macOS)
         let governed = try XCTUnwrap(governed)
@@ -107,6 +159,60 @@ final class BuilderOSProcessSandboxAttestorTests: XCTestCase {
         XCTAssertFalse(outcome.stdout.isEmpty && outcome.stderr.isEmpty)
         #else
         throw XCTSkip("real Seatbelt integration test requires macOS")
+        #endif
+    }
+
+    func testXcodeShimsDoNotPolluteProgramStderrWithHostCacheErrors() async throws {
+        #if os(macOS)
+        let outcome = try await withScope {
+            self.run("/usr/bin/python3", ["-c", "print('compiler-ok')"])
+        }
+        XCTAssertEqual(outcome.exitCode, 0, outcome.combined)
+        XCTAssertEqual(outcome.stdout, "compiler-ok\n")
+        XCTAssertEqual(outcome.stderr, "", "a successful program must not inherit xcrun cache errors")
+        let staged = try XCTUnwrap(staged)
+        try "print('compiler-ok')\n".write(to: staged.appendingPathComponent("check.py"), atomically: true, encoding: .utf8)
+        try ".PHONY: verify\nverify:\n\t/usr/bin/python3 check.py\n".write(
+            to: staged.appendingPathComponent("Makefile"), atomically: true, encoding: .utf8)
+        let nested = try await withScope { self.run("/usr/bin/make", ["verify"]) }
+        XCTAssertEqual(nested.exitCode, 0, nested.combined)
+        XCTAssertEqual(nested.stderr, "", "an immutable verifier can contain an absolute Apple shim")
+        XCTAssertTrue(nested.stdout.contains("compiler-ok"))
+        #endif
+    }
+
+    func testInstalledCompilersBuildAndRunUsingTheGovernedCommandTool() async throws {
+        #if os(macOS)
+        let staged = try XCTUnwrap(staged)
+        try FileManager.default.createDirectory(at: staged.appendingPathComponent(".build"), withIntermediateDirectories: true)
+        let fixtures: [(String, String, String, [String], String, [String])] = [
+            ("main.swift", "print(\"compiler-ok\")\n", "swiftc", ["main.swift", "-o", ".build/swift-main"], ".build/swift-main", []),
+            ("main.c", "#include <stdio.h>\nint main(void) { puts(\"compiler-ok\"); return 0; }\n", "clang", ["main.c", "-o", ".build/c-main"], ".build/c-main", []),
+            ("main.rs", "fn main() { println!(\"compiler-ok\"); }\n", "rustc", ["main.rs", "-o", ".build/rust-main"], ".build/rust-main", []),
+            ("Main.java", "public class Main { public static void main(String[] args) { System.out.println(\"compiler-ok\"); } }\n", "javac", ["-d", ".build", "Main.java"], "java", ["-cp", ".build", "Main"]),
+        ]
+        let installed = try BuilderToolchainEnvironment.discover()
+        var exercised: [String] = []
+        for (file, source, compiler, args, program, runArgs) in fixtures {
+            guard RunCommandTool.resolveExecutable(compiler, env: installed.values) != nil else { continue }
+            exercised.append(compiler)
+            try source.write(to: staged.appendingPathComponent(file), atomically: true, encoding: .utf8)
+            let result = try await withScope {
+                let context = ToolContext(projectRoot: staged.path,
+                    shell: ShellPolicy(enabled: true, allow: [], deny: []), sandbox: .disabled)
+                let compiled = await ToolRegistry([RunCommandTool()]).execute(name: "run_command",
+                    arguments: ["executable": compiler, "args": args, "timeout": 120], context: context)
+                guard compiled.success else { return compiled }
+                return await ToolRegistry([RunCommandTool()]).execute(name: "run_command",
+                    arguments: ["executable": program, "args": runArgs, "timeout": 30], context: context)
+            }
+            XCTAssertTrue(result.success, "\(compiler): \(result.diagnosticText)")
+            XCTAssertTrue(result.output.contains("compiler-ok"), "\(compiler): \(result.diagnosticText)")
+            XCTAssertFalse(result.output.contains("xcrun: error"), result.output)
+            XCTAssertEqual(result.metadata["builder_os_sandboxed"], "true")
+        }
+        XCTAssertTrue(exercised.contains("swiftc"))
+        XCTAssertTrue(exercised.contains("clang"))
         #endif
     }
 

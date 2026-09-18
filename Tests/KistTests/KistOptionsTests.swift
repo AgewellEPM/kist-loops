@@ -615,7 +615,7 @@ final class KistOptionsTests: XCTestCase {
 
         let outputOnly = KistOptions.parse(["--sml-out", ".kist/generated/review-runtime"])
         XCTAssertTrue(outputOnly.optionErrors.contains {
-            $0.contains("--sml-out requires --sml-runtime-scaffold <source.json>")
+            $0.contains("--sml-out requires --sml-runtime-scaffold or --sml-import-openapi <source.json>")
         })
         XCTAssertEqual(outputOnly.smlRuntimeOutputDirectory, ".kist/generated/review-runtime")
 
@@ -760,8 +760,23 @@ final class KistOptionsTests: XCTestCase {
         XCTAssertTrue(repl.optionErrors.contains { $0.contains("--sml-runtime-repl requires <source.json>") })
         XCTAssertNil(repl.smlRuntimeREPL)
 
-        let missingLine = KistOptions.parse(["--sml-runtime-repl", "graphs/review.langgraph.json"])
-        XCTAssertTrue(missingLine.optionErrors.contains { $0.contains("--sml-runtime-repl requires --sml-line") })
+        let interactive = KistOptions.parse([
+            "--sml-runtime-repl", "graphs/review.langgraph.json",
+        ])
+        XCTAssertNil(interactive.smlRuntimeREPLLine)
+        XCTAssertTrue(interactive.optionErrors.isEmpty,
+                      "omitting --sml-line selects the interactive REPL")
+        XCTAssertTrue(KistOptions.helpText.contains(
+            "--sml-runtime-repl <json> [--sml-line <line>]"
+        ))
+
+        let blankLine = KistOptions.parse([
+            "--sml-runtime-repl", "graphs/review.langgraph.json",
+            "--sml-line", "   ",
+        ])
+        XCTAssertTrue(blankLine.optionErrors.contains {
+            $0.contains("--sml-line must not be blank")
+        })
 
         let lineOnly = KistOptions.parse(["--sml-line", "help"])
         XCTAssertTrue(lineOnly.optionErrors.contains { $0.contains("--sml-line requires --sml-runtime-repl") })

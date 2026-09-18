@@ -55,6 +55,28 @@ final class CaptainScorecardTests: XCTestCase {
         XCTAssertTrue(back.wasStuck)
     }
 
+    func testRefusalSamplesRemainInAuditWithoutDemotingOrEvictingMeasuredPerformance() throws {
+        let fixture = try temporaryStore()
+        defer { try? FileManager.default.removeItem(atPath: fixture.root) }
+        let now = 4_000_000.0
+        let measured = (0..<5).map { sample(true, epoch: now - 100 + Double($0)) }
+        let stops = (0..<40).map {
+            sample(false, reason: CaptainLearningSample.refusalOrPermissionStopReason,
+                   epoch: now - 40 + Double($0))
+        }
+        XCTAssertTrue(fixture.store.record(measured + stops))
+        let loaded = fixture.store.load()
+        XCTAssertEqual(loaded, measured + stops, "raw labeled attempts must remain available")
+        XCTAssertEqual(CaptainLearningStore.modelVerdicts(loaded, now: now),
+                       CaptainLearningStore.modelVerdicts(measured, now: now))
+        XCTAssertEqual(CaptainLearningStore.summarize(loaded, now: now),
+                       CaptainLearningStore.summarize(measured, now: now))
+        let failures = (0..<10).map { _ in sample(false, reason: "verificationFail", epoch: now) }
+        XCTAssertTrue(CaptainLearningStore.verdict(
+            providerId: "mimo", samples: failures, now: now).exclude,
+            "actual measured failures must still affect routing")
+    }
+
     func testDecodedAndDirectSamplesAreSanitizedBeforeRouting() throws {
         let raw = #"{"taskSignature":" x ","taskTags":[" Coding ","coding"],"language":" SWIFT ","role":" TURN ","providerId":" MiMo ","source":"liveEval","success":false,"judgeScore":9,"tokens":-1,"latencyMs":-2,"toolFailures":-3,"atEpoch":100,"failureRate":4}"#
         let decoded = try JSONDecoder().decode(

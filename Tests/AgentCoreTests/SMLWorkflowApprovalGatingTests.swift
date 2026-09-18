@@ -235,9 +235,14 @@ final class SMLWorkflowApprovalGatingTests: XCTestCase {
         XCTAssertEqual(absent, SMLApprovalPolicy(),
                        "no policy file IS the locked approve-everything default")
 
+        let policyURL = root.appendingPathComponent(".kist/sml/policy.json")
         try "{not json".write(
-            to: root.appendingPathComponent(".kist/sml/policy.json"),
+            to: policyURL,
             atomically: true, encoding: .utf8
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o600))],
+            ofItemAtPath: policyURL.path
         )
         XCTAssertThrowsError(try SMLApprovalPolicy.load(projectRoot: root.path)) { error in
             guard case SMLApprovalPolicy.LoadError.malformed = error else {

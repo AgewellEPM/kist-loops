@@ -98,6 +98,98 @@ final class ConnectorAuditTests: XCTestCase {
         FileManager.default.temporaryDirectory.appendingPathComponent("caudit-\(UUID().uuidString).jsonl")
     }
 
+    func testInputHashDistinguishesEmbeddedFieldSeparators() {
+        XCTAssertNotEqual(ConnectorAudit.hashInput(["a": "1&b=2"]),
+                          ConnectorAudit.hashInput(["a": "1", "b": "2"]))
+        XCTAssertEqual(ConnectorAudit.hashInput(["a": "1", "b": "2"]),
+                       ConnectorAudit.hashInput(["b": "2", "a": "1"]))
+    }
+
+    func testConcurrentRecordsPreserveOneCompleteSequence() async throws {
+        let url = tempFile()
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + ".lock")
+        }
+        let audit = ConnectorAudit(fileURL: url)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<16 {
+                group.addTask {
+                    _ = try audit.record(connector: "c", action: "a", input: ["id": String(index)],
+                                     statusCode: 200, ok: true, atEpoch: Double(index))
+                }
+            }
+            try await group.waitForAll()
+        }
+        XCTAssertEqual(audit.entries().map(\.seq), Array(0..<16))
+        XCTAssertNil(audit.verifyChain())
+    }
+
+    struct FixtureConnector: Connector {
+        let name = "fixture"
+        let handler: @Sendable () async throws -> ConnectorResult
+        func actions() -> [ConnectorAction] { [] }
+        func invoke(action: String, input: [String: String]) async throws -> ConnectorResult { try await handler() }
+    }
+
+    func testAuditedInvocationPersistsIntentBeforeCallingAndResultAfterward() async throws {
+        let url = tempFile()
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + ".lock")
+        }
+        let audit = ConnectorAudit(fileURL: url)
+        let connector = FixtureConnector {
+            XCTAssertEqual(audit.entries().map(\.phase), ["started"])
+            return ConnectorResult(statusCode: 201, body: "created")
+        }
+        let result = try await AuditedConnector(connector, audit: audit).invoke(action: "create", input: [:])
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(audit.entries().map(\.phase), ["started", "completed"])
+    }
+
+    func testConcurrentIdenticalInvocationsHaveDistinctIntentResultPairs() async throws {
+        let url = tempFile()
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + ".lock")
+        }
+        let audit = ConnectorAudit(fileURL: url)
+        let fixture = FixtureConnector {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            return ConnectorResult(statusCode: 201, body: "created")
+        }
+        let audited = AuditedConnector(fixture, audit: audit)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask { _ = try await audited.invoke(action: "create", input: ["name": "same"]) }
+            }
+            try await group.waitForAll()
+        }
+        let entries = audit.entries()
+        XCTAssertEqual(entries.count, 16)
+        XCTAssertEqual(Set(entries.map(\.inputHash)).count, 1)
+        let invocations = Dictionary(grouping: entries, by: { $0.invocationID ?? "" })
+        XCTAssertEqual(invocations.count, 8)
+        for (id, pair) in invocations {
+            XCTAssertNotNil(UUID(uuidString: id))
+            XCTAssertEqual(pair.map(\.phase), ["started", "completed"])
+        }
+        XCTAssertNil(audit.verifyChain())
+    }
+
+    func testUnavailableAuditPreventsInvocation() async {
+        let audit = ConnectorAudit(fileURL: tempFile().appendingPathComponent("missing/audit.jsonl"))
+        let connector = FixtureConnector {
+            XCTFail("connector must not run without a saved intent")
+            return ConnectorResult(statusCode: 200, body: "")
+        }
+        do {
+            _ = try await AuditedConnector(connector, audit: audit).invoke(action: "create", input: [:])
+            XCTFail("missing audit destination must fail")
+        } catch { }
+    }
+
     func testSealedChainAndSecretRedaction() throws {
         let url = tempFile(); defer { try? FileManager.default.removeItem(at: url) }
         let audit = ConnectorAudit(fileURL: url)
@@ -122,6 +214,7 @@ final class ConnectorAuditTests: XCTestCase {
         try text.write(to: url, atomically: true, encoding: .utf8)
         XCTAssertEqual(audit.verifyChain(), 0, "tampered entry breaks the seal")
         XCTAssertEqual(audit.entries().count, 0)
+        XCTAssertThrowsError(try audit.record(connector: "c", action: "a", input: [:], statusCode: 200, ok: true, atEpoch: 2))
     }
 }
 

@@ -27,7 +27,12 @@ enum OAuthCallbackServer {
     /// Bind a loopback port; returns (port, listeningSocketFD). Caller uses the port in redirect_uri, then
     /// calls `waitForCallback`. Throws on any socket error.
     static func bind() throws -> (port: Int, fd: Int32) {
+        #if canImport(Darwin)
         let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #else
+        // On Linux/Glibc SOCK_STREAM is a `__socket_type` enum, not an Int32 the way it is on Darwin.
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #endif
         guard fd >= 0 else { throw MCPConnectionError.badResponse("socket() failed") }
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))

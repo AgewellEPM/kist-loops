@@ -10,12 +10,7 @@ extension HeadlessAgentLoop {
     /// only "exit code 1" — the compiler's stderr was captured in `output` but dropped, so the model
     /// patched blind, tried a denied `2>&1` re-run, and finally reported it "cannot access stderr".)
     static func failureAwareRaw(_ result: ToolResult) -> String {
-        if result.success { return result.output }
-        let error = (result.error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if error.isEmpty { return result.output }
-        if output.isEmpty || output == error { return error }
-        return error + "\n" + result.output
+        result.diagnosticText
     }
 
     static func toolObservationBody(raw: String, metadata: [String: String], maxBytes: Int) -> String {
@@ -43,10 +38,12 @@ extension HeadlessAgentLoop {
     }
 
     private static func continuationHint(visibleBody: String, metadata: [String: String]) -> String {
-        if let path = metadata["path"], let totalRaw = metadata["total_lines"], let total = Int(totalRaw) {
-            if let lastLine = lastVisibleNumberedLine(in: visibleBody), lastLine < total {
-                let nextStart = lastLine + 1
-                let nextEnd = min(total, nextStart + ReadFileWindow.defaultLines - 1)
+        if let path = metadata["path"], let totalRaw = metadata["total_lines"],
+           let total = Int(totalRaw), total > 0 {
+            let windowStart = metadata["shown_lines"]?.split(separator: "-").first.flatMap { Int($0) }
+            if let nextStart = firstUnseenNumberedLine(in: visibleBody) ?? windowStart,
+               nextStart > 0, nextStart <= total {
+                let nextEnd = nextStart + min(total - nextStart, ReadFileWindow.defaultLines - 1)
                 return "Continue with read_file(path=\"\(escapedForHint(path))\", start_line=\(nextStart), end_line=\(nextEnd)) before claiming full-file coverage."
             }
             if let nextStart = metadata["next_start_line"], let nextEnd = metadata["next_end_line"] {
@@ -56,13 +53,20 @@ extension HeadlessAgentLoop {
         return "Continue with read_file start_line/end_line or context_brain(action=\"get\", id=\"...\") before claiming full-file coverage."
     }
 
-    private static func lastVisibleNumberedLine(in text: String) -> Int? {
-        let pattern = #"(?m)^\s*(\d+)\s*│"#
+    private static func firstUnseenNumberedLine(in text: String) -> Int? {
+        let pattern = #"(?m)^[ \t]*(\d+)[ \t]*│"#
         guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
         let ns = text as NSString
         let matches = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
-        guard let match = matches.last, match.numberOfRanges > 1 else { return nil }
-        return Int(ns.substring(with: match.range(at: 1)))
+        guard let match = matches.last, match.numberOfRanges > 1,
+              let line = Int(ns.substring(with: match.range(at: 1))) else { return nil }
+        // A visible line number does not establish that its source text survived the byte cap.
+        // Resume that same line unless its terminating newline is also visible. If only the
+        // first marker was clipped, the caller falls back to the current window's start.
+        let tail = NSRange(location: match.range.location, length: ns.length - match.range.location)
+        guard ns.range(of: "\n", range: tail).location != NSNotFound else { return line }
+        let (next, overflow) = line.addingReportingOverflow(1)
+        return overflow ? nil : next
     }
 
     private static func escapedForHint(_ value: String) -> String {

@@ -5,68 +5,55 @@ import Foundation
 /// `ShellPolicy`, `SandboxPolicy`, and the audit log all apply automatically at the tool protocol
 /// layer, not as driver-side promises.
 ///
-/// `supports` is the intersection of three authorities: the instruction must be `CALL_TOOL`, the
-/// reference must be in the host catalog's `tool_capabilities` (checked at admission AND here),
-/// and a tool of that name must actually be registered. A capability the catalog admits but the
-/// registry lacks fails at dispatch with a named error, never silently.
+/// `supports` requires both `CALL_TOOL` and a reference in the host catalog's
+/// `tool_capabilities` (checked at admission AND here). The implementation is resolved again at
+/// execution; a capability the catalog admits but the registry lacks fails with a named error.
 public struct SMLToolCapabilityDriver: SMLInstructionDriver {
     public let id = "kist-tool-driver"
 
     private let allowedCapabilities: Set<String>
-    private let tool: @Sendable (String) -> (any AgentTool)?
+    private let registry: ToolRegistry
     private let context: ToolContext
     private let clock: @Sendable () -> Double
 
     public init(
         allowedCapabilities: Set<String>,
-        toolLookup: @escaping @Sendable (String) -> (any AgentTool)?,
+        registry: ToolRegistry,
         context: ToolContext,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
         self.allowedCapabilities = allowedCapabilities
-        self.tool = toolLookup
+        self.registry = registry
         self.context = context
         self.clock = clock
     }
 
     public func supports(_ request: SMLCapabilityRequest) -> Bool {
+        // Admission names a permitted capability, not an installed implementation. Resolve before
+        // the coordinator claims dispatch; an absent tool must remain parked and restartable.
         request.operation == .callTool && allowedCapabilities.contains(request.reference)
+            && registry.tool(named: request.reference) != nil
     }
 
     public func execute(
         _ invocation: SMLCapabilityInvocation
     ) async throws -> SMLCapabilityOutcome {
         let request = invocation.request
-        guard let tool = tool(request.reference) else {
+        guard registry.tool(named: request.reference) != nil else {
             throw SMLCapabilityDriverConfigurationError.unknownTool(capability: request.reference)
         }
         let outputField = try SMLCapabilityDriverSupport.outputField(of: request)
 
         var arguments = request.arguments
         arguments.removeValue(forKey: SMLCapabilityDriverSupport.outputFieldArgument)
-        let result: ToolResult
-        do {
-            result = try await tool.execute(
-                arguments: SMLCapabilityDriverSupport.foundationArguments(arguments),
-                context: context
-            )
-        } catch {
-            // A throwing tool (confinement refusal, shell policy, bad arguments) is a FAILED
-            // outcome with the refusal preserved as evidence — not a driver crash. The task
-            // parks visibly instead of the pump dying.
-            return SMLCapabilityDriverSupport.outcome(
-                for: invocation,
-                driverID: id,
-                status: .failed,
-                statePatch: [:],
-                evidencePayload: [
-                    "capability": .string(request.reference),
-                    "error": .string(String(describing: error)),
-                ],
-                receiptID: "tool.\(request.reference).threw",
-                observedAtEpoch: clock()
-            )
-        }
+        // Never call AgentTool.execute directly. ToolRegistry.execute is the shared security
+        // choke point for ToolGate authorization, schema validation, audit, tracing, and thrown
+        // error normalization; bypassing it would make serve mode less constrained than Kist.
+        let result = await registry.execute(
+            name: request.reference,
+            arguments: SMLCapabilityDriverSupport.foundationArguments(arguments),
+            context: context.withCorrelationID(invocation.dispatchID)
+        )
 
         var statePatch: SMLObject = [:]
         if result.success, let outputField {

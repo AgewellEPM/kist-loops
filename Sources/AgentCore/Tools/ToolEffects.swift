@@ -119,7 +119,7 @@ public enum ToolEffectCatalog {
     /// `run_command` and `custom_tool` depend on the invocation's arguments.
     public static let knownMutationTools: Set<String> = [
         "write_file", "edit_file", "apply_patch", "notebook_edit", "move_file",
-        "make_dir", "create_directory", "ast_grep_apply", "custom_tool",
+        "make_dir", "create_directory", "ast_grep_apply", "custom_tool", "create_agent",
         "generate_image", "edit_image", "generate_audio", "generate_video", "extract_clip",
         "translate_document", "watch_video", "live_screen_watch",
     ]
@@ -240,6 +240,12 @@ public enum ToolEffectCatalog {
                 : ToolEffectObservation(progress: .externalState)
         }
         switch tool {
+        case "create_agent":
+            guard outcomeMetadata?["changed"] != "false" else { return .none }
+            let confirmed = outcomeMetadata?["changed"] == "true"
+                && outcomeMetadata?["agent_definition_validated"] == "true"
+            return ToolEffectObservation(mutation: .nonSource, progress: .artifact,
+                                         mutationEvidence: confirmed ? .confirmed : .mayMutate)
         case "ast_grep_apply":
             // The default `.` and directory targets may rewrite many source types, so missing/extensionless
             // paths stay unknown rather than being laundered as non-source. Until the external process
@@ -325,7 +331,7 @@ public enum ToolEffectCatalog {
                 ? ToolEffectObservation(progress: .research) : .none
         case "jeeves_research", "web_search":
             return ToolEffectObservation(progress: .research)
-        case "fetch_url", "browse", "read_file", "search_code", "ast_grep", "symbols":
+        case "fetch_url", "browse", "read_file", "read_files", "search_code", "ast_grep", "symbols":
             return ToolEffectObservation(progress: .evidence)
         case "job":
             let action = (arguments["action"] as? String)?.lowercased() ?? "list"

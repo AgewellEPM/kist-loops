@@ -140,23 +140,10 @@ public struct ContextBrainIndex: Sendable, Equatable {
     }
 
     public func search(_ query: String, limit: Int = 12) -> [Chunk] {
-        let terms = Self.terms(query)
-        guard !terms.isEmpty else { return [] }
-        return chunks.compactMap { chunk -> (Chunk, Int)? in
-            let haystack = (chunk.path + "\n" + chunk.text).lowercased()
-            var score = 0
-            for term in terms {
-                if chunk.path.lowercased().contains(term) { score += 8 }
-                score += haystack.components(separatedBy: term).count - 1
-            }
-            return score > 0 ? (chunk, score) : nil
-        }
-        .sorted {
-            if $0.1 != $1.1 { return $0.1 > $1.1 }
-            return $0.0.id < $1.0.id
-        }
-        .prefix(max(1, limit))
-        .map(\.0)
+        let byID = Dictionary(uniqueKeysWithValues: chunks.map { ($0.id, $0) })
+        return LexicalSearch.rank(chunks.map {
+            LexicalSearch.Document(id: $0.id, title: $0.path, text: $0.text)
+        }, query: query, limit: max(1, limit)).compactMap { byID[$0.id] }
     }
 
     public func coverageBatches(maxCharacters: Int) -> [[Chunk]] {

@@ -23,13 +23,27 @@ public struct SMLModelPurposeBindings: Sendable {
     public static let relativePath = ".kist/sml/models.json"
 
     public let purposes: [String: Binding]
+    /// Backward-compatible top-level projection of the named compiled contracts.
+    public let outputSchemas: [String: SMLStateType]
+    public let outputContracts: [String: SMLModelOutputContract]
+    public static let builtinOutputSchemas: [String: SMLStateType] = [
+        "text": .string, "string": .string, "json.object": .object, "json.array": .array,
+        "json.boolean": .boolean, "json.number": .number, "json.integer": .integer,
+    ]
 
-    public init(purposes: [String: Binding]) {
+    public init(purposes: [String: Binding], outputSchemas: [String: SMLStateType] = [:],
+                outputContracts: [String: SMLModelOutputContract] = [:]) {
         self.purposes = purposes
+        let types = Self.builtinOutputSchemas.merging(outputSchemas) { _, configured in configured }
+        let contracts = types.mapValues { SMLModelOutputContract(type: $0) }
+            .merging(outputContracts) { _, configured in configured }
+        self.outputContracts = contracts
+        self.outputSchemas = contracts.mapValues(\.type)
     }
 
     public enum LoadError: Error, Equatable, CustomStringConvertible {
         case missing(path: String)
+        case unreadable(path: String, reason: String)
         case malformed(path: String, reason: String)
         case unsupportedSchemaVersion(Int)
 
@@ -39,6 +53,8 @@ public struct SMLModelPurposeBindings: Sendable {
                 return "SML model bindings are missing: \(path) — CALL_MODEL steps need "
                     + "purpose→provider bindings (\"purposes\": {\"<purpose>\": "
                     + "{\"provider\": ..., \"model\": ...}})"
+            case .unreadable(let path, let reason):
+                return "SML model bindings are unsafe or unreadable: \(path) (\(reason))"
             case .malformed(let path, let reason):
                 return "SML model bindings are malformed: \(path) (\(reason))"
             case .unsupportedSchemaVersion(let version):
@@ -48,57 +64,114 @@ public struct SMLModelPurposeBindings: Sendable {
         }
     }
 
-    private struct FileFormat: Decodable {
-        struct Entry: Decodable {
-            let provider: String
-            let model: String
-            let systemPrompt: String?
-            let maxTokens: Int?
-
-            enum CodingKeys: String, CodingKey {
-                case provider, model
-                case systemPrompt = "system_prompt"
-                case maxTokens = "max_tokens"
-            }
-        }
-
-        let schemaVersion: Int
-        let purposes: [String: Entry]
-
-        enum CodingKeys: String, CodingKey {
-            case schemaVersion = "schema_version"
-            case purposes
-        }
-    }
-
     public static func load(projectRoot: String) throws -> SMLModelPurposeBindings {
         let url = URL(fileURLWithPath: projectRoot).appendingPathComponent(relativePath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw LoadError.missing(path: url.path)
-        }
         let data: Data
         do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw LoadError.malformed(path: url.path, reason: String(describing: error))
-        }
-        let decoded: FileFormat
-        do {
-            decoded = try JSONDecoder().decode(FileFormat.self, from: data)
-        } catch {
-            throw LoadError.malformed(path: url.path, reason: String(describing: error))
-        }
-        guard decoded.schemaVersion == schemaVersion else {
-            throw LoadError.unsupportedSchemaVersion(decoded.schemaVersion)
-        }
-        return SMLModelPurposeBindings(purposes: decoded.purposes.mapValues {
-            Binding(
-                providerId: $0.provider,
-                model: $0.model,
-                systemPrompt: $0.systemPrompt,
-                maxTokens: min(max($0.maxTokens ?? 4_096, 256), 32_768)
+            data = try SMLHostConfigurationFile.read(
+                projectRoot: projectRoot,
+                relativePath: relativePath
             )
-        })
+        } catch SMLHostConfigurationFile.ReadError.missing {
+            throw LoadError.missing(path: url.path)
+        } catch {
+            throw LoadError.unreadable(path: url.path, reason: String(describing: error))
+        }
+
+        do {
+            let root = try SMLHostConfigurationFile.decodeRoot(from: data)
+            try SMLHostConfigurationFile.requireOnlyKeys(
+                root,
+                allowed: ["schema_version", "purposes", "output_schemas"],
+                path: "models"
+            )
+            let version = try SMLHostConfigurationFile.requiredInteger(
+                root["schema_version"], path: "models.schema_version")
+            guard version == schemaVersion else {
+                throw LoadError.unsupportedSchemaVersion(version)
+            }
+            let rawPurposes = try SMLHostConfigurationFile.requiredObject(
+                root["purposes"], path: "models.purposes")
+            guard rawPurposes.count <= SMLHostConfigurationFile.maximumBindings else {
+                throw SMLHostConfigurationFile.SchemaError(
+                    reason: "models.purposes exceeds "
+                        + "\(SMLHostConfigurationFile.maximumBindings) entries")
+            }
+
+            var purposes: [String: Binding] = [:]
+            for purpose in rawPurposes.keys.sorted() {
+                _ = try SMLHostConfigurationFile.reference(
+                    purpose, path: "models.purposes key")
+                let entryPath = "models.purposes.\(purpose)"
+                let entry = try SMLHostConfigurationFile.requiredObject(
+                    rawPurposes[purpose], path: entryPath)
+                try SMLHostConfigurationFile.requireOnlyKeys(
+                    entry,
+                    allowed: ["provider", "model", "system_prompt", "max_tokens"],
+                    path: entryPath
+                )
+                let provider = try SMLHostConfigurationFile.requiredString(
+                    entry["provider"], path: "\(entryPath).provider")
+                guard SMLValidationSupport.identifierIsValid(provider) else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "\(entryPath).provider is not a valid provider identifier")
+                }
+                let model = try SMLHostConfigurationFile.boundedText(
+                    try SMLHostConfigurationFile.requiredString(
+                        entry["model"], path: "\(entryPath).model"),
+                    path: "\(entryPath).model",
+                    maximumBytes: SMLHostConfigurationFile.maximumShortStringBytes
+                )
+                let systemPrompt: String?
+                if let prompt = try SMLHostConfigurationFile.optionalString(
+                    entry["system_prompt"], path: "\(entryPath).system_prompt") {
+                    systemPrompt = try SMLHostConfigurationFile.boundedText(
+                        prompt,
+                        path: "\(entryPath).system_prompt",
+                        maximumBytes: SMLHostConfigurationFile.maximumLongStringBytes,
+                        allowEmpty: true,
+                        allowFormattingWhitespace: true
+                    )
+                } else {
+                    systemPrompt = nil
+                }
+                let maxTokens = try SMLHostConfigurationFile.optionalInteger(
+                    entry["max_tokens"], path: "\(entryPath).max_tokens") ?? 4_096
+                guard (256...32_768).contains(maxTokens) else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "\(entryPath).max_tokens must be within 256...32768")
+                }
+                purposes[purpose] = Binding(
+                    providerId: provider,
+                    model: model,
+                    systemPrompt: systemPrompt,
+                    maxTokens: maxTokens
+                )
+            }
+            var outputContracts: [String: SMLModelOutputContract] = [:]
+            if let schemas = try SMLHostConfigurationFile.optionalObject(
+                root["output_schemas"], path: "models.output_schemas") {
+                guard schemas.count <= SMLHostConfigurationFile.maximumBindings else {
+                    throw SMLHostConfigurationFile.SchemaError(reason: "models.output_schemas has too many entries")
+                }
+                for name in schemas.keys.sorted() {
+                    _ = try SMLHostConfigurationFile.reference(name, path: "models.output_schemas key")
+                    if case .string(let raw)? = schemas[name], let type = SMLStateType(rawValue: raw) {
+                        outputContracts[name] = SMLModelOutputContract(type: type)
+                    } else if case .object(let schema)? = schemas[name] {
+                        outputContracts[name] = try SMLModelOutputContract(schema: schema)
+                    } else {
+                        throw SMLHostConfigurationFile.SchemaError(
+                            reason: "models.output_schemas.\(name) must name an SML state type or contain a supported schema object")
+                    }
+                }
+            }
+            return SMLModelPurposeBindings(purposes: purposes, outputContracts: outputContracts)
+        } catch let error as LoadError {
+            throw error
+        } catch {
+            throw LoadError.malformed(path: url.path, reason: String(describing: error))
+        }
     }
 }
 
@@ -136,7 +209,14 @@ public struct SMLModelCapabilityDriver: SMLInstructionDriver {
             throw SMLCapabilityDriverConfigurationError.unknownModelPurpose(request.reference)
         }
         let outputField = try SMLCapabilityDriverSupport.outputField(of: request)
-        let prompt = Self.prompt(for: request)
+        guard let schema = request.outputSchema, let contract = bindings.outputContracts[schema] else {
+            throw SMLModelOutputError.unknownSchema(request.outputSchema ?? "missing")
+        }
+        let format = contract.acceptsPlainText
+            ? "Return plain text."
+            : "Return only one valid JSON \(contract.type.rawValue) value, without Markdown fences."
+        let prompt = Self.prompt(for: request) + "\n\nOutput contract '\(schema)': \(format)"
+            + "\nRequired schema: \(contract.compactJSON)"
 
         var settings = ModelSettings(maxTokens: binding.maxTokens)
         if let system = binding.systemPrompt {
@@ -156,6 +236,9 @@ public struct SMLModelCapabilityDriver: SMLInstructionDriver {
             )
             for try await event in stream {
                 if case .delta(let text) = event {
+                    guard collected.utf8.count + text.utf8.count <= 65_536 else {
+                        throw SMLModelOutputError.tooLarge
+                    }
                     collected += text
                 }
             }
@@ -164,10 +247,18 @@ public struct SMLModelCapabilityDriver: SMLInstructionDriver {
         }
 
         let trimmed = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-        let succeeded = failure == nil && !trimmed.isEmpty
+        var value: SMLValue?
+        if failure == nil {
+            do {
+                value = try Self.decodeOutput(trimmed, contract: contract)
+            } catch {
+                failure = String(describing: error)
+            }
+        }
+        let succeeded = failure == nil && value != nil
         var statePatch: SMLObject = [:]
-        if succeeded, let outputField {
-            statePatch[outputField] = .string(trimmed)
+        if succeeded, let outputField, let value {
+            statePatch[outputField] = value
         }
         return SMLCapabilityDriverSupport.outcome(
             for: invocation,
@@ -179,12 +270,35 @@ public struct SMLModelCapabilityDriver: SMLInstructionDriver {
                 "provider": .string(binding.providerId),
                 "model": .string(binding.model),
                 "output_schema": request.outputSchema.map { .string($0) } ?? .null,
+                "output_contract_sha256": .string(SMLCapabilityDriverSupport.evidenceDigest(contract.jsonSchema)),
                 "response": .string(trimmed),
                 "error": failure.map { .string($0) } ?? .null,
             ],
             receiptID: "model.\(request.reference).\(succeeded ? "passed" : "failed")",
             observedAtEpoch: clock()
         )
+    }
+
+    static func decodeOutput(_ text: String, type: SMLStateType) throws -> SMLValue {
+        try decodeOutput(text, contract: SMLModelOutputContract(type: type))
+    }
+
+    static func decodeOutput(_ text: String, contract: SMLModelOutputContract) throws -> SMLValue {
+        guard !text.isEmpty else { throw SMLModelOutputError.invalidType(contract.type.rawValue) }
+        guard text.utf8.count <= 65_536 else { throw SMLModelOutputError.tooLarge }
+        let value: SMLValue
+        if contract.acceptsPlainText {
+            value = .string(text)
+        } else {
+            let wrapped = Data(("{\"value\":" + text + "}").utf8)
+            let object = try SMLWireCodec.decodeOpenObject(from: wrapped)
+            guard object.count == 1, let decoded = object["value"] else {
+                throw SMLModelOutputError.invalidType(contract.type.rawValue)
+            }
+            value = decoded
+        }
+        try contract.validate(value)
+        return value
     }
 
     /// Deterministic prompt assembly: the instruction's `prompt` argument (or the purpose name),
@@ -199,5 +313,22 @@ public struct SMLModelCapabilityDriver: SMLInstructionDriver {
         let stateJSON = (try? encoder.encode(request.state))
             .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
         return "\(head)\n\nCurrent workflow state:\n\(stateJSON)"
+    }
+}
+
+public enum SMLModelOutputError: Error, CustomStringConvertible {
+    case unknownSchema(String)
+    case invalidType(String)
+    case tooLarge
+
+    public var description: String {
+        switch self {
+        case .unknownSchema(let schema):
+            return "SML model output schema '\(schema)' has no contract binding; add it to output_schemas in .kist/sml/models.json"
+        case .invalidType(let type):
+            return "SML model output does not satisfy the declared \(type) type"
+        case .tooLarge:
+            return "SML model output exceeds the 65536-byte state limit"
+        }
     }
 }

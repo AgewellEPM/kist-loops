@@ -53,6 +53,18 @@ extension KistRunner {
     ) async -> Int32 {
         let launch = builderCompatibilityLaunch(for: opts, goal: goal)
         let contractID = builderCompatibilityContractID(root: root, goal: goal, adapter: launch.adapter)
+        if BuilderRunAudit.current == nil {
+            let audit = BuilderRunAudit(root: root, provider: providerId, model: model, contractID: contractID)
+            let status = await audit.run(goal: goal) {
+                await runBuilderCompatibility(
+                    opts, goal: goal, registry: registry, root: root, tools: tools, context: context,
+                    checkpoints: checkpoints, toolMode: toolMode, providerId: providerId, model: model,
+                    rolesOverride: rolesOverride, budgetOverride: budgetOverride,
+                    riskObjective: riskObjective, advisoryContext: advisoryContext)
+            }
+            note("builder replay · kist --project \(root) --replay \(audit.replay.manifest.runID)")
+            return status
+        }
         let planExecuteResumeID = launch.adapter == .planExecute ? opts.planExecuteResumeID : nil
         let planExecuteMissionID = launch.adapter == .planExecute
             ? (planExecuteResumeID ?? PlanExecuteMissionID.fresh()) : nil

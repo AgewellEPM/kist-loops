@@ -43,7 +43,7 @@ public struct SpecialistSpawner: Sendable {
         """
         return Plan(binding: binding,
                     toolNames: def.resolvedTools(ceiling: ceiling),
-                    maxIterations: def.maxTurns ?? defaultMaxIterations,
+                    maxIterations: max(0, min(def.maxTurns ?? defaultMaxIterations, defaultMaxIterations)),
                     goal: goal,
                     planMode: planMode)
     }
@@ -74,12 +74,18 @@ public struct SpecialistSpawner: Sendable {
     let defaultMaxIterations: Int
     let extendedThinking: Bool
     let budget: BudgetLedger?
+    let childToolsFactory: AgentTeamTools.ChildFactory?
+    let additionalToolNames: [String]
+    let checkpoints: LoopCheckpointStore?
+    let delegationDepthRemaining: Int
 
     public init(providers: ProviderRegistry, baseTools: ToolRegistry, context: ToolContext,
                 sink: RuntimeEventSink = NullEventSink(),
                 interactor: RuntimeInteractor = AutoApproveInteractor(),
                 aliasTable: [String: ProviderBinding] = [:], roleDefault: ProviderBinding? = nil,
-                defaultMaxIterations: Int = 50, extendedThinking: Bool = false, budget: BudgetLedger? = nil) {
+                defaultMaxIterations: Int = 50, extendedThinking: Bool = false, budget: BudgetLedger? = nil,
+                childToolsFactory: AgentTeamTools.ChildFactory? = nil, additionalToolNames: [String] = [],
+                checkpoints: LoopCheckpointStore? = nil, delegationDepthRemaining: Int = 0) {
         self.providers = providers
         self.baseTools = baseTools
         self.context = context
@@ -90,6 +96,10 @@ public struct SpecialistSpawner: Sendable {
         self.defaultMaxIterations = defaultMaxIterations
         self.extendedThinking = extendedThinking
         self.budget = budget
+        self.childToolsFactory = childToolsFactory
+        self.additionalToolNames = additionalToolNames
+        self.checkpoints = checkpoints
+        self.delegationDepthRemaining = max(0, delegationDepthRemaining)
     }
 
     /// Run a specialist as a subagent. `approvalTools` is the caller's permission set for this spawn
@@ -103,12 +113,18 @@ public struct SpecialistSpawner: Sendable {
                     now: Double = Date().timeIntervalSince1970,
                     forceWorktreeIsolation: Bool = false,
                     preparedWorktree: GitWorktree? = nil,
-                    steeringMailbox: DelegationSteeringMailbox? = nil) async -> HeadlessAgentLoop.Outcome {
+                    steeringMailbox: DelegationSteeringMailbox? = nil,
+                    parentContext: ToolContext? = nil) async -> HeadlessAgentLoop.Outcome {
+        let inheritedContext = parentContext ?? self.context
+        let context = inheritedContext.withAgentMemory(inheritedContext.agentMemory?.narrowed(to: def.memory))
         // `ask_user` is a communication primitive the loop can inject; put it IN the ceiling so the
         // specialist's allowlist/denylist governs it too. A `tools: []` specialist is then truly hermetic
         // (no ask_user); a nil allowlist inherits it; an author can allow/deny it explicitly.
-        let ceiling = Self.mcpScopedCeiling(baseTools.all().map { $0.name } + ["ask_user"],
-                                            mcpServers: def.mcpServers)
+        let inheritedCeiling = Self.mcpScopedCeiling(baseTools.all().map { $0.name } + additionalToolNames + ["ask_user"],
+                                                    mcpServers: def.mcpServers)
+        let parentAllowlist = await context.skillTracker?.activeToolAllowlist()
+        let ceiling = parentAllowlist.map { allowed in inheritedCeiling.filter { allowed.contains($0) } }
+            ?? inheritedCeiling
         // `skills` preload: fetch the named skills' full instructions to inject into the specialist's context.
         var preloaded: [(name: String, instructions: String)] = []
         if let want = def.skills, !want.isEmpty {
@@ -129,8 +145,8 @@ public struct SpecialistSpawner: Sendable {
                           defaultMaxIterations: defaultMaxIterations, planMode: planMode,
                           preloadedSkills: preloaded)
         let injectAskUser = p.toolNames.contains("ask_user")
-        // The specialist NEVER gets spawn_specialist/spawn_agent (no recursive fan-out from a named agent)
-        // and is scoped to its resolved tools — fail-closed: an empty list yields no tools. `ask_user` is a
+        // Scope to resolved tools first; the host child factory may add delegation only within the
+        // inherited depth and capability ceiling. An empty list yields no tools. `ask_user` is a
         // loop-injected primitive (not in baseTools), so filter it out of the concrete scoping set.
         var scoped = baseTools.scoped(to: p.toolNames.filter { $0 != "ask_user" })
         if let steeringMailbox { scoped = scoped.adding(DelegationInboxTool(mailbox: steeringMailbox)) }
@@ -165,17 +181,26 @@ public struct SpecialistSpawner: Sendable {
                 scopeOverrideApproved: context.scopeOverrideApproved,
                 skillLocations: context.skillLocations, skillTracker: context.skillTracker,
                 auditLog: context.auditLog, externalReadRoots: context.externalReadRoots,
-                correlationID: context.correlationID, traceRecorder: context.traceRecorder)
+                correlationID: context.correlationID, traceRecorder: context.traceRecorder,
+                agentMemory: context.agentMemory)
+        }
+
+        if let childToolsFactory {
+            scoped = childToolsFactory(p.binding, runContext, p.toolNames, p.maxIterations)
+                .scoped(to: p.toolNames.filter { $0 != "ask_user" })
+            if let steeringMailbox { scoped = scoped.adding(DelegationInboxTool(mailbox: steeringMailbox)) }
         }
 
         let loop = HeadlessAgentLoop(
             providers: providers, providerId: p.binding.providerId, model: p.binding.model,
             tools: scoped, context: runContext, sink: sink,
             interactor: interactor, approvalTools: approvalTools,
-            planMode: p.planMode, injectAskUser: injectAskUser, maxIterations: p.maxIterations,
+            planMode: p.planMode, injectAskUser: injectAskUser,
+            checkpoints: checkpoints, maxIterations: p.maxIterations,
             extendedThinking: extendedThinking, budget: budget,
             contextWindow: ContextWindowManager.forModel(
-                capabilities: providers.capabilities(providerId: p.binding.providerId, model: p.binding.model)))
+                capabilities: providers.capabilities(providerId: p.binding.providerId, model: p.binding.model)),
+            traceRecorder: context.traceRecorder, traceRole: def.name)
         let contextualGoal = p.goal + (advisoryContext.flatMap {
             $0.isEmpty ? nil : "\n\n" + $0.promptBlock
         } ?? "")
@@ -208,6 +233,8 @@ public struct SpecialistSpawner: Sendable {
     }
 
     private func withSummary(_ o: HeadlessAgentLoop.Outcome, _ s: String) -> HeadlessAgentLoop.Outcome {
-        HeadlessAgentLoop.Outcome(success: o.success, summary: s, iterations: o.iterations, checkpointId: o.checkpointId)
+        HeadlessAgentLoop.Outcome(success: o.success, summary: s, iterations: o.iterations,
+                                 checkpointId: o.checkpointId, providerFault: o.providerFault,
+                                 terminalStatus: o.terminalStatus)
     }
 }

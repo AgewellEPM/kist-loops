@@ -88,8 +88,9 @@ final class R0UXHotfixTests: XCTestCase {
         let gen = try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/Tools/GenerateTool.swift"), encoding: .utf8)
         XCTAssertTrue(gen.contains("sink?.emit(.usage"),
                       "GenerateTool no longer emits usage — coder steps show ~0 tok during execution")
-        XCTAssertTrue(loop.contains("budget: budget, sink: sink)]"),
+        XCTAssertTrue(loop.contains("budget: budget, sink: eventSink)]"),
                       "PlanExecuteLoop no longer threads its sink into GenerateTool — the coder usage emit is dead")
+        XCTAssertTrue(loop.contains("self.sink = eventSink"), "planner and coder must share the downstream event sink")
 
         // planReady proof honesty: the sink must record kind .planReady, NEVER .awaitingApproval
         // (that wrote phantom 'waiting for approval' entries into --yolo replay ledgers).

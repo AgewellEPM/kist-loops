@@ -19,6 +19,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let runbookDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeRunbook != nil"))
         let scaffoldDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeScaffold != nil"))
         let attachmentsDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAttachments != nil"))
+        let serveDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeServe != nil"))
         let replScriptDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeREPLScript != nil"))
         let replDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeREPL != nil"))
         let apiScriptDispatch = try XCTUnwrap(source.range(of: "if opts.smlRuntimeAPIScript != nil"))
@@ -99,6 +100,11 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "offline SML runtime attachments must not initialize providers, keychain, MCP, tools, or REPL"
         )
         XCTAssertLessThan(
+            serveDispatch.lowerBound,
+            configLoad.lowerBound,
+            "SML runtime serve must own its bounded headless driver registry"
+        )
+        XCTAssertLessThan(
             replScriptDispatch.lowerBound,
             configLoad.lowerBound,
             "offline SML runtime REPL script must not initialize providers, keychain, MCP, tools, or REPL"
@@ -142,9 +148,12 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let workflowPathOverrideForwardCount = source.components(
             separatedBy: "apiWorkflowPathOverrides: opts.smlRuntimeAPIWorkflowPathOverrides"
         ).count - 1
+        let runtimeLaunchCount = source.components(
+            separatedBy: "withSMLRuntimeHostLaunch("
+        ).count - 1
         XCTAssertEqual(
             workflowPathOverrideForwardCount,
-            20,
+            runtimeLaunchCount,
             "every SML runtime CLI mode must forward --sml-api-workflow-path into the runtime launch helpers"
         )
     }
@@ -583,15 +592,15 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertTrue(runtimeReplMount.examples.contains {
             $0.line == #"start TASK-ID {"topic":"topic"}"#
         })
-        XCTAssertEqual(runtimeReplMount.commandBindings.count, 7)
+        XCTAssertEqual(runtimeReplMount.commandBindings.count, 8)
         XCTAssertEqual(
             runtimeReplMount.commandBindings.first { $0.action == .start }?.apiPathTemplate,
             "/source/workflows/langgraph.review/tasks"
         )
-        XCTAssertEqual(export.runtimePackage.runtime.mountContract.workflowMounts.map(\.apiRoutes.count), [7])
+        XCTAssertEqual(export.runtimePackage.runtime.mountContract.workflowMounts.map(\.apiRoutes.count), [8])
         XCTAssertEqual(
             export.runtimePackage.runtime.mountContract.workflowMounts.map(\.commandBindings.count),
-            [7]
+            [8]
         )
         XCTAssertEqual(export.runtimePackage.runtime.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(export.runtimePackage.runtime.modelRouter.maximumCommandRounds, 3)
@@ -608,7 +617,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             export.runtimePackage.runtime.mountContract.onyxDriverIDs
         )
         let runtimeOnyxDriver = try XCTUnwrap(export.runtimePackage.runtime.onyxDrivers.first)
-        XCTAssertEqual(runtimeOnyxDriver.commandBindings.count, 7)
+        XCTAssertEqual(runtimeOnyxDriver.commandBindings.count, 8)
         XCTAssertEqual(
             runtimeOnyxDriver.commandBindings.first { $0.action == .start }?.apiPathTemplate,
             "/source/workflows/langgraph.review/tasks"
@@ -625,7 +634,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(runtimePlanningSkill.reference, "review.plan")
         XCTAssertEqual(runtimePlanningSkill.successors, ["write"])
         XCTAssertEqual(runtimePlanningSkill.outputSchema, "review.plan.v1")
-        XCTAssertEqual(export.runtimePackage.runtime.planning.commandBindings.count, 7)
+        XCTAssertEqual(export.runtimePackage.runtime.planning.commandBindings.count, 8)
         let startBinding = try XCTUnwrap(export.runtimePackage.runtime.planning.commandBindings.first {
             $0.action == .start
         })
@@ -663,7 +672,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             hostGuideWorkflow.skillIndex.first { $0.instructionID == "plan" }?.reference,
             "review.plan"
         )
-        XCTAssertEqual(hostGuideWorkflow.commandBindings.count, 7)
+        XCTAssertEqual(hostGuideWorkflow.commandBindings.count, 8)
         XCTAssertEqual(
             hostGuideWorkflow.commandBindings.first { $0.action == .start }?.replJSONFields.map(\.name),
             ["topic"]
@@ -682,7 +691,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             agentGuideWorkflow.skillIndex.first { $0.instructionID == "plan" }?.reference,
             "review.plan"
         )
-        XCTAssertEqual(agentGuideWorkflow.commandBindings.count, 7)
+        XCTAssertEqual(agentGuideWorkflow.commandBindings.count, 8)
         XCTAssertEqual(
             agentGuideWorkflow.commandBindings.first { $0.action == .start }?.replJSONFields.map(\.name),
             ["topic"]
@@ -751,13 +760,13 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             .string("start [TASK_ID] [JSON_INPUT_OBJECT]")
         )
         let openAPIRuntime = try object(export.runtimePackage.runtime.openAPI["x-sml-runtime"])
-        XCTAssertEqual(openAPIRuntime["mountREPLCommandBindingCount"], .number(7))
-        XCTAssertEqual(openAPIRuntime["mountWorkflowCommandBindingCount"], .number(7))
-        XCTAssertEqual(openAPIRuntime["attachmentCommandBindingCount"], .number(7))
-        XCTAssertEqual(openAPIRuntime["agentGuideCommandBindingCount"], .number(7))
+        XCTAssertEqual(openAPIRuntime["mountREPLCommandBindingCount"], .number(8))
+        XCTAssertEqual(openAPIRuntime["mountWorkflowCommandBindingCount"], .number(8))
+        XCTAssertEqual(openAPIRuntime["attachmentCommandBindingCount"], .number(8))
+        XCTAssertEqual(openAPIRuntime["agentGuideCommandBindingCount"], .number(8))
         XCTAssertEqual(openAPIRuntime["agentGuideModelDescriptorCount"], .number(1))
         XCTAssertEqual(openAPIRuntime["agentGuideSkillIndexCount"], .number(3))
-        XCTAssertEqual(openAPIRuntime["hostGuideCommandBindingCount"], .number(7))
+        XCTAssertEqual(openAPIRuntime["hostGuideCommandBindingCount"], .number(8))
         XCTAssertEqual(openAPIRuntime["hostGuideModelDescriptorCount"], .number(1))
         XCTAssertEqual(openAPIRuntime["hostGuideSkillIndexCount"], .number(3))
         XCTAssertEqual(openAPIRuntime["hostWiringModelDescriptorCount"], .number(1))
@@ -776,7 +785,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(openAPIPlanningSkill["reference"], .string("review.plan"))
         XCTAssertEqual(openAPIPlanningSkill["unitKind"], .string("model_reasoning"))
         let openAPICommandBindings = try array(openAPIRuntime["planningCommandBindings"])
-        XCTAssertEqual(openAPICommandBindings.count, 7)
+        XCTAssertEqual(openAPICommandBindings.count, 8)
         let openAPIStartBinding = try XCTUnwrap(
             openAPICommandBindings.compactMap { try? object($0) }.first {
                 $0["action"] == .string("start")
@@ -806,7 +815,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let launched = try XCTUnwrap(export.launchDescriptor.workflows.first)
         XCTAssertEqual(launched.replMount.workflowID, "langgraph.review")
         XCTAssertEqual(launched.replMount.commands.first { $0.verb == "start" }?.jsonFields.map(\.name), ["topic"])
-        XCTAssertEqual(launched.replMount.commandBindings.count, 7)
+        XCTAssertEqual(launched.replMount.commandBindings.count, 8)
         XCTAssertEqual(
             launched.replMount.workflowMetadata.replMountPath,
             "/source/runtime/repl-mounts/langgraph.review"
@@ -828,7 +837,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(launchedAttachment.model?.maximumCommandRounds, 3)
         XCTAssertEqual(launchedAttachment.skillIndex, launched.skillIndex)
         XCTAssertEqual(launchedAttachment.commandBindings, launched.commandBindings)
-        XCTAssertEqual(launched.apiRoutes.count, 7)
+        XCTAssertEqual(launched.apiRoutes.count, 8)
         XCTAssertEqual(
             launched.apiRoutes.first { $0.action == .start }?.examples.first?.body["input"],
             .object(["topic": .string("topic")])
@@ -882,8 +891,8 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             wiring.replMount.workflowMetadata.attachmentPath,
             "/source/runtime/attachments/langgraph.review"
         )
-        XCTAssertEqual(wiring.replMount.commandBindings.count, 7)
-        XCTAssertEqual(wiring.apiRoutes.count, 7)
+        XCTAssertEqual(wiring.replMount.commandBindings.count, 8)
+        XCTAssertEqual(wiring.apiRoutes.count, 8)
         XCTAssertEqual(
             wiring.apiRoutes.first { $0.action == .start }?.examples.first?.body["input"],
             .object(["topic": .string("topic")])
@@ -940,7 +949,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
                         ]
                 }
         })
-        XCTAssertEqual(wiring.commandBindings.count, 7)
+        XCTAssertEqual(wiring.commandBindings.count, 8)
         XCTAssertEqual(wiring.commandBindings, wiring.replMount.commandBindings)
         let wiringStartBinding = try XCTUnwrap(wiring.commandBindings.first {
             $0.action == .start
@@ -1143,7 +1152,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(driver.skillTree.map(\.id), ["plan", "write", "receipt"])
         XCTAssertEqual(driver.tools.map(\.reference), ["review.plan", "repository.write"])
         XCTAssertEqual(driver.plan.entrypoint, "plan")
-        XCTAssertEqual(driver.commandBindings.count, 7)
+        XCTAssertEqual(driver.commandBindings.count, 8)
         XCTAssertEqual(onyx.launchDescriptor.onyxDriverIDs, onyx.onyxDrivers.map(\.driverID))
         XCTAssertFalse(onyxJSON.contains("operator.test"))
         XCTAssertFalse(onyxJSON.contains("sml-runtime-export-lease"))
@@ -1185,7 +1194,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(planning.planning.toolIndex.map(\.reference), ["review.plan", "repository.write"])
         XCTAssertTrue(planning.planning.decomposableUnits.isEmpty)
         XCTAssertTrue(planning.planning.approvalGates.isEmpty)
-        XCTAssertEqual(planning.planning.commandBindings.count, 7)
+        XCTAssertEqual(planning.planning.commandBindings.count, 8)
         XCTAssertEqual(planning.launchDescriptor.planningWorkflowIDs, planning.planning.workflowIDs)
         XCTAssertTrue(planning.launchDescriptor.launchComplete)
         XCTAssertFalse(planningJSON.contains("operator.test"))
@@ -1513,7 +1522,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(mount.mountEndpoint?.resource, .mount)
         XCTAssertEqual(mount.mountContract.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(mount.mountContract.apiBasePaths, ["/source"])
-        XCTAssertEqual(mount.mountContract.apiRoutes.count, 27)
+        XCTAssertEqual(mount.mountContract.apiRoutes.count, 28)
         XCTAssertEqual(mount.mountContract.replMounts.first?.workflowID, "langgraph.review")
         XCTAssertEqual(mount.mountContract.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(mount.mountContract.planningWorkflowIDs, ["langgraph.review"])
@@ -1546,7 +1555,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(agentGuide.agentGuideEndpoint?.resource, .agentGuide)
         XCTAssertEqual(agentGuide.agentGuide.modelRouterTool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(agentGuide.agentGuide.workflowGuides.map(\.workflowID), ["langgraph.review"])
-        XCTAssertEqual(agentGuide.agentGuide.workflowGuides.first?.commandBindings.count, 7)
+        XCTAssertEqual(agentGuide.agentGuide.workflowGuides.first?.commandBindings.count, 8)
         XCTAssertEqual(agentGuide.agentGuide.workflowGuides.first?.skillIndex.count, 3)
         XCTAssertTrue(agentGuide.agentGuide.systemPrompt.contains("Skill tree:"))
         XCTAssertTrue(agentGuide.launchDescriptor.launchComplete)
@@ -1574,7 +1583,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(hostGuide.hostGuideEndpoint?.resource, .hostGuide)
         XCTAssertEqual(hostGuide.hostGuide.modelRouterTool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(hostGuide.hostGuide.workflowBindings.map(\.workflowID), ["langgraph.review"])
-        XCTAssertEqual(hostGuide.hostGuide.workflowBindings.first?.commandBindings.count, 7)
+        XCTAssertEqual(hostGuide.hostGuide.workflowBindings.first?.commandBindings.count, 8)
         XCTAssertEqual(hostGuide.hostGuide.workflowBindings.first?.skillIndex.count, 3)
         XCTAssertTrue(hostGuide.hostGuide.requiredHostServices.contains("host_command_gateway"))
         XCTAssertFalse(hostGuide.hostGuide.launchSteps.isEmpty)
@@ -1604,7 +1613,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(hostWiring.hostWiring.apiBasePaths, ["/source"])
         XCTAssertEqual(hostWiring.hostWiring.modelRouter.tool.name, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(hostWiring.hostWiring.workflows.map(\.workflowID), ["langgraph.review"])
-        XCTAssertEqual(hostWiring.hostWiring.workflows.first?.commandBindings.count, 7)
+        XCTAssertEqual(hostWiring.hostWiring.workflows.first?.commandBindings.count, 8)
         XCTAssertEqual(hostWiring.hostWiring.workflows.first?.skillIndex.count, 3)
         XCTAssertEqual(hostWiring.hostWiring.attachmentManifests.first?.workflowID, "langgraph.review")
         XCTAssertEqual(hostWiring.launchDescriptor.hostWiring, hostWiring.hostWiring)
@@ -1823,7 +1832,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             from: Data(contentsOf: outputURL.appendingPathComponent("mount.json"))
         )
         XCTAssertEqual(mount.workflowIDs, ["langgraph.review"])
-        XCTAssertEqual(mount.apiRoutes.count, 27)
+        XCTAssertEqual(mount.apiRoutes.count, 28)
         XCTAssertEqual(mount.modelRouter.maximumCommandRounds, 3)
 
         let runtimeExport = try JSONDecoder().decode(
@@ -1912,7 +1921,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(planning.workflowIDs, ["langgraph.review"])
         XCTAssertEqual(planning.skillIndex.count, 3)
-        XCTAssertEqual(planning.commandBindings.count, 7)
+        XCTAssertEqual(planning.commandBindings.count, 8)
 
         let agentGuide = try JSONDecoder().decode(
             SMLWorkflowRuntimeAgentGuide.self,
@@ -1947,7 +1956,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(attachments, [attachment])
         XCTAssertEqual(attachment.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(attachment.skillIndex.count, 3)
-        XCTAssertEqual(attachment.commandBindings.count, 7)
+        XCTAssertEqual(attachment.commandBindings.count, 8)
         let expectedHostBindingChannels: [SMLWorkflowRuntimeHostBindingChannel] = [
             .agentGuide, .customAPI, .customREPL, .modelRouter, .modelTool,
             .onyxDriver, .planningWorkflow, .skillTree, .toolBindings,
@@ -2230,7 +2239,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             workflowRunbook.approvalGateIDs,
             Array(Set(attachment.approvalGates.map(\.instructionID))).sorted()
         )
-        XCTAssertEqual(workflowRunbook.commandActions.count, 7)
+        XCTAssertEqual(workflowRunbook.commandActions.count, 8)
         XCTAssertEqual(workflowRunbook.apiEndpoints.count, attachment.apiRoutes.count)
         XCTAssertTrue(workflowRunbook.apiEndpoints.contains {
             $0.method == .post
@@ -3102,7 +3111,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(planningFromDirectory.sourceFormat, .runtimeScaffold)
         XCTAssertEqual(planningFromDirectory.planning.workflowIDs, ["langgraph.review"])
-        XCTAssertEqual(planningFromDirectory.planning.commandBindings.count, 7)
+        XCTAssertEqual(planningFromDirectory.planning.commandBindings.count, 8)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -3314,7 +3323,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         let runtime = try object(openAPI.openAPI["x-sml-runtime"])
         XCTAssertEqual(runtime["workflowIDs"], .array([.string("langgraph.review")]))
         XCTAssertEqual(runtime["modelRouterToolName"], .string(SMLWorkflowRuntimeModelAdapter.toolName))
-        XCTAssertEqual(runtime["mountAPIRouteCount"], .number(Decimal(27)))
+        XCTAssertEqual(runtime["mountAPIRouteCount"], .number(Decimal(28)))
         XCTAssertEqual(runtime["planningSkillIndexCount"], .number(Decimal(3)))
         let routerWorkflowMetadata = try object(try array(runtime["modelRouterWorkflowMetadata"]).first)
         XCTAssertEqual(routerWorkflowMetadata["workflowID"], .string("langgraph.review"))
@@ -3496,7 +3505,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         ])
         XCTAssertEqual(attachment.plan?.entrypoint, "plan")
         XCTAssertEqual(attachment.plan?.nodes.map(\.id), ["plan", "write", "receipt"])
-        XCTAssertEqual(attachment.commandBindings.count, 7)
+        XCTAssertEqual(attachment.commandBindings.count, 8)
         XCTAssertEqual(
             attachment.commandBindings.first { $0.action == .start }?.apiBodyFields.map(\.name),
             ["topic"]
@@ -3608,7 +3617,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(metadataPlanningSkill["unitKind"], .string("model_reasoning"))
         XCTAssertEqual(metadataPlanningSkill["successors"], .array([.string("write")]))
         let commandBindings = try array(planning["commandBindings"])
-        XCTAssertEqual(commandBindings.count, 7)
+        XCTAssertEqual(commandBindings.count, 8)
         let metadataStartBinding = try XCTUnwrap(
             commandBindings.compactMap { try? object($0) }.first {
                 $0["action"] == .string("start")
@@ -3692,7 +3701,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
                 try object(try object(workflow["model"])["tool"])["name"],
                 .string(SMLWorkflowModelAdapter.toolName)
             )
-            XCTAssertEqual(try array(workflow["commandBindings"]).count, 7)
+            XCTAssertEqual(try array(workflow["commandBindings"]).count, 8)
         } else {
             XCTFail("expected host-wiring workflows array")
         }
@@ -3743,7 +3752,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             .string(SMLWorkflowModelAdapter.toolName)
         )
         XCTAssertEqual(try array(attachment["skillIndex"]).count, 3)
-        XCTAssertEqual(try array(attachment["commandBindings"]).count, 7)
+        XCTAssertEqual(try array(attachment["commandBindings"]).count, 8)
         XCTAssertFalse(attachmentsJSON.contains("sml-runtime-export-lease"))
         XCTAssertFalse(attachmentsJSON.contains("authenticatedActor"))
 
@@ -3781,7 +3790,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(try array(workflowAttachment["skillTree"]).count, 3)
         XCTAssertEqual(try array(workflowAttachment["skillIndex"]).count, 3)
         XCTAssertEqual(try array(workflowAttachment["toolBindings"]).count, 2)
-        XCTAssertEqual(try array(workflowAttachment["commandBindings"]).count, 7)
+        XCTAssertEqual(try array(workflowAttachment["commandBindings"]).count, 8)
         XCTAssertFalse(workflowAttachmentJSON.contains("sml-runtime-export-lease"))
         XCTAssertFalse(workflowAttachmentJSON.contains("authenticatedActor"))
 
@@ -3846,7 +3855,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertNil(workflowAPIMountAPI.command)
         XCTAssertNil(workflowAPIMountAPI.result)
         let workflowAPIMount = try array(workflowAPIMountAPI.responseBody)
-        XCTAssertEqual(workflowAPIMount.count, 7)
+        XCTAssertEqual(workflowAPIMount.count, 8)
         XCTAssertTrue(workflowAPIMount.contains {
             guard case .object(let route) = $0 else { return false }
             return route["pathTemplate"] == .string("/source/workflows/langgraph.review/tasks")
@@ -3923,7 +3932,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(try object(workflowOnyx["api"])["workflowPath"], .string("/workflows/langgraph.review"))
         XCTAssertEqual(try array(workflowOnyx["skillTree"]).count, 3)
         XCTAssertEqual(try array(workflowOnyx["tools"]).count, 2)
-        XCTAssertEqual(try array(workflowOnyx["commandBindings"]).count, 7)
+        XCTAssertEqual(try array(workflowOnyx["commandBindings"]).count, 8)
         XCTAssertFalse(workflowOnyxJSON.contains("sml-runtime-export-lease"))
         XCTAssertFalse(workflowOnyxJSON.contains("authenticatedActor"))
 
@@ -4016,7 +4025,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         XCTAssertEqual(try array(workflowPlanning["skillIndex"]).count, 3)
         XCTAssertEqual(try array(workflowPlanning["toolIndex"]).count, 2)
         XCTAssertEqual(try array(workflowPlanning["toolBindings"]).count, 2)
-        XCTAssertEqual(try array(workflowPlanning["commandBindings"]).count, 7)
+        XCTAssertEqual(try array(workflowPlanning["commandBindings"]).count, 8)
         XCTAssertFalse(workflowPlanningJSON.contains("sml-runtime-export-lease"))
         XCTAssertFalse(workflowPlanningJSON.contains("authenticatedActor"))
 
@@ -4601,7 +4610,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         )
         XCTAssertEqual(attachment.replCommands.first { $0.verb == "attachment" }?.aliases, ["manifest"])
         XCTAssertEqual(attachment.replExamples.first { $0.verb == "attachment" }?.line, "attachment")
-        XCTAssertEqual(attachment.apiCatalog.endpoints.count, 7)
+        XCTAssertEqual(attachment.apiCatalog.endpoints.count, 8)
         XCTAssertEqual(attachment.modelTool.name, SMLWorkflowModelAdapter.toolName)
         XCTAssertEqual(attachment.modelRouterToolName, SMLWorkflowRuntimeModelAdapter.toolName)
         XCTAssertEqual(attachment.skillTree.map(\.id), ["plan", "write", "receipt"])
@@ -4609,7 +4618,7 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             "review.plan", "repository.write",
         ])
         XCTAssertEqual(attachment.plan.entrypoint, "plan")
-        XCTAssertEqual(attachment.commandBindings.count, 7)
+        XCTAssertEqual(attachment.commandBindings.count, 8)
         XCTAssertEqual(
             attachment.commandBindings.first { $0.action == .start }?.apiPathTemplate,
             "/source/workflows/langgraph.review/tasks"
@@ -5355,7 +5364,26 @@ final class KistSMLRuntimeExportTests: XCTestCase {
             XCTFail("duplicate runtime source set should fail closed")
         } catch {
             let message = String(describing: error)
-            XCTAssertTrue(message.contains("duplicate workflow id 'langgraph.review'"))
+            XCTAssertTrue(message.contains("duplicates another source path"), message)
+        }
+
+        let reviewCopyURL = directory.appendingPathComponent("review-copy.langgraph.json")
+        try langGraphReviewManifest().write(to: reviewCopyURL)
+        let duplicateWorkflowSetURL = directory.appendingPathComponent(
+            "duplicate-workflow.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: "review.langgraph.json"),
+            .init(path: "review-copy.langgraph.json"),
+        ])).write(to: duplicateWorkflowSetURL)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: "duplicate-workflow.sources.json",
+                projectRoot: directory.path
+            )
+            XCTFail("duplicate workflow ids across distinct sources should fail closed")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("duplicate workflow id 'langgraph.review'"), message)
         }
 
         let sourceExport = try await KistRunner.makeSMLRuntimeHostExport(
@@ -5423,6 +5451,77 @@ final class KistSMLRuntimeExportTests: XCTestCase {
         } catch {
             let message = String(describing: error)
             XCTAssertTrue(message.contains("modelMaximumCommandRounds must be between 1 and 8"))
+        }
+    }
+
+    func testRuntimeSourceLoadingRefusesTraversalAbsoluteAndSymlinkedEntries() async throws {
+        let directory = try temporaryDirectory()
+        let outside = try temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        let outsideWorkflow = outside.appendingPathComponent("outside.workflow.json")
+        try langGraphReviewManifest().write(to: outsideWorkflow)
+
+        do {
+            _ = try await KistRunner.withSMLRuntimeHostLaunch(
+                sourcePath: outsideWorkflow.path,
+                projectRoot: directory.path,
+                mode: .durable
+            ) { _ in true }
+            XCTFail("a durable host must not mount an external runtime source")
+        } catch {
+            XCTAssertTrue(
+                String(describing: error).contains("escapes the project root"),
+                "unexpected durable external-source refusal: \(error)")
+        }
+
+        let cases: [(name: String, path: String)] = [
+            ("traversal", "../\(outside.lastPathComponent)/outside.workflow.json"),
+            ("absolute", outsideWorkflow.path),
+        ]
+        for item in cases {
+            let sourceSetURL = directory.appendingPathComponent("\(item.name).sources.json")
+            try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+                .init(path: item.path),
+            ])).write(to: sourceSetURL)
+            do {
+                _ = try await KistRunner.makeSMLRuntimeHostExport(
+                    sourcePath: sourceSetURL.lastPathComponent,
+                    projectRoot: directory.path)
+                XCTFail("\(item.name) source-set path should fail closed")
+            } catch {
+                XCTAssertTrue(
+                    String(describing: error).contains("confined relative file path"),
+                    "unexpected \(item.name) refusal: \(error)")
+            }
+        }
+
+        let linked = directory.appendingPathComponent("linked.workflow.json")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outsideWorkflow)
+        let linkedSet = directory.appendingPathComponent("linked.sources.json")
+        try JSONEncoder().encode(KistRunner.SMLRuntimeHostSourceSet(sources: [
+            .init(path: linked.lastPathComponent),
+        ])).write(to: linkedSet)
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: linkedSet.lastPathComponent,
+                projectRoot: directory.path)
+            XCTFail("symlinked source-set entry should fail closed")
+        } catch {
+            XCTAssertTrue(
+                String(describing: error).contains("could not read sources[0]"),
+                "unexpected linked source-set refusal: \(error)")
+        }
+
+        do {
+            _ = try await KistRunner.makeSMLRuntimeHostExport(
+                sourcePath: linked.lastPathComponent,
+                projectRoot: directory.path)
+            XCTFail("symlinked top-level source should fail closed")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("could not read SML runtime source"))
         }
     }
 

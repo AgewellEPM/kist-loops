@@ -28,6 +28,36 @@ import Glibc
 /// or a PID-namespace whose PID 1 is reaped (future hardening tier).
 enum ProcessGroupRunner {
 
+    /// Cancellation completes only after process-group teardown and reaping.
+    static func runAsync(launchPath: String, launchArgs: [String], cwd: String,
+                         env: [String: String], timeoutSeconds: Int, capPerStream: Int,
+                         graceSeconds: Int = 2, stdinData: Data? = nil,
+                         stdinByteLimit: Int = 16 * 1_024 * 1_024,
+                         telemetrySink: BuilderTrustedCommandSink? = nil,
+                         requestedArgumentsDigest: String? = nil,
+                         builderSandboxAuthority: BuilderSandboxExecutionAuthority? = nil,
+                         requireBuilderSandbox: Bool = false) async -> Outcome {
+        let cancellation = ProcessCancellationToken()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let outcome = run(
+                        launchPath: launchPath, launchArgs: launchArgs, cwd: cwd, env: env,
+                        timeoutSeconds: timeoutSeconds, capPerStream: capPerStream,
+                        graceSeconds: graceSeconds, stdinData: stdinData, stdinByteLimit: stdinByteLimit,
+                        telemetrySink: telemetrySink, requestedArgumentsDigest: requestedArgumentsDigest,
+                        builderSandboxAuthority: builderSandboxAuthority,
+                        requireBuilderSandbox: requireBuilderSandbox,
+                        cancellationCheck: { cancellation.isCancelled })
+                    continuation.resume(returning: outcome)
+                }
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
+
     struct Outcome: Sendable {
         let combined: String     // stdout then stderr, each capped per-stream
         let exitCode: Int32      // process exit code, or 128+signal if signalled
@@ -80,7 +110,10 @@ enum ProcessGroupRunner {
                     requestedArgumentsDigest: String? = nil,
                     builderSandboxAuthority: BuilderSandboxExecutionAuthority? = nil,
                     requireBuilderSandbox: Bool = false,
-                    cancellationCheck: @Sendable () -> Bool = { false }) -> Outcome {
+                    cancellationCheck: @Sendable () -> Bool = { false },
+                    terminateOnOutputCap: Bool = true,
+                    onSpawn: (@Sendable () -> Void)? = nil,
+                    onOutput: (@Sendable (Data) -> Void)? = nil) -> Outcome {
 
         let telemetryStarted = DispatchTime.now().uptimeNanoseconds
         let inputDigest = stdinData.map {
@@ -134,6 +167,10 @@ enum ProcessGroupRunner {
             return outcome
         }
 
+        guard !cancellationCheck() else {
+            return observed(Outcome(combined: "command cancelled before launch", exitCode: -1,
+                                    timedOut: false, cancelled: true))
+        }
         let prepared: BuilderSandboxPreparedLaunch?
         do {
             prepared = try BuilderOSProcessSandboxAttestor.preparedLaunch(
@@ -228,13 +265,26 @@ enum ProcessGroupRunner {
         chk(attrInitRC)
         if attrInited {
             chk(posix_spawnattr_setpgroup(&attr, 0))
+            // Dispatch/Swift worker threads can block signals. Commands must not inherit a mask
+            // that makes TERM ineffective simply because this invocation used the async bridge.
+            var childMask = sigset_t()
+            chk(sigemptyset(&childMask))
+            chk(posix_spawnattr_setsigmask(&attr, &childMask))
+            // The terminal/server host handles signals through DispatchSources and may ignore them.
+            // A fresh command gets normal dispositions; its own program can install handlers afterward.
+            var childDefaults = sigset_t()
+            chk(sigemptyset(&childDefaults))
+            for signalNumber in [SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE] {
+                chk(sigaddset(&childDefaults, signalNumber))
+            }
+            chk(posix_spawnattr_setsigdefault(&attr, &childDefaults))
             #if canImport(Darwin)
             // POSIX_SPAWN_CLOEXEC_DEFAULT (Darwin): every inherited fd is closed at exec except
             // those set by file actions (our /dev/null stdin + stdout/stderr pipes) — the fd
             // lockdown that stops a parent fd/socket from bypassing the Seatbelt sandbox.
-            chk(posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP) | Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)))
+            chk(posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP) | Int16(POSIX_SPAWN_CLOEXEC_DEFAULT) | Int16(POSIX_SPAWN_SETSIGMASK) | Int16(POSIX_SPAWN_SETSIGDEF)))
             #else
-            chk(posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP)))
+            chk(posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP) | Int16(POSIX_SPAWN_SETSIGMASK) | Int16(POSIX_SPAWN_SETSIGDEF)))
             #endif
         }
 
@@ -269,6 +319,12 @@ enum ProcessGroupRunner {
                 exitCode: -1, timedOut: false))
         }
 
+        guard !cancellationCheck() else {
+            close(outFds[0]); close(outFds[1]); close(errFds[0]); close(errFds[1])
+            close(stopFds[0]); close(stopFds[1])
+            return observed(Outcome(combined: "command cancelled before launch", exitCode: -1,
+                                    timedOut: false, cancelled: true))
+        }
         var pid: pid_t = 0
         let rc = posix_spawn(&pid, effectiveLaunchPath, &fa, &attr, argv, envp)   // returns errno DIRECTLY
         // Parent must close its copy of the write ends or reads never see EOF.
@@ -279,17 +335,23 @@ enum ProcessGroupRunner {
                                     exitCode: -1, timedOut: false))
         }
         let pgid = pid   // we made the child its own group leader
+        onSpawn?()
 
         // --- concurrent drains (main owns the read fds) feeding the capped collector ---
         // GroupKiller guards every killpg behind a "still ours" flag so no signal can ever
         // target a recycled PGID (the leader's PGID is reusable the instant it is reaped).
         let killer = GroupKiller(pgid)
+        let outputLimitReached = ProcessCancellationToken()
         let collector = BoundedOutputCollector(capPerStream: capPerStream) {
-            killer.kill(SIGTERM)   // runaway output → tear the group down
+            if terminateOnOutputCap { outputLimitReached.cancel() }
         }
         let drains = DispatchGroup()
-        Self.drain(outFds[0], stop: stopFds[0], into: { collector.appendOut($0) }, group: drains)
-        Self.drain(errFds[0], stop: stopFds[0], into: { collector.appendErr($0) }, group: drains)
+        Self.drain(outFds[0], stop: stopFds[0], into: {
+            collector.appendOut($0); onOutput?($0)
+        }, group: drains)
+        Self.drain(errFds[0], stop: stopFds[0], into: {
+            collector.appendErr($0); onOutput?($0)
+        }, group: drains)
 
         // --- detect leader exit WITHOUT reaping (waitid + WNOWAIT): the un-reaped zombie
         //     keeps the PGID RESERVED through teardown, so the group sweep below is
@@ -317,6 +379,7 @@ enum ProcessGroupRunner {
 
         var timedOut = false
         var cancelled = false
+        var outputCapped = false
         let wallDeadline = DispatchTime.now() + .seconds(timeoutSeconds)
         while true {
             if exited.wait(timeout: .now() + .milliseconds(50)) == .success { break }
@@ -324,12 +387,16 @@ enum ProcessGroupRunner {
                 cancelled = true
                 break
             }
+            if outputLimitReached.isCancelled {
+                outputCapped = true
+                break
+            }
             if DispatchTime.now() >= wallDeadline {
                 timedOut = true
                 break
             }
         }
-        if timedOut || cancelled {
+        if timedOut || cancelled || outputCapped {
             // Gate each kill on the leader still reserving the PGID. For a normal host this is
             // always true here (the un-detected child is alive); the guard only matters under a
             // SIGCHLD=SIG_IGN auto-reap racing the timeout, where it avoids a recycled-PGID kill.
@@ -416,7 +483,7 @@ enum ProcessGroupRunner {
                             || aggregateTruncated,
                        stdoutDigest: streamDigests.stdout,
                        stderrDigest: streamDigests.stderr,
-                       cancelled: cancelled))
+                       cancelled: cancelled || cancellationCheck()))
     }
 
     // MARK: - Internals
@@ -560,4 +627,12 @@ private final class DetectBox: @unchecked Sendable {
     private var _rc: Int32 = -1
     func set(_ v: Int32) { lock.lock(); _rc = v; lock.unlock() }
     var rc: Int32 { lock.lock(); defer { lock.unlock() }; return _rc }
+}
+
+/// Bridges Swift task cancellation into blocking subprocess collection.
+final class ProcessCancellationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
 }

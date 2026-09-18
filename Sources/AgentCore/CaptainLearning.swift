@@ -16,6 +16,10 @@ public enum CaptainLearningSource: String, Codable, Sendable, Equatable {
 /// Samples are evidence, not authority. The assignment engine treats sparse records as shadow data and
 /// promotes only repeated, verified wins for the same role/task shape.
 public struct CaptainLearningSample: Codable, Sendable, Equatable {
+    /// Retained as labeled audit data, excluded from performance routing. A denied
+    /// action is not evidence that another model should be selected to perform it.
+    public static let refusalOrPermissionStopReason = "refusalOrPermissionStop"
+
     public let taskSignature: String
     public let taskTags: [String]
     public let language: String?
@@ -158,11 +162,13 @@ public struct CaptainLearningSummary: Sendable, Equatable {
     public let averageLatencyMs: Int
     public let toolFailures: Int
     public let latestEpoch: Double
+    /// Oldest observation included in this aggregate; bounds the lifetime of its exact contents.
+    public let earliestEpoch: Double
 
     public init(role: String, providerId: String, taskTags: [String], language: String?,
                 samples: Int, successes: Int, averageJudgeScore: Double?,
                 averageTokens: Int, averageLatencyMs: Int, toolFailures: Int,
-                latestEpoch: Double) {
+                latestEpoch: Double, earliestEpoch: Double? = nil) {
         self.role = role
         self.providerId = providerId
         self.taskTags = taskTags
@@ -174,6 +180,7 @@ public struct CaptainLearningSummary: Sendable, Equatable {
         self.averageLatencyMs = averageLatencyMs
         self.toolFailures = toolFailures
         self.latestEpoch = latestEpoch
+        self.earliestEpoch = earliestEpoch ?? latestEpoch
     }
 
     public var successRate: Double { samples == 0 ? 0 : Double(successes) / Double(samples) }
@@ -481,6 +488,7 @@ public final class CaptainLearningStore {
         let oldest = now - CaptainLearningRecencyPolicy.maximumAgeSeconds
         var buckets: [BucketKey: [IndexedSample]] = [:]
         for (offset, sample) in samples.enumerated() {
+            guard sample.failureReason != CaptainLearningSample.refusalOrPermissionStopReason else { continue }
             guard sample.atEpoch.isFinite,
                   sample.atEpoch >= oldest,
                   sample.atEpoch <= now + CaptainLearningRecencyPolicy.maximumFutureSkewSeconds,
@@ -546,7 +554,8 @@ public final class CaptainLearningStore {
             averageTokens: boundedAverage(samples.map(\.tokens)),
             averageLatencyMs: boundedAverage(samples.map(\.latencyMs)),
             toolFailures: saturatingSum(samples.map(\.toolFailures)),
-            latestEpoch: samples.map(\.atEpoch).max() ?? 0)
+            latestEpoch: samples.map(\.atEpoch).max() ?? 0,
+            earliestEpoch: samples.map(\.atEpoch).min() ?? 0)
     }
 
     private static func boundedAverage(_ values: [Int]) -> Int {

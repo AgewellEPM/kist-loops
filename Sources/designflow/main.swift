@@ -1,4 +1,5 @@
 import Foundation
+import AgentCore
 import DesignFlowKit
 import ConnectorKit
 import DockerControl
@@ -212,9 +213,7 @@ struct CLI {
             }
             let input = Self.parseKV(value("input") ?? "")
             do {
-                let result = try await c.invoke(action: action, input: input)
-                try? audit.record(connector: cname, action: action, input: input,
-                                  statusCode: result.statusCode, ok: result.ok, atEpoch: Date().timeIntervalSince1970)
+                let result = try await AuditedConnector(c, audit: audit).invoke(action: action, input: input)
                 print("HTTP \(result.statusCode) \(result.ok ? "OK" : "ERR")")
                 print(result.body.prefix(4000))
                 return result.ok ? 0 : 1
@@ -226,7 +225,8 @@ struct CLI {
             let entries = audit.entries()
             print("audit: \(entries.count) entries (chain \(audit.verifyChain() == nil ? "intact" : "BROKEN"))")
             for e in entries.suffix(20) {
-                print("  #\(e.seq) \(e.connector)/\(e.action) → \(e.statusCode) \(e.ok ? "OK" : "ERR")")
+                let invocation = e.invocationID.map { " id:\($0)" } ?? ""
+                print("  #\(e.seq) \(e.connector)/\(e.action) [\(e.phase ?? "completed")\(invocation)] → \(e.statusCode) \(e.ok ? "OK" : "ERR")")
             }
             return 0
 
@@ -236,7 +236,7 @@ struct CLI {
     }
 
     /// Fan a diff out to N reviewers in parallel and aggregate the verdict — the review
-    /// half of /tagteam. Exit 0 = SHIP, 3 = must fix, 2 = bad args.
+    /// half of /tagteam. Exit 0 = SHIP, 3 = must fix, 2 = bad args or incomplete review.
     /// `designflow tagteam review [--diff <file>] [--reviewers deepseek,codex]`
     private func runTagTeam(cwd: URL) async -> Int32 {
         let sub = args.dropFirst().first(where: { !$0.hasPrefix("-") }) ?? "review"
@@ -244,10 +244,16 @@ struct CLI {
 
         // The diff: an explicit file, or the working-tree diff of the current repo.
         let diff: String
-        if let f = value("diff"), let text = readFile(f) {
+        if let f = value("diff") {
+            guard let text = readFile(f) else {
+                log.error("could not read the requested diff: \(f)"); return 2
+            }
             diff = text
         } else {
-            diff = Self.gitDiff(cwd: cwd)
+            guard let text = await Self.gitDiff(cwd: cwd) else {
+                log.error("git diff did not complete; pass --diff <file> or check the repository"); return 2
+            }
+            diff = text
         }
         guard !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             log.error("no diff to review (pass --diff <file> or run in a repo with changes)"); return 2
@@ -255,7 +261,9 @@ struct CLI {
 
         let names = (value("reviewers") ?? "deepseek,codex").split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
         let reviewers = names.compactMap { ReviewerFactory.make($0) }
-        guard !reviewers.isEmpty else { log.error("no known reviewers in “\(names.joined(separator: ","))”"); return 2 }
+        guard !reviewers.isEmpty, reviewers.count == names.count else {
+            log.error("every requested reviewer must be recognized: \(names.joined(separator: ","))"); return 2
+        }
         log.info("tag-team review by: \(reviewers.map(\.name).joined(separator: ", "))")
 
         let (results, verdict) = await ReviewPanel().run(diff: diff, reviewers: reviewers)
@@ -269,20 +277,20 @@ struct CLI {
             print("Builder: fix EVERY finding above, then re-run the tag team until it's clean.")
             return 3
         }
-        print("✅ \(verdict.verdict == .ship ? "SHIP" : "no objections (unclear signals — read above)")")
+        guard verdict.verdict == .ship else {
+            print("Review incomplete — every requested reviewer must return SHIP.")
+            return 2
+        }
+        print("✅ SHIP")
         return 0
     }
 
-    static func gitDiff(cwd: URL) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["git", "diff", "HEAD"]
-        p.currentDirectoryURL = cwd
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return "" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8) ?? ""
+    static func gitDiff(cwd: URL) async -> String? {
+        let result = await BoundedProcessRunner.run(
+            executable: "/usr/bin/env", arguments: ["git", "--no-pager", "diff", "--no-ext-diff", "HEAD"],
+            cwd: cwd.path, environment: ProcessInfo.processInfo.environment,
+            timeoutSeconds: 30, maximumOutputBytes: 1_048_576)
+        return result.succeeded ? result.stdout : nil
     }
 
     /// Auto-configure + drive a Docker sandbox for a generated project. Dry by default

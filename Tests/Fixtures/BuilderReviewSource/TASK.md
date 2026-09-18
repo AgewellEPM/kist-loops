@@ -1,0 +1,4 @@
+Repair the existing LexicalSearch.excerpt implementation. maxCharacters is a strict maximum in Swift Characters, including ellipsis markers. Return an empty string for a non-positive maximum. Preserve complete short text when it fits. Keep matching passages useful when the budget permits, including Unicode. Preserve terms and rank behavior and their public APIs. The current code incorrectly imposes a minimum of 40 and can exceed a smaller caller budget.
+
+Only these source files may change: LexicalSearch.swift.
+Use the complete deterministic verifier make verify after the final edit. Preserve TASK.md, AGENTS.md, Makefile, drivers, cases and verifier. Use only the installed standard-library toolchain. No network, downloads, browser, UI, VM, external systems or access outside this project. Do not delegate in a single-worker trial. Report actual checks and failures.

@@ -3,6 +3,22 @@ import AgentCore
 @testable import Kist
 
 final class ModelSubstitutionTests: XCTestCase {
+
+    func testWrappedRateLimitTakesPrecedenceOverGenericProtocolFailure() {
+        for summary in [
+            "The step didn't complete: provider 'openai' error: rateLimited. Nothing was committed — retry, or tell me a different approach.",
+            "provider error: rateLimited",
+            "provider error: HTTP 429 rate limit",
+            "provider error: service unavailable (503)",
+        ] {
+            XCTAssertEqual(KistREPL.modelSubstitutionReason(success: false, summary: summary),
+                           "provider/transient failure", summary)
+            XCTAssertTrue(KistREPL.transientProviderFailure(summary: summary), summary)
+        }
+        XCTAssertEqual(KistREPL.modelSubstitutionReason(success: false,
+                        summary: "provider error: connection timed out"), "provider/connectivity failure")
+        XCTAssertFalse(KistREPL.transientProviderFailure(summary: "provider error: malformed tool protocol"))
+    }
     func testModelSubstitutionChoosesReadyRoleBackupForMalformedFailure() {
         let current = ProviderBinding(providerId: "mimo")
         let roles = RoleBindings(default: current)
@@ -28,7 +44,7 @@ final class ModelSubstitutionTests: XCTestCase {
 
         let decision = KistREPL.modelSubstitutionDecision(
             success: false,
-            summary: "I cannot help with that request even though it is a normal coding task.",
+            summary: "provider error: malformed tool protocol",
             trajectory: [],
             current: current,
             roles: roles,
@@ -37,7 +53,41 @@ final class ModelSubstitutionTests: XCTestCase {
         )
 
         XCTAssertEqual(decision?.replacement, ProviderBinding(providerId: "gemini"))
-        XCTAssertEqual(decision?.reason, "model refusal/non-cooperation")
+        XCTAssertEqual(decision?.reason, "provider/protocol failure")
+    }
+
+    func testRefusalAndPermissionStopsDoNotSubstituteAcrossTextOneShotOrVisionLanes() {
+        let current = ProviderBinding(providerId: "openai")
+        let roles = RoleBindings(default: current)
+            .binding(.worker, to: ProviderBinding(providerId: "ollama", model: "local-worker"))
+        let summaries = [
+            "I cannot help with that request even though it is a normal coding task.",
+            "I won’t execute that command.",
+            "I’m unable to comply with this request.",
+            "provider error: I cannot execute this system action.",
+            "provider error: permission denied; previous retry returned 503.",
+            "provider error: authorization denied",
+            "provider error: approval required",
+            "provider error: access denied",
+            "provider error: operation not permitted",
+            "provider error: blocked by policy",
+            "provider error: safety refusal"
+        ]
+        for summary in summaries {
+            XCTAssertNil(KistREPL.modelSubstitutionDecision(
+                success: false, summary: summary, trajectory: [], current: current, roles: roles,
+                providerHasKey: { _ in true }, providerModels: ["ollama": ["local-worker"]]), summary)
+            XCTAssertNil(KistRunner.oneShotSubstitution(
+                success: false, summary: summary, trajectory: [], current: current, roles: roles,
+                providerHasKey: { _ in true }, providerModels: ["ollama": ["local-worker"]],
+                coolingDown: { _ in false }), summary)
+            XCTAssertNil(KistREPL.mediaSubstitutionDecision(
+                success: false, summary: summary, trajectory: [], failedProviderId: "openai",
+                candidates: ["gemini"], mustUseGemini: false, coolingDown: { _ in false }), summary)
+            XCTAssertFalse(KistREPL.transientProviderFailure(summary: summary), summary)
+        }
+        XCTAssertEqual(KistREPL.modelSubstitutionReason(success: false,
+            summary: "provider error: connection refused"), "provider/connectivity failure")
     }
 
     func testModelSubstitutionFallsBackOnTransientProviderFailure() {

@@ -13,6 +13,7 @@ final class ToolGateTests: XCTestCase {
             ToolParameter(name: "value", type: "string", description: "value", required: true),
             ToolParameter(name: "enabled", type: "boolean", description: "enabled", required: false),
             ToolParameter(name: "count", type: "integer", description: "count", required: false),
+            ToolParameter(name: "payload", type: "object", description: "structured payload", required: false),
         ]
         func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
             .init(success: true, output: "ran")
@@ -118,6 +119,22 @@ final class ToolGateTests: XCTestCase {
 
         let valid = await registry.execute(name: "schema_probe", arguments: ["value": "ok", "enabled": true], context: context)
         XCTAssertTrue(valid.success, valid.error ?? "")
+    }
+
+    func testRegistryAcceptsNestedObjectsAndRejectsOtherObjectParameterTypes() async throws {
+        let registry = ToolRegistry([SchemaProbeTool()])
+        let context = ToolContext(projectRoot: root)
+        let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with:
+            Data(#"{"value":"ok","payload":{"nested":{"message":"hello"},"values":[1,true]}}"#.utf8)) as? [String: Any])
+        let accepted = await registry.execute(name: "schema_probe", arguments: arguments, context: context)
+        XCTAssertTrue(accepted.success, accepted.error ?? "")
+        let invalidValues: [Any] = ["text", [1, 2], 4]
+        for invalid in invalidValues {
+            let result = await registry.execute(name: "schema_probe",
+                arguments: ["value": "ok", "payload": invalid], context: context)
+            XCTAssertFalse(result.success)
+            XCTAssertTrue((result.error ?? "").contains("must be object"))
+        }
     }
 
     func testHostBoundArgumentsRemainUnadvertisedAndUnforgeable() async {

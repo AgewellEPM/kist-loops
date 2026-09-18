@@ -178,37 +178,15 @@ extension KistRunner {
         // the bounded delegation-depth budget remains, so teammates can help without runaway trees.
         // The SAME budget ledger is shared with spawn so the whole delegation tree draws one cap.
         let terminalSink: RuntimeEventSink = sinkOverride ?? TerminalEventSink(showReasoning: showReasoning)
-        let spawn = SpawnAgentTool(providers: registry, providerId: providerId, model: model,
-                                   roles: roles,
-                                   baseTools: tools, sink: terminalSink,
-                                   interactor: interactor, approvalTools: approvalTools,
-                                   maxIterations: maxIterations,
-                                   delegationDepth: delegationDepth,
-                                   extendedThinking: extendedThinking,
-                                   budget: budget)
-        // PROACTIVE specialist delegation: give the main agent `spawn_specialist` so it can hand a
-        // matching subtask to a named specialist (Claude-exact — the model reads their descriptions and
-        // delegates). Ceiling is `tools` (no spawn_* → a specialist can't recursively fan out). Only added
-        // when specialists exist, so the roster is never empty in the tool description.
-        let specialists = SpecialistRegistry(projectRoot: context.projectRoot).load()
-        var extraTools: [any AgentTool] = [spawn]
-        if !specialists.isEmpty {
-            let specSpawner = SpecialistSpawner(
-                providers: registry, baseTools: tools, context: context,
-                sink: terminalSink, interactor: interactor,
-                aliasTable: [:], roleDefault: ProviderBinding(providerId: providerId, model: model),
-                defaultMaxIterations: maxIterations, extendedThinking: extendedThinking, budget: budget)
-            // SECURITY (Codex HIGH): a proactively-spawned specialist is pinned to the canonical NORMAL
-            // approval floor (`Self.sensitiveTools`), NOT the loop's `approvalTools` param. The param is []
-            // under --yolo and is captured once at construction, so using it would let a --yolo-launched
-            // session that later TIGHTENS still spawn guards-off children (escalation). The constant normal
-            // floor can never be escalated below: a delegated specialist always re-asserts sensitive-tool
-            // approvals — even in --yolo, where the main agent stays guards-off but a spawned sub-agent does
-            // not inherit that. Child ≥ parent restrictiveness in every session state.
-            extraTools.append(SpawnSpecialistTool(specialists: specialists, spawner: specSpawner,
-                                                  approvalTools: Self.sensitiveTools))
-        }
-        let mainTools = ToolRegistry(tools.all() + extraTools)
+        // Named and generic agents share a lazy, bounded factory. The normal sensitive-tool floor
+        // persists through all descendants of a specialist, including a later generic delegation.
+        let mainTools = AgentTeamTools.make(
+            providers: registry, binding: ProviderBinding(providerId: providerId, model: model),
+            roles: roles, baseTools: tools, context: context, sink: terminalSink,
+            interactor: interactor, approvalTools: approvalTools,
+            specialistApprovalTools: Self.sensitiveTools, maxIterations: maxIterations,
+            spawnLevels: max(0, delegationDepth) + 1, extendedThinking: extendedThinking,
+            budget: budget, checkpoints: checkpoints)
         // Lifecycle hooks (kist-modularized security fix): user-level (~/.kist/hooks.json) always load;
         // the WORKSPACE-local <root>/.kist/hooks.json is opt-in (KIST_TRUST_PROJECT_HOOKS=1) because a
         // hostile cloned repo could ship one and hooks run as /bin/sh — auto-loading it is an

@@ -84,7 +84,8 @@ enum EvolutionTestAuthority {
             requiredBenchmarkCommands: required, treeSHA: tree,
             gitControlDigest: control, hostStateDigest: host,
             committedDiffDigest: record.committedDiffDigest ?? String(repeating: "b", count: 64),
-            integrityDigest: record.integrityDigest ?? EvolutionEvaluationAuthority.integrityDigest([]))
+            integrityDigest: record.integrityDigest ?? EvolutionEvaluationAuthority.integrityDigest([]),
+            capabilityFitness: record.capabilityFitness)
         let receipt: EvolutionBenchmarkAuthorityReceipt
         do { receipt = try EvolutionEvaluationAuthority.issueForTesting(unsigned) }
         catch { preconditionFailure("test evaluation receipt failed: \(error)") }
@@ -105,7 +106,8 @@ enum EvolutionTestAuthority {
             evaluationReceiptID: receipt.id,
             evaluationReceiptDigest: receipt.bindingDigest,
             evaluationReceiptSeal: receipt.seal,
-            evaluationContainmentExecutionDigest: receipt.containmentExecutionDigest)
+            evaluationContainmentExecutionDigest: receipt.containmentExecutionDigest,
+            capabilityFitness: unsigned.capabilityFitness)
     }
 
     static func seal(_ record: EvolutionCandidateRecord,

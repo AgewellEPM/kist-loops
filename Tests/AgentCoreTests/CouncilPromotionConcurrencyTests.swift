@@ -46,6 +46,8 @@ final class CouncilPromotionConcurrencyTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         let cancellations = await probe.cancellationCount
+        let maximumActive = await probe.maximumActive
+        XCTAssertEqual(maximumActive, 4, "all four mock providers must enter before cancellation")
         XCTAssertEqual(cancellations, 4)
     }
 
@@ -92,7 +94,8 @@ final class CouncilPromotionConcurrencyTests: XCTestCase {
     private func judge(provider: ControlledCouncilProvider,
                        deadline: TimeInterval) async -> CouncilPromotionVerdict {
         await CouncilPromotionJudge(
-            providers: ProviderRegistry(providers: [provider], retryDelaysNanoseconds: []),
+            providers: ProviderRegistry(providers: [provider], keyStore: CouncilConcurrencyNullKeys(),
+                                        retryDelaysNanoseconds: []),
             roles: RoleBindings(default: ProviderBinding(
                 providerId: provider.id, model: provider.defaultModel)),
             lensDeadline: deadline
@@ -103,6 +106,12 @@ final class CouncilPromotionConcurrencyTests: XCTestCase {
             testSummary: "all deterministic tests passed",
             signoffSummary: "host verification passed"))
     }
+}
+
+// Mock timing/cancellation tests must not consult the host Keychain. Registry
+// routing resolves keys even for these keyless providers, before stream enters.
+private struct CouncilConcurrencyNullKeys: KeyStore {
+    func key(forAccount account: String) -> String? { nil }
 }
 
 private enum ControlledCouncilBehavior: Sendable {

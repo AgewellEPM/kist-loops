@@ -475,6 +475,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             return try taskCommand(.refuse, verb: verb, tail: tail, defaultTaskID: defaultTaskID, issuedAtEpoch: issuedAtEpoch)
         case "rollback":
             return try taskCommand(.rollback, verb: verb, tail: tail, defaultTaskID: defaultTaskID, issuedAtEpoch: issuedAtEpoch)
+        case "reconcile":
+            return try taskCommand(.reconcile, verb: verb, tail: tail, defaultTaskID: defaultTaskID, issuedAtEpoch: issuedAtEpoch)
         case "receipts":
             return try taskCommand(.receipts, verb: verb, tail: tail, defaultTaskID: defaultTaskID, issuedAtEpoch: issuedAtEpoch)
         default:
@@ -511,7 +513,8 @@ public struct SMLWorkflowREPLCompiler: Sendable {
             "planning-bundle",
             "exit",
         ] + exampleLines + [
-            "Approve, refuse, and rollback require the task_revision returned by watch.",
+            "Approve, refuse, rollback, and reconcile require the task_revision returned by watch.",
+            "Reconcile also requires the interrupted dispatch_id and an operator note after restarting the host.",
         ]).joined(separator: "\n")
     }
 

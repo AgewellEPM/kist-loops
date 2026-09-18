@@ -13,6 +13,7 @@ public enum ProviderFault {
     /// failure (connection reset / timeout / TLS). Auth (401/403), missing key, and content 4xx are NOT
     /// provider faults — routing to another provider wouldn't help, and (for auth) it should surface.
     public static func isProviderFault(_ error: Error) -> Bool {
+        if let routed = error as? ProviderRouteFailure { return isProviderFault(routed.underlying) }
         guard let e = error as? AIProviderError else { return false }
         switch e {
         case .rateLimited:          return true

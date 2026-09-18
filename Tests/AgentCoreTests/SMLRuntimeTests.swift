@@ -95,7 +95,7 @@ final class SMLRuntimeTests: XCTestCase {
         )
 
         let migrated = try await store.load()
-        XCTAssertEqual(migrated.schemaVersion, 2)
+        XCTAssertEqual(migrated.schemaVersion, SMLRuntimeSnapshot.currentSchemaVersion)
         XCTAssertEqual(migrated.activeWorkflowVersions["legacy.workflow"], "1.0.0")
         XCTAssertNotNil(migrated.workflows["legacy.workflow#1.0.0"])
         XCTAssertEqual(migrated.tasks["TASK-LEGACY"]?.revision, 0)
@@ -113,7 +113,7 @@ final class SMLRuntimeTests: XCTestCase {
             SMLRuntimeSnapshot.self,
             from: Data(contentsOf: fileURL)
         )
-        XCTAssertEqual(published.schemaVersion, 2)
+        XCTAssertEqual(published.schemaVersion, SMLRuntimeSnapshot.currentSchemaVersion)
     }
 
     func testSchemaV1RollbackBackupIsWriteOnceAndRestoresExactOriginalBytes() async throws {

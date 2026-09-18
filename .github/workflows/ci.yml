@@ -1,0 +1,50 @@
+name: Kist CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kist-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Swift tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Select Swift
+        if: runner.os == 'Linux'
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "5.9"
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Test
+        run: swift test -c release
+
+      - name: Verify Linux bubblewrap enforcement
+        if: runner.os == 'Linux'
+        run: scripts/linux-sandbox-test.sh
+
+      - name: Validate cgroup-v2 preflight contract
+        if: runner.os == 'Linux'
+        run: bash -n scripts/evolution/check-linux-cgroup-v2.sh

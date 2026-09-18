@@ -104,7 +104,7 @@ final class CLIChatProviderStructuredTests: XCTestCase {
             {"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":4}}
             """)
         XCTAssertEqual(parsed.text, #"{"name":"kist"}"#)
-        XCTAssertEqual(parsed.usage, TokenUsage(promptTokens: 13, completionTokens: 4))
+        XCTAssertEqual(parsed.usage, TokenUsage(promptTokens: 10, completionTokens: 4))
 
         files.cleanup()
         XCTAssertFalse(FileManager.default.fileExists(atPath: schemaPath))
@@ -118,6 +118,37 @@ final class CLIChatProviderStructuredTests: XCTestCase {
             eventOutput: ""))
         XCTAssertThrowsError(try CLIChatProvider.parseCodexStructuredResult(
             Data("Here is JSON: {\"name\":\"wrong\"}".utf8), eventOutput: ""))
+    }
+
+    func testCodexTextEventsPreserveSourceBytesAndCountCachedTokensOnce() throws {
+        let source = "    first\nsecond\n"
+        let message: [String: Any] = ["type": "item.completed", "item": [
+            "type": "agent_message", "text": source]]
+        let line = String(decoding: try JSONSerialization.data(withJSONObject: message), as: UTF8.self)
+        let events = line + "\n" + #"{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122,"reasoning_output_tokens":100}}"#
+        let result = try CLIChatProvider.parseCodexTextResult(events)
+        XCTAssertEqual(result.text, source)
+        XCTAssertTrue(result.usageReported)
+        XCTAssertEqual(result.usage, TokenUsage(promptTokens: 24763, completionTokens: 122))
+        XCTAssertThrowsError(try CLIChatProvider.parseCodexTextResult(line))
+        XCTAssertThrowsError(try CLIChatProvider.parseCodexTextResult(events + "\n" + #"{"type":"turn.failed"}"#))
+        XCTAssertThrowsError(try CLIChatProvider.parseCodexTextResult("untyped prose"))
+        let missingUsage = try CLIChatProvider.parseCodexTextResult(
+            line + "\n" + #"{"type":"turn.completed","usage":{}}"#)
+        XCTAssertFalse(missingUsage.usageReported)
+    }
+
+    func testCodexExitDiagnosticUsesTypedErrorInsteadOfStdinBanner() {
+        let diagnostic = CLIChatProvider.processFailureDiagnostic(
+            stdout: #"{"type":"turn.failed","error":{"message":"Rate limit exceeded; api_key=sk-live-abcdef123456789"}}"#,
+            stderr: "Reading prompt from stdin...\n")
+        XCTAssertTrue(diagnostic.contains("Rate limit exceeded"))
+        XCTAssertFalse(diagnostic.contains("Reading prompt"))
+        XCTAssertFalse(diagnostic.contains("abcdef123456789"))
+        let unrelated = CLIChatProvider.processFailureDiagnostic(
+            stdout: #"{"type":"item.completed","item":{"type":"agent_message","text":"DO NOT COPY"}}"#,
+            stderr: "actual process error")
+        XCTAssertEqual(unrelated, "actual process error")
     }
 
     func testCLIProcessTimeoutAndCancellationTearDownTheProcessGroup() async throws {

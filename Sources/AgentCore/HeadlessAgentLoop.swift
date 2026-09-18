@@ -54,6 +54,7 @@ public struct HeadlessAgentLoop: Sendable {
     let tools: ToolRegistry
     let context: ToolContext
     let sink: RuntimeEventSink
+    let agentHistoryHealth: AgentHistoryHealth
     private let interactor: RuntimeInteractor
     var approvalTools: Set<String>    // tools that need human y/n before running (runtime-switchable via approving(_:))
     var planMode: Bool                // plan mode: only read-only tools may run (propose, don't execute)
@@ -84,7 +85,7 @@ public struct HeadlessAgentLoop: Sendable {
     private let ownsRecorder: Bool
     /// Optional host-owned span recorder for token/cost telemetry. nil = off.
     private let traceRecorder: TraceRecorder?
-    private let traceRole: String?
+    let traceRole: String?
     /// Agent-Skills: the Tier-1 `<available_skills>` menu injected into the system prompt
     /// (empty when no skills are discovered). Tracker tracks on-demand loads for telemetry.
     let skillsXML: String
@@ -115,13 +116,6 @@ public struct HeadlessAgentLoop: Sendable {
     /// (mirrors `recallLessons`) so the ablation can build two identical loops differing only in this bit.
     public var filterSelfToolsByRelevance: Bool = false
 
-    /// Tools that never modify state — the only ones permitted while plan mode is ON.
-    /// An ALLOWLIST (not a denylist) so unknown/MCP tools are blocked by default in plan mode.
-    public static let readOnlyTools: Set<String> = ["read_file", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search"]
-    static let conversationalReadOnlyTools = readOnlyTools.union([
-        "ask_user", "delegation_updates", "read_spreadsheet", "query_data", "view_image",
-        "browse", "tasks",
-    ])
     let maxObservationBytes = 8_000   // internal: +VerificationReplay envelopes observations too
     private let replanThreshold = 2      // consecutive tool failures before steering a re-plan
     private let maxReplans = 2           // budget so a doomed run can't loop on re-plans forever
@@ -180,15 +174,24 @@ public struct HeadlessAgentLoop: Sendable {
             ? nil : SkillTracker(activeSkills: skillManager.activeSkills)
         self.skillsXML = skillManager.promptXML()
         self.skillTracker = tracker
-        self.context = context.withSkills(locations: skillManager.locationIndex(), tracker: tracker)
-        self.sink = sink
+        let tracedContext: ToolContext
+        if let traceRecorder, context.correlationID == nil || context.correlationID == traceRecorder.traceId {
+            tracedContext = context.withCorrelationID(traceRecorder.traceId, traceRecorder: traceRecorder)
+        } else { tracedContext = context }
+        self.context = tracedContext.withSkills(locations: skillManager.locationIndex(), tracker: tracker)
+        let historyHealth = AgentHistoryHealth()
+        self.agentHistoryHealth = historyHealth
+        let downstream = (sink as? AgentHistoryEventSink)?.downstream ?? sink
+        self.sink = context.agentMemory.map {
+            AgentHistoryEventSink(downstream: downstream, access: $0, health: historyHealth) as RuntimeEventSink
+        } ?? downstream
         self.interactor = interactor
         self.approvalTools = approvalTools
         self.planMode = planMode
         self.toolMode = toolMode
         self.nativeToolCapabilityCache = NativeToolCapabilityCache()
         self.hooks = hooks
-        self.checkpoints = checkpoints
+        self.checkpoints = checkpoints ?? context.agentMemory?.checkpoints
         self.maxIterations = maxIterations
         self.providerReasoningEffort = reasoningEffort ?? (extendedThinking ? .deep : .none)
         self.extendedThinking = self.providerReasoningEffort != .none
@@ -299,30 +302,14 @@ public struct HeadlessAgentLoop: Sendable {
     /// Route to the NATIVE tool-calling loop or the universal text-protocol loop, decided by the
     /// (provider, model) CAPABILITIES and the `toolMode` override. `.auto` uses native only when the
     /// model actually supports it — local/small models fall to the text protocol (honest "all AIs").
-    private func drive(
-        _ initial: LoopCheckpoint,
-        heldRunLease: LoopCheckpointRunLease? = nil
-    ) async -> (Outcome, LoopCheckpoint) {
+    func driveCore(_ initial: LoopCheckpoint) async -> (Outcome, LoopCheckpoint) {
         // Normalize old checkpoints once at the boundary. Every downstream decision then reads the
         // persisted turn contract instead of reclassifying prose independently.
         var prepared = initial
-        let runLease: LoopCheckpointRunLease?
-        if let heldRunLease {
-            runLease = heldRunLease
-        } else if let checkpoints {
-            do {
-                runLease = try checkpoints.acquireRunLease(id: prepared.id)
-            } catch {
-                let summary = "checkpoint run refused: \(error)"
-                sink.emit(.stateChanged(.failed)); sink.emit(.failed(summary))
-                return (Outcome(success: false, summary: summary, iterations: prepared.iteration,
-                                checkpointId: prepared.id), prepared)
-            }
-        } else {
-            runLease = nil
+        guard providers.provider(id: providerId) != nil else {
+            let reason = "provider '\(providerId)' is unavailable or not admitted by the host"
+            return finishFailed(&prepared, reason, reason)
         }
-        // Keep kernel ownership until every hidden provider attempt and final persistence has finished.
-        defer { runLease?.release() }
         let mode: PromptCompiler.Mode = planMode ? .plan : .inline
         let raw = prepared.rawRequest ?? Self.scopeRequestSource(for: prepared.goal)
         let intent = prepared.intent ?? PromptCompiler.inferIntent(raw, mode: mode)
@@ -351,7 +338,10 @@ public struct HeadlessAgentLoop: Sendable {
         let requestPersistence: ProviderRequestBudget.Persistence?
         if let checkpointStore = checkpoints {
             requestPersistence = { minimumConsumed, limit in
-                try checkpointStore.admitProviderRequest(
+                if let error = agentHistoryHealth.error {
+                    throw ToolError.execution("agent history durability failed before provider admission: \(error)")
+                }
+                return try checkpointStore.admitProviderRequest(
                     id: checkpointID, minimumConsumed: minimumConsumed, limit: limit)
             }
         } else {
@@ -361,7 +351,7 @@ public struct HeadlessAgentLoop: Sendable {
                                                   consumed: startingRequests,
                                                   persistence: requestPersistence)
         let nativeTools = surfaceRelevantSelfTools(
-            Self.conversationalToolset(tools, intent: prepared.intent), goal: prepared.goal)
+            Self.conversationalToolset(tools, intent: prepared.intent, request: prepared.rawRequest), goal: prepared.goal)
         let schemaFingerprint = Self.nativeToolSchemaFingerprint(nativeTools.toolSpecs())
         let resolvedModel = providers.provider(id: providerId)?.resolvedModel(model)
             ?? model ?? "unknown"
@@ -447,8 +437,11 @@ public struct HeadlessAgentLoop: Sendable {
     /// can inspect and ask, but cannot mutate even if a weak/text-protocol model invents a hidden tool call
     /// or the session is in bypass. Build/fleet and explicit desktop work retain their effectful tools.
     /// A nil legacy intent remains unchanged for checkpoint compatibility.
-    public static func conversationalToolset(_ tools: ToolRegistry, intent: TaskBrief.Intent?) -> ToolRegistry {
+    public static func conversationalToolset(_ tools: ToolRegistry, intent: TaskBrief.Intent?, request: String? = nil) -> ToolRegistry {
         guard let intent else { return tools }
+        if intent == .build, let request, AgentMetadataRequest.matches(request) {
+            return tools.scoped(to: AgentMetadataRequest.actionTools.sorted())
+        }
         switch intent {
         case .build, .fleet, .desktop:
             return tools
@@ -538,7 +531,7 @@ public struct HeadlessAgentLoop: Sendable {
             AuthorizationScopeEngine.evaluate(scopeSource))
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard) —
         // applies to BOTH the standard prompt and the weak-model primer below (MiMo takes the weak path).
-        let authorizedTools = Self.conversationalToolset(tools, intent: cp.intent)
+        let authorizedTools = Self.conversationalToolset(tools, intent: cp.intent, request: cp.rawRequest)
         let turnTools = surfaceRelevantSelfTools(authorizedTools, goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
         var system = Self.systemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot, planMode: planMode,
                                        shellEnabled: scopedContext.shell.enabled, skillsXML: skillsXML,
@@ -557,15 +550,22 @@ public struct HeadlessAgentLoop: Sendable {
         var settings = ModelSettings(temperature: 0.2, maxTokens: 4096, systemPrompt: system,
                                      disableThinking: providerReasoningEffort == .none,
                                      reasoningEffort: providerReasoningEffort)
+        if providerId.lowercased() == "codex-cli" {
+            settings.jsonSchema = Self.subscriptionCLIActionSchema(
+                tools: turnTools, shellEnabled: scopedContext.shell.enabled)
+            settings.jsonOutput = settings.jsonSchema != nil
+            settings.systemPrompt += "\nFor this response schema, wrap the selected action in `action` "
+                + "and encode tool `parameters` as a JSON object string. Kist decodes and executes it."
+        }
         applyProviderReasoningEffort(&settings, checkpoint: &cp)
         let profileStopsApplied = applyModelProfileStops(&settings)
         var parseFailures = 0
         var consecutiveFailures = 0
         var replansUsed = 0
-        var consecutiveGathering = 0       // read-only (gathering) calls in a row → forced-synthesis nudge
+        var gatheringProgress = HeadlessGatheringProgress()
         var lastSynthesisNudge = -100
         var verificationNudges = 0         // verify-before-done: re-nudge up to a bound, then finish honestly
-        var subscriptionCLIToolBlockNudges = 0 // reject a subscription backend's false zero-tool blocker
+        var subscriptionCLIToolBlockNudges = 0 // bound recovery from false subscription tool blockers
         var lastVerify: VerificationReplay? = nil   // last PASSING build/test of this run — re-verify replay candidate
         var replayAttempted = false                 // one deterministic replay per fresh candidate, never a loop
         var recoveryAttempted = false      // stuck-recovery: one hard reset before giving up
@@ -613,7 +613,7 @@ public struct HeadlessAgentLoop: Sendable {
             } catch {
                 _ = await synchronizeProviderRequests(&cp, budget: requestBudget)
                 if Task.isCancelled { return finishInterrupted(&cp) }   // ESC mid-stream
-                return finishFailed(&cp, "provider error: \(error)", "provider '\(providerId)' error: \(error)",
+                return finishFailed(&cp, "provider error: \(error)", ProviderRouteFailure.describe(error, requested: providerId),
                                     providerFault: ProviderFault.isProviderFault(error))
             }
             let iteration = await synchronizeProviderRequests(&cp, budget: requestBudget)
@@ -648,15 +648,16 @@ public struct HeadlessAgentLoop: Sendable {
                 // Subscription CLIs are deliberately stripped of THEIR native tools and used as pure
                 // completion backends. The outer Kist loop still advertises and executes its JSON tools.
                 // Some backends conflate those two layers and immediately claim repository access is
-                // unavailable. Reject that false zero-observation blocker while a real Kist read/search
-                // tool is present; after a small bound, fail honestly instead of accepting or looping.
+                // unavailable, even after successful Kist reads. Reject that unsupported blocker while
+                // grounding tools are present; after a small bound, fail honestly instead of looping.
                 if let blockerDecision = subscriptionCLIPrematureToolBlocker(
                     summary: summary, tools: turnTools, nudges: subscriptionCLIToolBlockNudges
                 ) {
                     switch blockerDecision {
                     case .nudge(let why):
                         subscriptionCLIToolBlockNudges += 1
-                        cp.messages.append(ChatMessage(role: .user, content: CompletionVerifier.steering(reason: why)))
+                        cp.messages.append(ChatMessage(role: .user, content: why
+                            + "\n" + Self.subscriptionCLICompletionBackendRules))
                         cp.iteration = iteration; persist(&cp)
                         continue
                     case .failUnverified(let why):
@@ -838,13 +839,12 @@ public struct HeadlessAgentLoop: Sendable {
                     validTools: Self.validToolNames(turnTools, shellEnabled: scopedContext.shell.enabled))))
             }
 
-            // 5c) Forced synthesis: research/audit loops can read forever and never write findings. Count
-            // consecutive GATHERING (read-only) calls and, past a threshold, steer the model to STOP
-            // reading and synthesize NOW. Bounded to one nudge per threshold-window (the MiMo audit gap).
-            if Self.readOnlyTools.contains(tool) { consecutiveGathering += 1 } else { consecutiveGathering = 0 }
-            if Self.shouldForceSynthesis(consecutiveGathering: consecutiveGathering, iteration: iteration,
+            // New observations remain useful work, including required file windows and diffs.
+            gatheringProgress.observe(tool: tool, args: args, result: result, visibleBody: body,
+                                      readOnly: Self.readOnlyTools.contains(tool))
+            if Self.shouldForceSynthesis(consecutiveGathering: gatheringProgress.stalledCalls, iteration: iteration,
                                          lastNudge: lastSynthesisNudge, maxIterations: maxIterations) {
-                lastSynthesisNudge = iteration; consecutiveGathering = 0
+                lastSynthesisNudge = iteration; gatheringProgress.didNudge()
                 cp.messages.append(ChatMessage(role: .user,
                                                content: Self.synthesisSteering(
                                                 validTools: Self.validToolNames(turnTools,
@@ -895,7 +895,7 @@ public struct HeadlessAgentLoop: Sendable {
         let scopedContext = context.withAuthorizationScope(
             AuthorizationScopeEngine.evaluate(scopeSource))
         // Interactive chat/review turns don't get the recursive spawn vector (runaway-research guard).
-        let authorizedTools = Self.conversationalToolset(tools, intent: cp.intent)
+        let authorizedTools = Self.conversationalToolset(tools, intent: cp.intent, request: cp.rawRequest)
         let turnTools = surfaceRelevantSelfTools(authorizedTools, goal: cp.goal)   // P2: task-targeted self__ advertisement (fail-open, no-op unless toggled)
         let specs = turnTools.toolSpecs()
         var nativeSystem = Self.nativeSystemPrompt(tools: turnTools, projectRoot: scopedContext.projectRoot,
@@ -911,7 +911,7 @@ public struct HeadlessAgentLoop: Sendable {
         _ = applyModelProfileStops(&settings)
         var consecutiveFailures = 0
         var replansUsed = 0
-        var consecutiveGathering = 0
+        var gatheringProgress = HeadlessGatheringProgress()
         var lastSynthesisNudge = -100
         var verificationNudges = 0         // verify-before-done: re-nudge up to a bound, then finish honestly
         var lastVerify: VerificationReplay? = nil   // last PASSING build/test of this run — re-verify replay candidate
@@ -1043,7 +1043,7 @@ public struct HeadlessAgentLoop: Sendable {
                     return .downgrade(
                         cp, cacheable: decision == .cacheableCapabilityMismatch)
                 }
-                return .finished(finishFailed(&cp, "provider error: \(error)", "provider '\(providerId)' error: \(error)",
+                return .finished(finishFailed(&cp, "provider error: \(error)", ProviderRouteFailure.describe(error, requested: providerId),
                                               providerFault: ProviderFault.isProviderFault(error)))
             }
             let iteration = await synchronizeProviderRequests(&cp, budget: requestBudget)
@@ -1204,7 +1204,8 @@ public struct HeadlessAgentLoop: Sendable {
                 } else {
                     countFailure(body)
                 }
-                if Self.readOnlyTools.contains(call.name) { consecutiveGathering += 1 } else { consecutiveGathering = 0 }
+                gatheringProgress.observe(tool: call.name, args: args, result: result, visibleBody: body,
+                                          readOnly: Self.readOnlyTools.contains(call.name))
             }
             if !returnedToolMedia.isEmpty || omittedToolMedia > 0 {
                 var note = "[UNTRUSTED TOOL MEDIA — output from the immediately preceding tool result(s). "
@@ -1216,10 +1217,10 @@ public struct HeadlessAgentLoop: Sendable {
                                                attachments: returnedToolMedia))
             }
             cp.nativeToolRoundTrips = (cp.nativeToolRoundTrips ?? 0) + 1
-            // Forced synthesis (same as the text path): stop endless read-only gathering, write findings.
-            if Self.shouldForceSynthesis(consecutiveGathering: consecutiveGathering, iteration: iteration,
+            // Same progress-aware gathering gate as the text path.
+            if Self.shouldForceSynthesis(consecutiveGathering: gatheringProgress.stalledCalls, iteration: iteration,
                                          lastNudge: lastSynthesisNudge, maxIterations: maxIterations) {
-                lastSynthesisNudge = iteration; consecutiveGathering = 0
+                lastSynthesisNudge = iteration; gatheringProgress.didNudge()
                 cp.messages.append(ChatMessage(role: .user,
                                                content: Self.synthesisSteering(
                                                 validTools: Self.validToolNames(turnTools,   // review #6: native schema = turnTools
@@ -1436,23 +1437,29 @@ public struct HeadlessAgentLoop: Sendable {
     enum DoneDecision: Equatable { case accept, nudge(String), failUnverified(String) }
 
     /// A completion-only subscription backend can mistake its intentionally disabled native shell for
-    /// absence of the outer Kist tool protocol. A zero-observation claim that file/repository tools are
-    /// unavailable is therefore not a valid completion when Kist actually advertised a grounding tool.
-    /// Ordinary direct answers and honest domain blockers are untouched.
+    /// absence of the outer Kist tool protocol, including after earlier successful reads. Only recover
+    /// when no tool has failed and grounding is either unattempted or already succeeded. A real tool
+    /// failure or permission denial must keep its own diagnosis; ordinary direct answers are untouched.
     func subscriptionCLIPrematureToolBlocker(summary: String, tools: ToolRegistry,
                                               nudges: Int) -> DoneDecision? {
-        guard ["claude-cli", "codex-cli"].contains(providerId.lowercased()),
-              recorder.snapshot().isEmpty else { return nil }
+        guard ["claude-cli", "codex-cli"].contains(providerId.lowercased()) else { return nil }
 
         let lower = summary.lowercased()
         let names = Set(tools.names)
-        let groundingOrder = ["read_file", "search_code", "list_files", "glob_files", "git_status", "git_diff"]
+        let groundingOrder = ["read_file", "search_code", "list_files", "glob_files", "git", "git_status", "git_diff"]
         let offered = groundingOrder.filter { names.contains($0) }
-        let mentionsOfferedTool = offered.contains { lower.contains($0) }
+        let observations = recorder.snapshot()
+        let successfulGrounding = observations.filter { $0.success && offered.contains($0.tool) }.count
+        guard observations.allSatisfy({ $0.success }),
+              observations.isEmpty || successfulGrounding > 0 else { return nil }
+        let mentionsOfferedTool = offered.contains {
+            lower.range(of: "\\b" + NSRegularExpression.escapedPattern(for: $0) + "\\b",
+                        options: .regularExpression) != nil
+        }
         // Completion backends do not always echo the advertised JSON name. Codex has also described
         // the same false blocker as "no Kist filesystem or git tools". Keep these phrases narrow and
-        // behind the zero-observation + subscription-provider guards above so an ordinary domain
-        // blocker is not forced into an unrelated repository call.
+        // behind the successful-or-unattempted observation and subscription-provider guards above
+        // so a real tool failure is not forced into an unrelated repository call.
         let mentionsGroundingSurface = mentionsOfferedTool || [
             "kist filesystem", "kist file tools", "kist tools", "git tools",
             "filesystem tools", "file-system tools", "repository tools"
@@ -1461,11 +1468,38 @@ public struct HeadlessAgentLoop: Sendable {
             "unavailable", "not available", "not callable", "cannot call", "can't call", "unable to call",
             "exposes no", "exposes neither", "does not expose", "doesn't expose", "no kist", "no repository access",
             "no filesystem access", "no file-system access", "do not have access", "don't have access",
-            "cannot access", "can't access"
+            "cannot access", "can't access", "no filesystem-reading", "no file-reading",
+            "no file-writing", "no command-execution", "no command runner", "read-only sandbox",
+            "filesystem is read-only", "workspace is read-only", "workspace remains read-only",
+            "enable writable workspace access"
         ].contains { lower.contains($0) }
-        guard !offered.isEmpty, mentionsGroundingSurface, availabilityNegation else { return nil }
+        let unattemptedSandboxClaim = observations.isEmpty
+            && (lower.hasPrefix("blocked") || lower.contains("cannot") || lower.contains("can't")) && [
+            "filesystem is read-only", "workspace is read-only", "workspace remains read-only",
+            "read-only sandbox", "enable writable workspace access",
+            "no filesystem-reading", "no file-reading", "no command-execution"
+        ].contains { lower.contains($0) }
+        guard !offered.isEmpty, (mentionsGroundingSurface || unattemptedSandboxClaim),
+              availabilityNegation else { return nil }
 
-        let why = "the subscription CLI claimed repository/file tools were unavailable before making any call, "
+        // After a read, "read_file says the dependency is unavailable" is an ordinary finding.
+        // Require a direct denial of a tool/interface, not separated mentions of tools and absence.
+        if !observations.isEmpty {
+            let subjects = offered + ["kist tools", "kist filesystem tools", "filesystem tools",
+                                      "file-system tools", "repository tools", "git tools"]
+            let subject = "\\b(?:" + subjects.map { NSRegularExpression.escapedPattern(for: $0) }
+                .joined(separator: "|") + ")(?: tools?)?\\b"
+            let denials = [
+                subject + #"\s+(?:is|are|remains?)\s+(?:currently\s+)?(?:unavailable|not available|not callable|not exposed)"#,
+                #"(?:does not expose|doesn't expose|exposes no|exposes neither|cannot call|can't call|unable to call)\s+(?:(?:the|required|any|kist)\s+)*"# + subject,
+            ]
+            guard denials.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
+            else { return nil }
+        }
+
+        let stage = observations.isEmpty ? "before making any call"
+            : "after \(successfulGrounding) successful grounding call(s) with no tool error"
+        let why = "the subscription CLI claimed repository/file tools were unavailable \(stage), "
             + "but Kist advertised \(offered.joined(separator: ", ")). Its native CLI tools are disabled; "
             + "Kist executes the JSON tool action. Request one advertised grounding tool now"
         return nudges < 2 ? .nudge(why) : .failUnverified(why)
@@ -1737,8 +1771,11 @@ public struct HeadlessAgentLoop: Sendable {
             }
         } catch {
             // Release the reservation on ANY failure so a failed call doesn't leak its hold.
-            await recordLLMSpan(usage: .zero, promptChars: promptChars, completionChars: 0,
-                                started: started, status: .error, reservation: reservation)
+            let route = error as? ProviderRouteFailure
+            await recordLLMSpan(usage: usage, promptChars: promptChars, completionChars: text.count,
+                                started: started, status: .error, reservation: reservation,
+                                actualProvider: route?.provider ?? effortRecords.last?.providerID,
+                                actualModel: route?.model ?? effortRecords.last?.modelID)
             throw error
         }
         await recordLLMSpan(usage: usage,
@@ -1746,7 +1783,9 @@ public struct HeadlessAgentLoop: Sendable {
                             completionChars: text.count,
                             started: started,
                             status: .ok,
-                            reservation: reservation)
+                            reservation: reservation,
+                            actualProvider: effortRecords.last?.providerID,
+                            actualModel: effortRecords.last?.modelID)
         return CompletionStreamResult(text: text,
                                       effortRecords: Array(effortRecords.suffix(32)),
                                       reasoningHandles: Array(reasoningHandles.suffix(32)))
@@ -1819,13 +1858,14 @@ public struct HeadlessAgentLoop: Sendable {
     }
 
     func recordLLMSpan(usage: TokenUsage, promptChars: Int, completionChars: Int,
-                               started: Date, status: SpanStatus, reservation: Reservation? = nil) async {
+                               started: Date, status: SpanStatus, reservation: Reservation? = nil,
+                               actualProvider: String? = nil, actualModel: String? = nil) async {
         // Budget accounting runs at THIS single chokepoint (both the native and text drive paths
         // funnel every model call through recordLLMSpan), and BEFORE the trace guard so the cap is
         // enforced even when no trace recorder is attached. Measured tokens when the provider reports
         // them; a clearly-labeled ~4-char estimate otherwise.
         let measured = usage.isZero ? TokenUsage.estimate(promptChars: promptChars, completionChars: completionChars) : usage
-        let usd = CompetitiveBenchmark.priceUSD(vendor: providerId,
+        let usd = CompetitiveBenchmark.priceUSD(vendor: actualProvider ?? providerId,
                                                 promptTokens: measured.promptTokens,
                                                 completionTokens: measured.completionTokens) ?? 0
         // Commit (aplus): release the pre-call reservation (by id) and book the ACTUAL spend (atomic
@@ -1845,9 +1885,10 @@ public struct HeadlessAgentLoop: Sendable {
         guard let traceRecorder else { return }
         await traceRecorder.record(AgentSpan(id: TraceID.make(), traceId: traceRecorder.traceId,
                                              kind: .llmCall, role: traceRole,
-                                             vendor: providerId, model: model,
+                                             vendor: actualProvider ?? providerId, model: actualModel ?? model,
                                              promptTokens: measured.promptTokens,
                                              completionTokens: measured.completionTokens,
+                                             attributes: ["usage.reported": String(!usage.isZero)],
                                              startedAt: started, endedAt: Date(),
                                              status: status))
     }

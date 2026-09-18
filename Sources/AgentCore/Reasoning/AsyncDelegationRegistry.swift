@@ -230,6 +230,12 @@ public actor AsyncDelegationRegistry {
                 await self?.finish(handleID: handle.id, outcome: .cancelled)
                 return .cancelled
             } catch {
+                // Child loops may translate CancellationError into an interrupted Outcome before
+                // their wrapper throws a typed failure. Preserve the actual task cancellation.
+                if Task.isCancelled {
+                    await self?.finish(handleID: handle.id, outcome: .cancelled)
+                    return .cancelled
+                }
                 let message = String(String(describing: error).prefix(2_000))
                 await self?.finish(handleID: handle.id, outcome: .failed(message))
                 return .failed(message)
@@ -266,9 +272,22 @@ public actor AsyncDelegationRegistry {
         guard var entry = entries[handleID] else {
             throw DelegationRegistryError.unknownHandle(handleID)
         }
+        guard entry.status == .running || entry.status == .cancelling else { return }
         entry.status = .cancelling
         entry.task?.cancel()
         entries[handleID] = entry
+    }
+
+    /// A loop owns only the handles recorded in its checkpoint. Cancel and await its unfinished
+    /// children before that loop releases its run lease; completed results remain available.
+    /// Awaiting the task also awaits the child's provider/process and worktree cleanup.
+    public func cancelAndDrain(handleIDs: Set<String>) async -> [DelegationSnapshot] {
+        let pending = handleIDs.sorted().filter {
+            entries[$0]?.status == .running || entries[$0]?.status == .cancelling
+        }
+        for id in pending { try? cancel(handleID: id) }
+        for id in pending { _ = await entries[id]?.task?.value }
+        return pending.compactMap { try? snapshot(handleID: $0) }
     }
 
     public func steer(_ handle: DelegationHandle, message: String) async throws {

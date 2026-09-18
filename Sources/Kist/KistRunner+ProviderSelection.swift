@@ -9,6 +9,15 @@ import Glibc
 // Provider selection / routing policy (resolveProvider, pickByPolicy, pickProvider) — extracted from KistRunner.swift to keep the core orchestration file under the
 // size limit. Part of `enum KistRunner`.
 extension KistRunner {
+    static func startupModel(explicit: String?, selectedProvider: String,
+                             configProvider: String?, configModel: String?,
+                             goalModel: String? = nil) -> String? {
+        if let explicit { return explicit }
+        if let goalModel { return goalModel }
+        guard configProvider == nil || configProvider?.lowercased() == selectedProvider.lowercased() else { return nil }
+        return configModel
+    }
+
     /// Explicit flag > config > strongest-or-cheapest available (per selection policy) > first local.
     /// Nil after an error.
     static func resolveProvider(_ opts: KistOptions, _ registry: ProviderRegistry, configProvider: String?,

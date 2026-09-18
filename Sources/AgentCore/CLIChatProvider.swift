@@ -185,6 +185,14 @@ public struct CLIChatProvider: ChatProvider {
                             cancellationCheck: { cancellation.isCancelled })
                         result = try Self.parseCodexStructuredResult(
                             try files.readResult(), eventOutput: eventOutput)
+                    } else if providerID == "codex-cli" {
+                        let args = baseArgs + ["--json"]
+                        executedArguments = args
+                        route = "text-protocol"
+                        let eventOutput = try Self.runToCompletion(
+                            binaryName: bin, args: args, stdin: prompt,
+                            cancellationCheck: { cancellation.isCancelled })
+                        result = try Self.parseCodexTextResult(eventOutput)
                     } else {
                         executedArguments = baseArgs
                         route = "text-protocol"
@@ -215,7 +223,7 @@ public struct CLIChatProvider: ChatProvider {
                             canonicalSchema: canonicalSchema),
                         responseFingerprint: BuilderEvidenceDigest.sha256(text))
                     if !text.isEmpty { continuation.yield(.delta(text)) }
-                    if !result.usage.isZero {
+                    if result.usageReported {
                         continuation.yield(.usage(
                             promptTokens: result.usage.promptTokens,
                             completionTokens: result.usage.completionTokens))
@@ -394,21 +402,71 @@ public struct CLIChatProvider: ChatProvider {
                 binary: "codex", detail: "final response file is not one JSON value")
         }
         let text = try canonicalJSONString(value, binary: "codex")
+        let metering = codexUsage(eventOutput)
+        return CLIStructuredResult(text: text, usage: metering.usage, usageReported: metering.reported)
+    }
+
+    static func parseCodexTextResult(_ eventOutput: String) throws -> CLIStructuredResult {
+        var answer: String?
+        var completed = false
+        for event in codexEvents(eventOutput) {
+            if event["type"] as? String == "turn.completed" { completed = true }
+            if event["type"] as? String == "turn.failed" { completed = false }
+            if event["type"] as? String == "item.completed",
+               let item = event["item"] as? [String: Any],
+               item["type"] as? String == "agent_message", let text = item["text"] as? String {
+                answer = text
+            }
+        }
+        guard completed, let answer else {
+            throw CLIProviderError.invalidStructuredOutput(
+                binary: "codex", detail: "no completed turn with a final agent message")
+        }
+        let metering = codexUsage(eventOutput)
+        return CLIStructuredResult(text: answer, usage: metering.usage, usageReported: metering.reported)
+    }
+
+    private static func codexEvents(_ eventOutput: String) -> [[String: Any]] {
+        eventOutput.split(separator: "\n", omittingEmptySubsequences: true).compactMap { line in
+            guard line.utf8.count <= 4 * 1_024 * 1_024 else { return nil }
+            return try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        }
+    }
+
+    private static func codexUsage(_ eventOutput: String) -> (usage: TokenUsage, reported: Bool) {
         var usage = TokenUsage.zero
         var usageReported = false
-        for line in eventOutput.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard line.utf8.count <= 1_048_576,
-                  let eventData = String(line).data(using: .utf8),
-                  let event = try? JSONSerialization.jsonObject(with: eventData) as? [String: Any],
-                  event["type"] as? String == "turn.completed",
-                  let rawUsage = event["usage"] as? [String: Any] else { continue }
+        for event in codexEvents(eventOutput) {
+            guard event["type"] as? String == "turn.completed",
+                  let rawUsage = event["usage"] as? [String: Any],
+                  let input = rawUsage["input_tokens"] as? NSNumber,
+                  let output = rawUsage["output_tokens"] as? NSNumber,
+                  let inputTokens = Int(input.stringValue), inputTokens >= 0,
+                  let outputTokens = Int(output.stringValue), outputTokens >= 0 else { continue }
             usageReported = true
+            // Codex input_tokens is the total input; cached_input_tokens is a subset, not extra work.
+            // output_tokens likewise already includes reasoning output. Never add either subset twice.
             usage = TokenUsage(
-                promptTokens: nonnegativeInt(rawUsage["input_tokens"])
-                    + nonnegativeInt(rawUsage["cached_input_tokens"]),
-                completionTokens: nonnegativeInt(rawUsage["output_tokens"]))
+                promptTokens: inputTokens, completionTokens: outputTokens)
         }
-        return CLIStructuredResult(text: text, usage: usage, usageReported: usageReported)
+        return (usage, usageReported)
+    }
+
+    static func processFailureDiagnostic(stdout: String, stderr: String) -> String {
+        var messages: [String] = []
+        for event in codexEvents(stdout) {
+            if let error = event["error"] as? [String: Any], let message = error["message"] as? String {
+                messages.append(message)
+            } else if event["type"] as? String == "error", let message = event["message"] as? String {
+                messages.append(message)
+            }
+        }
+        let stderrLines = stderr.split(whereSeparator: { $0.isNewline }).filter {
+            !$0.hasPrefix("Reading prompt from stdin")
+        }.suffix(4).joined(separator: "\n")
+        if !stderrLines.isEmpty { messages.append(stderrLines) }
+        let detail = messages.suffix(5).joined(separator: " | ")
+        return boundedRedactedDiagnostic(detail.isEmpty ? "no provider error details" : detail, maxBytes: 1_200)
     }
 
     private static func canonicalJSONString(_ value: Any, binary: String) throws -> String {
@@ -482,9 +540,9 @@ public struct CLIChatProvider: ChatProvider {
             throw CLIProviderError.notRunnable(binary: binaryName, detail: outcome.combined)
         }
         guard outcome.exitCode == 0 else {
-            let err = outcome.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             throw CLIProviderError.exited(binary: binaryName, code: outcome.exitCode,
-                                          stderr: String(err.prefix(400)))
+                                          stderr: processFailureDiagnostic(
+                                            stdout: outcome.stdout, stderr: outcome.stderr))
         }
         return outcome.stdout
     }

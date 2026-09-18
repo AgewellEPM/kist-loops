@@ -181,7 +181,7 @@ public struct ContextBrainTool: AgentTool {
         var lines = ["Context search: \(query)", "Matches: \(chunks.count)", ""]
         for chunk in chunks {
             lines.append("- \(chunk.id) · \(chunk.characters) chars")
-            lines.append("  \(preview(chunk.text))")
+            lines.append("  \(LexicalSearch.excerpt(chunk.text, query: query))")
         }
         lines.append("")
         lines.append("Use context_brain(action=\"get\", id=\"...\") to hot-load an exact chunk.")
@@ -221,16 +221,6 @@ public struct ContextBrainTool: AgentTool {
         lines.append("")
         lines.append("VERIFICATION: \(batches.count) batch(es), \(index.chunks.count) retrievable chunk(s), \(index.binaryOrLargeCount) metadata-only file(s). This coverage output is only the plan; call context_brain(action=\"get\", id=\"...\") for each chunk before claiming full source coverage.")
         return lines.joined(separator: "\n")
-    }
-
-    private func preview(_ text: String) -> String {
-        let compact = text.replacingOccurrences(of: "\r", with: "\n")
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        guard compact.count > 220 else { return compact.isEmpty ? "(empty)" : compact }
-        return String(compact.prefix(219)) + "..."
     }
 
     private func metadata(_ index: ContextBrainIndex) -> [String: String] {

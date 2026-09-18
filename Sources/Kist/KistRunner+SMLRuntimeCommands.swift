@@ -301,6 +301,10 @@ extension KistRunner {
     }
 
     static func runSMLRuntimeREPL(_ opts: KistOptions) async -> Int32 {
+        // No --sml-line: the interactive loop owns the session (reads stdin until exit/EOF).
+        if opts.smlRuntimeREPLLine == nil {
+            return await runSMLRuntimeREPLInteractive(opts)
+        }
         do {
             let json = try await renderSMLRuntimeHostREPLCommand(
                 sourcePath: opts.smlRuntimeREPL,

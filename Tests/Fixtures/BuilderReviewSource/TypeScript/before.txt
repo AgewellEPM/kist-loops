@@ -1,0 +1,86 @@
+/**
+ * src/lib/boards/tags.ts
+ *
+ * Helpers for the BoardTag surface (Phase 2 social-network,
+ * Batch 2.1, 2026-05-15). Pure functions — no prisma calls,
+ * caller does the I/O.
+ *
+ * Public surface:
+ *   • normalizeTag(input)  — lowercase, kebab-case, ≤30 chars,
+ *                            strip leading '#'. Returns null
+ *                            for invalid input (caller maps to
+ *                            400 or drops).
+ *   • normalizeTagList(arr) — dedupes after normalize, caps at
+ *                             MAX_TAGS_PER_BOARD.
+ *   • MAX_TAGS_PER_BOARD = 10
+ *   • MAX_TAG_LEN        = 30
+ */
+
+export const MAX_TAGS_PER_BOARD = 10;
+export const MAX_TAG_LEN = 30;
+const MIN_TAG_LEN = 2;
+
+// Allowed characters in a normalized tag (post-transform).
+// Lowercase a-z + 0-9 + hyphen. Hyphen cannot lead or trail
+// and cannot duplicate. Numbers can lead but the tag must
+// include at least one letter to avoid pure-number tags
+// (those collide with board-id-shaped strings in the URL
+// router).
+const NORMALIZED_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
+/**
+ * Normalize a single user-supplied tag string.
+ *
+ * Transform pipeline:
+ *   1. Strip leading '#' (so #stroke and stroke both work)
+ *   2. Lowercase
+ *   3. Trim leading/trailing whitespace
+ *   4. Replace internal whitespace runs with single '-'
+ *   5. Strip any character not [a-z0-9-]
+ *   6. Collapse repeated '-' to single '-'
+ *   7. Strip leading/trailing '-'
+ *
+ * Returns null when:
+ *   - input is not a string
+ *   - normalized string is shorter than MIN_TAG_LEN
+ *   - normalized string is longer than MAX_TAG_LEN
+ *   - normalized string has no letters (digits-only banned)
+ *   - normalized string fails the boundary regex
+ */
+export function normalizeTag(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  let s = input.trim();
+  if (s.startsWith("#")) s = s.slice(1);
+  s = s.toLowerCase();
+  s = s.replace(/\s+/g, "-");
+  s = s.replace(/[^a-z0-9-]/g, "");
+  s = s.replace(/-+/g, "-");
+  s = s.replace(/^-+|-+$/g, "");
+  if (s.length < MIN_TAG_LEN) return null;
+  if (s.length > MAX_TAG_LEN) return null;
+  if (!/[a-z]/.test(s)) return null;
+  if (!NORMALIZED_RE.test(s)) return null;
+  return s;
+}
+
+/**
+ * Normalize + dedupe + cap an array of user-supplied tag
+ * strings. Returns the canonical set the caller should
+ * persist. Invalid tags are silently dropped — the API
+ * layer can compare the input length to the result length
+ * to surface "we dropped N invalid tags" if it wants, but
+ * never 400s solely because a string didn't normalize.
+ */
+export function normalizeTagList(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    const t = normalizeTag(raw);
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= MAX_TAGS_PER_BOARD) break;
+  }
+  return out;
+}

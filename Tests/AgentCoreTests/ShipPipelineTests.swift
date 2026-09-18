@@ -83,6 +83,15 @@ final class ShipPipelineTests: XCTestCase {
         XCTAssertTrue(d.reason.contains("nothing was built"))
     }
 
+    func testSealedReviewDoesNotSilentlyClipSourceMaterial() async {
+        var oversized = build(true, completionEvidence: verificationEvidence())
+        oversized.diffSummary = String(repeating: "x", count: 8_001)
+        let d = await ShipPipeline(council: StubCouncil(ship: true)).review(goal: "x", build: oversized)
+        XCTAssertFalse(d.canDeploy)
+        XCTAssertNil(d.verdict, "input completeness must be checked before council inference")
+        XCTAssertTrue(d.reason.contains("exceeds the council input allowance"))
+    }
+
     func testCouncilBlessingMakesItDeployEligible() async {
         let d = await ShipPipeline(council: StubCouncil(ship: true)).review(goal: "x", build: build(true))
         XCTAssertTrue(d.canDeploy)

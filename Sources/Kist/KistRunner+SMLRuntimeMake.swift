@@ -876,6 +876,27 @@ extension KistRunner {
         let sourceFormat: SMLRuntimeHostExportSourceFormat
         let runtimePackage: SMLWorkflowRuntimeSourcePackage
         let launch: SMLWorkflowRuntimeLaunch
+        /// Present only for `.durable` launches: the persistent store, session lease, real
+        /// clock, and authority resolver a long-lived host (serve mode) needs beyond the app.
+        let durableEnvironment: SMLRuntimeDurableHostEnvironment?
+        /// The launched runtime instance for `.durable` hosts (capability coordinators need it).
+        let durableRuntime: SMLRuntime?
+
+        init(
+            sourcePath: String,
+            sourceFormat: SMLRuntimeHostExportSourceFormat,
+            runtimePackage: SMLWorkflowRuntimeSourcePackage,
+            launch: SMLWorkflowRuntimeLaunch,
+            durableEnvironment: SMLRuntimeDurableHostEnvironment? = nil,
+            durableRuntime: SMLRuntime? = nil
+        ) {
+            self.sourcePath = sourcePath
+            self.sourceFormat = sourceFormat
+            self.runtimePackage = runtimePackage
+            self.launch = launch
+            self.durableEnvironment = durableEnvironment
+            self.durableRuntime = durableRuntime
+        }
     }
 
     final class SMLRuntimeSequentialIDSource: @unchecked Sendable {

@@ -3,6 +3,16 @@ import AgentCore
 
 let kistRawArguments = Array(CommandLine.arguments.dropFirst())
 
+// A host broker request is an exclusive JSON protocol, including malformed CLI invocations.
+// Dispatch before version/help, terminal setup, environment mutation, and generic cleanup.
+if kistRawArguments.contains("--operator-action") {
+    exit(await KistOperatorActionProtocol.run(arguments: kistRawArguments))
+}
+
+if kistRawArguments.contains("--inspect-builder-evidence") {
+    exit(KistBuilderEvidenceCommand.run(arguments: kistRawArguments))
+}
+
 // Deployment metadata must be inspectable without mutating KIST_ACTIVE or touching option parsing,
 // project discovery, MCP configuration, provider selection, or model initialization.
 if KistBuildInfo.isVersionRequest(kistRawArguments) {

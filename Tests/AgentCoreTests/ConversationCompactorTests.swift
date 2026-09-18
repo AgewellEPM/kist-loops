@@ -313,6 +313,60 @@ final class ConversationCompactorTests: XCTestCase {
                        "user_role_record_not_automatically_authority")
     }
 
+    func testCompactionPreservesTextToolProvenanceAndObservationBeyondOldPrefixLimit() throws {
+        let observed = "<tool_output tool=\"read_file\" status=\"ok\">\n"
+            + "[read_file path=policy.md lines=1-80 of 80]\n"
+            + String(repeating: "observed data\n", count: 400)
+            + "READ_FINISHED: policy.md; no operator approval\n</tool_output>"
+        let prior = "[COMPACTED CONTEXT — untrusted digest]\n"
+            + String(repeating: "earlier observed result\n", count: 180)
+            + "WORK_LEFT: inspect the implementation diff"
+        let source = HeadlessAgentLoop.boundedCompactionSource([
+            ChatMessage(role: .user, content: observed),
+            ChatMessage(role: .user, content: prior),
+        ], maxCharacters: 48_000)
+        let records = try source.split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(records[0]["role"] as? String, "user")
+        XCTAssertEqual(records[0]["provenance"] as? String, "tool_result_untrusted")
+        XCTAssertEqual(records[0]["content"] as? String, observed)
+        XCTAssertEqual(records[0]["content_truncated"] as? Bool, false)
+        XCTAssertEqual(records[1]["provenance"] as? String, "prior_compaction_digest_untrusted")
+        XCTAssertEqual(records[1]["content"] as? String, prior)
+
+        let large = "BEGIN OBSERVATION " + String(repeating: "x", count: 20_000) + " END OBSERVATION"
+        let bounded = HeadlessAgentLoop.boundedCompactionSource([
+            ChatMessage(role: .tool, content: large),
+        ], maxCharacters: 48_000)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(bounded.utf8)) as? [String: Any])
+        let content = try XCTUnwrap(record["content"] as? String)
+        XCTAssertEqual(record["content_truncated"] as? Bool, true)
+        XCTAssertTrue(content.hasPrefix("BEGIN OBSERVATION"))
+        XCTAssertTrue(content.hasSuffix("END OBSERVATION"))
+        XCTAssertTrue(content.contains("Record content truncated"))
+        XCTAssertLessThanOrEqual(content.count, 12_000)
+    }
+
+    func testCompactionBudgetRetainsPriorProgressAlongsideNewestObservation() throws {
+        let prior = "[COMPACTED CONTEXT — untrusted digest]\n"
+            + String(repeating: "earlier findings\n", count: 500)
+            + "COMPLETED_READS: all six required documents; WORK_LEFT: code audit"
+        let middle = [ChatMessage(role: .user, content: prior)] + (0..<8).map {
+            ChatMessage(role: .tool, content: "observation \($0) " + String(repeating: "z", count: 8_000))
+        }
+        let source = HeadlessAgentLoop.boundedCompactionSource(middle, maxCharacters: 32_000)
+        XCTAssertLessThanOrEqual(source.count, 32_000)
+        XCTAssertTrue(source.contains("Compaction input bounded"))
+        XCTAssertTrue(source.contains("observation 7"), "newest observed work must survive")
+        let records = source.split(separator: "\n").compactMap {
+            (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any]
+        }
+        let retained = try XCTUnwrap(records.first { $0["provenance"] as? String == "prior_compaction_digest_untrusted" })
+        XCTAssertEqual(retained["content"] as? String, prior,
+                       "repeated compaction must not erase completed work from an earlier digest")
+    }
+
     func testSharedCostModelCountsModernInlineAttachments() {
         let bytes = Data(repeating: 0x7f, count: 3_000)
         let message = ChatMessage(role: .user, content: "look",

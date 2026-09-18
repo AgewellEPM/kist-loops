@@ -27,6 +27,7 @@ public struct SMLRetrievalSourceBindings: Sendable {
 
     public enum LoadError: Error, Equatable, CustomStringConvertible {
         case missing(path: String)
+        case unreadable(path: String, reason: String)
         case malformed(path: String, reason: String)
         case unsupportedSchemaVersion(Int)
 
@@ -36,6 +37,8 @@ public struct SMLRetrievalSourceBindings: Sendable {
                 return "SML retrieval bindings are missing: \(path) — RETRIEVE steps need "
                     + "source→store bindings (\"sources\": {\"<source>\": {\"store_path\": ..., "
                     + "\"embedding_space\": ...}})"
+            case .unreadable(let path, let reason):
+                return "SML retrieval bindings are unsafe or unreadable: \(path) (\(reason))"
             case .malformed(let path, let reason):
                 return "SML retrieval bindings are malformed: \(path) (\(reason))"
             case .unsupportedSchemaVersion(let version):
@@ -45,52 +48,83 @@ public struct SMLRetrievalSourceBindings: Sendable {
         }
     }
 
-    private struct FileFormat: Decodable {
-        struct Entry: Decodable {
-            let storePath: String
-            let embeddingSpace: String
-            let topK: Int?
-
-            enum CodingKeys: String, CodingKey {
-                case storePath = "store_path"
-                case embeddingSpace = "embedding_space"
-                case topK = "top_k"
-            }
-        }
-
-        let schemaVersion: Int
-        let sources: [String: Entry]
-
-        enum CodingKeys: String, CodingKey {
-            case schemaVersion = "schema_version"
-            case sources
-        }
-    }
-
     public static func load(projectRoot: String) throws -> SMLRetrievalSourceBindings {
         let url = URL(fileURLWithPath: projectRoot).appendingPathComponent(relativePath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw LoadError.missing(path: url.path)
-        }
         let data: Data
         do {
-            data = try Data(contentsOf: url)
+            data = try SMLHostConfigurationFile.read(
+                projectRoot: projectRoot,
+                relativePath: relativePath
+            )
+        } catch SMLHostConfigurationFile.ReadError.missing {
+            throw LoadError.missing(path: url.path)
         } catch {
-            throw LoadError.malformed(path: url.path, reason: String(describing: error))
+            throw LoadError.unreadable(path: url.path, reason: String(describing: error))
         }
-        let decoded: FileFormat
+
         do {
-            decoded = try JSONDecoder().decode(FileFormat.self, from: data)
+            let root = try SMLHostConfigurationFile.decodeRoot(from: data)
+            try SMLHostConfigurationFile.requireOnlyKeys(
+                root,
+                allowed: ["schema_version", "sources"],
+                path: "retrieval"
+            )
+            let version = try SMLHostConfigurationFile.requiredInteger(
+                root["schema_version"], path: "retrieval.schema_version")
+            guard version == schemaVersion else {
+                throw LoadError.unsupportedSchemaVersion(version)
+            }
+            let rawSources = try SMLHostConfigurationFile.requiredObject(
+                root["sources"], path: "retrieval.sources")
+            guard rawSources.count <= SMLHostConfigurationFile.maximumBindings else {
+                throw SMLHostConfigurationFile.SchemaError(
+                    reason: "retrieval.sources exceeds "
+                        + "\(SMLHostConfigurationFile.maximumBindings) entries")
+            }
+
+            var sources: [String: Binding] = [:]
+            for source in rawSources.keys.sorted() {
+                _ = try SMLHostConfigurationFile.reference(
+                    source, path: "retrieval.sources key")
+                let entryPath = "retrieval.sources.\(source)"
+                let entry = try SMLHostConfigurationFile.requiredObject(
+                    rawSources[source], path: entryPath)
+                try SMLHostConfigurationFile.requireOnlyKeys(
+                    entry,
+                    allowed: ["store_path", "embedding_space", "top_k"],
+                    path: entryPath
+                )
+                let storePath = try SMLHostConfigurationFile.boundedText(
+                    try SMLHostConfigurationFile.requiredString(
+                        entry["store_path"], path: "\(entryPath).store_path"),
+                    path: "\(entryPath).store_path",
+                    maximumBytes: SMLHostConfigurationFile.maximumReferenceBytes
+                )
+                let embeddingSpace = try SMLHostConfigurationFile.boundedText(
+                    try SMLHostConfigurationFile.requiredString(
+                        entry["embedding_space"], path: "\(entryPath).embedding_space"),
+                    path: "\(entryPath).embedding_space",
+                    maximumBytes: SMLHostConfigurationFile.maximumShortStringBytes
+                )
+                let topK = try SMLHostConfigurationFile.optionalInteger(
+                    entry["top_k"], path: "\(entryPath).top_k") ?? 5
+                guard (1...50).contains(topK) else {
+                    throw SMLHostConfigurationFile.SchemaError(
+                        reason: "\(entryPath).top_k must be within 1...50")
+                }
+                sources[source] = Binding(
+                    storePath: storePath.hasPrefix("/") ? storePath
+                        : URL(fileURLWithPath: projectRoot).appendingPathComponent(storePath).standardizedFileURL.path,
+                    embeddingSpace: embeddingSpace,
+                    topK: topK
+                )
+            }
+            return SMLRetrievalSourceBindings(sources: sources)
+        } catch let error as LoadError {
+            throw error
         } catch {
             throw LoadError.malformed(path: url.path, reason: String(describing: error))
         }
-        guard decoded.schemaVersion == schemaVersion else {
-            throw LoadError.unsupportedSchemaVersion(decoded.schemaVersion)
-        }
-        return SMLRetrievalSourceBindings(sources: decoded.sources.mapValues {
-            Binding(storePath: $0.storePath, embeddingSpace: $0.embeddingSpace,
-                    topK: $0.topK ?? 5)
-        })
     }
 }
 
@@ -103,7 +137,7 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
     public let id = "kist-retrieval-driver"
 
     private let bindings: SMLRetrievalSourceBindings
-    private let embed: @Sendable (String) async throws -> [Float]
+    private let embed: @Sendable (String, String) async throws -> [Float]
     private let clock: @Sendable () -> Double
 
     public init(
@@ -112,8 +146,31 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
         self.bindings = bindings
-        self.embed = embed
+        self.embed = { query, _ in try await embed(query) }
         self.clock = clock
+    }
+
+    /// Production embeddings must belong to the exact space named by the reviewed source binding.
+    /// Check on both sides of generation because a mutable model tag can change during a request.
+    public init(
+        bindings: SMLRetrievalSourceBindings,
+        provider: any EmbeddingProviding,
+        clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
+    ) {
+        self.bindings = bindings
+        self.clock = clock
+        embed = { query, expectedSpace in
+            let before = try await provider.embeddingSpaceID()
+            guard before == expectedSpace else {
+                throw SMLRetrievalEmbeddingError.spaceMismatch(expected: expectedSpace, actual: before)
+            }
+            let vector = try await provider.embedding(for: query)
+            let after = try await provider.embeddingSpaceID()
+            guard after == expectedSpace else {
+                throw SMLRetrievalEmbeddingError.spaceMismatch(expected: expectedSpace, actual: after)
+            }
+            return vector
+        }
     }
 
     public func supports(_ request: SMLCapabilityRequest) -> Bool {
@@ -133,7 +190,7 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
         var hits: [VectorHit] = []
         var failure: String?
         do {
-            let vector = try await embed(query)
+            let vector = try await embed(query, binding.embeddingSpace)
             let store = FileBackedVectorStore(path: binding.storePath)
             hits = try store.query(
                 vector,
@@ -182,5 +239,16 @@ public struct SMLRetrievalCapabilityDriver: SMLInstructionDriver {
             return value
         }
         return request.reference
+    }
+}
+
+public enum SMLRetrievalEmbeddingError: Error, CustomStringConvertible {
+    case spaceMismatch(expected: String, actual: String)
+
+    public var description: String {
+        switch self {
+        case .spaceMismatch(let expected, let actual):
+            return "SML retrieval embedding space mismatch: configured '\(expected)', provider '\(actual)'"
+        }
     }
 }

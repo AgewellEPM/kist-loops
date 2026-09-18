@@ -30,6 +30,9 @@ final class KistBuilderReviewWorkspaceTests: XCTestCase {
         let outputText = "HEADLESS_OK\n"
         let output = Data(outputText.utf8)
         try output.write(to: staged.appendingPathComponent("headless.ok"), options: .atomic)
+        let task = "Create headless.ok containing HEADLESS_OK. Source review task nonce: orchard-review.\n"
+        try task.write(to: source.appendingPathComponent("TASK.md"), atomically: true, encoding: .utf8)
+        try task.write(to: staged.appendingPathComponent("TASK.md"), atomically: true, encoding: .utf8)
         let sourceDigest = PlanExecuteLoop.governedWorkspaceDigest(projectRoot: source.path)
         let stagedDigest = PlanExecuteLoop.governedWorkspaceDigest(projectRoot: staged.path)
         XCTAssertNotEqual(sourceDigest, stagedDigest)
@@ -104,6 +107,8 @@ final class KistBuilderReviewWorkspaceTests: XCTestCase {
         XCTAssertTrue(prompts.allSatisfy { $0.contains("hadChanges: true") })
         XCTAssertTrue(prompts.allSatisfy { $0.contains("changedPaths: headless.ok") })
         XCTAssertTrue(prompts.allSatisfy { $0.contains("kind=create; path=headless.ok") })
+        XCTAssertTrue(prompts.allSatisfy { $0.contains("SOURCE REVIEW MATERIAL") })
+        XCTAssertTrue(prompts.allSatisfy { $0.contains("HEADLESS_OK") && $0.contains("orchard-review") })
         XCTAssertTrue(prompts.allSatisfy { $0.contains("git advisory unavailable") })
         XCTAssertTrue(prompts.allSatisfy { !$0.contains("fatal: not a git repository") })
         XCTAssertTrue(prompts.allSatisfy { !$0.contains("Permission denied") })

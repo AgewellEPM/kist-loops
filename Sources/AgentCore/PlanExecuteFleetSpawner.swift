@@ -44,7 +44,7 @@ public enum PlanExecuteFleetSpawner {
         // The user's --allow-read grant (read-only, fail-closed) — propagated so fleet workers
         // don't silently lose read access the top-level session has, which previously made the
         // denial steer give FALSE advice ("relaunch with --allow-read" when the user already had).
-        externalReadRoots: [String] = []
+        externalReadRoots: [String] = [], agentMemory: AgentMemoryAccess? = nil
     ) -> InProcessAgentSpawner {
         // The SAME ledger is captured by the closure, so EVERY fleet agent draws from one global cap —
         // closing the hole the council flagged (the fleet path doesn't go through makeLoop, so without
@@ -53,10 +53,13 @@ public enum PlanExecuteFleetSpawner {
             // Per-worktree audit trail so fleet workers' tool calls are recorded too (Codex HIGH —
             // the fleet path doesn't go through the CLI context, so audit must be wired here).
             let context = ToolContext(projectRoot: worktree.path, shell: shell, sandbox: sandbox,
-                                      externalReadRoots: externalReadRoots)
+                                      externalReadRoots: externalReadRoots, agentMemory: agentMemory)
                 .withAuditLog(audit ? AuditLog.forProject(root: worktree.path) : nil)
+            let workerTools = AgentTeamTools.make(
+                providers: providers, binding: roles.binding(for: .coder), roles: roles,
+                baseTools: tools, context: context, spawnLevels: 0, budget: budget)
             let loop = PlanExecuteLoop(
-                providers: providers, roles: roles, tools: tools, context: context,
+                providers: providers, roles: roles, tools: workerTools, context: context,
                 interactor: AutoApproveInteractor(), requireApproval: false,
                 maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans, verifyGoal: verifyGoal,
                 budget: budget)
@@ -84,13 +87,13 @@ public enum PlanExecuteFleetSpawner {
         verifyGoal: Bool = true,
         autoCommit: Bool = true,
         budget: BudgetLedger? = nil,
-        externalReadRoots: [String] = []
+        externalReadRoots: [String] = [], agentMemory: AgentMemoryAccess? = nil
     ) -> AssignedPlanExecuteSpawner {
         AssignedPlanExecuteSpawner(providers: providers, defaultRoles: defaultRoles, tools: tools,
                                    shell: shell, sandbox: sandbox,
                                    maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans,
                                    verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget,
-                                   externalReadRoots: externalReadRoots)
+                                   externalReadRoots: externalReadRoots, agentMemory: agentMemory)
     }
 
     public struct AssignedPlanExecuteSpawner: AssignedAgentSpawner {
@@ -105,26 +108,29 @@ public enum PlanExecuteFleetSpawner {
         let autoCommit: Bool
         let budget: BudgetLedger?
         let externalReadRoots: [String]
+        let agentMemory: AgentMemoryAccess?
 
         public func spawn(task: String, worktree: GitWorktree) async -> Bool {
+            let parent = AgentExecutionScope.current
             Task.detached(priority: .userInitiated) {
-                let summary = await runWorker(task: task, worktree: worktree, providers: providers,
+                let summary = await AgentExecutionScope.$current.withValue(parent) { await runWorker(task: task, worktree: worktree, providers: providers,
                                               roles: defaultRoles, tools: tools, shell: shell, sandbox: sandbox,
                                               maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans,
                                               verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget,
-                                              externalReadRoots: externalReadRoots)
+                                              externalReadRoots: externalReadRoots, agentMemory: agentMemory) }
                 FleetSentinel.markDone(inWorktree: worktree.path, summary: summary)
             }
             return true
         }
 
         public func spawn(task: String, worktree: GitWorktree, assignment: ModelAssignmentDecision) async -> Bool {
+            let parent = AgentExecutionScope.current
             Task.detached(priority: .userInitiated) {
-                let summary = await runWorker(task: task, worktree: worktree, providers: providers,
+                let summary = await AgentExecutionScope.$current.withValue(parent) { await runWorker(task: task, worktree: worktree, providers: providers,
                                               roles: assignment.roles, tools: tools, shell: shell, sandbox: sandbox,
                                               maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans,
                                               verifyGoal: verifyGoal, autoCommit: autoCommit, budget: budget,
-                                              externalReadRoots: externalReadRoots)
+                                              externalReadRoots: externalReadRoots, agentMemory: agentMemory) }
                 FleetSentinel.markDone(inWorktree: worktree.path, summary: summary)
             }
             return true
@@ -136,11 +142,13 @@ public enum PlanExecuteFleetSpawner {
                                   shell: ShellPolicy, sandbox: SandboxPolicy,
                                   maxPlanRepairs: Int, maxReplans: Int, verifyGoal: Bool,
                                   autoCommit: Bool, budget: BudgetLedger?,
-                                  externalReadRoots: [String] = []) async -> String {
+                                  externalReadRoots: [String] = [], agentMemory: AgentMemoryAccess? = nil) async -> String {
         let context = ToolContext(projectRoot: worktree.path, shell: shell, sandbox: sandbox,
-                                  externalReadRoots: externalReadRoots)
+                                  externalReadRoots: externalReadRoots, agentMemory: agentMemory)
+        let workerTools = AgentTeamTools.make(providers: providers, binding: roles.binding(for: .coder), roles: roles,
+                                              baseTools: tools, context: context, spawnLevels: 0, budget: budget)
         let loop = PlanExecuteLoop(
-            providers: providers, roles: roles, tools: tools, context: context,
+            providers: providers, roles: roles, tools: workerTools, context: context,
             interactor: AutoApproveInteractor(), requireApproval: false,
             maxPlanRepairs: maxPlanRepairs, maxReplans: maxReplans, verifyGoal: verifyGoal,
             budget: budget)

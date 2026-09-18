@@ -77,18 +77,25 @@ public actor MCPClientManager {
     ///
     /// - Parameter allowProjectConfig: load `<projectRoot>/.mcp.json` too. Off by
     ///   default (untrusted-workspace RCE guard); enable ONLY for a trusted workspace.
-    public func discoverAndWrapTools(projectRoot: String, allowProjectConfig: Bool = false) async -> [RemoteMCPTool] {
-        let servers: [MCPServerConfig]
+    public func discoverAndWrapTools(
+        projectRoot: String,
+        allowProjectConfig: Bool = false,
+        admittedServerNames: Set<String>? = nil
+    ) async -> [RemoteMCPTool] {
+        let configuredServers: [MCPServerConfig]
         let issues: [MCPConfigIssue]
         if let configuredServersOverride {
-            servers = configuredServersOverride
+            configuredServers = configuredServersOverride
             issues = []
         } else {
-            (servers, issues) = MCPClientConfig.load(
+            (configuredServers, issues) = MCPClientConfig.load(
                 projectRoot: projectRoot,
                 allowProjectConfig: allowProjectConfig)
         }
         for issue in issues { MCPLog.warn("config: server '\(issue.server)': \(issue.reason)") }
+        let servers = configuredServers.filter { config in
+            admittedServerNames?.contains(config.name) ?? true
+        }
         if servers.isEmpty { return [] }   // common case: stay quiet
 
         var wrappers: [RemoteMCPTool] = []

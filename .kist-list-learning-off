@@ -1,0 +1,5 @@
+LIST learning is OFF for this project (Luke, 2026-09-17).
+LIST observations (~/file_memory activity/entries) must not be imported into this
+project's advisory memory or injected into any model prompt here. Enforced by
+OrganizationalLearningStore.listLearningOptedOut — the file's presence is the switch;
+its content is documentation only. Delete this file to re-enable.

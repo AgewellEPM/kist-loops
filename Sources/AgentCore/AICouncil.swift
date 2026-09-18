@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // Linux: URLSession lives here
+#endif
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -78,6 +81,8 @@ public struct AICouncil: Sendable {
     private let providers: ProviderRegistry
     private let roles: RoleBindings
     private let memoryContext: String?
+    private let agentMemory: AgentMemoryAccess?
+    private let memoryRunID: String
     private let researchDossier: String?
     private let recorder: TraceRecorder?
     private let progress: ProgressSink?
@@ -104,10 +109,13 @@ public struct AICouncil: Sendable {
     public init(providers: ProviderRegistry, roles: RoleBindings, memoryContext: String? = nil,
                 researchDossier: String? = nil, recorder: TraceRecorder? = nil,
                 progress: ProgressSink? = nil, budget: BudgetLedger? = nil, projectRoot: String? = nil,
-                refuters: [ReviewFindingRefuter] = [], requireStructuredCriticVerdict: Bool = false) {
+                refuters: [ReviewFindingRefuter] = [], requireStructuredCriticVerdict: Bool = false,
+                agentMemory: AgentMemoryAccess? = nil) {
         self.providers = providers
         self.roles = roles
         self.memoryContext = memoryContext
+        self.agentMemory = agentMemory
+        self.memoryRunID = recorder?.traceId ?? "council-" + UUID().uuidString.lowercased()
         self.researchDossier = researchDossier
         self.recorder = recorder
         self.progress = progress
@@ -118,6 +126,10 @@ public struct AICouncil: Sendable {
     }
 
     public func run(goal: String) async -> CouncilRunResult {
+        await withSharedHistory(goal: goal) { await runCore(goal: goal) }
+    }
+
+    private func runCore(goal: String) async -> CouncilRunResult {
         let normalizedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         await heartbeat(status: "council", message: "council started")
         var minds: [CouncilMindResult] = []
@@ -261,6 +273,12 @@ public struct AICouncil: Sendable {
     /// asked first (cheap, no metering); capped at `maxMinds`; each mind has its own wall-clock timeout so
     /// one hung provider can't stall the report; budget-gated like `run()`.
     public func runWide(goal: String, maxMinds: Int = 5, perMindTimeout: TimeInterval = 90) async -> CouncilRunResult {
+        await withSharedHistory(goal: goal) {
+            await runWideCore(goal: goal, maxMinds: maxMinds, perMindTimeout: perMindTimeout)
+        }
+    }
+
+    private func runWideCore(goal: String, maxMinds: Int, perMindTimeout: TimeInterval) async -> CouncilRunResult {
         let normalizedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         await heartbeat(status: "council", message: "dig-in-deep started")
 
@@ -334,20 +352,15 @@ public struct AICouncil: Sendable {
         let settings = ModelSettings(temperature: 0.3, maxTokens: 1200,
                                      systemPrompt: "You are ONE of several independent expert AI models answering the SAME question in parallel for a 'consult the minds' panel. Answer DIRECTLY and concretely. State your key claims and explicitly flag anything you are unsure about. No meta-commentary about being an AI. Substantive but concise.",
                                      disableThinking: true)
-        let started = Date()
         await heartbeat(status: "council", message: "\(label) started")
         do {
-            let (text, usage) = try await Self.withTimeout(seconds: timeout) {
-                try await self.providers.completeWithUsage(providerId: providerId, model: model,
-                                                           messages: messages, settings: settings)
+            let (text, _) = try await Self.withTimeout(seconds: timeout) {
+                try await self.completeForAgent(role: "council-mind-" + label, binding: binding,
+                                                messages: messages, settings: settings)
             }
-            await record(role: "council_mind_\(label.lowercased())", binding: binding, usage: usage,
-                         promptChars: question.count, completionChars: text.count, started: started, status: .ok)
             await heartbeat(status: "council", message: "\(label) completed")
             return CouncilMindResult(name: label, role: "mind", binding: binding, output: text.trimmedOrPlaceholder())
         } catch {
-            await record(role: "council_mind_\(label.lowercased())", binding: binding, usage: .zero,
-                         promptChars: question.count, completionChars: 0, started: started, status: .error)
             await heartbeat(status: "council", message: "\(label) failed")
             let reason = (error is CouncilMindTimeout) ? "TIMED OUT after \(Int(timeout))s" : "FAILED: \(error)"
             return CouncilMindResult(name: label, role: "mind", binding: binding, output: reason, failed: true)
@@ -387,10 +400,8 @@ public struct AICouncil: Sendable {
                                      systemPrompt: "You merge multiple expert opinions into one decisive, honest answer, naming agreement and disagreement plainly.",
                                      disableThinking: true)
         do {
-            let (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
-                                                                      messages: messages, settings: settings)
-            await record(role: "council_wide_synthesis", binding: binding, usage: usage,
-                         promptChars: prompt.count, completionChars: text.count, started: Date(), status: .ok)
+            let (text, _) = try await completeForAgent(role: "council-wide-synthesis", binding: binding,
+                                                         messages: messages, settings: settings)
             return text.trimmedOrPlaceholder()
         } catch {
             return Self.fallbackFinalPlan(error: error, minds: minds)
@@ -417,7 +428,12 @@ public struct AICouncil: Sendable {
     private static func tcpConnectable(host: String, port: Int, timeout: TimeInterval) -> Bool {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
+        #if canImport(Darwin)
         hints.ai_socktype = SOCK_STREAM
+        #else
+        // Glibc types SOCK_STREAM as `__socket_type`; addrinfo.ai_socktype is Int32.
+        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        #endif
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &res) == 0 else { return false }
         defer { freeaddrinfo(res) }
@@ -509,16 +525,10 @@ public struct AICouncil: Sendable {
         let settings = ModelSettings(temperature: 0.2, maxTokens: maxTokens,
                                      systemPrompt: Self.systemPrompt(mindName: name),
                                      disableThinking: true)
-        let started = Date()
         await heartbeat(status: "council", message: "\(name) started")
         do {
-            let (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId,
-                                                                      model: binding.model,
-                                                                      messages: messages,
-                                                                      settings: settings)
-            await record(role: "council_\(name.lowercased())", binding: binding, usage: usage,
-                         promptChars: prompt.count, completionChars: text.count,
-                         started: started, status: .ok)
+            let (text, _) = try await completeForAgent(role: "council-" + name, binding: binding,
+                                                         messages: messages, settings: settings)
             await heartbeat(status: "council", message: "\(name) completed")
             return CouncilMindResult(
                 name: name,
@@ -528,9 +538,6 @@ public struct AICouncil: Sendable {
                 criticVerdict: role == .critic ? Self.parseCriticVerdict(text) : nil
             )
         } catch {
-            await record(role: "council_\(name.lowercased())", binding: binding, usage: .zero,
-                         promptChars: prompt.count, completionChars: 0,
-                         started: started, status: .error)
             await heartbeat(status: "council", message: "\(name) failed")
             return CouncilMindResult(name: name, role: role.rawValue, binding: binding,
                                      output: "FAILED: \(error)", failed: true)
@@ -584,25 +591,57 @@ public struct AICouncil: Sendable {
         let settings = ModelSettings(temperature: 0.15, maxTokens: 2200,
                                      systemPrompt: Self.systemPrompt(mindName: "Final Plan Agent"),
                                      disableThinking: true)
-        let started = Date()
         await heartbeat(status: "council", message: "Final Plan Agent started")
         do {
-            let (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId,
-                                                                      model: binding.model,
-                                                                      messages: messages,
-                                                                      settings: settings)
-            await record(role: "council_final_plan", binding: binding, usage: usage,
-                         promptChars: prompt.count, completionChars: text.count,
-                         started: started, status: .ok)
+            let (text, _) = try await completeForAgent(role: "council-final-plan", binding: binding,
+                                                         messages: messages, settings: settings)
             await heartbeat(status: "council", message: "Final Plan Agent completed")
             return text.trimmedOrPlaceholder()
         } catch {
-            await record(role: "council_final_plan", binding: binding, usage: .zero,
-                         promptChars: prompt.count, completionChars: 0,
-                         started: started, status: .error)
             await heartbeat(status: "council", message: "Final Plan Agent failed")
             return Self.fallbackFinalPlan(error: error, minds: minds)
         }
+    }
+
+    private func withSharedHistory(goal: String, body: () async -> CouncilRunResult) async -> CouncilRunResult {
+        guard let access = agentMemory else { return await body() }
+        do {
+            let identity = try access.identity(runID: memoryRunID, role: "council", executionRoot: projectRoot ?? access.project.canonicalPath)
+            return try await AgentExecutionScope.$current.withValue(identity) {
+                try access.history.append(agent: identity, kind: "run_started", detail: goal)
+                let result = await body()
+                try access.history.append(agent: identity, kind: "run_finished", detail: result.finalPlan)
+                return result
+            }
+        } catch {
+            let reason = "Council shared history failed: \(error)"
+            return CouncilRunResult(goal: goal,
+                                    minds: [CouncilMindResult(name: "History", role: "host", binding: nil, output: reason, failed: true)],
+                                    finalPlan: "", markdown: reason, builderBrief: "")
+        }
+    }
+
+    private func completeForAgent(role: String, binding: ProviderBinding,
+                                  messages: [ChatMessage], settings: ModelSettings) async throws -> (String, TokenUsage) {
+        @Sendable func complete(_ supplied: [ChatMessage]) async throws -> (String, TokenUsage) {
+            let started = Date()
+            let promptChars = settings.systemPrompt.count + supplied.reduce(0) { $0 + $1.content.count }
+            let recordRole = role.lowercased().replacingOccurrences(of: "-", with: "_")
+            do {
+                let result = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
+                                                                   messages: supplied, settings: settings)
+                await record(role: recordRole, binding: binding, usage: result.1,
+                             promptChars: promptChars, completionChars: result.0.count, started: started, status: .ok)
+                return result
+            } catch {
+                await record(role: recordRole, binding: binding, usage: .zero,
+                             promptChars: promptChars, completionChars: 0, started: started, status: .error)
+                throw error
+            }
+        }
+        guard let access = agentMemory else { return try await complete(messages) }
+        return try await access.withModelCall(role: role, executionRoot: projectRoot ?? access.project.canonicalPath,
+                                             messages: messages, summarize: { $0.0 }, body: complete)
     }
 
     private func memoryMind() -> CouncilMindResult {
@@ -630,7 +669,9 @@ public struct AICouncil: Sendable {
                                         role: role, vendor: binding.providerId, model: binding.model,
                                         promptTokens: measured.promptTokens,
                                         completionTokens: measured.completionTokens,
-                                        finishReason: nil, startedAt: started, endedAt: Date(),
+                                        finishReason: nil,
+                                        attributes: ["usage.reported": String(!usage.isZero)],
+                                        startedAt: started, endedAt: Date(),
                                         status: status))
     }
 

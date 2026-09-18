@@ -129,6 +129,15 @@ final class InnerPipelineTests: XCTestCase {
         XCTAssertTrue(result.blockReason?.contains("did not build") ?? false, result.blockReason ?? "")
     }
 
+    func testBuildCheckRejectsValidSyntaxWithTypeErrors() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("type-error-\(UUID().uuidString).swift")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try "let value: Int = \"wrong\"\n".write(to: file, atomically: true, encoding: .utf8)
+        let (status, diagnostics) = await BuildArchitectAgent.compileCheck(file)
+        XCTAssertEqual(status, "FAIL")
+        XCTAssertTrue(diagnostics.contains("cannot convert"), diagnostics)
+    }
+
     /// Codex HIGH-4: a stage that makes NO new commit (identical re-output on a reused
     /// workspace) did no committed work and MUST be blocked — it can't mint a signoff
     /// off a prior run's committed paths. (This reverses an earlier test that wrongly

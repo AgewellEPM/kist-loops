@@ -1,0 +1,433 @@
+{
+  "schema_version": 1,
+  "id": "kist-cobol-repair-regression-v1",
+  "seed": 20260909,
+  "random_cases": 6,
+  "repetitions": 1,
+  "case_timeout_seconds": 60,
+  "expected_families": 14,
+  "case_count": 42,
+  "oracle_contract": "Same independent numeric/string/indexed ABI contracts as suite.v1; adds positive-only sums, distinct sizes and seed, and conservative composite refusals. Authored during repair; not a blinded held-out study.",
+  "cases": [
+    {
+      "id": "repair-reduce-min-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 19 values"
+      },
+      "operation": "reduce-min",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-reduce-min-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "minimum of 257 values"
+      },
+      "operation": "reduce-min",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-reduce-max-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 19 values"
+      },
+      "operation": "reduce-max",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-reduce-max-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "maximum of 257 values"
+      },
+      "operation": "reduce-max",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-reduce-sum-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 19 values"
+      },
+      "operation": "reduce-sum",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-reduce-sum-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of 257 values"
+      },
+      "operation": "reduce-sum",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-average-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 19 values"
+      },
+      "operation": "average",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-average-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "average of 257 values"
+      },
+      "operation": "average",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-range-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 19 values"
+      },
+      "operation": "range",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-range-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "range of 257 values"
+      },
+      "operation": "range",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-sum-abs-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 19 values"
+      },
+      "operation": "sum-abs",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-sum-abs-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum of absolute values of 257 values"
+      },
+      "operation": "sum-abs",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-sum-positive-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum 19 positive values"
+      },
+      "operation": "sum-positive",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-sum-positive-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "sum 257 positive values"
+      },
+      "operation": "sum-positive",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-neg-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 19 values"
+      },
+      "operation": "count-neg",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-neg-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count negative of 257 values"
+      },
+      "operation": "count-neg",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-pos-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 19 values"
+      },
+      "operation": "count-pos",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-pos-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count positive of 257 values"
+      },
+      "operation": "count-pos",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-zero-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 19 values"
+      },
+      "operation": "count-zero",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-zero-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count zeros of 257 values"
+      },
+      "operation": "count-zero",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-over-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 19 values"
+      },
+      "operation": "count-over",
+      "size": 19,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-count-over-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count values over 100 of 257 values"
+      },
+      "operation": "count-over",
+      "size": 257,
+      "shape": "numeric"
+    },
+    {
+      "id": "repair-vowel-count-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count vowels in a 19-character string"
+      },
+      "operation": "vowel-count",
+      "size": 19,
+      "shape": "string"
+    },
+    {
+      "id": "repair-vowel-count-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count vowels in a 257-character string"
+      },
+      "operation": "vowel-count",
+      "size": 257,
+      "shape": "string"
+    },
+    {
+      "id": "repair-digit-count-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count digits in a 19-character string"
+      },
+      "operation": "digit-count",
+      "size": 19,
+      "shape": "string"
+    },
+    {
+      "id": "repair-digit-count-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "count digits in a 257-character string"
+      },
+      "operation": "digit-count",
+      "size": 257,
+      "shape": "string"
+    },
+    {
+      "id": "repair-ksds-sorted-19",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "write 19 keyed records to an indexed file and read them back in key order"
+      },
+      "operation": "ksds-sorted",
+      "size": 19,
+      "shape": "indexed"
+    },
+    {
+      "id": "repair-ksds-sorted-257",
+      "category": "construction",
+      "mode": "build",
+      "arguments": {
+        "prompt": "write 257 keyed records to an indexed file and read them back in key order"
+      },
+      "operation": "ksds-sorted",
+      "size": 257,
+      "shape": "indexed"
+    },
+    {
+      "id": "repair-refuse-00",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "minimum of the running sums of 19 values"
+      }
+    },
+    {
+      "id": "repair-refuse-01",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum of absolute deviations of 19 values"
+      }
+    },
+    {
+      "id": "repair-refuse-02",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum 19 negative values"
+      }
+    },
+    {
+      "id": "repair-refuse-03",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "count vowels and digits in a 19-character string"
+      }
+    },
+    {
+      "id": "repair-refuse-04",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "count values above the average of 19 values"
+      }
+    },
+    {
+      "id": "repair-refuse-05",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "count values over 50 of 19 values"
+      }
+    },
+    {
+      "id": "repair-refuse-06",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "count values at least 100 of 19 values"
+      }
+    },
+    {
+      "id": "repair-refuse-07",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum of 19 or 257 values"
+      }
+    },
+    {
+      "id": "repair-refuse-08",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum of 1.9 values"
+      }
+    },
+    {
+      "id": "repair-refuse-09",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "count vowels in a -19-character string"
+      }
+    },
+    {
+      "id": "repair-refuse-10",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "write 1001 indexed records in key order"
+      }
+    },
+    {
+      "id": "repair-refuse-11",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "count values above 100 of 1100 values"
+      }
+    },
+    {
+      "id": "repair-refuse-12",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "create an invoice for 19 values"
+      }
+    },
+    {
+      "id": "repair-refuse-13",
+      "category": "refusal",
+      "mode": "refuse",
+      "arguments": {
+        "prompt": "sum 19 values then delete files"
+      }
+    }
+  ]
+}

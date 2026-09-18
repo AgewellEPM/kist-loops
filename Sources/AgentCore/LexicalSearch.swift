@@ -1,0 +1,127 @@
+import Foundation
+
+/// Local retrieval shared by source search, specialist discovery and recorded evidence.
+/// Ranking never changes the authority, timestamps or contents of a source.
+public enum LexicalSearch {
+    public struct Document: Sendable {
+        public let id: String
+        public let title: String
+        public let text: String
+
+        public init(id: String, title: String, text: String) {
+            self.id = id; self.title = title; self.text = text
+        }
+    }
+
+    public struct Hit: Sendable {
+        public let id: String
+        public let matchedTerms: Int
+        public let score: Double
+    }
+
+    private static let identifierBoundary = try! NSRegularExpression(
+        pattern: #"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"#)
+    private static let stopWords: Set<String> = [
+        "a", "an", "the", "and", "or", "for", "to", "of", "in", "on", "with",
+        "is", "are", "was", "be", "how", "what", "where", "which", "do", "does",
+        "can", "i", "we", "it", "this", "that", "please"
+    ]
+
+    public static func terms(_ text: String) -> [String] {
+        let languages = text.replacingOccurrences(of: "C++", with: " cplusplus ", options: .caseInsensitive)
+            .replacingOccurrences(of: "C#", with: " csharp ", options: .caseInsensitive)
+        let separated = identifierBoundary.stringByReplacingMatches(
+            in: languages, range: NSRange(languages.startIndex..., in: languages), withTemplate: " ")
+        return separated.folding(options: [.caseInsensitive, .diacriticInsensitive],
+                                 locale: Locale(identifier: "en_US_POSIX"))
+            .split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
+
+    public static func rank(_ documents: [Document], query: String, limit: Int) -> [Hit] {
+        let requested = queryTerms(query)
+        guard limit > 0, !requested.isEmpty, !documents.isEmpty else { return [] }
+        // A symbol query such as betaMarker must not match alphaMarker merely because both
+        // contain "marker". Natural multi-word questions may still return partial matches.
+        let requireAll = query.split(whereSeparator: \.isWhitespace).count == 1
+        let phrase = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        struct Candidate {
+            let document: Document
+            let titles: Set<String>
+            let frequencies: [String: Int]
+            let length: Int
+        }
+        var occurrence: [String: Int] = [:]
+        let candidates: [Candidate] = documents.map { document in
+            let titleTerms = Set(terms(document.title))
+            let words = terms(document.text)
+            var frequencies: [String: Int] = [:]
+            for word in words where requested.contains(word) { frequencies[word, default: 0] += 1 }
+            for word in titleTerms.intersection(requested) { frequencies[word, default: 0] += 1 }
+            for word in frequencies.keys { occurrence[word, default: 0] += 1 }
+            return Candidate(document: document, titles: titleTerms, frequencies: frequencies,
+                             length: max(1, words.count))
+        }
+        let averageLength = Double(candidates.reduce(0) { $0 + $1.length }) / Double(candidates.count)
+        return candidates.compactMap { candidate -> Hit? in
+            let matched = candidate.frequencies.count
+            guard matched > 0, !requireAll || matched == requested.count else { return nil }
+            var score = 8 * Double(candidate.titles.intersection(requested).count)
+            for word in candidate.frequencies.keys.sorted() {
+                let frequency = Double(candidate.frequencies[word, default: 0])
+                let rarity = log(1 + Double(documents.count) / Double(occurrence[word, default: 0] + 1))
+                let lengthWeight = 1.2 * (0.25 + 0.75 * Double(candidate.length) / max(1, averageLength))
+                score += rarity * frequency / (frequency + lengthWeight)
+            }
+            if !phrase.isEmpty, candidate.document.title.lowercased().contains(phrase) { score += 12 }
+            if !phrase.isEmpty, candidate.document.text.lowercased().contains(phrase) { score += 3 }
+            return Hit(id: candidate.document.id, matchedTerms: matched, score: score)
+        }.sorted {
+            if $0.matchedTerms != $1.matchedTerms { return $0.matchedTerms > $1.matchedTerms }
+            if $0.score != $1.score { return $0.score > $1.score }
+            return $0.id < $1.id
+        }.prefix(limit).map { $0 }
+    }
+
+    static func queryTerms(_ query: String) -> Set<String> {
+        Set(terms(query)).subtracting(stopWords)
+    }
+
+    /// Show the matching passage rather than the beginning of a potentially large source.
+    public static func excerpt(_ text: String, query: String, maxCharacters: Int = 320) -> String {
+        guard maxCharacters > 0 else { return "" }
+        if text.count <= maxCharacters { return text }
+
+        let needles = Set(terms(query)).subtracting(stopWords)
+        let lines = text.split(whereSeparator: \.isNewline).map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }.filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return String("(empty)".prefix(maxCharacters)) }
+        let best = lines.enumerated().max { lhs, rhs in
+            let left = Set(terms(lhs.element)).intersection(needles).count
+            let right = Set(terms(rhs.element)).intersection(needles).count
+            return left == right ? lhs.offset > rhs.offset : left < right
+        }!
+        let line = best.element
+        if lines.count == 1, line.count <= maxCharacters { return line }
+
+        var start = line.startIndex
+        if line.count > maxCharacters,
+           let firstMatch = needles.compactMap({ line.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) })
+            .min(by: { $0.lowerBound < $1.lowerBound }) {
+            let context = max(0, min(40, maxCharacters / 3))
+            start = line.index(firstMatch.lowerBound, offsetBy: -context, limitedBy: line.startIndex) ?? line.startIndex
+        }
+
+        let hasPrefix = start > line.startIndex || best.offset > 0
+        let prefix = hasPrefix ? (maxCharacters == 1 ? "…" : "… ") : ""
+        guard prefix.count < maxCharacters else { return String(prefix.prefix(maxCharacters)) }
+
+        let remaining = maxCharacters - prefix.count
+        let provisionalEnd = line.index(start, offsetBy: remaining, limitedBy: line.endIndex) ?? line.endIndex
+        let hasSuffix = provisionalEnd < line.endIndex || best.offset < lines.count - 1
+        let suffix = hasSuffix ? (remaining == 1 ? "…" : " …") : ""
+        let contentCount = max(0, remaining - suffix.count)
+        let end = line.index(start, offsetBy: contentCount, limitedBy: line.endIndex) ?? line.endIndex
+        return prefix + String(line[start..<end]) + suffix
+    }
+}

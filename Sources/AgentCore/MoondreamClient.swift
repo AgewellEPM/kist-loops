@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // Linux: URLSession lives here
+#endif
 
 /// Client for Moondream — a tiny, fast vision model used as the agent's cheap "eyes". Its killer feature
 /// for the desktop hands is POINTING: given a screenshot and a target name ("the attack button"), it
@@ -147,7 +150,11 @@ public struct MoondreamClient: Sendable {
     /// Rejects JSON booleans up-front: `JSONSerialization` bridges true/false to an NSNumber that would
     /// otherwise cast through `as? Double`/`as? Int` as 1.0/0.0 — a malformed point, not a coordinate.
     private static func numeric(_ any: Any?) -> Double? {
+        #if canImport(Darwin)
         if let n = any as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
+        #else
+        if let n = any as? NSNumber, String(cString: n.objCType) == "c" { return nil }
+        #endif
         let d: Double?
         if let v = any as? Double { d = v }
         else if let i = any as? Int { d = Double(i) }

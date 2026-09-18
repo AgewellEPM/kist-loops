@@ -3,9 +3,13 @@ import Foundation
 @testable import AgentCore
 
 /// LIVE verification that the `browse` tool actually drives Playwright (renders a real page and
-/// extracts text). Skips cleanly when node/playwright/network aren't available so CI stays green.
+/// extracts text). Explicit opt-in keeps the ordinary suite from launching a browser or using
+/// the network just to discover that a live-test dependency is unavailable.
 final class BrowserLiveTests: XCTestCase {
     func testBrowseRendersRealPage() async throws {
+        guard ProcessInfo.processInfo.environment["KIST_REQUIRE_LIVE_BROWSER"] == "1" else {
+            throw XCTSkip("live browser testing is opt-in; use the configured local UI testing tools")
+        }
         guard RunCommandTool.resolveExecutable("node", env: ProcessInfo.processInfo.environment) != nil else {
             if ProcessInfo.processInfo.environment["KIST_REQUIRE_LIVE_BROWSER"] == "1" {
                 XCTFail("required live browser dogfood needs Node.js")

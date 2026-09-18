@@ -277,6 +277,9 @@ public enum BuilderEvidenceDigest {
     public static func sha256(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+    public static func sha256Bytes(_ bytes: [UInt8]) -> String {
+        SHA256.hash(data: Data(bytes)).map { String(format: "%02x", $0) }.joined()
+    }
 }
 public enum BuilderContractFingerprint {
     public static func canonical(_ contract: BuilderContract) throws -> String {

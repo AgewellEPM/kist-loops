@@ -124,6 +124,17 @@ public struct SMLREPLCompiler: Sendable {
                 expectedState: ["task_revision": .number(Decimal(revision))],
                 issuedAtEpoch: issuedAtEpoch
             )
+        case "reconcile":
+            let revision = try taskRevision(parts)
+            let dispatch = try identifier(try required(parts, index: 3, name: "dispatch_id"))
+            _ = try required(parts, index: 4, name: "operator_note")
+            envelope = command(
+                op: SMLRuntimeCommandOperation.taskReconcile,
+                task: try identifier(try required(parts, index: 1, name: "task_id")),
+                arguments: ["dispatch_id": .string(dispatch), "note": .string(parts.dropFirst(4).joined(separator: " "))],
+                expectedState: ["task_revision": .number(Decimal(revision))],
+                issuedAtEpoch: issuedAtEpoch
+            )
         case "receipts":
             let task = parts.count > 1 ? try identifier(parts[1]) : "runtime"
             envelope = command(op: SMLRuntimeCommandOperation.receiptsList, task: task,
@@ -222,6 +233,9 @@ public enum SMLREPLRenderer {
             ]
             if let owner = task.waitingApprovalOwner {
                 lines.append("approval: \(owner)")
+            }
+            if let dispatchID = task.capabilityDispatchID {
+                lines.append("dispatch: \(dispatchID)")
             }
             lines.append("receipts: \(task.receiptIDs.count)")
             return lines.joined(separator: "\n")

@@ -39,7 +39,7 @@ public struct RunCommandTool: AgentTool {
         ToolParameter(name: "command", type: "string", description: "Raw shell command — requires shell:true and approval", required: false),
         ToolParameter(name: "shell", type: "boolean", description: "Run `command` via /bin/sh -c (enables pipes/globs). Default false.", required: false),
         ToolParameter(name: "cwd", type: "string", description: "Working dir relative to project root (default: root)", required: false),
-        ToolParameter(name: "timeout", type: "integer", description: "Timeout in seconds (default 120, max 600)", required: false),
+        ToolParameter(name: "timeout", type: "integer", description: "Timeout in seconds (foreground: default 120, max 600; background: default 3600, max 86400)", required: false),
         ToolParameter(name: "cpu_limit", type: "integer", description: "CPU seconds before the child is killed (default: timeout, max 600)", required: false),
         ToolParameter(name: "file_size_limit_mb", type: "integer", description: "Max file size the child may create (default 1024 MB, max 4096)", required: false),
         ToolParameter(name: "memory_limit_mb", type: "integer", description: "Optional virtual-memory limit for platforms whose /bin/sh supports `ulimit -v`", required: false),
@@ -202,7 +202,9 @@ public struct RunCommandTool: AgentTool {
 
         if let exe = arguments["executable"] as? String, !exe.isEmpty {
             // STRUCTURED MODE — resolve the binary, gate on the RESOLVED path, no shell.
-            guard let resolved = Self.resolveExecutable(exe, env: Self.scrubbedEnvironment(), cwd: cwd) else {
+            let builderEnvironment = try BuilderOSProcessSandboxAttestor.currentExecutionEnvironment()
+            let environment = builderEnvironment ?? Self.scrubbedEnvironment()
+            guard let resolved = Self.resolveExecutable(exe, env: environment, cwd: cwd) else {
                 return .failure("executable not found or not executable: \(exe)")
             }
             let exeArgs = (arguments["args"] as? [String]) ?? []
@@ -210,7 +212,11 @@ public struct RunCommandTool: AgentTool {
                 throw ToolError.shellDenied(reason)
             }
             // Gate on the FULL argv line so argument-bearing deny entries fire.
-            if let reason = await context.shell.binaryRefusalReason(resolvedPath: resolved, args: exeArgs) {
+            let compilerAliases: Set<String> = ["python3", "python", "swift", "swiftc", "clang", "clang++",
+                                                "cc", "c++", "gcc", "make", "rustc", "cargo", "javac", "java", "tsc"]
+            let alias = builderEnvironment != nil && compilerAliases.contains(exe) ? exe : nil
+            if let reason = await context.shell.binaryRefusalReason(
+                resolvedPath: resolved, args: exeArgs, trustedToolchainAlias: alias) {
                 throw ToolError.shellDenied(reason)
             }
             launchPath = resolved
@@ -253,9 +259,12 @@ public struct RunCommandTool: AgentTool {
         let finalPath: String
         let finalArgs: [String]
         let sandboxed: Bool
-        switch SeatbeltSandbox.wrap(launchPath: launchPath, args: launchArgs, root: context.projectRoot, policy: context.sandbox, cwd: cwd) {
+        let invocation = Self.compilerModeLaunch(
+            launchPath: launchPath, launchArgs: launchArgs,
+            requestedName: arguments["executable"] as? String)
+        switch SeatbeltSandbox.wrap(launchPath: invocation.launchPath, args: invocation.launchArgs, root: context.projectRoot, policy: context.sandbox, cwd: cwd) {
         case .passthrough:
-            finalPath = launchPath; finalArgs = launchArgs; sandboxed = false
+            finalPath = invocation.launchPath; finalArgs = invocation.launchArgs; sandboxed = false
         case .wrapped(let p, let a):
             finalPath = p; finalArgs = a; sandboxed = true
         case .unavailable(let reason):
@@ -271,7 +280,7 @@ public struct RunCommandTool: AgentTool {
 
         // BACKGROUND: detach and return a job id immediately (dev servers, watchers, long tails). The
         // agent polls output / kills it via the `job` tool. Same resolved+gated+sandboxed command; the
-        // timeout doesn't apply (a background job runs until it exits or is killed).
+        // timeout bounds its lifetime too; background jobs default to one hour.
         if (arguments["background"] as? Bool) == true {
             guard context.sandbox.allowBackgroundProcesses else {
                 return .failure("background processes are forbidden by this sandbox policy")
@@ -283,15 +292,18 @@ public struct RunCommandTool: AgentTool {
             if BackgroundJobStore.shared.runningCount() >= BackgroundJobStore.maxConcurrentRunning {
                 return .failure("background job limit reached (\(BackgroundJobStore.maxConcurrentRunning) running) — stop some with job(action=\"kill\", id=…) before starting more")
             }
+            let backgroundTimeout = min(max(optionalInt("timeout", from: arguments)
+                ?? BackgroundJobStore.defaultTimeoutSeconds, 1), 86_400)
             guard let id = BackgroundJobStore.shared.start(launchPath: limited.launchPath, args: limited.launchArgs,
                                                            cwd: cwd, env: Self.scrubbedEnvironment(),
                                                            command: display.trimmingCharacters(in: .whitespaces),
-                                                           owner: context.projectRoot) else {
+                                                           owner: context.projectRoot, timeoutSeconds: backgroundTimeout) else {
                 return .failure("could not start background job")
             }
             return ToolResult(success: true,
                               output: "started background job \(id) — poll it with job(action=\"output\", id=\"\(id)\"), stop with job(action=\"kill\", id=\"\(id)\")",
                               metadata: ["job_id": id, "background": "true",
+                                         "timeout_seconds": String(backgroundTimeout),
                                          "sandboxed": String(sandboxed),
                                          "builder_os_sandboxed": "false"])
         }
@@ -309,6 +321,26 @@ public struct RunCommandTool: AgentTool {
     }
 
     // MARK: - Spawn + bounded collection
+
+    /// These compiler aliases select driver behavior through argv[0]. Execute the canonical, gated
+    /// target while retaining that mode; launching swift-frontend as itself cannot compile a program,
+    /// and clang launched instead of clang++ omits the C++ link defaults. The shell text is constant
+    /// and every model-supplied value remains a literal positional argument.
+    static func compilerModeLaunch(launchPath: String, launchArgs: [String], requestedName: String?)
+        -> (launchPath: String, launchArgs: [String]) {
+        #if os(macOS)
+        if let requestedName {
+            let name = (requestedName as NSString).lastPathComponent
+            if ["swift", "swiftc", "clang++", "c++", "cc", "gcc"].contains(name),
+               name != (launchPath as NSString).lastPathComponent {
+                let argv0 = URL(fileURLWithPath: launchPath).deletingLastPathComponent()
+                    .appendingPathComponent(name).path
+                return ("/bin/sh", ["-c", "exec -a \"$0\" \"$@\"", argv0, launchPath] + launchArgs)
+            }
+        }
+        #endif
+        return (launchPath, launchArgs)
+    }
 
     static func spawnAndCollect(launchPath: String, launchArgs: [String], cwd: String, timeout: Int,
                                 stdinData: Data? = nil, allowedExitCodes: Set<Int> = [0]) async -> ToolResult {
@@ -343,23 +375,16 @@ public struct RunCommandTool: AgentTool {
             launchArgs: requestedLaunchArgs ?? launchArgs,
             cwd: cwd, timeout: timeout, standardInput: standardInput,
             allowedExitCodes: allowedExitCodes)
-        let outcome: ProcessGroupRunner.Outcome = await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let o = ProcessGroupRunner.run(
-                    launchPath: launchPath, launchArgs: launchArgs, cwd: cwd,
-                    env: scrubbedEnvironment(), timeoutSeconds: timeout, capPerStream: maxOutputBytes,
-                    stdinData: standardInput.data, stdinByteLimit: maxStdinBytes,
-                    telemetrySink: telemetrySink,
-                    requestedArgumentsDigest: requestedDigest,
-                    builderSandboxAuthority: builderSandboxAuthority,
-                    requireBuilderSandbox: builderSandboxAuthority != nil
-                )
-                cont.resume(returning: o)
-            }
-        }
+        let outcome = await ProcessGroupRunner.runAsync(
+            launchPath: launchPath, launchArgs: launchArgs, cwd: cwd,
+            env: scrubbedEnvironment(), timeoutSeconds: timeout, capPerStream: maxOutputBytes,
+            stdinData: standardInput.data, stdinByteLimit: maxStdinBytes,
+            telemetrySink: telemetrySink, requestedArgumentsDigest: requestedDigest,
+            builderSandboxAuthority: builderSandboxAuthority,
+            requireBuilderSandbox: builderSandboxAuthority != nil)
 
         let combined = outcome.combined
-        let cleanExit = !outcome.timedOut && !outcome.wasSignalled && outcome.exitCode >= 0
+        let cleanExit = !outcome.cancelled && !outcome.timedOut && !outcome.wasSignalled && outcome.exitCode >= 0
         let success = cleanExit && allowedExitCodes.contains(Int(outcome.exitCode))
         let verificationEligible = success && outcome.exitCode == 0
         // Never leave the agent blind on failure: if a command failed with NO captured output, say WHY it's
@@ -367,6 +392,7 @@ public struct RunCommandTool: AgentTool {
         // bare "exit code N" that gives nothing to diagnose.
         let failError: String?
         if success { failError = nil }
+        else if outcome.cancelled { failError = "command cancelled" }
         else if outcome.timedOut { failError = "command timed out after \(timeout)s" }
         else if outcome.wasSignalled {
             // KILLED BY A SIGNAL (exit is 128+signal) — the real signature of an OS sandbox /
@@ -394,6 +420,7 @@ public struct RunCommandTool: AgentTool {
         var metadata = [
             "exit_code": String(outcome.exitCode),
             "timed_out": String(outcome.timedOut),
+            "cancelled": String(outcome.cancelled),
             "was_signalled": String(outcome.wasSignalled),
             "stdout": outcome.stdout,
             "stderr": outcome.stderr,

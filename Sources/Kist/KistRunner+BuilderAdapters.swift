@@ -248,9 +248,8 @@ extension KistRunner {
     static func builderCompatibilityLaunch(for opts: KistOptions, goal: String) -> BuilderCompatibilityLaunch {
         let mutationIntent = builderDeterministicMutationIntent(for: opts, goal: goal)
         let effort = EffortController.assess(goal: goal)
-        let lower = goal.lowercased()
-        let rigorWords = ["production", "enterprise", "security", "payment", "auth", "migration", "deploy"]
-        let highRisk = opts.cobolo || opts.mission || opts.greatLoop || rigorWords.contains(where: lower.contains)
+        let highRisk = opts.cobolo || opts.mission || opts.greatLoop
+            || EffortController.requiresRigor(goal: goal)
         let structuralComplexity = min(
             100,
             max(10, goal.split(whereSeparator: { $0.isWhitespace }).count * 4)
@@ -404,7 +403,7 @@ extension KistRunner {
         var mutationTools = Set<String>()
         for operation in sealedPlan.operations {
             switch operation.kind {
-            case .create: mutationTools.insert("write_file")
+            case .create: mutationTools.formUnion(["write_file", "edit_file"])
             case .modify: mutationTools.insert("edit_file")
             case .delete: mutationTools.insert("apply_patch")
             }
@@ -412,12 +411,14 @@ extension KistRunner {
         var scopedTools = mutationTools
         if !sealedPlan.verificationCommands.isEmpty { scopedTools.insert("run_command") }
         let allowed = HeadlessAgentLoop.readOnlyTools.union(scopedTools)
+        let createdFiles = BuilderCreatedFileAuthority()
         let selected: [any AgentTool] = tools.all().compactMap { tool in
             guard allowed.contains(tool.name) else { return nil }
             guard scopedTools.contains(tool.name) else { return tool }
             return BuilderContractScopedMutationTool(
                 base: tool, authority: authority,
-                verificationCommands: sealedPlan.verificationCommands)
+                verificationCommands: sealedPlan.verificationCommands,
+                createdFiles: createdFiles)
         }
         return ToolRegistry(selected)
     }
@@ -1008,7 +1009,7 @@ extension KistRunner {
                                 functionalObjective: functionalExecutionGoal,
                                 canonicalFunctionalObjective: canonicalFunctionalExecutionGoal,
                                 hostContractID: finalizedContract.id,
-                                memoryRoot: root,
+                                memoryRoot: root, auditRoot: root,
                                 persistMemoryEpisode: false,
                                 outcomeCapture: { planOutcomeBox.set($0) })
                         }
@@ -1084,11 +1085,13 @@ extension KistRunner {
                         let executionBinding = builderHeadlessExecutionBinding(
                             builder: builderBinding, resolvedModel: builderModel)
                         let recorder = TrajectoryRecorder()
-                        let traceRecorder = TraceRecorder(traceId: TraceID.make())
                         let runReplay = RunReplayStore(
-                            projectRoot: adapterRoot,
+                            projectRoot: root,
                             provider: executionBinding.providerId,
-                            model: executionBinding.model)
+                            model: executionBinding.model,
+                            executionRoot: adapterRoot,
+                            parentContractID: finalizedContract.id)
+                        let traceRecorder = TraceRecorder(traceId: runReplay.manifest.runID)
                         let proofStore = TurnProofStore(replayStore: runReplay)
                         let lessonStore = opts.noMemory ? nil : LessonStore()
                         proofStore.startTurn(goal: goal)
@@ -1166,7 +1169,7 @@ extension KistRunner {
                             print(grounding.render(color: TerminalCapabilities.stdoutIsInteractive))
                         }
                         printUsageDelta(from: [], to: await traceRecorder.all(), label: "usage",
-                                        projectRoot: adapterRoot)
+                                        projectRoot: root)
                         note("replay · kist --replay \(runReplay.manifest.runID)")
                         if !executionStagePassed {
                             note("paused — resume with: kist --resume \(outcome.checkpointId)")
@@ -1364,23 +1367,45 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
     let base: any AgentTool
     let authority: [String: BuilderMutationKind]
     let verificationCommands: [KistRunner.BuilderPreflightCommand]
+    var createdFiles: BuilderCreatedFileAuthority? = nil
 
     var name: String { base.name }
     var description: String {
         if name == "run_command" {
-            return base.description + " Builder contract permits only: "
-                + verificationCommands.map {
-                    "\($0.canonicalStatement) [timeout=\($0.timeoutSeconds)]"
-                }.joined(separator: "; ")
+            return "Run a sealed verification command in the staged project root. "
+                + "Use one of these exact structured argument objects: "
+                + sealedCommandExamples.joined(separator: "; ")
+                + ". Omit cwd (or use a single dot). Omit timeout to use its sealed value. "
+                + "Shell commands, input redirection and background execution are unavailable in this contract."
         }
         return base.description + " Builder contract paths: "
             + authority.keys.sorted().joined(separator: ", ")
+            + (name == "write_file" ? ". After creating a file, revise it with edit_file or replace its full contents with write_file; then rerun the sealed verifier." : "")
+            + (name == "edit_file" ? ". A create path can be edited only after this worker successfully wrote its current contents." : "")
     }
-    var parameters: [ToolParameter] { base.parameters }
+    var parameters: [ToolParameter] {
+        guard name == "run_command" else { return base.parameters }
+        return [
+            ToolParameter(name: "executable", type: "string", description: "Exact executable from the sealed argument objects above"),
+            ToolParameter(name: "args", type: "array", description: "Exact string argument array from the sealed command"),
+            ToolParameter(name: "cwd", type: "string", description: "Omit for the staged project root; only the root is permitted", required: false),
+            ToolParameter(name: "timeout", type: "number", description: "Omit to use the sealed command timeout; an explicit value must match exactly", required: false),
+            ToolParameter(name: "allowed_exit_codes", type: "array", description: "Omit, or use [0]", required: false),
+        ]
+    }
     var supportedActions: [String] { base.supportedActions }
     var unsupportedActions: [String] { base.unsupportedActions }
     var capabilityNote: String? { base.capabilityNote }
-    var usageExamples: [String] { base.usageExamples }
+    var usageExamples: [String] { name == "run_command" ? sealedCommandExamples : base.usageExamples }
+
+    private var sealedCommandExamples: [String] {
+        verificationCommands.compactMap { command in
+            let object: [String: Any] = ["executable": command.executable, "args": command.arguments,
+                                         "timeout": command.timeoutSeconds]
+            return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]))
+                .map { String(decoding: $0, as: UTF8.self) }
+        }
+    }
 
     func canonicalizeToolArguments(_ arguments: [String: Any]) -> [String: Any] {
         contractBoundArguments(arguments)
@@ -1388,10 +1413,27 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
 
     func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let effectiveArguments = canonicalizeToolArguments(arguments)
-        guard authorized(effectiveArguments) else {
-            return .failure("builder execution contract denied an undeclared mutation")
+        let path = effectiveArguments["path"] as? String
+        let revisingCreatedFile: Bool
+        if name == "edit_file", let path, authority[path] == .create, let createdFiles {
+            revisingCreatedFile = await createdFiles.matches(path: path, context: context)
+        } else {
+            revisingCreatedFile = false
+        }
+        guard authorized(effectiveArguments) || revisingCreatedFile else {
+            if name == "run_command" {
+                return .failure("The command arguments did not match the sealed verifier. "
+                    + "Use exactly one of these argument objects: " + sealedCommandExamples.joined(separator: "; ")
+                    + ". Omit cwd; do not switch to shell/command mode.")
+            }
+            return .failure("builder execution contract denied an undeclared mutation. "
+                + "Use the advertised file tool for a sealed path; run_command permits only the exact sealed verifier, including during repair.")
         }
         let result = try await base.execute(arguments: effectiveArguments, context: context)
+        if result.success, let path, authority[path] == .create,
+           name == "write_file" || name == "edit_file" {
+            await createdFiles?.record(path: path, context: context)
+        }
         guard name == "run_command", result.success else { return result }
         return result.authorizingBuilderContractVerification(arguments: effectiveArguments)
     }
@@ -1399,8 +1441,13 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
     /// `run_command` defaults an omitted timeout to 120 seconds, which could exceed the frozen
     /// verifier's ceiling. For one unambiguous executable+argv match, bind the actual invocation to
     /// the contract's timeout before the command is authorized, audited, executed, and sealed.
-    /// Explicit timeouts are never repaired and every other argument remains byte-for-byte supplied.
+    /// Explicit timeouts are never repaired. An empty cwd is the base tool's spelling of the project
+    /// root, so canonicalize it to omission before authorization, audit and execution.
     private func contractBoundArguments(_ arguments: [String: Any]) -> [String: Any] {
+        var arguments = arguments
+        if name == "run_command", arguments["cwd"] as? String == "" {
+            arguments.removeValue(forKey: "cwd")
+        }
         guard name == "run_command", arguments["timeout"] == nil,
               let executable = arguments["executable"] as? String else { return arguments }
         let suppliedArguments = (arguments["args"] as? [String]) ?? []

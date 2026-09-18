@@ -14,6 +14,8 @@ public struct SMLCommandAuthority: Sendable {
     public let scope: SMLObject
     public let maximumCommandAgeSeconds: Double
     public let maximumFutureSkewSeconds: Double
+    /// Host-owned session notified only after a task-creating command succeeds.
+    public let taskLease: SMLRuntimeLeaseRegistry.Session?
 
     public init(
         authenticatedActor: String,
@@ -24,7 +26,8 @@ public struct SMLCommandAuthority: Sendable {
         approvalAuthorities: Set<String> = [],
         scope: SMLObject,
         maximumCommandAgeSeconds: Double = 300,
-        maximumFutureSkewSeconds: Double = 30
+        maximumFutureSkewSeconds: Double = 30,
+        taskLease: SMLRuntimeLeaseRegistry.Session? = nil
     ) {
         self.authenticatedActor = authenticatedActor
         self.leaseID = leaseID
@@ -35,6 +38,7 @@ public struct SMLCommandAuthority: Sendable {
         self.scope = scope
         self.maximumCommandAgeSeconds = maximumCommandAgeSeconds
         self.maximumFutureSkewSeconds = maximumFutureSkewSeconds
+        self.taskLease = taskLease
     }
 }
 

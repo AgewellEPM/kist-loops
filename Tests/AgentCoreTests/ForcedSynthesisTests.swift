@@ -5,6 +5,32 @@ import XCTest
 /// now nudges the model to stop gathering and write findings. These pin the decision logic.
 final class ForcedSynthesisTests: XCTestCase {
 
+    func testOnlyRepeatedOrFailedObservationsCountAsStalledGathering() {
+        var progress = HeadlessGatheringProgress()
+        let result = ToolResult(success: true, output: "same contents")
+        let prefix = String(repeating: "long-directory/", count: 5)
+        for index in 0..<40 {
+            progress.observe(tool: "read_file", args: ["path": prefix + "\(index).txt"],
+                             result: result, visibleBody: result.output, readOnly: true)
+            XCTAssertEqual(progress.stalledCalls, 0)
+        }
+        let args: [String: Any] = ["path": prefix + "39.txt"]
+        for index in 1...6 {
+            progress.observe(tool: "read_file", args: args, result: result,
+                             visibleBody: result.output, readOnly: true)
+            XCTAssertEqual(progress.stalledCalls, index)
+        }
+        progress.observe(tool: "read_file", args: args, result: result,
+                         visibleBody: "changed contents", readOnly: true)
+        XCTAssertEqual(progress.stalledCalls, 0)
+        progress.observe(tool: "read_file", args: ["path": "absent"],
+                         result: ToolResult(success: false, output: "", error: "missing"),
+                         visibleBody: "missing", readOnly: true)
+        XCTAssertEqual(progress.stalledCalls, 1)
+        progress.didNudge()
+        XCTAssertEqual(progress.stalledCalls, 0)
+    }
+
     func testFiresAfterThresholdGathering() {
         // maxIterations 12 → threshold 6.
         XCTAssertFalse(HeadlessAgentLoop.shouldForceSynthesis(consecutiveGathering: 5, iteration: 5, lastNudge: -100, maxIterations: 12))

@@ -1,7 +1,75 @@
 import XCTest
+import AgentCore
 @testable import Kist
 
 final class RunReplayStoreTests: XCTestCase {
+
+    func testResumePreservesManifestAndMonotonicEventSequence() throws {
+        let root = NSTemporaryDirectory() + "replay-resume-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let original = RunReplayStore(projectRoot: root, provider: "first", model: nil, runID: "mission")
+        original.startTurn(goal: "first turn")
+        original.recordEvent(kind: "checkpoint", text: "paused")
+        let resumed = RunReplayStore(projectRoot: root, provider: "second", model: "new", runID: "mission")
+        resumed.startTurn(goal: "continue")
+        XCTAssertEqual(resumed.manifest, original.manifest)
+        let events = RunReplayStore.loadEvents(projectRoot: root, runID: "mission")
+        XCTAssertEqual(events.map(\.sequence), [1, 2, 3, 4])
+        XCTAssertEqual(events[2].kind, "runResumed")
+        XCTAssertTrue(events[2].text.contains("second:new"))
+    }
+
+    func testMissingInvalidAndExistingReplayHaveDistinctExitStatuses() throws {
+        let root = NSTemporaryDirectory() + "replay-status-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        XCTAssertEqual(KistRunner.replayRun(projectRoot: root, id: "absent"), 1)
+        XCTAssertEqual(KistRunner.replayRun(projectRoot: root, id: "../outside"), 2)
+        _ = RunReplayStore(projectRoot: root, provider: "codex-cli", model: "test", runID: "exists")
+        XCTAssertEqual(KistRunner.replayRun(projectRoot: root, id: "exists"), 0)
+    }
+
+    func testCompilerDiagnosticsAndContractSurviveExecutionWorkspaceCleanup() throws {
+        let root = NSTemporaryDirectory() + "replay-retention-\(UUID().uuidString)"
+        let staging = root + "-staging"
+        try FileManager.default.createDirectory(atPath: staging, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: root)
+            try? FileManager.default.removeItem(atPath: staging)
+        }
+        let replay = RunReplayStore(projectRoot: root, provider: "codex-cli", model: "test",
+                                    runID: "build-attempt", executionRoot: staging,
+                                    parentContractID: "contract-42")
+        let proof = TurnProofStore(replayStore: replay)
+        proof.startTurn(goal: "create a parser")
+        let sink = TerminalEventSink(color: false, style: .calm, proofStore: proof)
+        sink.emit(.actionStarted(index: 1, tool: "run_command", description: "make verify"))
+        sink.emit(.actionFinished(index: 1, success: false,
+            output: "solution.c:17: error: expected ';'\nsecret sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef",
+            error: "exit code 2; allowed exit codes: [0]"))
+        try FileManager.default.removeItem(atPath: staging)
+
+        let rendered = RunReplayStore.read(projectRoot: root, id: "build-attempt")
+        XCTAssertEqual(rendered.exitCode, 0)
+        XCTAssertTrue(rendered.text.contains("contract-42"))
+        XCTAssertTrue(rendered.text.contains("exit code 2"))
+        XCTAssertTrue(rendered.text.contains("solution.c:17: error: expected ';'"))
+        XCTAssertTrue(proof.renderLast().contains("solution.c:17: error: expected ';'"))
+        XCTAssertFalse(rendered.text.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+        XCTAssertFalse(proof.renderLast().contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    }
+
+    func testReplayLimitKeepsTheFinalFailureVisible() {
+        let root = NSTemporaryDirectory() + "replay-tail-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let replay = RunReplayStore(projectRoot: root, provider: "test", model: nil, runID: "tail")
+        for index in 1...125 {
+            replay.record(.init(kind: .actionFinished, tool: "read_file", success: true, text: "read \(index)"))
+        }
+        replay.record(.init(kind: .failed, tool: nil, success: false, text: "final compiler failure"))
+        let rendered = RunReplayStore.render(projectRoot: root, id: "tail", limit: 2)
+        XCTAssertTrue(rendered.contains("124 earlier event(s)"))
+        XCTAssertTrue(rendered.contains("final compiler failure"))
+    }
 
     func testReplayPersistsProofEventsAndRedactsSecrets() throws {
         let root = NSTemporaryDirectory() + "kist-replay-\(UUID().uuidString)"

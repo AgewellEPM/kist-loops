@@ -136,7 +136,7 @@ final class EvolutionLabTests: XCTestCase {
         XCTAssertEqual(record.status, .blocked)
     }
 
-    func testEvaluatorScoresPassingFailingAndNoChangeCandidates() {
+    func testEvaluatorRequiresPairedFitnessAndReceiptForBothPassingAndFailingBenchmarks() {
         let policy = EvolutionPolicy()
         let passed = EvolutionEvaluator.evaluate(
             runID: "run", candidateID: "pass", parentID: nil, objective: "x",
@@ -156,13 +156,14 @@ final class EvolutionLabTests: XCTestCase {
             changedFiles: [], benchmarks: [bench("swift test", 0)],
             policy: policy, createdAtEpoch: 1)
 
-        XCTAssertEqual(passed.status, .passed)
-        XCTAssertGreaterThan(passed.score, failed.score)
-        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(passed.status, .blocked)
+        XCTAssertEqual(passed.score, 0)
+        XCTAssertEqual(failed.status, .blocked)
+        XCTAssertEqual(failed.score, 0)
         XCTAssertEqual(noChange.status, .noChange)
     }
 
-    func testEvaluatorRewardsCompactPassingDiffsOverSprawlingDiffs() {
+    func testReviewabilityCannotCreateFitnessWithoutCommittedDiffAndHostAuthority() {
         let compact = EvolutionEvaluator.evaluate(
             runID: "run", candidateID: "compact", parentID: nil, objective: "x",
             branch: "b", worktreePath: "/wt", baseSHA: "base", commitSHA: "head",
@@ -176,9 +177,10 @@ final class EvolutionLabTests: XCTestCase {
             benchmarks: [bench("swift test", 0)],
             policy: EvolutionPolicy(), createdAtEpoch: 1)
 
-        XCTAssertEqual(compact.status, .passed)
-        XCTAssertEqual(sprawling.status, .passed)
-        XCTAssertGreaterThan(compact.score, sprawling.score)
+        XCTAssertEqual(compact.status, .blocked)
+        XCTAssertEqual(sprawling.status, .blocked)
+        XCTAssertEqual(compact.score, 0)
+        XCTAssertEqual(sprawling.score, 0)
     }
 
     func testArchiveAppendsLoadsAndRanksPassingCandidates() throws {

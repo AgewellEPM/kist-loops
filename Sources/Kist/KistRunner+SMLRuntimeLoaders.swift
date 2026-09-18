@@ -19,19 +19,16 @@ extension KistRunner {
               !sourcePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SMLRuntimeHostExportError.missingSourcePath
         }
-        let requestedSourceURL = smlRuntimeSourceURL(sourcePath, projectRoot: projectRoot)
-        let sourceURL = smlRuntimeReadableSourceURL(requestedSourceURL)
-        let sourceData: Data
-        do {
-            sourceData = try Data(contentsOf: sourceURL)
-        } catch {
-            throw SMLRuntimeHostExportError.readFailed(
-                path: sourceURL.path,
-                reason: String(describing: error)
-            )
-        }
+        let readableSource = try readSMLRuntimeSource(
+            sourcePath: sourcePath, projectRoot: projectRoot, mode: mode)
+        let sourceURL = readableSource.url
+        let sourceData = readableSource.data
 
-        var loaded = try loadSMLRuntimeSource(data: sourceData, path: sourceURL.path)
+        var loaded = try loadSMLRuntimeSource(
+            data: sourceData,
+            path: sourceURL.path,
+            confinement: readableSource.confinement,
+            confinedPath: readableSource.confinedPath)
         // Durable (live) hosts run every workflow through approval gating BEFORE validation and
         // admission, so the DAG proofs hold for the gated graph and no externally advanced step
         // can execute without a human gate. Ephemeral export stays byte-stable and ungated —
@@ -163,7 +160,8 @@ extension KistRunner {
                 sourcePath: sourceURL.standardizedFileURL.path,
                 sourceFormat: loaded.format,
                 runtimePackage: runtimePackage,
-                launch: launch
+                launch: launch,
+                durableEnvironment: nil
             )
             return try await body(host)
         case .durable:
@@ -182,7 +180,9 @@ extension KistRunner {
                 sourcePath: sourceURL.standardizedFileURL.path,
                 sourceFormat: loaded.format,
                 runtimePackage: runtimePackage,
-                launch: launch
+                launch: launch,
+                durableEnvironment: environment,
+                durableRuntime: runtime
             )
             return try await body(host)
         }
@@ -447,20 +447,102 @@ extension KistRunner {
             .appendingPathComponent(sourcePath)
     }
 
-    private static func smlRuntimeReadableSourceURL(_ sourceURL: URL) -> URL {
-        var isDirectory = ObjCBool(false)
-        guard FileManager.default.fileExists(
-            atPath: sourceURL.path,
-            isDirectory: &isDirectory
-        ), isDirectory.boolValue else {
-            return sourceURL
+    /// Resolve and read one runtime source without ever reopening an inspected pathname. Durable
+    /// hosts accept project-confined sources only; ephemeral export may read an explicitly named
+    /// external source, but still confines the leaf under its canonical parent and refuses links.
+    private struct SMLRuntimeReadableSource {
+        let url: URL
+        let data: Data
+        let confinement: ConfinedRoot
+        /// Canonical path relative to `confinement` for this exact source descriptor.
+        let confinedPath: String
+    }
+
+    private static func readSMLRuntimeSource(
+        sourcePath: String,
+        projectRoot: String,
+        mode: SMLRuntimeHostMode
+    ) throws -> SMLRuntimeReadableSource {
+        do {
+            let project = try ConfinedRoot(root: projectRoot, readOnly: true)
+            let durable: Bool
+            if case .durable = mode { durable = true } else { durable = false }
+
+            let confinement: ConfinedRoot
+            let confinedPath: String
+            if sourcePath.hasPrefix("/") {
+                let requested = URL(fileURLWithPath: sourcePath).standardizedFileURL
+                let leaf = requested.lastPathComponent
+                guard !leaf.isEmpty,
+                      let canonicalParent = ToolContext.canonicalize(
+                        requested.deletingLastPathComponent().path) else {
+                    throw ToolError.pathEscape(path: sourcePath, root: project.rootPath)
+                }
+                let canonicalSource = canonicalParent == "/"
+                    ? "/\(leaf)" : "\(canonicalParent)/\(leaf)"
+                let projectPrefix = project.rootPath == "/" ? "/" : project.rootPath + "/"
+                if canonicalSource == project.rootPath {
+                    confinement = project
+                    confinedPath = ""
+                } else if canonicalSource.hasPrefix(projectPrefix) {
+                    confinement = project
+                    confinedPath = String(canonicalSource.dropFirst(projectPrefix.count))
+                } else {
+                    guard !durable else {
+                        throw ToolError.pathEscape(path: sourcePath, root: project.rootPath)
+                    }
+                    confinement = try ConfinedRoot(
+                        root: canonicalParent, readOnly: true)
+                    confinedPath = leaf
+                }
+            } else {
+                confinement = project
+                confinedPath = sourcePath
+            }
+
+            let type = try confinement.fileType(confinedPath)
+            let readablePath: String
+            if type.exists && type.isDir {
+                readablePath = confinedPath.isEmpty
+                    ? "scaffold.json"
+                    : confinedPath.hasSuffix("/")
+                    ? confinedPath + "scaffold.json"
+                    : confinedPath + "/scaffold.json"
+            } else {
+                readablePath = confinedPath
+            }
+            let data = try confinement.readStableData(
+                readablePath, maxBytes: SMLWireCodec.Limits.standard.maximumBytes)
+            let components = readablePath.split(
+                separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard !components.isEmpty,
+                  components.allSatisfy({ !$0.isEmpty && $0 != ".." }) else {
+                throw ToolError.pathEscape(path: readablePath, root: confinement.rootPath)
+            }
+            let normalizedPath = components.filter { $0 != "." }.joined(separator: "/")
+            guard !normalizedPath.isEmpty else {
+                throw ToolError.pathEscape(path: readablePath, root: confinement.rootPath)
+            }
+            let absolutePath = confinement.rootPath == "/"
+                ? "/\(normalizedPath)" : "\(confinement.rootPath)/\(normalizedPath)"
+            return SMLRuntimeReadableSource(
+                url: URL(fileURLWithPath: absolutePath),
+                data: data,
+                confinement: confinement,
+                confinedPath: normalizedPath)
+        } catch {
+            throw SMLRuntimeHostExportError.readFailed(
+                path: sourcePath,
+                reason: String(describing: error)
+            )
         }
-        return sourceURL.appendingPathComponent("scaffold.json", isDirectory: false)
     }
 
     private static func loadSMLRuntimeSource(
         data: Data,
         path: String,
+        confinement: ConfinedRoot,
+        confinedPath: String,
         allowSourceSet: Bool = true
     ) throws -> LoadedSMLRuntimeSource {
         var diagnostics: [String] = []
@@ -476,7 +558,11 @@ extension KistRunner {
         }
         do {
             let scaffold = try JSONDecoder().decode(SMLRuntimeHostScaffold.self, from: data)
-            let package = try loadSMLRuntimePackage(from: scaffold, indexPath: path)
+            let package = try loadSMLRuntimePackage(
+                from: scaffold,
+                indexPath: path,
+                confinement: confinement,
+                confinedPath: confinedPath)
             return LoadedSMLRuntimeSource(
                 format: .runtimeScaffold,
                 package: package,
@@ -488,7 +574,11 @@ extension KistRunner {
         if allowSourceSet {
             do {
                 let sourceSet = try JSONDecoder().decode(SMLRuntimeHostSourceSet.self, from: data)
-                let mounts = try loadSMLRuntimeSourceSet(sourceSet, indexPath: path)
+                let mounts = try loadSMLRuntimeSourceSet(
+                    sourceSet,
+                    indexPath: path,
+                    confinement: confinement,
+                    confinedPath: confinedPath)
                 return LoadedSMLRuntimeSource(
                     format: .runtimeSourceSet,
                     package: nil,
@@ -527,7 +617,9 @@ extension KistRunner {
 
     private static func loadSMLRuntimeSourceSet(
         _ sourceSet: SMLRuntimeHostSourceSet,
-        indexPath: String
+        indexPath: String,
+        confinement: ConfinedRoot,
+        confinedPath: String
     ) throws -> [LoadedSMLRuntimeSourceMount] {
         guard sourceSet.schemaVersion == SMLRuntimeHostSourceSet.currentSchemaVersion else {
             throw SMLRuntimeHostExportError.invalidSourceSet(
@@ -547,26 +639,34 @@ extension KistRunner {
                 reason: "sources must contain at least one workflow source"
             )
         }
+        guard sourceSet.sources.count <= 1_024 else {
+            throw SMLRuntimeHostExportError.invalidSourceSet(
+                path: indexPath,
+                reason: "sources must contain at most 1024 workflow sources"
+            )
+        }
 
-        let indexURL = URL(fileURLWithPath: indexPath).standardizedFileURL
-        let baseURL = indexURL.deletingLastPathComponent()
+        let baseComponents = confinedPath.split(separator: "/").dropLast().map(String.init)
         var mounts: [LoadedSMLRuntimeSourceMount] = []
         var seenWorkflowIDs = Set<String>()
+        var seenSourcePaths = Set<String>()
         for (offset, entry) in sourceSet.sources.enumerated() {
-            let entryPath = entry.path.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !entryPath.isEmpty else {
+            let entryPath = try validatedSMLRuntimeSourceSetRelativePath(
+                entry.path, offset: offset, indexPath: indexPath)
+            guard seenSourcePaths.insert(
+                entryPath.precomposedStringWithCanonicalMapping.lowercased()).inserted else {
                 throw SMLRuntimeHostExportError.invalidSourceSet(
                     path: indexPath,
-                    reason: "sources[\(offset)].path must be nonempty"
+                    reason: "sources[\(offset)].path duplicates another source path"
                 )
             }
-            let entryURL = (entryPath.hasPrefix("/")
-                ? URL(fileURLWithPath: entryPath)
-                : baseURL.appendingPathComponent(entryPath))
-                .standardizedFileURL
+            let confinedEntryPath = (baseComponents + [entryPath]).joined(separator: "/")
+            let entryURL = URL(fileURLWithPath: confinement.rootPath, isDirectory: true)
+                .appendingPathComponent(confinedEntryPath).standardizedFileURL
             let entryData: Data
             do {
-                entryData = try Data(contentsOf: entryURL)
+                entryData = try confinement.readStableData(
+                    confinedEntryPath, maxBytes: SMLWireCodec.Limits.standard.maximumBytes)
             } catch {
                 throw SMLRuntimeHostExportError.invalidSourceSet(
                     path: indexPath,
@@ -576,6 +676,8 @@ extension KistRunner {
             let loaded = try loadSMLRuntimeSource(
                 data: entryData,
                 path: entryURL.path,
+                confinement: confinement,
+                confinedPath: confinedEntryPath,
                 allowSourceSet: false
             )
             guard loaded.package == nil,
@@ -640,6 +742,29 @@ extension KistRunner {
         return mounts
     }
 
+    private static func validatedSMLRuntimeSourceSetRelativePath(
+        _ path: String,
+        offset: Int,
+        indexPath: String
+    ) throws -> String {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !path.isEmpty,
+              path == path.trimmingCharacters(in: .whitespacesAndNewlines),
+              path.utf8.count <= 2_048,
+              !path.hasPrefix("/"),
+              !path.contains("\\"),
+              !path.unicodeScalars.contains(where: {
+                  $0.value == 0 || $0.value < 0x20 || $0.value == 0x7f
+              }),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw SMLRuntimeHostExportError.invalidSourceSet(
+                path: indexPath,
+                reason: "sources[\(offset)].path must be a confined relative file path"
+            )
+        }
+        return path
+    }
+
     private static func normalizedSMLRuntimeSourceSetString(
         _ value: String?,
         field: String,
@@ -700,9 +825,15 @@ extension KistRunner {
 
     private static func loadSMLRuntimePackage(
         from scaffold: SMLRuntimeHostScaffold,
-        indexPath: String
+        indexPath: String,
+        confinement: ConfinedRoot,
+        confinedPath: String
     ) throws -> SMLWorkflowRuntimeSourcePackage {
-        let files = try validatedSMLRuntimeScaffoldFiles(scaffold, indexPath: indexPath)
+        let files = try validatedSMLRuntimeScaffoldFiles(
+            scaffold,
+            indexPath: indexPath,
+            confinement: confinement,
+            confinedPath: confinedPath)
         guard let packageData = files["runtime-source-package.json"] else {
             throw SMLRuntimeHostExportError.invalidScaffold(
                 path: indexPath,
@@ -714,7 +845,9 @@ extension KistRunner {
 
     private static func validatedSMLRuntimeScaffoldFiles(
         _ scaffold: SMLRuntimeHostScaffold,
-        indexPath: String
+        indexPath: String,
+        confinement: ConfinedRoot,
+        confinedPath: String
     ) throws -> [String: Data] {
         guard (1...SMLRuntimeHostScaffold.currentSchemaVersion).contains(scaffold.schemaVersion) else {
             throw SMLRuntimeHostExportError.invalidScaffold(
@@ -728,9 +861,12 @@ extension KistRunner {
                 reason: "files must contain at least runtime-source-package.json"
             )
         }
+        guard scaffold.files.count <= 4_096 else {
+            throw SMLRuntimeHostExportError.invalidScaffold(
+                path: indexPath, reason: "files exceeds 4096 records")
+        }
 
-        let indexURL = URL(fileURLWithPath: indexPath).standardizedFileURL
-        let baseURL = indexURL.deletingLastPathComponent().standardizedFileURL
+        let baseComponents = confinedPath.split(separator: "/").dropLast().map(String.init)
         var seen = Set<String>()
         var files: [String: Data] = [:]
         for file in scaffold.files {
@@ -744,12 +880,20 @@ extension KistRunner {
                     reason: "duplicate file record '\(relativePath)'"
                 )
             }
-            let fileURL = baseURL
-                .appendingPathComponent(relativePath, isDirectory: false)
+            guard (0...SMLWireCodec.Limits.standard.maximumBytes).contains(file.byteCount) else {
+                throw SMLRuntimeHostExportError.invalidScaffold(
+                    path: indexPath,
+                    reason: "\(relativePath) byte count exceeds the runtime source limit"
+                )
+            }
+            let confinedFilePath = (baseComponents + [relativePath]).joined(separator: "/")
+            let fileURL = URL(fileURLWithPath: confinement.rootPath, isDirectory: true)
+                .appendingPathComponent(confinedFilePath, isDirectory: false)
                 .standardizedFileURL
             let data: Data
             do {
-                data = try Data(contentsOf: fileURL)
+                data = try confinement.readStableData(
+                    confinedFilePath, maxBytes: file.byteCount)
             } catch {
                 throw SMLRuntimeHostExportError.readFailed(
                     path: fileURL.path,
@@ -1007,73 +1151,4 @@ extension KistRunner {
         }
     }
 
-    /// Offline export needs an admission catalog only to prove the generated surfaces are structurally
-    /// mountable. This catalog is derived from the already-imported workflow references and is not
-    /// serialized; live execution still requires the host's fresh admission catalog and authority resolver.
-    private static func derivedSMLAdmissionCatalog(
-        for workflows: [SMLWorkflow]
-    ) -> SMLExecutionAdmissionCatalog {
-        var observationSources = Set<String>()
-        var retrievalSources = Set<String>()
-        var toolCapabilities = Set<String>()
-        var modelPurposes = Set<String>()
-        var modelOutputSchemas = Set<String>()
-        var vCards = Set<String>()
-        var workflowIDs = Set(workflows.map(\.id))
-        var verifiers = Set<String>()
-        var rollbackProcedures = Set<String>()
-        var approvalAuthorities = Set<String>()
-
-        for workflow in workflows {
-            for instruction in workflow.instructions {
-                switch instruction.op {
-                case .observe:
-                    insert(instruction.source, into: &observationSources)
-                case .retrieve:
-                    insert(instruction.source, into: &retrievalSources)
-                case .callTool:
-                    insert(instruction.capability, into: &toolCapabilities)
-                case .callModel:
-                    insert(instruction.purpose, into: &modelPurposes)
-                    insert(instruction.outputSchema, into: &modelOutputSchemas)
-                case .invokeVCard:
-                    insert(instruction.capability, into: &vCards)
-                    insert(instruction.verifier, into: &verifiers)
-                case .runWorkflow:
-                    insert(instruction.workflow, into: &workflowIDs)
-                case .verify, .commit:
-                    insert(instruction.verifier, into: &verifiers)
-                case .waitApproval:
-                    insert(instruction.owner, into: &approvalAuthorities)
-                case .runPlugin:
-                    insert(instruction.plugin?.verifier, into: &verifiers)
-                    insert(instruction.plugin?.rollback, into: &rollbackProcedures)
-                case .branch, .assert, .checkpoint, .retry, .rollback, .escalate,
-                     .emitReceipt, .complete:
-                    break
-                }
-            }
-        }
-
-        return SMLExecutionAdmissionCatalog(
-            observationSources: observationSources,
-            retrievalSources: retrievalSources,
-            toolCapabilities: toolCapabilities,
-            modelPurposes: modelPurposes,
-            modelOutputSchemas: modelOutputSchemas,
-            vCards: vCards,
-            workflows: workflowIDs,
-            verifiers: verifiers,
-            rollbackProcedures: rollbackProcedures,
-            approvalAuthorities: approvalAuthorities
-        )
-    }
-
-    private static func insert(_ value: String?, into values: inout Set<String>) {
-        guard let value,
-              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return
-        }
-        values.insert(value)
-    }
 }

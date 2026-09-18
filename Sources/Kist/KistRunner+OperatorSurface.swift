@@ -7,8 +7,9 @@ import AgentCore
 extension KistRunner {
 
     static func replayRun(projectRoot: String, id: String) -> Int32 {
-        note(RunReplayStore.render(projectRoot: projectRoot, id: id))
-        return 0
+        let result = RunReplayStore.read(projectRoot: projectRoot, id: id)
+        note(result.text)
+        return result.exitCode
     }
 
     /// Live model-id preflight: GET /models per keyed provider, diff vs the catalog, flag dead ids.

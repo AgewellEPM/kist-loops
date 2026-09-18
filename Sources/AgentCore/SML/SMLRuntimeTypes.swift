@@ -11,13 +11,14 @@ public enum SMLRuntimeCommandOperation {
     public static let taskApprove = "task.approve_request"
     public static let taskRefuse = "task.refuse_request"
     public static let taskRollback = "task.rollback"
+    public static let taskReconcile = "task.reconcile"
     public static let taskClaimCapability = "task.claim_capability"
     public static let taskRecordStep = "task.record_step"
     public static let receiptsList = "receipts.list"
 
     public static let all: Set<String> = [
         status, rolesList, workflowsList, workflowInspect, workflowRun, workflowRunMatching,
-        taskWatch, taskApprove, taskRefuse, taskRollback, taskClaimCapability,
+        taskWatch, taskApprove, taskRefuse, taskRollback, taskReconcile, taskClaimCapability,
         taskRecordStep, receiptsList,
     ]
 }
