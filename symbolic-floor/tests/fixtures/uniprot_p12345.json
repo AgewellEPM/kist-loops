@@ -1,0 +1,8 @@
+{
+  "primaryAccession": "P12345",
+  "uniProtKBCrossReferences": [
+    {"database": "EMBL", "id": "X01405"},
+    {"database": "PDB", "id": "1ABC"},
+    {"database": "PDB", "id": "2XYZ"}
+  ]
+}

@@ -42,6 +42,16 @@ temporal/evolution gates until a separately authorized drain/deploy/restart succ
 - ⚠️ `/Volumes/PRO-G40/Downloads/kist-loops` is a DEAD worktree of a different ancestor —
   never build from or sync to it.
 
+## symbolic-floor — the bio verification floor (subtree)
+`symbolic-floor/` — git subtree of `~/.kist/workspaces/captain/symbolic_floor`
+(the RUNTIME copy; floor DBs + dashboard run there, `data/` never travels
+through git). Typed six-relation Peel floor w/ functional hard-veto,
+floor-proposer gate lane (local model proposes, floor verdicts), research
+loop with reflect/ponder + grounded lab notebook, floor dashboard
+(localhost:8977; /api/research is the ONLY write lane, via the Store).
+Sync contract: `symbolic-floor/SUBTREE.md`.
+Test: `cd symbolic-floor && .venv/bin/python -m pytest tests/`.
+
 ## Build / test / deploy
 ```
 swift test                                           # local verification

@@ -1,0 +1,29 @@
+{
+  "primaryAccession": "P69905",
+  "genes": [{"geneName": {"value": "HBA1"}}, {"geneName": {"value": "HBA2"}}],
+  "organism": {"scientificName": "Homo sapiens"},
+  "comments": [
+    {"commentType": "SUBCELLULAR LOCATION",
+     "subcellularLocations": [{"location": {"value": "Cytoplasm"}},
+                               {"location": {"value": "Cell membrane"}}]},
+    {"commentType": "DISEASE",
+     "disease": {"diseaseId": "Erythrocytosis, familial, 7"}},
+    {"commentType": "DISEASE",
+     "disease": {"diseaseId": "alpha-Thalassemia"}},
+    {"commentType": "FUNCTION", "texts": [{"value": "Oxygen transport."}]}
+  ],
+  "features": [
+    {"type": "Domain", "description": "Globin"},
+    {"type": "Chain", "description": "Hemoglobin subunit alpha"}
+  ],
+  "uniProtKBCrossReferences": [
+    {"database": "PDB", "id": "1A00"},
+    {"database": "PDB", "id": "1A01"},
+    {"database": "PDB", "id": "1A0U"},
+    {"database": "PDB", "id": "1A0Z"},
+    {"database": "PDB", "id": "1A3N"},
+    {"database": "PDB", "id": "1A3O"},
+    {"database": "PDB", "id": "1ABW"},
+    {"database": "EMBL", "id": "V00491"}
+  ]
+}

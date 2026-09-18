@@ -1,0 +1,7 @@
+# Intentionally empty: runtime is Python 3.11+ standard library only
+# (sqlite3, json, urllib.request, hashlib, re, datetime, argparse).
+# The vendored Peel engine (symbolic_floor/peel/relation_schema.py) is also
+# stdlib-only — that is WHY it could be embedded verbatim.
+#
+# Dev/test only (not a runtime dependency): pytest, installed in .venv
+# (python3.13 -m venv .venv && .venv/bin/pip install pytest).
