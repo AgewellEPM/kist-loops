@@ -1,0 +1,13 @@
+{
+  "model": "floor-proposer",
+  "resolver": true,
+  "n": 27,
+  "parse_rate": 1.0,
+  "kind_accuracy": 1.0,
+  "subject_accuracy": 1.0,
+  "abstain_recall": 1.0,
+  "false_abstains": 0,
+  "floor_admission_rate": 1.0,
+  "elapsed_s": 58.5,
+  "parse_failures": []
+}

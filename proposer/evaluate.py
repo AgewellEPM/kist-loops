@@ -24,11 +24,12 @@ from symbolic_floor.schema import ValidationError
 from symbolic_floor.store import Store
 
 from .contract import parse_proposal
+from .resolver import resolve
 from .runtime import admit, ask_model
 
 
 def evaluate(store: Store, eval_path: str | Path, *, model: str,
-             limit: int | None = None) -> dict:
+             limit: int | None = None, resolver: bool = False) -> dict:
     rows = [json.loads(line) for line in Path(eval_path).read_text().splitlines()]
     if limit:
         rows = rows[:limit]
@@ -51,6 +52,10 @@ def evaluate(store: Store, eval_path: str | Path, *, model: str,
                              "reply": reply[:120]})
             continue
         parsed += 1
+        if resolver:
+            # Score the deployed lane: symbolic subject binding included
+            # (same step propose() applies after the parse).
+            got, _ = resolve(user, got)
 
         if gold["kind"] == "abstain":
             gold_abstain += 1
@@ -74,6 +79,7 @@ def evaluate(store: Store, eval_path: str | Path, *, model: str,
     wrong_confidence = model_abstain_total - model_abstain_on_gold
     report = {
         "model": model,
+        "resolver": resolver,
         "n": n,
         "parse_rate": round(parsed / n, 3) if n else 0.0,
         "kind_accuracy": round(kind_ok / n, 3) if n else 0.0,

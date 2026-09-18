@@ -32,6 +32,7 @@ from symbolic_floor.schema import ValidationError
 from symbolic_floor.store import CLAIM_SHAPE_STRUCTURAL, Store
 
 from .contract import SYSTEM_PROMPT, parse_proposal
+from .resolver import resolve
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "floor-proposer"
@@ -112,10 +113,13 @@ def propose(store: Store, prompt: str, *, model: str = DEFAULT_MODEL,
     except ValidationError as e:
         return {"admitted": "rejected_unparseable", "error": str(e),
                 "raw_reply": reply[:500]}
+    # Symbolic subject binding: accessions come from the user's text or the
+    # curated table, never from model recall (see resolver.py).
+    proposal, resolver_action = resolve(prompt, proposal)
     try:
         return admit(store, proposal, environment=environment,
-                     libraries=libraries)
+                     libraries=libraries) | {"resolver": resolver_action}
     except ValidationError as e:
         # Parsed but the floor refused it (bad params, unknown claim, ...).
         return {"admitted": "rejected_by_floor", "proposal": proposal,
-                "error": str(e)}
+                "error": str(e), "resolver": resolver_action}
