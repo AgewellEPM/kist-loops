@@ -59,6 +59,22 @@ CREATE TABLE IF NOT EXISTS environments (
     registered_at     TEXT NOT NULL
 );
 
+-- Adaptive runtime: capabilities a researcher MOLDED at runtime ("mold this
+-- around X, I need it to do Y"). Each is a TYPED, bounded affordance schema
+-- admitted through the PEEL invariant gate (never arbitrary code) and bound
+-- idempotently by name — re-molding the same name replaces its row, so the
+-- loop is safe to repeat. spec_json is the validated param schema; the intent
+-- and provenance are kept so the local machine-learning distillation can see
+-- how this lab molds its runtime over time.
+CREATE TABLE IF NOT EXISTS molded_capabilities (
+    name          TEXT PRIMARY KEY,  -- clean lowercase identifier
+    spec_json     TEXT NOT NULL,     -- validated {param: {type, constraint}}
+    intent        TEXT NOT NULL,     -- the researcher's own words
+    based_on      TEXT,              -- built-in capability it narrows, or NULL
+    molded_at     TEXT NOT NULL,     -- UTC ISO-8601
+    mold_count    INTEGER NOT NULL DEFAULT 1  -- times re-molded (local ML signal)
+);
+
 -- Hand-off audit trail: one row per dispatch attempt, INCLUDING refusals and
 -- unplannable intents (a refusal is itself auditable evidence). The loop is
 -- closed here: plan out, outcome back.

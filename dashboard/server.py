@@ -11,11 +11,13 @@ Mirrors the Jeeves desktop lanes:
                                  the model never touches the graph
 
 Every read opens the SQLite file with ``mode=ro``. Every write lane
-(/api/research, /api/import, /api/teach, /api/minds, /api/demo/import)
-writes only via the Store — the floor's one authorized author. The demo
-lane additionally only ever CREATES fresh DBs from allowlisted local
-Harvest packs; it never appends to an existing floor. stdlib only,
-localhost only.
+(/api/research, /api/import, /api/teach, /api/minds, /api/demo/import,
+/api/mold) writes only via the Store — the floor's one authorized author.
+/api/mold is the adaptive runtime: it admits a researcher-molded typed
+capability through the PEEL invariant gate (safety-enveloped, idempotent) —
+a schema, never code. The demo lane additionally only ever CREATES fresh DBs
+from allowlisted local Harvest packs; it never appends to an existing floor.
+stdlib only, localhost only.
 
 Run:  .venv/bin/python -m dashboard.server [--port 8977]
 """
@@ -445,6 +447,52 @@ def start_recorder_loop(interval_s: int = 300) -> None:
             _time.sleep(interval_s)
 
     threading.Thread(target=loop, daemon=True, name="science-recorder").start()
+
+
+def capabilities_view(db_name: str) -> dict:
+    """The floor's effective execution vocabulary for one mind: built-in
+    affordances plus every runtime-molded capability, each with its typed,
+    bounded schema — what the researcher can compose right now."""
+    from symbolic_floor.molding import effective_capabilities, list_molded
+    from symbolic_floor.store import Store
+    store = Store(str(_resolve_db(db_name)))
+    try:
+        eff = effective_capabilities(store)
+        molded = {m["name"] for m in list_molded(store)}
+    finally:
+        store.close()
+    caps = []
+    for name in sorted(eff):
+        params = {p: {"type": t, "constraint": list(c)}
+                  for p, (t, c) in eff[name].items()}
+        caps.append({"name": name, "molded": name in molded, "params": params})
+    return {"db": db_name, "capabilities": caps,
+            "molded_count": len(molded), "builtin_count": len(caps) - len(molded)}
+
+
+def mold(db_name: str, name: str, params: dict, intent: str) -> dict:
+    """The adaptive runtime write lane: mold a new typed capability into one
+    mind through the PEEL invariant gate. Idempotent by name; refuses (raises,
+    surfaced as a 400) anything out of the floor's safety envelope."""
+    from symbolic_floor.molding import mold_capability
+    from symbolic_floor.store import Store
+    store = Store(str(_resolve_db(db_name)))
+    try:
+        return mold_capability(store, str(name or ""), params or {}, str(intent or ""))
+    finally:
+        store.close()
+
+
+def invoke(db_name: str, name: str, params: dict) -> dict:
+    """Admit one call against the effective (built-in + molded) registry — the
+    execution binding, fail-fast typed/bounded, no model, no side effects."""
+    from symbolic_floor.molding import invoke_molded
+    from symbolic_floor.store import Store
+    store = Store(str(_resolve_db(db_name)))
+    try:
+        return invoke_molded(store, str(name or ""), params or {})
+    finally:
+        store.close()
 
 
 def resolve_subject(user_text: str) -> dict:
@@ -1016,6 +1064,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(sequence_residues(db, (q.get("id") or [""])[0]))
             elif url.path == "/api/resolve":
                 self._json(resolve_subject((q.get("q") or [""])[0]))
+            elif url.path == "/api/capabilities":
+                self._json(capabilities_view(db))
             elif url.path in ("/api/ledger", "/api/export"):
                 led = ledger(
                     db,
@@ -1147,6 +1197,15 @@ class Handler(BaseHTTPRequestHandler):
                                        str(body.get("mind") or "")))
             elif url.path == "/api/partner/tick":
                 self._json(partner_tick())
+            elif url.path == "/api/mold":
+                self._json(mold(str(body.get("db") or ""),
+                                str(body.get("name") or ""),
+                                body.get("params") or {},
+                                str(body.get("intent") or "")))
+            elif url.path == "/api/invoke":
+                self._json(invoke(str(body.get("db") or ""),
+                                  str(body.get("name") or ""),
+                                  body.get("params") or {}))
             elif url.path == "/api/minds":
                 self._json(create_mind(str(body.get("name") or "")))
             elif url.path == "/api/teach":
