@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 data/
 .pytest_cache/
+
+# stray floor DBs never travel through git (canonical DBs live in data/, already ignored)
+*.db
