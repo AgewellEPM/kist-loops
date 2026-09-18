@@ -188,12 +188,20 @@ public enum ReversibilityClassifier {
         return false
     }
 
-    public static func assess(tool: String, args: [String: Any], projectRoot: String) -> ActionRisk {
+    /// `hostDeclaredReadOnly` is the OWNER's per-tool `toolEffects: "readOnly"` config declaration for an
+    /// external MCP tool (resolved by the caller from the tool registry, never from the untrusted server).
+    /// When set, it satisfies the default-deny "provably read-only" bar the name-based verb gate can't —
+    /// bio-research__uniprot_entry ("uniprot" is not a read verb) is read-only because the owner said so.
+    public static func assess(tool: String, args: [String: Any], projectRoot: String,
+                              hostDeclaredReadOnly: Bool = false) -> ActionRisk {
         if readOnlyTools.contains(tool) { return .safe }
         // DEFAULT-DENY for external MCP tools: they bypass ConfinedRoot, so anything not PROVABLY
         // read-only is high-blast-radius → .dangerous (ALWAYS prompt, even past "allow all"), like
-        // run_command. A leaf that clearly reads (definition/references/hover/get/list…) stays ungated.
-        if isMCPTool(tool) { return isReadOnlyMCPTool(tool) ? .safe : .dangerous }
+        // run_command. A leaf that clearly reads (definition/references/hover/get/list…) stays ungated,
+        // as does one the OWNER explicitly declared read-only in their own config.
+        if isMCPTool(tool) {
+            return (hostDeclaredReadOnly || isReadOnlyMCPTool(tool)) ? .safe : .dangerous
+        }
         switch tool {
         case "desktop_control", "ax_press", "tap", "point_click":
             // THE HANDS: real mouse/keyboard injection drives the live desktop — irreversible and

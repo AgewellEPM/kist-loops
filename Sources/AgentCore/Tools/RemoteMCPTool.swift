@@ -11,23 +11,29 @@ import Foundation
 // crash handling, and output sanitization). The `ToolContext` is intentionally NOT
 // forwarded: a remote server declares its own argument contract, and silently
 // injecting host paths/policy into an untrusted tool's arguments would be unsafe.
-public struct RemoteMCPTool: AgentTool {
+public struct RemoteMCPTool: AgentTool, HostDeclaredEffectTool {
     public let name: String
     public let description: String
     public let parameters: [ToolParameter]
     /// Explicit per-server/per-tool policy. `nil` preserves the conservative legacy name heuristic.
     public let explicitComputerUseRequirement: Bool?
+    /// The OWNER declared this raw tool name `"readOnly"` in the server's `toolEffects` config map.
+    /// Host-side provenance only (never derived from the untrusted server); false = treated as
+    /// effectful and excluded from inspect-only turns.
+    public let hostDeclaredReadOnly: Bool
 
     private let serverName: String
     private let remoteToolName: String
     private let manager: MCPClientManager
 
     init(serverName: String, spec: RemoteToolSpec, manager: MCPClientManager,
-         computerUsePolicy: MCPComputerUsePolicy = .legacyNameHeuristic) {
+         computerUsePolicy: MCPComputerUsePolicy = .legacyNameHeuristic,
+         hostDeclaredReadOnly: Bool = false) {
         self.serverName = serverName
         self.remoteToolName = spec.name
         self.manager = manager
         self.explicitComputerUseRequirement = computerUsePolicy.explicitRequirement(for: spec.name)
+        self.hostDeclaredReadOnly = hostDeclaredReadOnly
         // The model-facing (registry) name is derived from the UNTRUSTED server tool name — sanitize +
         // cap it so a hostile name can't inject into the tool schema (DeepSeek H1). Routing still uses the
         // raw `remoteToolName` below, so a sanitized display name can't break a legit call.

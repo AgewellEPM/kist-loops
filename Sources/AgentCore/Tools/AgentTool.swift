@@ -652,6 +652,15 @@ public protocol ReadOnlyAgentTool: AgentTool {}
 /// provenance rather than a model-visible name, so a shadow tool cannot gain orchestration authority.
 public protocol DelegationAgentTool: AgentTool {}
 
+/// A tool whose effect classification was declared by the HOST OWNER's configuration (the per-server
+/// `toolEffects` map in the MCP config) rather than by the implementation. `ReadOnlyAgentTool` cannot
+/// apply to remote MCP tools — their implementation is an untrusted external process — so this carries
+/// the owner's declaration instead: the user wrote "readOnly" next to the tool name in their own config.
+/// Undeclared remote tools report false and stay excluded from inspect-only turns (fail-closed).
+public protocol HostDeclaredEffectTool: AgentTool {
+    var hostDeclaredReadOnly: Bool { get }
+}
+
 extension ReadFileTool: ReadOnlyAgentTool {}
 extension ListFilesTool: ReadOnlyAgentTool {}
 extension GlobFilesTool: ReadOnlyAgentTool {}

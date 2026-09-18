@@ -393,6 +393,44 @@ final class MCPClientTests: XCTestCase {
         XCTAssertTrue(servers.contains { $0.name == "trusted" })
     }
 
+    // MARK: - toolEffects: the owner's per-tool effect declaration (bio-scientist audit fix, 2026-09-18)
+
+    func testConfig_toolEffectsReadOnlyDeclarationParsed() throws {
+        let sh = FileManager.default.fileExists(atPath: "/bin/sh") ? "/bin/sh" : "/bin/bash"
+        try writeConfig(#"{"mcpServers":{"bio":{"command":"\#(sh)","toolEffects":{"pubmed_search":"readOnly","uniprot_entry":"readOnly","run_python":"projectMutation"}}}}"#)
+        let (servers, issues) = MCPClientConfig.load(projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+        XCTAssertTrue(issues.isEmpty, "\(issues)")
+        let bio = servers.first { $0.name == "bio" }
+        XCTAssertEqual(bio?.declaredReadOnlyTools, ["pubmed_search", "uniprot_entry"],
+                       "only readOnly declarations grant admission; projectMutation is documentation")
+    }
+
+    func testConfig_toolEffectsAbsentMeansNoDeclarations() throws {
+        let sh = FileManager.default.fileExists(atPath: "/bin/sh") ? "/bin/sh" : "/bin/bash"
+        try writeConfig(#"{"mcpServers":{"bare":{"command":"\#(sh)"}}}"#)
+        let (servers, _) = MCPClientConfig.load(projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+        XCTAssertEqual(servers.first { $0.name == "bare" }?.declaredReadOnlyTools, [],
+                       "no toolEffects map -> every tool defaults to effectful (fail-closed)")
+    }
+
+    func testConfig_toolEffectsUnknownEffectRejectedLoudly() throws {
+        // A typo like "readonly" would fail closed SILENTLY (tool just never exposed) - reject the
+        // entry instead so the misconfiguration is visible.
+        let sh = FileManager.default.fileExists(atPath: "/bin/sh") ? "/bin/sh" : "/bin/bash"
+        try writeConfig(#"{"mcpServers":{"typo":{"command":"\#(sh)","toolEffects":{"pubmed_search":"readonly"}}}}"#)
+        let (servers, issues) = MCPClientConfig.load(projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+        XCTAssertFalse(servers.contains { $0.name == "typo" })
+        XCTAssertTrue(issues.contains { $0.server == "typo" && $0.reason.contains("unknown effect") })
+    }
+
+    func testConfig_toolEffectsWrongShapeRejected() throws {
+        let sh = FileManager.default.fileExists(atPath: "/bin/sh") ? "/bin/sh" : "/bin/bash"
+        try writeConfig(#"{"mcpServers":{"bad":{"command":"\#(sh)","toolEffects":["pubmed_search"]}}}"#)
+        let (servers, issues) = MCPClientConfig.load(projectRoot: dir, allowProjectConfig: true, includeUserConfig: false)
+        XCTAssertFalse(servers.contains { $0.name == "bad" })
+        XCTAssertTrue(issues.contains { $0.server == "bad" && $0.reason.contains("toolEffects") })
+    }
+
     // MARK: - Codex MED regression: sanitizer strips \r and bidi-override format chars
 
     func testSanitizer_stripsCarriageReturnAndBidi() {
