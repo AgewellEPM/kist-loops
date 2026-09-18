@@ -78,3 +78,34 @@ def test_resolve_url_shapes():
     assert "alphafold" in resolve_url("AF-P69905-F1")
     with pytest.raises(ValueError):
         resolve_url("structure:../../etc/passwd")
+
+
+def test_af_accession_extraction():
+    from dashboard.structures import af_accession
+    assert af_accession("AF-P69905-F1") == "P69905"
+    assert af_accession("structure:AF-Q9Y6K9-F1") == "Q9Y6K9"
+    assert af_accession("1A3N") is None
+    assert af_accession("structure:1A3N") is None
+
+
+def test_af_url_resolves_from_api_and_falls_back(monkeypatch):
+    """AlphaFold bumps its model version; the AF URL must come from the API
+    (version-current) and fall back to the pinned URL only when the API is down
+    — never a stale hardcoded version that 404s."""
+    import io
+    from dashboard import structures as S
+
+    # API up: return the authoritative (v6+) pdbUrl
+    def api_ok(url, timeout=0):
+        assert "api/prediction/P69905" in url
+        body = json.dumps([{"pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P69905-F1-model_v9.pdb"}])
+        return io.BytesIO(body.encode())
+    monkeypatch.setattr(S.urllib.request, "urlopen", api_ok)
+    assert S._af_pdb_url("AF-P69905-F1").endswith("model_v9.pdb")
+
+    # API down: fall back to the pinned version on the same allowlisted host
+    def api_down(url, timeout=0):
+        raise OSError("network down")
+    monkeypatch.setattr(S.urllib.request, "urlopen", api_down)
+    fb = S._af_pdb_url("AF-P69905-F1")
+    assert fb.startswith("https://alphafold.ebi.ac.uk/") and fb.endswith(".pdb")
