@@ -147,6 +147,17 @@ for sym, acc in pairs.items():
     # also lift the gene metadata so the graph carries gene→protein too
     retry(lambda: extract.research_gene(store, sym))
 
+# CONTROL COHORT — unrelated human proteins, so the null model has a real
+# background to test enrichment against (uniprot-only = fast entry facts).
+print(f"  {D}+ gathering a control cohort (unrelated human proteins) so significance is testable…{X}")
+CONTROL = ["P04637", "P00533", "P01308", "P38398", "P42858", "P01375",
+           "P05067", "P10275", "P00734", "P02768", "P01579", "P06400"]
+controls = 0
+for acc in CONTROL:
+    c = retry(lambda: extract.extract_protein(store, acc, enabled={"uniprot"}), tries=2)
+    controls += c.get("status") == "OK"
+print(f"  {D}control cohort: {controls} unrelated human proteins in the background{X}")
+
 print(f"\n  {D}researched proteins: {', '.join(proteins) or '(none resolved live)'}{X}")
 
 # ── 4. DISCUSS (strong model reflects; adversarial self-challenge) ────────────
@@ -168,37 +179,43 @@ design = brain("Design the experiment in ONE sentence: we will traverse the type
 print(f"  {M}🧠 strong model:{X} {design}")
 print(f"  {D}→ operationalized: convergence over ≥3 proteins, each with its edge path{X}")
 
-# ── 6. RUN THE EXPERIMENT (the floor traverses — real graph query) ────────────
-hr("6) RUN IT  — the floor traverses (relevance = reachability)")
-reach = {}
-for acc in proteins:
-    for e in store.get_edges(source=f"protein:{acc}"):
-        reach.setdefault(e["object"], set()).add(acc)
-convergences = sorted(((node, sorted(who)) for node, who in reach.items() if len(who) >= 3),
-                      key=lambda t: (-len(t[1]), t[0]))
-print(f"  traversed {len(proteins)} proteins → {B}{len(convergences)}{X} node(s) reachable from ≥3 of them:")
-for node, who in convergences[:8]:
-    print(f"      {G}◆ {node}{X}  {D}← reached from {len(who)}: {', '.join(who)}{X}")
+# ── 6. RUN THE EXPERIMENT (the floor traverses + the enrichment null model) ────
+hr("6) RUN IT  — the floor traverses, then the null model separates signal from hubs")
+from symbolic_floor.discovery import find_convergences   # noqa: E402
+convs = find_convergences(store, [f"protein:{a}" for a in proteins], min_support=3)
+sig = [c for c in convs if c.significant]
+print(f"  traversed {len(proteins)} proteins → {B}{len(convs)}{X} raw convergence(s); "
+      f"the hypergeometric null model keeps {B}{len(sig)}{X} as significant:")
+for c in convs[:8]:
+    mark = f"{G}✓ SIGNIFICANT{X}" if c.significant else (
+           f"{Y}trivial hub{X}" if not c.underpowered else f"{Y}underpowered{X}")
+    print(f"      {'◆' if c.significant else '◇'} {c.node:26} {D}k={c.support} m={c.background_m}/"
+          f"{c.population_N} p={c.p_value:.1e}{X}  {mark}")
+if not sig and convs:
+    print(f"  {Y}→ no convergence beats the background — honest null, not a fabricated finding.{X}")
 
 # record the receipt + verdict (pre-registration held: prediction preceded this)
-obs = {"traversal:globin_convergence": len(convergences)}
+obs = {"traversal:globin_convergence": len(sig)}   # graded on SIGNIFICANT, not raw
 exp = ledger.design_experiment(question="globin convergence traversal", adapter="symbolic-floor",
         request={"proteins": proteins}, prediction_ids=[p for p in ledger.predictions])
 import hashlib
 ledger.record_receipt(exp["id"], obs,
         raw_digest=hashlib.sha256(json.dumps(obs, sort_keys=True).encode()).hexdigest(),
-        adapter_meta={"traversal": "reachable-from->=3"})
+        adapter_meta={"traversal": "hypergeometric-enriched, min_support=3, alpha=0.05"})
 pid = next(iter(ledger.predictions))
-ledger.record_verdict(pid, exp["id"], "PASSED" if convergences else "REFUTED",
-                      actual=len(convergences), error=None)
+ledger.record_verdict(pid, exp["id"], "PASSED" if sig else "REFUTED",
+                      actual=len(sig), error=None)
 
-# ── 7. DISCOVERY (strong model interprets the grounded convergence) ───────────
+# ── 7. DISCOVERY (strong model interprets only the SIGNIFICANT convergence) ────
 hr("7) 🔎 DISCOVERY")
-conv_text = "; ".join(f"{n} (shared by {len(w)}: {','.join(w)})" for n, w in convergences[:6]) or "none"
-discovery = brain(f"The traversal found these nodes each reachable from ≥3 human globin proteins: "
-                  f"{conv_text}. State the scientific discovery in 3 sentences: what does this shared "
-                  f"structure reveal about the globin family, and why is it justified by the edge PATHS "
-                  f"(provenance-pinned to UniProt/PDB) rather than by any statistical similarity?")
+conv_text = "; ".join(f"{c.node} (shared by {c.support}, enrichment p={c.p_value:.1e})"
+                      for c in sig[:6]) or "no enriched convergence"
+discovery = brain(f"An enrichment-tested traversal over human globin proteins found these "
+                  f"STATISTICALLY SIGNIFICANT shared nodes (hypergeometric p<0.05, i.e. reached far "
+                  f"more than the human-protein background would give by chance): {conv_text}. State "
+                  f"the discovery in 3 sentences: what does this reveal about the globin family, and "
+                  f"why does surviving the null model (not mere reachability) make it a real finding? "
+                  f"If the list says 'no enriched convergence', say so honestly and do not invent one.")
 print(f"  {M}🧠 strong model — the finding:{X}\n  {G}{discovery}{X}")
 
 conf = hyp.confidence(ledger)
