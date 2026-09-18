@@ -13,7 +13,7 @@ edge, and everything written is listed in the returned trace.
 
 from __future__ import annotations
 
-from .connectors import alphafold, uniprot
+from .connectors import alphafold, ensembl, pubchem, uniprot
 from .connectors.base import Transport
 from .connectors.pdb import RCSB_ENTRY_URL
 from .connectors.base import http_get
@@ -87,6 +87,26 @@ def _entry_facts(entry: dict, acc: str) -> list[tuple[str, str, str, str]]:
                     seen.add(node)
                     facts.append((protein, "has_part", node,
                                   f"{acc} domain: {desc}"))
+
+    # Curated binary protein-protein interactions (UniProt's own INTERACTION
+    # comment). The partner is whichever interactant is NOT this entry; self- and
+    # malformed-accession partners are skipped (the wheel's _add reports the skip).
+    for comment in entry.get("comments") or []:
+        if (comment or {}).get("commentType") != "INTERACTION":
+            continue
+        for interaction in comment.get("interactions") or []:
+            accs = [((interaction.get(side) or {}).get("uniProtKBAccession") or "").strip().upper()
+                    for side in ("interactantOne", "interactantTwo")]
+            partners = [a for a in accs if a and a != acc]
+            for partner in partners:
+                node = f"protein:{partner}"
+                if node in seen:
+                    continue
+                seen.add(node)
+                n_exp = interaction.get("numberOfExperiments")
+                facts.append((protein, "interacts_with", node,
+                              f"{acc} interacts with {partner}"
+                              + (f" ({n_exp} experiments)" if n_exp else "")))
     return facts
 
 
@@ -98,11 +118,31 @@ def _pdb_xrefs(entry: dict) -> list[str]:
     return ids
 
 
+# Selectable wheel libraries. "uniprot" is the wheel's root (the entry JSON
+# drives every other block) and cannot be disabled.
+WHEEL_LIBRARIES = ("uniprot", "sequence", "pdb", "alphafold")
+
+
 def extract_protein(store: Store, accession: str, *,
                     transport: Transport | None = None,
-                    max_structures: int = MAX_CONFIRMED_STRUCTURES) -> dict:
-    """Run the full wheel for one accession. Returns the extraction trace:
-    every edge written (id + triple), everything skipped, sources fetched."""
+                    max_structures: int = MAX_CONFIRMED_STRUCTURES,
+                    enabled: set[str] | None = None) -> dict:
+    """Run the wheel for one accession. Returns the extraction trace:
+    every edge written (id + triple), everything skipped, sources fetched.
+
+    ``enabled`` selects which libraries the wheel collects from (subset of
+    WHEEL_LIBRARIES; None = all). Disabled libraries are simply not
+    fetched — and the trace names them, so a narrowed run is never
+    mistaken for a full one."""
+    if enabled is None:
+        enabled = set(WHEEL_LIBRARIES)
+    unknown = enabled - set(WHEEL_LIBRARIES)
+    if unknown:
+        raise ValidationError(f"unknown wheel libraries: {sorted(unknown)}")
+    if "uniprot" not in enabled:
+        raise ValidationError("the uniprot library is the wheel's root and "
+                              "cannot be disabled")
+    disabled = sorted(set(WHEEL_LIBRARIES) - enabled)
     fetched = uniprot.fetch_entry_json(accession, transport=transport)
     acc = fetched["accession"]
     if fetched["status"] == "NOT_FOUND":
@@ -140,21 +180,22 @@ def extract_protein(store: Store, accession: str, *,
         _add(src, rel, dst, label, dict(entry_prov))
 
     # 2) Sequence (FASTA route, content-addressed).
-    seq = uniprot.fetch_sequence(store, acc, transport=transport)
-    if seq["status"] == "OK":
-        sources.append(uniprot.FASTA_URL.format(accession=acc))
-        if seq["created"]:
-            written.append({"edge_id": seq["edge_id"], "source": f"protein:{acc}",
-                            "relation": "has_sequence", "target": seq["sequence_id"]})
-        else:
-            existing += 1
+    if "sequence" in enabled:
+        seq = uniprot.fetch_sequence(store, acc, transport=transport)
+        if seq["status"] == "OK":
+            sources.append(uniprot.FASTA_URL.format(accession=acc))
+            if seq["created"]:
+                written.append({"edge_id": seq["edge_id"], "source": f"protein:{acc}",
+                                "relation": "has_sequence", "target": seq["sequence_id"]})
+            else:
+                existing += 1
 
     # 3) Experimental structures: ALL xrefs are the link graph; confirm the
     #    first max_structures against RCSB (each confirmed one becomes an edge
     #    with RCSB provenance). The cap is reported, never silent.
     xrefs = _pdb_xrefs(entry)
     confirmed = 0
-    for pdb_id in xrefs[:max_structures]:
+    for pdb_id in (xrefs[:max_structures] if "pdb" in enabled else []):
         entry_url_rcsb = RCSB_ENTRY_URL.format(pdb_id=pdb_id)
         status, body = http_get(entry_url_rcsb, transport=transport)
         sources.append(entry_url_rcsb)
@@ -173,14 +214,15 @@ def extract_protein(store: Store, accession: str, *,
         confirmed += 1
 
     # 4) Predicted structure (AlphaFold).
-    pred = alphafold.fetch_prediction(store, acc, transport=transport)
-    if pred["status"] == "OK":
-        sources.append(alphafold.PREDICTION_URL.format(accession=acc))
-        if pred["created"]:
-            written.append({"edge_id": pred["edge_id"], "source": f"protein:{acc}",
-                            "relation": "predicts_structure", "target": pred["structure_id"]})
-        else:
-            existing += 1
+    if "alphafold" in enabled:
+        pred = alphafold.fetch_prediction(store, acc, transport=transport)
+        if pred["status"] == "OK":
+            sources.append(alphafold.PREDICTION_URL.format(accession=acc))
+            if pred["created"]:
+                written.append({"edge_id": pred["edge_id"], "source": f"protein:{acc}",
+                                "relation": "predicts_structure", "target": pred["structure_id"]})
+            else:
+                existing += 1
 
     # Canonical-37 PEEL trace: root + one tile per fact currently stored for
     # this protein (both newly-written AND already-present edges belong to the
@@ -207,6 +249,224 @@ def extract_protein(store: Store, accession: str, *,
         "pdb_xrefs_total": len(xrefs),
         "pdb_confirmed": confirmed,
         "pdb_confirm_cap": max_structures,
+        "libraries_disabled": disabled,
         "sources_fetched": sources,
         "peel_trace": trace,
     }
+
+
+def _molecule_facts(props: dict, cid: int) -> list[tuple[str, str, str, str]]:
+    """(source, relation, target, label) tuples from PubChem property JSON.
+    Pure function — no I/O. Formula/InChIKey/weight are case-kept exactly as the
+    source returned them; the IUPAC name is slugged into a compound node."""
+    molecule = f"molecule:{cid}"
+    facts: list[tuple[str, str, str, str]] = []
+
+    formula = props.get("MolecularFormula")
+    if formula:
+        facts.append((molecule, "has_formula", f"formula:{formula}",
+                      f"CID {cid} molecular formula {formula}"))
+
+    iupac = props.get("IUPACName")
+    if iupac:
+        try:
+            facts.append((molecule, "has_iupac_name", f"compound:{slug(iupac)}",
+                          f"CID {cid} IUPAC name {iupac}"))
+        except ValidationError:
+            pass  # un-sluggable IUPAC string -> no edge, never a crash
+
+    inchikey = props.get("InChIKey")
+    if inchikey:
+        facts.append((molecule, "has_inchikey", f"inchikey:{inchikey}",
+                      f"CID {cid} InChIKey {inchikey}"))
+
+    weight = props.get("MolecularWeight")
+    if weight:
+        facts.append((molecule, "has_weight", f"weight:{weight}",
+                      f"CID {cid} molecular weight {weight} g/mol"))
+    return facts
+
+
+def extract_molecule(store: Store, cid: int, *, name: str | None = None,
+                     transport: Transport | None = None,
+                     synonym_cap: int = 8) -> dict:
+    """The molecule wheel: one PubChem CID -> typed chemistry facts + a PEEL
+    trace, every edge pinned to the exact pubchem URL fetched. Deterministic and
+    idempotent (re-running writes nothing new). ``name`` is a cosmetic label for
+    the trace; the facts come only from PubChem."""
+    label_name = (name or f"CID {cid}").strip()
+    fetched = pubchem.fetch_properties(cid, transport=transport)
+    if fetched["status"] == "NOT_FOUND":
+        return {"status": "NOT_FOUND", "cid": cid,
+                "edges_written": [], "sources_fetched": [fetched["url"]]}
+
+    prop_url = fetched["url"]
+    props = fetched["props"]
+    sources = [prop_url]
+    written: list[dict] = []
+    skipped: list[dict] = []
+    existing = 0
+
+    def _add(src: str, rel: str, dst: str, label: str, provenance: dict) -> None:
+        nonlocal existing
+        try:
+            edge_id, created = store.add_edge(src, rel, dst, provenance, label=label)
+        except ValidationError as e:
+            skipped.append({"source": src, "relation": rel, "target": dst,
+                            "reason": str(e)})
+            return
+        if created:
+            written.append({"edge_id": edge_id, "source": src,
+                            "relation": rel, "target": dst})
+        else:
+            existing += 1
+
+    # 1) Canonical identity facts (formula / IUPAC name / InChIKey / weight).
+    prop_prov = {"source": "pubchem", "url": prop_url,
+                 "retrieved_at": utc_now_iso(), "raw_id": str(cid)}
+    for src, rel, dst, label in _molecule_facts(props, cid):
+        _add(src, rel, dst, label, dict(prop_prov))
+
+    # 2) Synonyms (capped, reported). Each is a known_as edge to a compound node.
+    syn = pubchem.fetch_synonyms(cid, transport=transport, cap=synonym_cap)
+    synonyms_total = 0
+    if syn["status"] == "OK":
+        sources.append(syn["url"])
+        synonyms_total = len(syn["synonyms"])
+        syn_prov = {"source": "pubchem", "url": syn["url"],
+                    "retrieved_at": utc_now_iso(), "raw_id": str(cid)}
+        for name_str in syn["synonyms"]:
+            try:
+                node = f"compound:{slug(name_str)}"
+            except ValidationError:
+                continue  # un-sluggable synonym -> skip, never crash
+            _add(f"molecule:{cid}", "known_as", node,
+                 f"CID {cid} also known as {name_str}", dict(syn_prov))
+
+    # 3) Canonical-37 PEEL trace over the WHOLE evidence base for this molecule.
+    from .peel_tiles import write_molecule_extraction_trace
+    all_edges = [
+        {"edge_id": e["id"], "source": e["subject"],
+         "relation": e["relation_type"], "target": e["object"]}
+        for e in store.get_edges(source=f"molecule:{cid}")
+    ]
+    trace = write_molecule_extraction_trace(store, cid, label_name, all_edges, sources)
+
+    return {
+        "status": "OK",
+        "cid": cid,
+        "name": label_name,
+        "edges_written": written,
+        "edges_already_present": existing,
+        "skipped": skipped,
+        "synonyms_total": synonyms_total,
+        "synonym_cap": synonym_cap,
+        "sources_fetched": sources,
+        "peel_trace": trace,
+    }
+
+
+def research_molecule(store: Store, query: str, *,
+                      transport: Transport | None = None,
+                      synonym_cap: int = 8) -> dict:
+    """Native 'research this molecule' path: resolve a common NAME to a PubChem
+    CID, then run the molecule wheel. No model, no MCP — the name resolves and
+    the facts pull deterministically from the curated PubChem aggregator, or the
+    query is honestly NOT_FOUND. This is what makes `research water` return real
+    chemistry (H2O, oxidane, InChIKey, 18.015 g/mol) instead of nothing."""
+    resolved = pubchem.resolve_cid(query, transport=transport)
+    if resolved["status"] == "NOT_FOUND":
+        return {"status": "NOT_FOUND", "query": query,
+                "sources_fetched": [resolved["url"]]}
+    cid = resolved["cid"]
+    result = extract_molecule(store, cid, name=query.strip(),
+                              transport=transport, synonym_cap=synonym_cap)
+    result["query"] = query.strip()
+    result["resolved_cid"] = cid
+    result.setdefault("sources_fetched", []).insert(0, resolved["url"])
+    return result
+
+
+def extract_gene(store: Store, symbol: str, *, species: str = "homo_sapiens",
+                 transport: Transport | None = None) -> dict:
+    """The gene wheel: one gene symbol -> typed genomics facts (chromosome,
+    biotype, encoded proteins) + a PEEL trace, every edge pinned to the exact
+    ensembl URL. Deterministic and idempotent."""
+    sym = symbol.strip()
+    lookup = ensembl.lookup_symbol(sym, species=species, transport=transport)
+    if lookup["status"] == "NOT_FOUND":
+        return {"status": "NOT_FOUND", "symbol": sym,
+                "edges_written": [], "sources_fetched": [lookup["url"]]}
+
+    gene = f"gene:{sym}"
+    sources = [lookup["url"]]
+    written: list[dict] = []
+    skipped: list[dict] = []
+    existing = 0
+
+    def _add(src: str, rel: str, dst: str, label: str, provenance: dict) -> None:
+        nonlocal existing
+        try:
+            edge_id, created = store.add_edge(src, rel, dst, provenance, label=label)
+        except ValidationError as e:
+            skipped.append({"source": src, "relation": rel, "target": dst,
+                            "reason": str(e)})
+            return
+        if created:
+            written.append({"edge_id": edge_id, "source": src,
+                            "relation": rel, "target": dst})
+        else:
+            existing += 1
+
+    # 1) Gene metadata (chromosome, biotype) from the lookup record.
+    lk_prov = {"source": "ensembl", "url": lookup["url"],
+               "retrieved_at": utc_now_iso(), "raw_id": sym}
+    if lookup.get("chromosome"):
+        _add(gene, "on_chromosome", f"chromosome:{lookup['chromosome']}",
+             f"{sym} on chromosome {lookup['chromosome']}", dict(lk_prov))
+    if lookup.get("biotype"):
+        try:
+            bt = f"biotype:{slug(lookup['biotype'])}"
+            _add(gene, "has_biotype", bt, f"{sym} biotype {lookup['biotype']}", dict(lk_prov))
+        except ValidationError:
+            pass
+
+    # 2) Encoded proteins (Ensembl -> UniProt xrefs).
+    xref = ensembl.xref_uniprot(sym, species=species, transport=transport)
+    if xref["status"] == "OK" and xref["accessions"]:
+        sources.append(xref["url"])
+        xr_prov = {"source": "ensembl", "url": xref["url"],
+                   "retrieved_at": utc_now_iso(), "raw_id": sym}
+        for acc in xref["accessions"]:
+            _add(gene, "encodes", f"protein:{acc}",
+                 f"{sym} encodes {acc}", dict(xr_prov))
+
+    # 3) Canonical-37 PEEL trace over the gene's whole evidence base.
+    from .peel_tiles import write_gene_extraction_trace
+    all_edges = [
+        {"edge_id": e["id"], "source": e["subject"],
+         "relation": e["relation_type"], "target": e["object"]}
+        for e in store.get_edges(source=gene)
+    ]
+    trace = write_gene_extraction_trace(store, sym, all_edges, sources)
+
+    return {
+        "status": "OK",
+        "symbol": sym,
+        "ensembl_id": lookup.get("ensembl_id"),
+        "edges_written": written,
+        "edges_already_present": existing,
+        "skipped": skipped,
+        "sources_fetched": sources,
+        "peel_trace": trace,
+    }
+
+
+def research_gene(store: Store, symbol: str, *, species: str = "homo_sapiens",
+                  transport: Transport | None = None) -> dict:
+    """Native 'research this gene' path: a bare gene symbol -> the gene wheel.
+    No model, no MCP — Ensembl resolves the symbol and the facts pull
+    deterministically, or the symbol is honestly NOT_FOUND."""
+    result = extract_gene(store, symbol, species=species, transport=transport)
+    result["query"] = symbol.strip()
+    return result

@@ -1,0 +1,19 @@
+{
+  "model": "floor-proposer",
+  "resolver": true,
+  "n": 35,
+  "parse_rate": 0.971,
+  "kind_accuracy": 0.971,
+  "subject_accuracy": 0.962,
+  "abstain_recall": 1.0,
+  "false_abstains": 0,
+  "floor_admission_rate": 1.0,
+  "elapsed_s": 66.1,
+  "parse_failures": [
+    {
+      "prompt": "Measure the absorbance of well:D3 at 280 nm. (sample of lysozyme C)",
+      "error": "intent proposal requires predicted_outcome",
+      "reply": "{\"intent\": \"measure_sample\", \"kind\": \"intent\", \"params\": {\"target\": \"well:D3\", \"wavelength_nm\": 280}, \"subject\": \"P61626"
+    }
+  ]
+}

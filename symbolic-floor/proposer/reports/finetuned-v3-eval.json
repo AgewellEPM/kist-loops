@@ -1,0 +1,18 @@
+{
+  "model": "floor-proposer-v3",
+  "n": 27,
+  "parse_rate": 0.963,
+  "kind_accuracy": 0.593,
+  "subject_accuracy": 0.5,
+  "abstain_recall": 1.0,
+  "false_abstains": 10,
+  "floor_admission_rate": 1.0,
+  "elapsed_s": 53.2,
+  "parse_failures": [
+    {
+      "prompt": "Measure the absorbance of well:D3 at 280 nm. (sample of cytochrome c)",
+      "error": "malformed protein id: 'protein:D11308'",
+      "reply": "{\"intent\": \"measure_sample\", \"kind\": \"intent\", \"params\": {\"target\": \"well:D3\", \"wavelength_nm\": 280}, \"predicted_outcome"
+    }
+  ]
+}

@@ -18,9 +18,15 @@ ALLOWED_HOSTS = frozenset({
     "files.rcsb.org",
     "www.ebi.ac.uk",
     "search.rcsb.org",
+    # Chemistry (slice 2 — the molecule wheel). PubChem PUG-REST is the curated
+    # small-molecule aggregator; every chemistry edge pins to a pubchem URL.
+    "pubchem.ncbi.nlm.nih.gov",
+    # Genomics (slice 3 — the gene wheel). Ensembl REST is the curated gene
+    # aggregator (symbol -> gene metadata + UniProt xrefs).
+    "rest.ensembl.org",
 })
 
-PROVENANCE_SOURCES = frozenset({"uniprot", "pdb", "alphafold", "manual", "executor"})
+PROVENANCE_SOURCES = frozenset({"uniprot", "pdb", "alphafold", "pubchem", "ensembl", "manual", "executor"})
 
 # Sources whose provenance may carry url=null (their raw_id must then hold the
 # citation / executor reference instead).
@@ -51,6 +57,18 @@ _NODE_SHAPES: dict[str, re.Pattern[str]] = {
     "location":  _SLUG,
     "disease":   _SLUG,
     "domain":    _SLUG,
+    # Chemistry nodes (slice 2 — the molecule wheel, PubChem). A molecule is a
+    # PubChem CID; its canonical identifiers are case-preserving (Hill formula
+    # `CO` != `Co`; InChIKey is uppercase blocks) so they are NOT slugged.
+    "molecule":  re.compile(r"^[0-9]{1,9}$"),                       # PubChem CID
+    "formula":   re.compile(r"^[A-Za-z0-9()\[\].+-]{1,64}$"),       # Hill formula, case-kept
+    "compound":  _SLUG,                                             # chemical name / synonym
+    "inchikey":  re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$"),        # canonical InChIKey
+    "weight":    re.compile(r"^[0-9]+(?:\.[0-9]+)?$"),              # molecular weight (g/mol)
+    # Genomics nodes (slice 3 — the gene wheel, Ensembl). A gene already exists
+    # as a prefix (used by `encodes`); these are its metadata targets.
+    "chromosome": re.compile(r"^(?:[0-9]{1,2}|MT|[XY])$"),          # 1-22, X, Y, MT
+    "biotype":    _SLUG,                                            # protein_coding, lncRNA, ...
 }
 
 # relation -> (source prefix, target prefix). Directionality is FIXED.
@@ -75,7 +93,40 @@ EXTRACTION_RELATIONS: dict[str, tuple[str, str]] = {
     "has_part":   ("protein", "domain"),     # sequence domain/region
 }
 
-RELATION_DIRECTIONS: dict[str, tuple[str, str]] = {**CORE_RELATIONS, **EXTRACTION_RELATIONS}
+# Slice-2 chemistry relations (the molecule wheel). A molecule has exactly ONE
+# canonical formula / IUPAC name / InChIKey / weight (those are functional in the
+# Peel engine — a second, different value is a CONTRADICTION, the hard-veto doing
+# real chemistry work), and MANY synonyms (known_as is non-functional). The
+# functional flags live in peel/floor.py where the engine reads them.
+CHEMISTRY_RELATIONS: dict[str, tuple[str, str]] = {
+    "has_formula":    ("molecule", "formula"),    # molecular formula (functional)
+    "has_iupac_name": ("molecule", "compound"),   # preferred IUPAC name (functional)
+    "known_as":       ("molecule", "compound"),   # synonym / common name (many)
+    "has_inchikey":   ("molecule", "inchikey"),   # canonical fingerprint (functional)
+    "has_weight":     ("molecule", "weight"),     # molecular weight g/mol (functional)
+}
+
+# Slice-3 genomics relations (the gene wheel, Ensembl). A gene sits on exactly
+# ONE chromosome and has ONE biotype (functional — the hard-veto again); `encodes`
+# (gene -> protein) already lives in CORE_RELATIONS and is reused here.
+GENE_RELATIONS: dict[str, tuple[str, str]] = {
+    "on_chromosome": ("gene", "chromosome"),   # cytogenetic location (functional)
+    "has_biotype":   ("gene", "biotype"),       # protein_coding / lncRNA / ... (functional)
+}
+
+# Slice-4 mechanistic relations — the first edges BETWEEN two entities of the same
+# type (not annotation). interacts_with is a curated binary protein-protein
+# interaction from UniProt's own INTERACTION annotations (accession-native). NON
+# functional (a protein has many interactors); it's what lets the traversal find
+# mechanistic convergence (shared interactors), not just shared annotation.
+INTERACTION_RELATIONS: dict[str, tuple[str, str]] = {
+    "interacts_with": ("protein", "protein"),
+}
+
+RELATION_DIRECTIONS: dict[str, tuple[str, str]] = {
+    **CORE_RELATIONS, **EXTRACTION_RELATIONS, **CHEMISTRY_RELATIONS, **GENE_RELATIONS,
+    **INTERACTION_RELATIONS,
+}
 
 ALLOWED_RELATIONS = frozenset(RELATION_DIRECTIONS)
 

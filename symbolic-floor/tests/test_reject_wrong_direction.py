@@ -32,9 +32,27 @@ def test_direction_enforced_per_relation(store):
         "located_in":         ("location:cytoplasm", "protein:P12345"),
         "affects":            ("disease:alpha_thalassemia", "protein:P12345"),
         "has_part":           ("domain:globin", "protein:P12345"),
+        # slice-2 chemistry relations (molecule wheel) — reversed = target-first.
+        "has_formula":        ("formula:H2O", "molecule:962"),
+        "has_iupac_name":     ("compound:oxidane", "molecule:962"),
+        "known_as":           ("compound:water", "molecule:962"),
+        "has_inchikey":       ("inchikey:XLYOFNOQVPJJNP-UHFFFAOYSA-N", "molecule:962"),
+        "has_weight":         ("weight:18.015", "molecule:962"),
+        # slice-3 genomics relations (gene wheel) — reversed = target-first.
+        "on_chromosome":      ("chromosome:11", "gene:HBB"),
+        "has_biotype":        ("biotype:protein_coding", "gene:HBB"),
     }
-    assert set(reversed_cases) == set(RELATION_DIRECTIONS), "cover every relation"
+    # Symmetric-typed relations (same prefix on both ends) have NO reversible
+    # direction to enforce — they're excluded from the reversed-edge coverage but
+    # pinned as a valid edge below, so the set-equality still names every relation.
+    symmetric = {r for r, (s, d) in RELATION_DIRECTIONS.items() if s == d}
+    assert symmetric == {"interacts_with"}, "only interacts_with is symmetric-typed"
+    assert set(reversed_cases) | symmetric == set(RELATION_DIRECTIONS), "cover every relation"
     for relation, (src, dst) in reversed_cases.items():
         with pytest.raises(ValidationError, match="wrong direction"):
             store.add_edge(src, relation, dst, provenance=manual_provenance())
     assert store.get_edges() == []
+    # interacts_with: both endpoints are proteins, so it's accepted either way.
+    store.add_edge("protein:P68871", "interacts_with", "protein:P69905",
+                   provenance=manual_provenance())
+    assert len(store.get_edges(relation="interacts_with")) == 1

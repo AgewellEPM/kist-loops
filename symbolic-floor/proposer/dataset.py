@@ -41,18 +41,56 @@ KNOWN_PROTEINS: dict[str, str] = {
 EXTRA_ACCESSIONS = ["Q5VSL9", "O75592", "P38398", "Q9Y6K9", "P42858"]
 
 FICTIONAL_NAMES = ["glorbulin-7", "xenoprotein alpha", "the memory protein",
-                   "flurbozyme", "protein X-99"]
+                   "flurbozyme", "protein X-99",
+                   # v2 abstain-heavy expansion — abstain_recall regressed 0.5->0.4
+                   # with only 5 fictional names; widen the class.
+                   "zorbinase", "quantumglobin", "krellase", "phantomase B",
+                   "vexoglobin", "mystozyme", "darkozyme-12",
+                   "protein omega-null", "gluonoprotein", "fablezyme"]
+
+# Real-sounding cousins of curated entries that are NOT in KNOWN_PROTEINS.
+# The dangerous failure mode: the model emits the curated cousin's accession
+# (hemoglobin gamma != P69905). Abstention is provably right — any accession
+# the model could produce from the curated table is wrong for these names.
+NEAR_MISS_NAMES = ["hemoglobin subunit beta", "hemoglobin gamma",
+                   "p63", "p73",
+                   "insulin receptor", "proinsulin",
+                   "bovine serum albumin", "lysozyme G",
+                   "cytochrome b", "cytochrome c oxidase",
+                   "ubiquitin ligase", "myoglobin II"]
 
 OFF_DOMAIN = ["What is the capital of France?",
               "Write me a poem about the sea.",
               "How do I fix a segfault in C?",
               "What's the best pizza topping?",
-              "Summarize the French Revolution."]
+              "Summarize the French Revolution.",
+              "What's the weather like tomorrow?",
+              "Should I buy tech stocks right now?",
+              "Translate 'good morning' into Japanese.",
+              "Give me a recipe for sourdough bread.",
+              "Why is my JavaScript promise never resolving?",
+              "Plan me a three-day workout split.",
+              "Recommend a movie for tonight.",
+              "What is the capital of Japan?",
+              "Explain SQL injection to a beginner.",
+              "What should I get my brother for his birthday?"]
 
 AMBIGUOUS = ["verify the structure of that kinase we discussed",
              "check the protein from yesterday's meeting",
              "run the usual on the new sample protein",
-             "validate the enzyme everyone is talking about"]
+             "validate the enzyme everyone is talking about",
+             "verify that protein",
+             "check the one from the paper",
+             "measure the sample on the bench",
+             "run structural validation on the target we chose",
+             "verify the enzyme from last week's harvest",
+             "check our usual protein"]
+
+# Identifier-shaped strings that are NOT valid UniProt accessions (too short,
+# RefSeq-style, bare numbers). A claim/extract with these as subject would be
+# rejected by validate_node_id — the only admissible reply is abstention.
+MALFORMED_ACCESSIONS = ["P1234", "XP_004321", "12345",
+                        "NM_000518", "PROT-77", "Q12"]
 
 
 def _claim(acc: str, expect: str) -> str:
@@ -81,6 +119,15 @@ _CLAIM_TEMPLATES = [
     "Is the AlphaFold prediction for {name} backed by an experimental structure?",
     "Check whether {name}'s predicted and experimental structures agree.",
     "Has {name} been structurally validated?",
+]
+
+# Contrast pairs for the malformed-accession abstains: the same
+# "accession <id>" surface form with VALID curated accessions must stay a
+# claim, or the word "accession" itself becomes an abstain marker (observed
+# in the v2 run: false abstains on curated names and bare valid accessions).
+_ACCESSION_CLAIM_TEMPLATES = [
+    "Verify the structural consistency of accession {acc}.",
+    "Has accession {acc} been structurally validated?",
 ]
 
 _EXTRACT_TEMPLATES = [
@@ -118,12 +165,14 @@ def generate_pairs(store: Store, *, seed: int = 20260917) -> list[dict]:
                     "SELECT DISTINCT subject FROM typed_relations "
                     "WHERE subject LIKE 'protein:%'").fetchall()}
 
-    # 1) claim pairs — names AND bare accessions.
+    # 1) claim pairs — names, bare accessions, and "accession <id>" phrasing.
     for name, acc in sorted(KNOWN_PROTEINS.items()):
+        expect = "an experimental structure and a prediction exist for the same accession"
         for tpl in _CLAIM_TEMPLATES:
-            expect = "an experimental structure and a prediction exist for the same accession"
             pairs.append((tpl.format(name=name), _claim(acc, expect)))
             pairs.append((tpl.format(name=acc), _claim(acc, expect)))
+        for tpl in _ACCESSION_CLAIM_TEMPLATES:
+            pairs.append((tpl.format(acc=acc), _claim(acc, expect)))
 
     # 2) extract pairs — accessions the floor does NOT hold yet (checked live
     #    against this store so the pair is witnessed-correct at build time).
@@ -164,15 +213,24 @@ def generate_pairs(store: Store, *, seed: int = 20260917) -> list[dict]:
                         "sample held at temperature without degradation"),
             ))
 
-    # 4) abstain pairs — fictional, off-domain, ambiguous.
+    # 4) abstain pairs — fictional, near-miss, off-domain, ambiguous, malformed.
     for name in FICTIONAL_NAMES:
         for tpl in _CLAIM_TEMPLATES[:3]:
             pairs.append((tpl.format(name=name),
                           _abstain(f"no verified UniProt accession is known for '{name}'")))
+    # Two templates, not three: the v2 run showed near-miss density bleeding
+    # into false abstains on the curated cousins themselves.
+    for name in NEAR_MISS_NAMES:
+        for tpl in _CLAIM_TEMPLATES[:2]:
+            pairs.append((tpl.format(name=name),
+                          _abstain(f"no verified UniProt accession is known for '{name}'; guessing a related protein's accession would be wrong")))
     for q in OFF_DOMAIN:
         pairs.append((q, _abstain("request is unrelated to protein structure verification")))
     for q in AMBIGUOUS:
         pairs.append((q, _abstain("the protein reference is ambiguous; a specific accession is required")))
+    for acc in MALFORMED_ACCESSIONS:
+        pairs.append((f"Verify the structural consistency of accession {acc}.",
+                      _abstain(f"'{acc}' is not a valid UniProt accession")))
 
     # Sanity: every assistant output must parse under the SAME grammar the
     # floor enforces — the dataset cannot teach anything the gate would reject.
@@ -188,11 +246,20 @@ def generate_pairs(store: Store, *, seed: int = 20260917) -> list[dict]:
 
 
 def write_dataset(store: Store, out_dir: str | Path, *, seed: int = 20260917,
-                  valid_fraction: float = 0.1) -> dict:
-    """train.jsonl / valid.jsonl / eval.jsonl (eval = held out entirely)."""
+                  valid_fraction: float = 0.1,
+                  exclude_eval: str | Path | None = None) -> dict:
+    """train.jsonl / valid.jsonl / eval.jsonl (eval = held out entirely).
+
+    exclude_eval: path to a prior eval.jsonl whose user prompts must not
+    appear anywhere in this dataset — keeps a cross-version gating eval
+    uncontaminated (v2 trains while v1's eval stays the yardstick)."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     rows = generate_pairs(store, seed=seed)
+    if exclude_eval:
+        held = {json.loads(line)["messages"][1]["content"]
+                for line in Path(exclude_eval).read_text().splitlines()}
+        rows = [r for r in rows if r["messages"][1]["content"] not in held]
     n_eval = max(8, int(len(rows) * 0.15))
     n_valid = max(8, int(len(rows) * valid_fraction))
     eval_rows, valid_rows, train_rows = (rows[:n_eval],

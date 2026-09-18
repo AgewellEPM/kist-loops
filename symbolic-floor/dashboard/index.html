@@ -2,120 +2,114 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Floor Dashboard — evidence, sources, graph</title>
-<style>
-  :root {
-    --bg: #0e1116; --panel: #161b23; --line: #232b36; --ink: #dbe2ea;
-    --dim: #7d8894; --accent: #f5a623; --ok: #4cc38a; --bad: #e5534b;
-    --protein: #f5a623; --gene: #4cc38a; --disease: #e5534b;
-    --structure: #58a6ff; --sequence: #b083f0; --organism: #d29922;
-    --location: #39c5cf; --domain: #ff9bce; --claim: #8b949e;
-  }
-  * { box-sizing: border-box; margin: 0; }
-  body { background: var(--bg); color: var(--ink);
-         font: 14px/1.45 -apple-system, "SF Pro Text", sans-serif; height: 100vh;
-         display: grid; grid-template-rows: auto 1fr;
-         grid-template-columns: 320px 1fr 380px;
-         grid-template-areas: "top top top" "left graph right"; }
-  header { grid-area: top; display: flex; align-items: baseline; gap: 14px;
-           padding: 10px 16px; border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 16px; font-weight: 700; }
-  header h1 span { color: var(--accent); }
-  header .sub { color: var(--dim); font-size: 12px; }
-  select { background: var(--panel); color: var(--ink); border: 1px solid var(--line);
-           border-radius: 6px; padding: 4px 8px; font-size: 13px; }
-  aside, section.detail { overflow-y: auto; padding: 14px; }
-  aside { grid-area: left; border-right: 1px solid var(--line); }
-  section.detail { grid-area: right; border-left: 1px solid var(--line); }
-  .card { background: var(--panel); border: 1px solid var(--line);
-          border-radius: 10px; padding: 12px; margin-bottom: 12px; }
-  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
-             color: var(--dim); margin-bottom: 8px; }
-  .kv { display: flex; justify-content: space-between; padding: 2px 0; font-size: 13px; }
-  .kv b { font-variant-numeric: tabular-nums; }
-  .src { padding: 8px 0; border-top: 1px solid var(--line); }
-  .src:first-of-type { border-top: 0; }
-  .src .name { font-weight: 700; }
-  .src .host, .src .when { color: var(--dim); font-size: 12px; }
-  .dbrow { cursor: pointer; padding: 6px 8px; border-radius: 6px; }
-  .dbrow:hover { background: #1c232d; }
-  .dbrow.active { background: #232d3a; outline: 1px solid var(--accent); }
-  .dbrow .path { color: var(--dim); font-size: 11px; word-break: break-all; }
-  main { grid-area: graph; position: relative; }
-  canvas { display: block; width: 100%; height: 100%; }
-  #legend { position: absolute; left: 12px; bottom: 12px; background: #161b23cc;
-            border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
-            font-size: 12px; display: flex; flex-wrap: wrap; gap: 8px; max-width: 60%; }
-  .lg { display: flex; align-items: center; gap: 5px; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; }
-  .edge-row { border-top: 1px solid var(--line); padding: 7px 0; font-size: 13px; }
-  .edge-row .rel { color: var(--accent); }
-  .edge-row a { color: var(--structure); font-size: 12px; word-break: break-all;
-                text-decoration: none; }
-  .edge-row a:hover { text-decoration: underline; }
-  .edge-row .when { color: var(--dim); font-size: 11px; }
-  .tile { border-left: 3px solid var(--accent); padding: 4px 8px; margin: 6px 0;
-          background: #1a212b; border-radius: 0 6px 6px 0; font-size: 13px; }
-  .empty { color: var(--dim); font-style: italic; }
-  .trunc { color: var(--bad); font-size: 12px; }
-  .tabs { display: flex; gap: 4px; margin-left: 8px; }
-  .tab { padding: 4px 12px; border-radius: 6px 6px 0 0; cursor: pointer;
-         color: var(--dim); border: 1px solid transparent; background: none;
-         font: inherit; }
-  .tab.active { color: var(--ink); background: var(--panel);
-                border-color: var(--line); border-bottom-color: var(--panel); }
-  input[type=text], input[type=date] { background: var(--panel); color: var(--ink);
-    border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 13px; }
-  #nodesearch { width: 210px; }
-  #ledgerview { grid-area: graph; overflow-y: auto; padding: 14px; display: none; }
-  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
-  .chip { display: inline-block; background: #1c232d; border: 1px solid var(--line);
-          border-radius: 12px; padding: 2px 10px; font-size: 12px; cursor: pointer; margin: 2px; }
-  .chip.on { border-color: var(--accent); color: var(--accent); }
-  table.ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
-  table.ledger th { text-align: left; color: var(--dim); font-size: 11px;
-    text-transform: uppercase; letter-spacing: .06em; padding: 6px 8px;
-    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
-  table.ledger td { padding: 6px 8px; border-bottom: 1px solid var(--line);
-    vertical-align: top; }
-  table.ledger td.when { white-space: nowrap; font-variant-numeric: tabular-nums;
-    color: var(--dim); }
-  .kind { font-size: 11px; padding: 1px 7px; border-radius: 9px; font-weight: 700; }
-  .kind-edge { background: #2b3f2f; color: var(--ok); }
-  .kind-claim { background: #3d3427; color: var(--accent); }
-  .kind-node { background: #253244; color: var(--structure); }
-  .kind-sequence { background: #362a44; color: var(--sequence); }
-  .kind-tile { background: #2a2f36; color: var(--dim); }
-  td a { color: var(--structure); text-decoration: none; font-size: 12px; word-break: break-all; }
-  td a:hover { text-decoration: underline; }
-  .btn { background: var(--panel); border: 1px solid var(--line); color: var(--ink);
-         border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
-  .btn:hover { border-color: var(--accent); }
-</style>
+<title>Lois — the Jeeves system, online</title>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+
 <header>
-  <h1>🧬 <span>floor</span> dashboard</h1>
-  <span class="sub">read-only · every edge carries its receipt</span>
-  <select id="dbsel"></select>
+  <h1>🧬 <span>lois</span> dashboard</h1>
+  <span class="sub">every sentence walks back to a receipt</span>
+  <select id="dbsel" title="minds — one floor DB each"></select>
   <nav class="tabs">
     <button class="tab active" id="tab-graph">Graph</button>
     <button class="tab" id="tab-ledger">Ledger</button>
-    <button class="tab" id="tab-harvest">Harvest</button>
-    <button class="tab" id="tab-research">Research</button>
     <button class="tab" id="tab-notebook">Notebook</button>
+    <button class="tab" id="tab-scientist">Scientist</button>
+    <button class="tab" id="tab-vision">Vision</button>
+    <button class="tab" id="tab-calendar">Calendar</button>
+    <button class="tab" id="tab-resolver">Resolver</button>
   </nav>
   <input type="text" id="nodesearch" placeholder="find node… (e.g. P69905)" list="nodelist">
   <datalist id="nodelist"></datalist>
   <span class="sub" id="dbstat"></span>
 </header>
 
-<aside>
-  <div class="card"><h2>Where the data is</h2><div id="dbs"></div></div>
+<!-- column 1: conversations (Jeeves Chats) -->
+<aside id="chatscol">
+  <div class="colhead">💬 Chats <button class="btn" id="newchat">+ New</button></div>
+  <div class="pad" style="padding-top:8px">
+    <input type="text" id="chatsearch" placeholder="🔍 Search chats…" style="width:100%">
+    <button class="btn wide" id="organize">✏️ Organize</button>
+  </div>
+  <div id="chatlist"></div>
+</aside>
+
+<!-- column 2: PEEL (Harvest / Research / Trace) + Knowledge Categories -->
+<aside id="peelcol">
+  <div class="colhead">🧠 PEEL
+    <span>
+      <button class="btn small" id="learnings">🧠 Learnings</button>
+      <button class="btn small" id="rulesbtn">📜 Rules</button>
+    </span>
+  </div>
+  <div class="pad" style="padding-top:8px">
+    <div class="sub">Click any tile card to inspect its dataset and lineage.</div>
+    <nav class="tabs small" style="margin-top:6px">
+      <button class="tab active" id="ptab-harvest">Harvest</button>
+      <button class="tab" id="ptab-research">Research</button>
+      <button class="tab" id="ptab-trace">Trace</button>
+    </nav>
+  </div>
+  <div id="pharvest">
+    <div class="pad">
+      <div class="green">Harvested tiles</div>
+      <div class="sub">Click any tile to inspect its full text, fields and source.</div>
+      <button class="btn" id="latestharvest">Latest harvest</button>
+      <button class="btn" id="refreshharvest">Refresh</button>
+    </div>
+    <div id="htopics" class="pad"></div>
+    <div id="htiles" class="pad"></div>
+  </div>
+  <div id="presearch" style="display:none">
+    <div class="sub pad">Your request goes to the local proposer. Extracts pull
+      provenance-pinned evidence, claims get floor verdicts — the model never
+      writes the graph.</div>
+    <div class="pad">
+      <input type="text" id="rq" placeholder="e.g. Pull the available evidence for P68871.">
+      <button class="btn wide" id="rgo">Propose through the gate</button>
+    </div>
+    <div id="rout" class="pad"></div>
+  </div>
+  <div id="ptrace" style="display:none">
+    <div class="sub pad">The canonical trace: every tile the wheel wrote for a
+      subject, in turn order, with its sources.</div>
+    <div id="tsubjects" class="pad"></div>
+    <div id="ttrace" class="pad"></div>
+  </div>
+
+  <div class="colhead">📚 Knowledge Categories</div>
+  <div class="pad" style="padding-top:8px">
+    <input type="text" id="catsearch" placeholder="🔍 Search categories…" style="width:100%">
+    <div style="margin-top:6px">
+      <button class="btn" id="exportbtn">📤 Export</button>
+      <button class="btn" id="importbtn">📥 Import</button>
+    </div>
+    <div id="readypill" class="pill">checking…</div>
+    <button class="btn wide accentbtn" id="newmind">🧠 Create New Mind</button>
+  </div>
+  <div class="card"><h2>Research libraries — collect from</h2>
+    <div class="sub" style="margin-bottom:6px">Check which archives the wheel
+      pulls from. A narrowed run says so in its trace.</div>
+    <div id="libbox"></div></div>
+  <div class="card"><h2>Minds — where the data is</h2><div id="dbs"></div></div>
   <div class="card"><h2>Where it was collected from</h2><div id="sources"></div></div>
 </aside>
 
-<main id="graphview"><canvas id="cv"></canvas><div id="legend"></div></main>
+<!-- center: graph / ledger / notebook -->
+<main id="graphview"><canvas id="cv"></canvas><div id="legend"></div>
+  <div id="graphctl">
+    <select id="gstyle" title="graph style">
+      <option value="orbit">🌌 3D orbit</option>
+      <option value="helix">🧬 helix</option>
+      <option value="sphere">🪐 sphere</option>
+      <option value="rings">🎯 rings</option>
+      <option value="flat">▦ classic 2D</option>
+    </select>
+    <button class="btn small" id="gspin" title="auto-spin on/off">🌀</button>
+    <button class="btn small" id="gfit" title="fit to view (also dbl-click)">⤢</button>
+  </div>
+</main>
 
 <div id="ledgerview">
   <div class="filters">
@@ -137,424 +131,95 @@
   <div style="margin:10px 0"><button class="btn" id="lmore">Load more</button></div>
 </div>
 
-<div id="harvestview" style="grid-area:graph; overflow-y:auto; padding:14px; display:none">
-  <div class="filters"><span class="sub">topics — click to open its trace</span></div>
-  <div id="htopics"></div>
-  <div id="hsources"></div>
-  <div id="htiles"></div>
-</div>
-
-<div id="researchview" style="grid-area:graph; overflow-y:auto; padding:14px; display:none">
-  <div class="card" style="max-width:760px">
-    <h2>Research — proposer → gate → floor</h2>
-    <p class="sub" style="margin-bottom:8px">Your request goes to the local
-      <b>floor-proposer</b> model. Its reply is admitted only through the
-      gate: extracts pull provenance-pinned evidence, claims get floor
-      verdicts, everything else is rejected or abstained — the model never
-      writes the graph.</p>
-    <div class="filters">
-      <input type="text" id="rq" style="flex:1"
-             placeholder="e.g. Pull the available evidence for P68871 into the floor.">
-      <button class="btn" id="rgo">Propose</button>
-    </div>
-    <div id="rout"><span class="empty">no proposals yet this session</span></div>
-  </div>
-</div>
-
-<div id="notebookview" style="grid-area:graph; overflow-y:auto; padding:14px; display:none">
+<div id="notebookview">
   <div class="filters">
-    <span class="sub">the system's own journal — what it saw, found, learned
-      (live, auto-refreshes)</span>
+    <span class="sub">the system's own journal — live</span>
     <span style="flex:1"></span><span id="nbkinds"></span>
   </div>
   <div id="nbentries"></div>
 </div>
 
-<section class="detail">
-  <div class="card"><h2>Node</h2><div id="node"><span class="empty">click a node in the graph</span></div></div>
+<div id="scientistview">
+  <div class="filters">
+    <span class="sub">the scientist loop — terminal runs feed here; every ledger is
+      chain-verified before display</span>
+    <span style="flex:1"></span>
+    <button class="btn" id="scirefresh">↻ Refresh</button>
+  </div>
+  <div id="sciruns"></div>
+  <div id="scidetail"></div>
+</div>
+
+<div id="visionview">
+  <div class="filters stagebar">
+    <span class="sub">the vision stage — every generated or illustrative view
+      banners itself; real data names its source</span>
+    <span style="flex:1"></span>
+    <nav class="tabs small">
+      <button class="tab active" id="vstage-journey">🎥 Cell journey</button>
+      <button class="tab" id="vstage-molecule">🧪 Molecule builder</button>
+      <button class="tab" id="vstage-mri">🩻 MRI volume</button>
+    </nav>
+  </div>
+  <div id="visionstage"></div>
+</div>
+
+<div id="calendarview">
+  <div id="calendarlane"></div>
+</div>
+
+<!-- Resolver: the anti-hallucination layer, live in the browser (no model) -->
+<div id="resolverview"></div>
+
+<!-- column 4: Chat with Lois -->
+<section id="chatcol">
+  <div class="colhead">Chat with Lois
+    <select id="modelsel" title="model for the gate lane"></select>
+  </div>
+  <div id="chatlog"><div class="floorbubble">
+    🧬 Grounded chat. Ask what Lois knows (“what do you know about
+    P69905”), ask it to pull evidence, or ask for a verdict. Replies come
+    only from stored facts or the gate — never free prose. Clicking a graph
+    node or a tile card pops its inspection out.
+  </div></div>
+  <div id="toolrow">
+    <button class="tool" id="t-new" title="New conversation">➕</button>
+    <button class="tool" id="t-history" title="Conversation history">🕰</button>
+    <button class="tool" id="t-run" title="Run a research session (live in Notebook)">▶</button>
+    <button class="tool" id="t-report" title="Session report">📖</button>
+    <button class="tool" id="t-diag" title="Diagnostics — integrity invariants">🔧</button>
+    <button class="tool" id="t-teach" title="Teach — add a cited manual edge">✏️</button>
+    <button class="tool" id="t-mold" title="Mold — extend the runtime with a new capability">🧩</button>
+    <button class="tool" id="t-hypo" title="Hypothesis — claim through the gate">🧪</button>
+    <button class="tool" id="t-doc" title="Document scan — find accessions in pasted text">📄</button>
+    <button class="tool" id="t-learn" title="Learnings — what the system has learned">🧠</button>
+    <button class="tool" id="t-rules" title="Rules — the floor's law">📜</button>
+    <button class="tool" id="t-sources" title="Sources — where the data came from">🌐</button>
+    <button class="tool" id="t-notebook" title="Notebook — live journal">📓</button>
+    <button class="tool" id="t-raw" title="Raw data of the last reply">&lt;/&gt;</button>
+    <button class="tool" id="t-rec" title="Export this conversation">⏺</button>
+    <button class="tool" id="t-focus" title="Focus mode — graph only">▯▯</button>
+    <button class="tool" id="t-theme" title="Toggle theme">🎨</button>
+    <button class="tool" id="t-find" title="Find a node">🔍</button>
+  </div>
+  <div id="chatbar">
+    <input type="text" id="cmsg" placeholder="Message Lois">
+    <button class="btn" id="csend">➤</button>
+  </div>
 </section>
 
-<script>
-"use strict";
-const $ = id => document.getElementById(id);
-const api = (path, params) =>
-  fetch(path + "?" + new URLSearchParams(params)).then(r => r.json());
+<!-- popout (Jeeves inspector) -->
+<div id="modal" style="display:none">
+  <div id="modalbody"></div>
+</div>
 
-const COLORS = { protein: "#f5a623", gene: "#4cc38a", disease: "#e5534b",
-  structure: "#58a6ff", sequence: "#b083f0", organism: "#d29922",
-  location: "#39c5cf", domain: "#ff9bce", claim: "#8b949e", peel: "#8b949e" };
-const color = t => COLORS[t] || "#8b949e";
-const fmtBytes = n => n > 1048576 ? (n/1048576).toFixed(1)+" MB" : (n/1024).toFixed(0)+" KB";
-const short = id => { const [t, v] = id.split(/:(.*)/s);
-  return v && v.length > 22 ? t + ":" + v.slice(0, 8) + "…" + v.slice(-6) : id; };
-
-let state = { db: null, nodes: [], edges: [], sel: null, drag: null };
-
-/* ---------- left panel ---------- */
-async function loadDbs() {
-  const data = await api("/api/dbs", {});
-  const box = $("dbs"), sel = $("dbsel");
-  box.innerHTML = ""; sel.innerHTML = "";
-  for (const db of data.dbs) {
-    sel.add(new Option(db.name, db.name));
-    const row = document.createElement("div");
-    row.className = "dbrow"; row.dataset.name = db.name;
-    row.innerHTML = `<b>${db.name}</b> · ${db.edges} edges · ${db.nodes} nodes ·
-      ${db.tiles} tiles · ${fmtBytes(db.size_bytes)}
-      <div class="path">${db.path}</div>`;
-    row.onclick = () => pick(db.name);
-    box.appendChild(row);
-  }
-  const want = new URLSearchParams(location.search).get("db");
-  if (data.dbs.length)
-    pick(want && data.dbs.some(d => d.name === want) ? want
-         : (state.db || data.dbs[0].name));
-  else box.innerHTML = '<span class="empty">no floor DBs found</span>';
-}
-
-async function pick(name) {
-  state.db = name; $("dbsel").value = name;
-  document.querySelectorAll(".dbrow").forEach(r =>
-    r.classList.toggle("active", r.dataset.name === name));
-  const [srcs, g] = await Promise.all([
-    api("/api/sources", { db: name }), api("/api/graph", { db: name })]);
-  renderSources(srcs); startGraph(g);
-  $("dbstat").textContent = `${g.edges.length} edges` +
-    (g.truncated ? ` (capped at ${g.edge_cap})` : "");
-  $("node").innerHTML = '<span class="empty">click a node in the graph</span>';
-  if ($("tab-ledger").classList.contains("active")) runLedger(true);
-  if ($("tab-harvest").classList.contains("active")) loadHarvest("");
-  const deep = new URLSearchParams(location.search).get("node");
-  if (deep) {
-    const hit = state.nodes.find(n => n.id === deep);
-    if (hit) { state.sel = hit; showNode(hit.id); }
-  }
-}
-
-function renderSources(data) {
-  const box = $("sources");
-  if (!data.sources.length) { box.innerHTML = '<span class="empty">no provenance rows</span>'; return; }
-  box.innerHTML = data.sources.map(s => `
-    <div class="src">
-      <div class="name">${s.source} <b style="float:right">${s.edges}</b></div>
-      <div class="host">${Object.entries(s.hosts).map(([h,c]) => `${h} (${c})`).join(" · ")}</div>
-      <div class="when">${(s.first_retrieved||"").slice(0,19)} → ${(s.last_retrieved||"").slice(0,19)}</div>
-    </div>`).join("");
-}
-
-/* ---------- graph: tiny force layout, no deps ---------- */
-const cv = $("cv"), ctx = cv.getContext("2d");
-function startGraph(g) {
-  const idx = new Map();
-  state.nodes = g.nodes.map((n, i) => { idx.set(n.id, i); return {
-    ...n, x: Math.cos(i*2.399)*(120+8*Math.sqrt(i)) ,
-    y: Math.sin(i*2.399)*(120+8*Math.sqrt(i)), vx: 0, vy: 0 }; });
-  state.edges = g.edges.map(e => ({ ...e, si: idx.get(e.source), ti: idx.get(e.target) }));
-  const degree = new Array(state.nodes.length).fill(0);
-  state.edges.forEach(e => { degree[e.si]++; degree[e.ti]++; });
-  state.nodes.forEach((n, i) => n.r = 5 + Math.min(11, Math.sqrt(degree[i]) * 2.2));
-  state.sel = null;
-  const types = [...new Set(state.nodes.map(n => n.type))];
-  $("legend").innerHTML = types.map(t =>
-    `<span class="lg"><span class="dot" style="background:${color(t)}"></span>${t}</span>`).join("");
-}
-
-function step() {
-  const N = state.nodes, E = state.edges;
-  for (let i = 0; i < N.length; i++) for (let j = i+1; j < N.length; j++) {
-    const a = N[i], b = N[j];
-    let dx = b.x - a.x, dy = b.y - a.y;
-    let d2 = dx*dx + dy*dy || 1;
-    if (d2 < 40000) { const f = 900 / d2;
-      const d = Math.sqrt(d2); dx /= d; dy /= d;
-      a.vx -= dx*f; a.vy -= dy*f; b.vx += dx*f; b.vy += dy*f; }
-  }
-  for (const e of E) {
-    const a = N[e.si], b = N[e.ti];
-    if (!a || !b) continue;
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const d = Math.sqrt(dx*dx + dy*dy) || 1, f = (d - 90) * 0.004;
-    a.vx += dx/d*f; a.vy += dy/d*f; b.vx -= dx/d*f; b.vy -= dy/d*f;
-  }
-  for (const n of N) {
-    if (n === state.drag) continue;
-    n.vx *= 0.85; n.vy *= 0.85;
-    n.x += n.vx; n.y += n.vy;
-    n.x -= n.x * 0.002; n.y -= n.y * 0.002;   // gentle centering
-  }
-}
-
-function draw() {
-  const w = cv.clientWidth, h = cv.clientHeight;
-  if (cv.width !== w*devicePixelRatio) { cv.width = w*devicePixelRatio; cv.height = h*devicePixelRatio; }
-  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  ctx.save(); ctx.translate(w/2, h/2);
-  ctx.strokeStyle = "#2c3644"; ctx.lineWidth = 1;
-  for (const e of state.edges) {
-    const a = state.nodes[e.si], b = state.nodes[e.ti];
-    if (!a || !b) continue;
-    const hot = state.sel && (a === state.sel || b === state.sel);
-    ctx.strokeStyle = hot ? "#f5a623" : "#2c3644";
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-  }
-  for (const n of state.nodes) {
-    ctx.fillStyle = color(n.type);
-    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7); ctx.fill();
-    if (n === state.sel) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
-    if (n.r > 7 || n === state.sel) {
-      ctx.fillStyle = "#dbe2ea"; ctx.font = "11px sans-serif";
-      ctx.fillText(short(n.id), n.x + n.r + 3, n.y + 3);
-    }
-  }
-  ctx.restore();
-  step(); requestAnimationFrame(draw);
-}
-requestAnimationFrame(draw);
-
-function nodeAt(mx, my) {
-  const w = cv.clientWidth, h = cv.clientHeight;
-  const x = mx - w/2, y = my - h/2;
-  for (let i = state.nodes.length - 1; i >= 0; i--) {
-    const n = state.nodes[i], dx = n.x - x, dy = n.y - y;
-    if (dx*dx + dy*dy <= (n.r+3)*(n.r+3)) return n;
-  }
-  return null;
-}
-cv.addEventListener("mousedown", ev => {
-  const r = cv.getBoundingClientRect();
-  const n = nodeAt(ev.clientX - r.left, ev.clientY - r.top);
-  if (n) { state.drag = n; }
-});
-cv.addEventListener("mousemove", ev => {
-  const r = cv.getBoundingClientRect();
-  if (state.drag) {
-    state.drag.x = ev.clientX - r.left - cv.clientWidth/2;
-    state.drag.y = ev.clientY - r.top - cv.clientHeight/2;
-  }
-  cv.style.cursor = nodeAt(ev.clientX - r.left, ev.clientY - r.top) ? "pointer" : "default";
-});
-window.addEventListener("mouseup", ev => {
-  const r = cv.getBoundingClientRect();
-  const n = nodeAt(ev.clientX - r.left, ev.clientY - r.top);
-  if (n && n === state.drag) { state.sel = n; showNode(n.id); }
-  state.drag = null;
-});
-
-/* ---------- right panel ---------- */
-async function showNode(id) {
-  const d = await api("/api/node", { db: state.db, id });
-  const edgeHtml = (e, dir) => {
-    const other = dir === "out" ? e.target : e.source;
-    const p = e.provenance;
-    return `<div class="edge-row">
-      ${dir === "out" ? "→" : "←"} <span class="rel">${e.relation}</span> ${short(other)}
-      ${p ? `<div><a href="${p.url}" target="_blank" rel="noopener">${p.url}</a></div>
-             <div class="when">${p.source} · ${(p.retrieved_at||"").slice(0,19)} · edge ${e.id.slice(0,8)}</div>`
-          : `<div class="when">no provenance row</div>`}
-    </div>`;
-  };
-  $("node").innerHTML = `<b>${d.node}</b>` +
-    (d.outgoing.length + d.incoming.length
-      ? d.outgoing.map(e => edgeHtml(e, "out")).join("") +
-        d.incoming.map(e => edgeHtml(e, "in")).join("")
-      : '<div class="empty">no edges</div>') +
-    (d.tiles.length
-      ? `<h2 style="margin-top:10px;font-size:11px;color:var(--dim)">PEEL TRACE TILES</h2>` +
-        d.tiles.map(t => `<div class="tile">${t.emoji || ""} ${t.sentence}</div>`).join("")
-      : "");
-}
-
-$("dbsel").onchange = ev => pick(ev.target.value);
-
-/* ---------- tabs ---------- */
-const TABS = ["graph", "ledger", "harvest", "research", "notebook"];
-function showTab(name) {
-  for (const t of TABS) {
-    $("tab-" + t).classList.toggle("active", t === name);
-    $(t + "view").style.display =
-      t === name ? (t === "graph" ? "" : "block") : "none";
-  }
-  if (name === "ledger") runLedger(true);
-  if (name === "harvest") loadHarvest("");
-  if (name === "notebook") loadNotebook();
-}
-for (const t of TABS) $("tab-" + t).onclick = () => showTab(t);
-const wantTab = location.hash.slice(1);
-if (TABS.includes(wantTab) && wantTab !== "graph")
-  window.addEventListener("load", () => showTab(wantTab));
-
-/* ---------- node search (also selects in the graph) ---------- */
-$("nodesearch").addEventListener("change", ev => {
-  const term = ev.target.value.trim().toLowerCase();
-  if (!term) return;
-  const hit = state.nodes.find(n => n.id.toLowerCase() === term) ||
-              state.nodes.find(n => n.id.toLowerCase().includes(term));
-  if (hit) { state.sel = hit; showTab("graph"); showNode(hit.id); }
-  else $("node").innerHTML = `<span class="empty">no node matching “${ev.target.value}”</span>`;
-});
-const origStart = startGraph;
-startGraph = function (g) {
-  origStart(g);
-  $("nodelist").innerHTML = g.nodes.map(n => `<option value="${n.id}">`).join("");
-};
-
-/* ---------- ledger ---------- */
-const lstate = { offset: 0, limit: 200, kind: "", source: "", relation: "", total: 0 };
-function lparams() {
-  return { db: state.db, q: $("lq").value, from: $("lfrom").value,
-    to: $("lto").value, kind: lstate.kind, source: lstate.source,
-    relation: lstate.relation, limit: lstate.limit, offset: lstate.offset };
-}
-async function runLedger(reset) {
-  if (!state.db) return;   // dbs not loaded yet; pick() re-triggers
-  if (reset) { lstate.offset = 0; $("lrows").innerHTML = ""; }
-  const d = await api("/api/ledger", lparams());
-  lstate.total = d.total;
-  renderFacets(d.facets);
-  $("lcount").textContent =
-    `${d.total} events — showing ${Math.min(d.offset + d.limit, d.total)}`;
-  $("lrows").insertAdjacentHTML("beforeend", d.events.map(e => `
-    <tr>
-      <td class="when">${e.when ? e.when.replace("T", " ").slice(0, 19) : "—"}</td>
-      <td><span class="kind kind-${e.kind}">${e.kind}</span></td>
-      <td>${e.text}</td>
-      <td>${e.url ? `<a href="${e.url}" target="_blank" rel="noopener">${e.url}</a>`
-                  : (e.source || '<span class="empty">local</span>')}</td>
-      <td class="when">${e.retrieved_at ? e.retrieved_at.slice(0, 19) : "—"}</td>
-    </tr>`).join(""));
-  $("lmore").style.display =
-    d.offset + d.events.length < d.total ? "" : "none";
-}
-function chip(group, key, count) {
-  const on = lstate[group] === key;
-  return `<span class="chip ${on ? "on" : ""}" data-g="${group}" data-k="${key}">
-    ${key} ${count}</span>`;
-}
-function renderFacets(f) {
-  $("lfacets").innerHTML =
-    Object.entries(f.kinds).map(([k, c]) => chip("kind", k, c)).join("") +
-    Object.entries(f.sources).map(([k, c]) => chip("source", k, c)).join("") +
-    Object.entries(f.relations).map(([k, c]) => chip("relation", k, c)).join("");
-  document.querySelectorAll("#lfacets .chip").forEach(el => el.onclick = () => {
-    const g = el.dataset.g, k = el.dataset.k;
-    lstate[g] = lstate[g] === k ? "" : k;
-    runLedger(true);
-  });
-}
-$("lgo").onclick = () => runLedger(true);
-$("lq").addEventListener("keydown", ev => { if (ev.key === "Enter") runLedger(true); });
-$("lclear").onclick = () => {
-  $("lq").value = ""; $("lfrom").value = ""; $("lto").value = "";
-  lstate.kind = lstate.source = lstate.relation = "";
-  runLedger(true);
-};
-$("lmore").onclick = () => { lstate.offset += lstate.limit; runLedger(false); };
-const dl = fmt => {
-  const p = new URLSearchParams({ ...lparams(), format: fmt, offset: 0 });
-  window.open("/api/export?" + p, "_blank");
-};
-$("lcsv").onclick = () => dl("csv");
-$("ljson").onclick = () => dl("json");
-
-/* ---------- harvest (Jeeves tile browser) ---------- */
-async function loadHarvest(topic) {
-  if (!state.db) return;
-  const d = await api("/api/harvest", { db: state.db, topic });
-  if (!topic) {
-    $("htiles").innerHTML = ""; $("hsources").innerHTML = "";
-    $("htopics").innerHTML = (d.topics || []).length
-      ? d.topics.map(t =>
-          `<span class="chip" data-t="${t.topic}">${t.topic} · ${t.tiles}</span>`).join("")
-      : '<span class="empty">no trace tiles in this db</span>';
-    document.querySelectorAll("#htopics .chip").forEach(el =>
-      el.onclick = () => loadHarvest(el.dataset.t));
-    return;
-  }
-  document.querySelectorAll("#htopics .chip").forEach(el =>
-    el.classList.toggle("on", el.dataset.t === topic));
-  $("hsources").innerHTML = d.sources.length
-    ? `<div class="card" style="margin-top:10px"><h2>Collected from</h2>` +
-      d.sources.map(s => `<div class="edge-row">
-        <a href="${s.url}" target="_blank" rel="noopener">${s.url}</a>
-        <div class="when">${s.source} · ${(s.retrieved_at || "").slice(0, 19)}</div>
-      </div>`).join("") + "</div>"
-    : "";
-  const conn = t => ["related_to","causes","requires","part_of","next_step","previous_step"]
-    .filter(k => t[k]).map(k => `<span class="chip">${k}: ${t[k]}</span>`).join("");
-  $("htiles").innerHTML = `<div style="margin-top:10px">` +
-    d.tiles.map(t => `<div class="tile">
-      <b>${t.emoji || "🧩"}</b> ${t.sentence}
-      <div class="when">${t.subcategory} · depth ${t.depth_level} · turn ${t.turn_number}</div>
-      <div>${conn(t)}</div>
-    </div>`).join("") + "</div>";
-}
-
-/* ---------- research (proposer through the gate) ---------- */
-async function runResearch() {
-  const prompt = $("rq").value.trim();
-  if (!prompt || !state.db) return;
-  $("rgo").disabled = true;
-  $("rout").insertAdjacentHTML("afterbegin",
-    `<div class="edge-row"><b>»</b> ${prompt}<div class="when">proposing…</div></div>`);
-  let d;
-  try {
-    d = await fetch("/api/research", { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ db: state.db, prompt }) }).then(r => r.json());
-  } catch (e) { d = { admitted: "request_failed", error: String(e) }; }
-  $("rgo").disabled = false;
-  const badge = { extract: "ok", claim: "ok", intent: "ok", abstain: "claim" };
-  let detail = "";
-  if (d.admitted === "extract") {
-    const x = d.extraction || {};
-    detail = `status ${x.status} · ${x.edges_written ?? 0} new edges` +
-      (x.pdb_xrefs_total != null ? ` · ${x.pdb_xrefs_total} PDB xrefs` : "");
-  } else if (d.admitted === "claim") {
-    detail = `verdict: <b>${(d.verdict || {}).verdict}</b>`;
-  } else if (d.admitted === "abstain") {
-    detail = `reason: ${(d.proposal || {}).reason || ""}`;
-  } else detail = d.error || "";
-  $("rout").firstElementChild.innerHTML =
-    `<b>»</b> ${prompt}
-     <div><span class="kind kind-${badge[d.admitted] ? "edge" : "tile"}">${d.admitted}</span>
-       ${(d.proposal && d.proposal.subject) ? " subject " + d.proposal.subject : ""}</div>
-     <div class="when">${detail}</div>`;
-  if (d.admitted === "extract") pick(state.db);   // graph + panels refresh
-}
-$("rgo").onclick = runResearch;
-$("rq").addEventListener("keydown", ev => { if (ev.key === "Enter") runResearch(); });
-
-/* ---------- notebook (the system's journal, live) ---------- */
-const NBCOLOR = { observation: "node", discovery: "edge", learning: "claim",
-                  anomaly: "tile", reflection: "sequence" };
-let nbKind = "", nbTimer = null;
-async function loadNotebook() {
-  const d = await api("/api/notebook", { limit: 300, kind: nbKind });
-  const kinds = {};
-  d.entries.forEach(e => kinds[e.kind] = (kinds[e.kind] || 0) + 1);
-  $("nbkinds").innerHTML = Object.entries(kinds).map(([k, c]) =>
-    `<span class="chip ${nbKind === k ? "on" : ""}" data-k="${k}">${k} ${c}</span>`).join("");
-  document.querySelectorAll("#nbkinds .chip").forEach(el => el.onclick = () => {
-    nbKind = nbKind === el.dataset.k ? "" : el.dataset.k; loadNotebook();
-  });
-  $("nbentries").innerHTML = d.entries.length
-    ? d.entries.slice().reverse().map(e => `<div class="edge-row">
-        <span class="kind kind-${NBCOLOR[e.kind] || "tile"}">${e.kind}</span>
-        ${e.text}
-        <div class="when">${(e.at || "").replace("T", " ").slice(0, 19)}
-          · ${e.session || ""}${e.refs && e.refs.length
-            ? " · refs: " + e.refs.slice(0, 6).map(r => r.slice(0, 26)).join(", ")
-            : ""}</div>
-      </div>`).join("")
-    : `<span class="empty">no notes yet — run a research session
-       (dogfood/research_loop.py) and the system will start dictating</span>`;
-  clearTimeout(nbTimer);
-  if ($("tab-notebook").classList.contains("active"))
-    nbTimer = setTimeout(loadNotebook, 4000);
-}
-
-loadDbs();
-</script>
+<script src="/static/molecule.js"></script>
+<script src="/static/graph3d.js"></script>
+<script src="/static/conceptviz.js"></script>
+<script src="/static/cinema.js"></script>
+<script src="/static/mri.js"></script>
+<script src="/static/calendar.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/resolver-demo.js"></script>
 </body>
 </html>
