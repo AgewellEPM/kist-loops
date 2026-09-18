@@ -21,9 +21,12 @@ ALLOWED_HOSTS = frozenset({
     # Chemistry (slice 2 — the molecule wheel). PubChem PUG-REST is the curated
     # small-molecule aggregator; every chemistry edge pins to a pubchem URL.
     "pubchem.ncbi.nlm.nih.gov",
+    # Genomics (slice 3 — the gene wheel). Ensembl REST is the curated gene
+    # aggregator (symbol -> gene metadata + UniProt xrefs).
+    "rest.ensembl.org",
 })
 
-PROVENANCE_SOURCES = frozenset({"uniprot", "pdb", "alphafold", "pubchem", "manual", "executor"})
+PROVENANCE_SOURCES = frozenset({"uniprot", "pdb", "alphafold", "pubchem", "ensembl", "manual", "executor"})
 
 # Sources whose provenance may carry url=null (their raw_id must then hold the
 # citation / executor reference instead).
@@ -62,6 +65,10 @@ _NODE_SHAPES: dict[str, re.Pattern[str]] = {
     "compound":  _SLUG,                                             # chemical name / synonym
     "inchikey":  re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$"),        # canonical InChIKey
     "weight":    re.compile(r"^[0-9]+(?:\.[0-9]+)?$"),              # molecular weight (g/mol)
+    # Genomics nodes (slice 3 — the gene wheel, Ensembl). A gene already exists
+    # as a prefix (used by `encodes`); these are its metadata targets.
+    "chromosome": re.compile(r"^(?:[0-9]{1,2}|MT|[XY])$"),          # 1-22, X, Y, MT
+    "biotype":    _SLUG,                                            # protein_coding, lncRNA, ...
 }
 
 # relation -> (source prefix, target prefix). Directionality is FIXED.
@@ -99,8 +106,16 @@ CHEMISTRY_RELATIONS: dict[str, tuple[str, str]] = {
     "has_weight":     ("molecule", "weight"),     # molecular weight g/mol (functional)
 }
 
+# Slice-3 genomics relations (the gene wheel, Ensembl). A gene sits on exactly
+# ONE chromosome and has ONE biotype (functional — the hard-veto again); `encodes`
+# (gene -> protein) already lives in CORE_RELATIONS and is reused here.
+GENE_RELATIONS: dict[str, tuple[str, str]] = {
+    "on_chromosome": ("gene", "chromosome"),   # cytogenetic location (functional)
+    "has_biotype":   ("gene", "biotype"),       # protein_coding / lncRNA / ... (functional)
+}
+
 RELATION_DIRECTIONS: dict[str, tuple[str, str]] = {
-    **CORE_RELATIONS, **EXTRACTION_RELATIONS, **CHEMISTRY_RELATIONS,
+    **CORE_RELATIONS, **EXTRACTION_RELATIONS, **CHEMISTRY_RELATIONS, **GENE_RELATIONS,
 }
 
 ALLOWED_RELATIONS = frozenset(RELATION_DIRECTIONS)

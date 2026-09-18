@@ -38,6 +38,9 @@ def test_direction_enforced_per_relation(store):
         "known_as":           ("compound:water", "molecule:962"),
         "has_inchikey":       ("inchikey:XLYOFNOQVPJJNP-UHFFFAOYSA-N", "molecule:962"),
         "has_weight":         ("weight:18.015", "molecule:962"),
+        # slice-3 genomics relations (gene wheel) — reversed = target-first.
+        "on_chromosome":      ("chromosome:11", "gene:HBB"),
+        "has_biotype":        ("biotype:protein_coding", "gene:HBB"),
     }
     assert set(reversed_cases) == set(RELATION_DIRECTIONS), "cover every relation"
     for relation, (src, dst) in reversed_cases.items():

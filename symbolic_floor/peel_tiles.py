@@ -50,6 +50,9 @@ _RELATION_RENDER = {
     "known_as":           ("💬", "is also known as", ["known", "as"]),
     "has_inchikey":       ("🔑", "has InChIKey", ["inchikey"]),
     "has_weight":         ("⚖️", "has molecular weight", ["has", "weight"]),
+    # Slice-3 genomics (the gene wheel).
+    "on_chromosome":      ("📌", "is on chromosome", ["on", "chromosome"]),
+    "has_biotype":        ("🏷️", "has biotype", ["biotype"]),
 }
 
 
@@ -66,7 +69,9 @@ def _human(node: str) -> str:
         return ident.replace("_", " ")
     if prefix == "molecule":
         return f"CID {ident}"
-    return ident
+    if prefix == "gene":
+        return f"gene {ident}"
+    return ident  # chromosome/biotype/formula/inchikey/weight: bare ident
 
 
 def write_tile(store: Store, tile: dict) -> tuple[str, bool]:
@@ -309,6 +314,112 @@ def write_molecule_extraction_trace(store: Store, cid: int, name: str,
             "causes": "none",
             "requires": f"edge:{edge['edge_id']}",
             "part_of": f"{name} chemistry trace",
+            "next_step": _tile_id(conversation_id, next_branch) if next_branch else "none",
+            "previous_step": _tile_id(conversation_id, prev_branch) if n > 1 else root_id,
+            "connectors": json.dumps(connectors),
+        }
+        tid, created = write_tile(store, tile)
+        if created:
+            written.append(tid)
+
+    return {"conversation_id": conversation_id, "root_tile": root_id,
+            "tiles_written": len(written), "tiles_total": 1 + len(ordered)}
+
+
+def _base_gene_tile(conversation_id: str, symbol: str, branch_path: str,
+                    turn: int, depth: int, parent_tile: str) -> dict:
+    """Shared scaffolding for gene tiles (the gene wheel), topicked genomics:<symbol>."""
+    return {
+        "conversation_id": conversation_id,
+        "intent": "teach",
+        "emotion": "neutral",
+        "complexity_level": "medium",
+        "reading_level": "grade-8",
+        "speech_pattern": "declarative",
+        "cognitive_load": "low",
+        "confidence_score": 1.0,
+        "prerequisites": json.dumps([]),
+        "follow_up_suggestions": json.dumps([f"research the proteins {symbol} encodes"]),
+        "audio_tts_hints": "plain",
+        "pet_motion": "idle",
+        "depth_level": depth,
+        "parent_tile_id": parent_tile,
+        "branch_path": branch_path,
+        "turn_number": turn,
+        "topic": f"genomics:{symbol}",
+    }
+
+
+def write_gene_extraction_trace(store: Store, symbol: str, edges: list[dict],
+                                sources: list[str]) -> dict:
+    """Canonical-37 tile trace for one gene wheel run — same contract as the
+    protein/molecule traces, keyed under `gene-wheel:<symbol>`."""
+    conversation_id = f"gene-wheel:{symbol}"
+    gene = f"gene:{symbol}"
+    written: list[str] = []
+
+    root_path = f"{gene}/root"
+    root_id = _tile_id(conversation_id, root_path)
+    ordered = sorted(edges, key=lambda e: (e["relation"], e["target"]))
+
+    root = {
+        **_base_gene_tile(conversation_id, symbol, root_path, 0, 0, "root"),
+        "id": root_id,
+        "emoji": "🧬",
+        "words": json.dumps([symbol, "gene", "genomics"]),
+        "sentence": f"Gene {symbol} evidence gathered from {len(sources)} "
+                    f"allowlisted source(s).",
+        "verb": "gather",
+        "action": "extract",
+        "visual_representation": gene,
+        "entities": json.dumps([gene]),
+        "svo_triple": json.dumps({"s": "gene-wheel", "v": "extracted", "o": gene}),
+        "learning_objective": f"ground the genomics of {symbol}",
+        "visual_aids": sources[0] if sources else "none",
+        "parent": "genomics",
+        "subcategory": "extraction-root",
+        "related_to": json.dumps(sorted({e["relation"] for e in ordered})),
+        "causes": "none",
+        "requires": "allowlisted genomics sources",
+        "part_of": "symbolic-floor gene wheel",
+        "next_step": _tile_id(conversation_id,
+                              f"{gene}/{ordered[0]['relation']}/1") if ordered else "none",
+        "previous_step": "none",
+        "connectors": json.dumps(["genomics", "from"]),
+    }
+    tid, created = write_tile(store, root)
+    if created:
+        written.append(tid)
+
+    for n, edge in enumerate(ordered, start=1):
+        emoji, verb_phrase, connectors = _RELATION_RENDER.get(
+            edge["relation"], ("🔗", edge["relation"].replace("_", " "), ["relates"]))
+        subj_h, obj_h = _human(edge["source"]), _human(edge["target"])
+        branch = f"{gene}/{edge['relation']}/{n}"
+        prev_branch = (f"{gene}/{ordered[n - 2]['relation']}/{n - 1}"
+                       if n > 1 else root_path)
+        next_branch = (f"{gene}/{ordered[n]['relation']}/{n + 1}"
+                       if n < len(ordered) else None)
+        tile = {
+            **_base_gene_tile(conversation_id, symbol, branch, n, 1, root_id),
+            "id": _tile_id(conversation_id, branch),
+            "emoji": emoji,
+            "words": json.dumps([subj_h, verb_phrase, obj_h]),
+            "sentence": f"{subj_h} {verb_phrase} {obj_h}.",
+            "verb": verb_phrase.split()[0],
+            "action": edge["relation"],
+            "visual_representation": edge["target"],
+            "entities": json.dumps([edge["source"], edge["target"]]),
+            "svo_triple": json.dumps({"s": edge["source"], "v": edge["relation"],
+                                      "o": edge["target"]}),
+            "learning_objective": f"pin {edge['relation']} for {symbol}",
+            "visual_aids": edge["edge_id"],
+            "parent": gene,
+            "subcategory": edge["relation"],
+            "related_to": json.dumps([edge["source"], edge["target"]]),
+            "causes": "none",
+            "requires": f"edge:{edge['edge_id']}",
+            "part_of": f"{symbol} genomics trace",
             "next_step": _tile_id(conversation_id, next_branch) if next_branch else "none",
             "previous_step": _tile_id(conversation_id, prev_branch) if n > 1 else root_id,
             "connectors": json.dumps(connectors),

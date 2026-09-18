@@ -48,6 +48,14 @@ CHEM_RELATIONS = {
     "has_weight":     {"inverse": "weight_of",    "transitive": False, "category": "chem_identity", "functional": True},
 }
 
+# Slice-3 genomics relations (the gene wheel, Ensembl). A gene sits on exactly one
+# chromosome and has one biotype — functional, so a conflicting second value is a
+# CONTRADICTION the engine catches.
+GENE_RELATIONS = {
+    "on_chromosome": {"inverse": "location_of", "transitive": False, "category": "bio_genomic", "functional": True},
+    "has_biotype":   {"inverse": "biotype_of",  "transitive": False, "category": "bio_genomic", "functional": True},
+}
+
 
 @dataclass(frozen=True)
 class BioFloor:
@@ -59,8 +67,8 @@ class BioFloor:
 
 
 def register_bio_relations() -> None:
-    """Idempotently add the bio + chemistry relations to the engine's registry."""
-    for name, spec in {**BIO_RELATIONS, **CHEM_RELATIONS}.items():
+    """Idempotently add the bio + chemistry + genomics relations to the registry."""
+    for name, spec in {**BIO_RELATIONS, **CHEM_RELATIONS, **GENE_RELATIONS}.items():
         RELATION_TYPES.setdefault(name, spec)
 
 

@@ -34,7 +34,13 @@ class AllowlistError(ConnectorError):
 
 
 def _default_transport(url: str, timeout: float) -> tuple[int, bytes]:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
+    # Accept: application/json — Ensembl REST content-negotiates on this header
+    # (without it, rest.ensembl.org serves its HTML website, not the API). Safe
+    # for the others: UniProt/PubChem select format by URL path/extension, and
+    # RCSB/AlphaFold serve JSON regardless.
+    req = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()

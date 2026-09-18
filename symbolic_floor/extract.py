@@ -13,7 +13,7 @@ edge, and everything written is listed in the returned trace.
 
 from __future__ import annotations
 
-from .connectors import alphafold, pubchem, uniprot
+from .connectors import alphafold, ensembl, pubchem, uniprot
 from .connectors.base import Transport
 from .connectors.pdb import RCSB_ENTRY_URL
 from .connectors.base import http_get
@@ -364,4 +364,89 @@ def research_molecule(store: Store, query: str, *,
     result["query"] = query.strip()
     result["resolved_cid"] = cid
     result.setdefault("sources_fetched", []).insert(0, resolved["url"])
+    return result
+
+
+def extract_gene(store: Store, symbol: str, *, species: str = "homo_sapiens",
+                 transport: Transport | None = None) -> dict:
+    """The gene wheel: one gene symbol -> typed genomics facts (chromosome,
+    biotype, encoded proteins) + a PEEL trace, every edge pinned to the exact
+    ensembl URL. Deterministic and idempotent."""
+    sym = symbol.strip()
+    lookup = ensembl.lookup_symbol(sym, species=species, transport=transport)
+    if lookup["status"] == "NOT_FOUND":
+        return {"status": "NOT_FOUND", "symbol": sym,
+                "edges_written": [], "sources_fetched": [lookup["url"]]}
+
+    gene = f"gene:{sym}"
+    sources = [lookup["url"]]
+    written: list[dict] = []
+    skipped: list[dict] = []
+    existing = 0
+
+    def _add(src: str, rel: str, dst: str, label: str, provenance: dict) -> None:
+        nonlocal existing
+        try:
+            edge_id, created = store.add_edge(src, rel, dst, provenance, label=label)
+        except ValidationError as e:
+            skipped.append({"source": src, "relation": rel, "target": dst,
+                            "reason": str(e)})
+            return
+        if created:
+            written.append({"edge_id": edge_id, "source": src,
+                            "relation": rel, "target": dst})
+        else:
+            existing += 1
+
+    # 1) Gene metadata (chromosome, biotype) from the lookup record.
+    lk_prov = {"source": "ensembl", "url": lookup["url"],
+               "retrieved_at": utc_now_iso(), "raw_id": sym}
+    if lookup.get("chromosome"):
+        _add(gene, "on_chromosome", f"chromosome:{lookup['chromosome']}",
+             f"{sym} on chromosome {lookup['chromosome']}", dict(lk_prov))
+    if lookup.get("biotype"):
+        try:
+            bt = f"biotype:{slug(lookup['biotype'])}"
+            _add(gene, "has_biotype", bt, f"{sym} biotype {lookup['biotype']}", dict(lk_prov))
+        except ValidationError:
+            pass
+
+    # 2) Encoded proteins (Ensembl -> UniProt xrefs).
+    xref = ensembl.xref_uniprot(sym, species=species, transport=transport)
+    if xref["status"] == "OK" and xref["accessions"]:
+        sources.append(xref["url"])
+        xr_prov = {"source": "ensembl", "url": xref["url"],
+                   "retrieved_at": utc_now_iso(), "raw_id": sym}
+        for acc in xref["accessions"]:
+            _add(gene, "encodes", f"protein:{acc}",
+                 f"{sym} encodes {acc}", dict(xr_prov))
+
+    # 3) Canonical-37 PEEL trace over the gene's whole evidence base.
+    from .peel_tiles import write_gene_extraction_trace
+    all_edges = [
+        {"edge_id": e["id"], "source": e["subject"],
+         "relation": e["relation_type"], "target": e["object"]}
+        for e in store.get_edges(source=gene)
+    ]
+    trace = write_gene_extraction_trace(store, sym, all_edges, sources)
+
+    return {
+        "status": "OK",
+        "symbol": sym,
+        "ensembl_id": lookup.get("ensembl_id"),
+        "edges_written": written,
+        "edges_already_present": existing,
+        "skipped": skipped,
+        "sources_fetched": sources,
+        "peel_trace": trace,
+    }
+
+
+def research_gene(store: Store, symbol: str, *, species: str = "homo_sapiens",
+                  transport: Transport | None = None) -> dict:
+    """Native 'research this gene' path: a bare gene symbol -> the gene wheel.
+    No model, no MCP — Ensembl resolves the symbol and the facts pull
+    deterministically, or the symbol is honestly NOT_FOUND."""
+    result = extract_gene(store, symbol, species=species, transport=transport)
+    result["query"] = symbol.strip()
     return result
