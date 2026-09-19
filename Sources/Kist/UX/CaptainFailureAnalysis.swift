@@ -29,6 +29,7 @@ struct CaptainFailureCapsule: Codable, Equatable, Sendable {
         case uncertainMutation = "uncertain-mutation"
         case staleVerification = "stale-verification"
         case plannerExecution = "planner-execution"
+        case providerRequestBudget = "provider-request-budget"
         case unknown = "unknown"
     }
 
@@ -736,6 +737,48 @@ struct CaptainFailureAnalysis: Sendable {
             return typed
         }
 
+        // Provider-request-budget exhaustion. The loop's own terminal signal is
+        // "provider request limit reached (consumed/limit)" (HeadlessAgentLoop.finishFailed /
+        // finishProviderRequestBudgetFailure). It is a deterministic budget/convergence condition —
+        // NOT a telemetry gap — so it must never fall through to the "unknown" bucket that spawns
+        // endless "improve telemetry" missions. Gated on `failedTools.isEmpty`: if a tool failed, the
+        // tool failure is the actionable root cause and owns the classification (see below); the
+        // budget was likely burned by that failure's retries.
+        if failedTools.isEmpty, lower.contains("provider request limit reached") {
+            let counts = Self.parseProviderRequestCounts(from: [summary] + proofFailures)
+            let ratio = counts.map { "\($0.consumed)/\($0.limit)" } ?? "at the configured ceiling"
+            return Classification(
+                layer: .providerRequestBudget,
+                confidence: 90,
+                observed: "Turn exhausted its provider-request budget (\(ratio)) before completing the objective.",
+                evidence: evidence + [
+                    "provider request ceiling reached: \(ratio)",
+                    "no tool failed — the turn was making tool progress but ran out of provider requests, not on an error",
+                ],
+                hypotheses: [
+                    .init(rank: 1, title: "Objective needs more provider requests than the per-turn ceiling allows", confidence: 60,
+                          reason: "The loop halted at the hard request ceiling (\(ratio)) rather than on a tool or provider error.",
+                          inspect: ["run replay: is progress monotonic per request?", "objective scope vs. maxIterations", "HeadlessAgentLoop maxIterations ceiling"]),
+                    .init(rank: 2, title: "Agent looped without converging (repeated work, no new progress)", confidence: 55,
+                          reason: "A non-converging agent spends its whole budget re-doing work instead of finishing.",
+                          inspect: ["trajectory for repeated / near-duplicate tool calls", "replan events", "no-progress detection"])
+                ],
+                researchTasks: [
+                    "Open the run replay and decide: is this a legitimately large objective, or a non-converging loop?",
+                    "Compare provider requests consumed against real progress made per request."
+                ],
+                repairPlan: [
+                    "If the objective is legitimately large, DECOMPOSE it into sub-goals that each fit the request ceiling — do not blindly raise the limit.",
+                    "If the agent looped without progress, fix the non-convergence that burned the budget, not the ceiling.",
+                    "Raise maxIterations only as a deliberate, evidenced decision after non-convergence is ruled out."
+                ],
+                verificationPlan: [
+                    "Re-run the objective (decomposed, or with a justified higher ceiling) and confirm it completes within budget",
+                    "swift test --filter ProviderRequestBudgetTests"
+                ],
+                teachCandidate: "Provider-request-budget exhaustion is a deterministic budget/convergence signal, not an unknown failure: decompose the objective or fix non-convergence before ever raising the ceiling.")
+        }
+
         let structuredDenial = proofFailures.first(where: {
             let text = $0.lowercased()
             return text.contains("denied by") || text.contains("permission denied")
@@ -1067,6 +1110,28 @@ struct CaptainFailureAnalysis: Sendable {
     private static func safe(_ text: String) -> String {
         SecretScanner.redactSecrets(in: text)
             .replacingOccurrences(of: NSHomeDirectory(), with: "~")
+    }
+
+    /// Pull `(consumed, limit)` out of the loop's terminal budget signature
+    /// "provider request limit reached (consumed/limit)". Returns nil if the phrase carries no
+    /// parseable ratio (the caller still classifies as budget, just without the exact numbers).
+    private static func parseProviderRequestCounts(from texts: [String]) -> (consumed: Int, limit: Int)? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"provider request limit reached \((\d+)/(\d+)\)"#,
+            options: [.caseInsensitive]) else {
+            return nil
+        }
+        for text in texts {
+            let ns = text as NSString
+            guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+                  match.numberOfRanges == 3,
+                  let consumed = Int(ns.substring(with: match.range(at: 1))),
+                  let limit = Int(ns.substring(with: match.range(at: 2))) else {
+                continue
+            }
+            return (consumed, limit)
+        }
+        return nil
     }
 }
 

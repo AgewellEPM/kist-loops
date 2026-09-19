@@ -45,6 +45,67 @@ final class CaptainFailureAnalysisTests: XCTestCase {
         XCTAssertTrue(plan.tasks.contains { $0.title.contains("Teach Captain failure lesson") })
     }
 
+    func testProviderRequestBudgetExhaustionClassifiedNotUnknown() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        // Reproduce the real capsule: 12 successful tool steps, 0 failed, then the loop's terminal
+        // ceiling signal. This used to fall through to the "unknown" bucket at 50% confidence.
+        let summary = "provider request limit reached (40/40)"
+        let trajectory = (0..<12).map {
+            ActionRecord(tool: "read_file", argsFingerprint: "step-\($0)", success: true)
+        }
+        let analyzer = CaptainFailureAnalysis(projectRoot: root,
+                                              now: { Date(timeIntervalSince1970: 1_789_627_421) })
+
+        let report = analyzer.analyze(goal: "review the new fields and make sure the loop code is right",
+                                      summary: summary,
+                                      trajectory: trajectory,
+                                      proofEntries: [
+                                        .init(kind: .failed, tool: nil, success: false, text: summary)
+                                      ])
+
+        XCTAssertTrue(report.writeSucceeded, report.writeError ?? "missing write error")
+        // The core regression: a budget ceiling is a KNOWN deterministic signal, never "unknown".
+        XCTAssertEqual(report.capsule.likelyLayer, .providerRequestBudget)
+        XCTAssertNotEqual(report.capsule.likelyLayer, .unknown)
+        XCTAssertEqual(report.capsule.confidence, 90)
+        XCTAssertNotEqual(report.capsule.observed, "Turn failed without a classified root-cause signature.")
+        XCTAssertTrue(report.capsule.observed.contains("provider-request budget"))
+        XCTAssertTrue(report.capsule.observed.contains("40/40"))
+        XCTAssertTrue(report.capsule.evidence.contains { $0.contains("provider request ceiling reached: 40/40") })
+        // The repair must be decompose/convergence — NOT the generic "improve telemetry" plan.
+        XCTAssertTrue(report.capsule.repairPlan.contains { $0.contains("DECOMPOSE") })
+        XCTAssertFalse(report.capsule.repairPlan.contains { $0.lowercased().contains("improve failure telemetry") })
+        XCTAssertTrue(report.capsule.teachCandidate.contains("budget/convergence"))
+        XCTAssertEqual(report.seededTasks, 5)
+
+        let text = try String(contentsOfFile: root + "/" + report.path)
+        XCTAssertTrue(text.contains("provider-request-budget"))
+        XCTAssertFalse(text.contains("Turn failed without a classified root-cause signature."))
+    }
+
+    /// Per multi-site discipline: the budget signature can arrive via `summary` OR only via a proof
+    /// entry. Pin the invariant on the proof-only channel too, so a refactor can't regress one input
+    /// surface while the other still passes.
+    func testProviderRequestBudgetExhaustionViaProofEntryOnly() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let analyzer = CaptainFailureAnalysis(projectRoot: root,
+                                              now: { Date(timeIntervalSince1970: 1_789_627_500) })
+
+        let report = analyzer.analyze(goal: "long research objective",
+                                      summary: "failure with no summary",
+                                      trajectory: [],
+                                      proofEntries: [
+                                        .init(kind: .failed, tool: nil, success: false,
+                                              text: "provider request limit reached (64/64)")
+                                      ],
+                                      seedTasks: false)
+
+        XCTAssertEqual(report.capsule.likelyLayer, .providerRequestBudget)
+        XCTAssertTrue(report.capsule.observed.contains("64/64"))
+    }
+
     func testSelfHealMissionUsesLatestFailureCapsule() throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
