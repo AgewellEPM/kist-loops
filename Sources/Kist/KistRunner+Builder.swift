@@ -199,6 +199,12 @@ extension KistRunner {
                  + "after the planning pass (\(substitution.reason)) → \(substitution.to.providerId)")
         }
         teamRoles = rewarmed.roles
+        let aligned = alignInnerCriticWithProducers(teamRoles, criticPinnedExplicitly: opts.criticSpec != nil)
+        if aligned.moved {
+            note("build lane · inner critic \(teamRoles.binding(for: .critic).providerId) is not a declared producer "
+                 + "provider → following the planner (\(aligned.roles.binding(for: .critic).providerId))")
+        }
+        teamRoles = aligned.roles
         let roles = teamRoles
         let builderBinding = roles.binding(for: .coder)
         let criticBinding = roles.binding(for: .critic)

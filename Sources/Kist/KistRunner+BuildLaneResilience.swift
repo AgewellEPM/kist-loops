@@ -87,6 +87,22 @@ extension KistRunner {
         return WarmedRoles(roles: next, substitutions: substitutions, stranded: stranded)
     }
 
+    /// The plan-execute INNER critic is advisory, but every model call in the build stage is
+    /// observed as a producer identity and must be one the contract declares (planner / worker /
+    /// coder). Warming can move the critic to a provider none of them use (live 2026-09-27:
+    /// planner deepseek, critic claude-cli → "Observed provider/model identity is not
+    /// contract-bound: producer" after a finished build). Unless the operator pinned --critic,
+    /// keep the critic on the planner's provider whenever it is not already a producer provider.
+    /// The OUTER independent reviewer is selected separately and stays distinct.
+    static func alignInnerCriticWithProducers(_ roles: RoleBindings,
+                                              criticPinnedExplicitly: Bool) -> (roles: RoleBindings, moved: Bool) {
+        guard !criticPinnedExplicitly else { return (roles, false) }
+        let producers = Set([AgentRole.planner, .worker, .coder].map { roles.binding(for: $0).providerId.lowercased() })
+        let critic = roles.binding(for: .critic)
+        guard !producers.contains(critic.providerId.lowercased()) else { return (roles, false) }
+        return (roles.binding(.critic, to: roles.binding(for: .planner)), true)
+    }
+
     /// Registry-backed wiring: benched = live cooldown OR health-daemon down; usable = provider exists
     /// and is keyless or keyed. Both stores re-read their files per call (a recovered provider comes
     /// back without a relaunch).

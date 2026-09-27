@@ -264,10 +264,8 @@ public struct PlanExecuteLoop: Sendable {
         }
         let text: String, usage: TokenUsage
         do {
-            // Advisory critic may use the warm fallback chain (patch #3, docs/PLAN_EXECUTE_LOOP_SPLIT_PLAN.md).
             (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
-                                                                  messages: messages, settings: settings,
-                                                                  allowFallback: role == .critic)
+                                                                  messages: messages, settings: settings)
         } catch {
             if let id = reservationID { await budget?.commit(reservation: id, actualTokens: 0, actualUSD: 0) }   // release on failure
             throw error

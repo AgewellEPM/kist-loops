@@ -83,6 +83,29 @@ final class BuildLaneResilienceTests: XCTestCase {
         XCTAssertFalse(usable("nonexistent"))
     }
 
+    // MARK: inner critic must be a declared producer provider
+
+    func testCriticOnAThirdProviderFollowsThePlannerUnlessPinned() {
+        let warmed = RoleBindings(
+            default: ProviderBinding(providerId: "deepseek"),
+            [.planner: ProviderBinding(providerId: "deepseek"),
+             .worker: ProviderBinding(providerId: "deepseek", model: "deepseek-v4-pro"),
+             .coder: ProviderBinding(providerId: "deepseek", model: "deepseek-v4-pro"),
+             .critic: ProviderBinding(providerId: "claude-cli")])
+        let aligned = KistRunner.alignInnerCriticWithProducers(warmed, criticPinnedExplicitly: false)
+        XCTAssertTrue(aligned.moved)
+        XCTAssertEqual(aligned.roles.binding(for: .critic), warmed.binding(for: .planner))
+        let pinned = KistRunner.alignInnerCriticWithProducers(warmed, criticPinnedExplicitly: true)
+        XCTAssertFalse(pinned.moved, "an explicit --critic is the operator's call")
+        XCTAssertEqual(pinned.roles, warmed)
+    }
+
+    func testCriticAlreadyOnAProducerProviderIsLeftAlone() {
+        let aligned = KistRunner.alignInnerCriticWithProducers(truthTeam, criticPinnedExplicitly: false)
+        XCTAssertFalse(aligned.moved, "openai critic with openai planner is already producer-bound")
+        XCTAssertEqual(aligned.roles, truthTeam)
+    }
+
     // MARK: substitution after a LIVE failure (provider was not benched yet)
 
     func testPlannerSubstituteAfterLiveFailureSkipsTheFailedAndBenchedProviders() {
