@@ -1146,7 +1146,11 @@ public struct PlanExecuteLoop: Sendable {
                                         planRevision:
                                             coordinatedReplay.workspaceReceipt?.intent.planRevision,
                                         workspaceActionReceiptDigest:
-                                            coordinatedReplay.workspaceReceipt?.receiptDigest)
+                                            coordinatedReplay.workspaceReceipt?.receiptDigest,
+                                        // Emergency patch #2 (see docs/PLAN_EXECUTE_LOOP_SPLIT_PLAN.md):
+                                        // the gate digested the tool's canonical view of these args.
+                                        canonicalArguments: tools.canonicalArguments(
+                                            name: replay.tool, arguments: replay.arguments))
                                 }
                             }
                         }

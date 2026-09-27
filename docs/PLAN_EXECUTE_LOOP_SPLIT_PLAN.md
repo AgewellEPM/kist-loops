@@ -1,10 +1,11 @@
 # PlanExecuteLoop.swift split plan (required: file is over the 1,500-line hard stop)
 
 `Sources/AgentCore/PlanExecuteLoop.swift` is 1,8xx lines. The global rule forbids adding to a
-file over 1,500 lines without a split plan. 0.17.63 made ONE emergency patch inside it (the
-host-receipt replay trigger, ~10 lines, with the logic itself in
-`CompletionVerifier+HostReceipt.swift`) because every finished, council-approved build was
-reporting failure. This document is the split plan that patch owes.
+file over 1,500 lines without a split plan. 0.17.63 made TWO emergency patches inside it — the
+host-receipt replay trigger (~10 lines, logic in `CompletionVerifier+HostReceipt.swift`) and the
+canonical-arguments hand-off to `makeFinalVerificationReceipt` (3 lines) — because every
+finished, council-approved build was reporting failure. This document is the split plan those
+patches owe.
 
 ## What is already outside the file (keep using these seams)
 

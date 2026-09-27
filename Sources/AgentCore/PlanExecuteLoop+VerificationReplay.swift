@@ -188,18 +188,39 @@ extension PlanExecuteLoop {
         workspaceManifestRevision: Int? = nil,
         planID: String? = nil,
         planRevision: Int? = nil,
-        workspaceActionReceiptDigest: String? = nil
+        workspaceActionReceiptDigest: String? = nil,
+        canonicalArguments: [String: Any]? = nil
     ) -> PlanFinalVerificationReceipt? {
         let expected = configuredExitCodes(replay.arguments["allowed_exit_codes"])
         let observedAllowed = metadataExitCodes(result.metadata["allowed_exit_codes"])
-        guard replay.tool == "run_command", expected == [0], observedAllowed == [0],
-              result.metadata["verification_eligible"]?.lowercased() == "true",
-              let actual = Int(result.metadata["exit_code"] ?? ""), actual == 0,
-              let trustedCommandReference = result.trustedCommandReference,
-              trustedCommandReference.isValid,
-              trustedCommandReference.exitCode == actual,
-              trustedCommandReference.gateArgumentsDigest
-                == AuditLog.digest(replay.arguments).1 else { return nil }
+        // Name the clause that refuses to mint (0.17.63): a silent nil here surfaced only as
+        // "final deterministic replay receipt is missing" after the files were already committed.
+        func refuse(_ clause: String) -> PlanFinalVerificationReceipt? {
+            FileHandle.standardError.write(Data(("final receipt not minted: \(clause)\n").utf8))
+            return nil
+        }
+        guard replay.tool == "run_command" else { return refuse("tool=\(replay.tool)") }
+        guard expected == [0] else { return refuse("replay allowed_exit_codes=\(expected)") }
+        guard observedAllowed == [0] else { return refuse("observed allowed_exit_codes=\(observedAllowed)") }
+        guard result.metadata["verification_eligible"]?.lowercased() == "true" else {
+            return refuse("verification_eligible=\(result.metadata["verification_eligible"] ?? "nil")")
+        }
+        guard let actual = Int(result.metadata["exit_code"] ?? ""), actual == 0 else {
+            return refuse("exit_code=\(result.metadata["exit_code"] ?? "nil")")
+        }
+        guard let trustedCommandReference = result.trustedCommandReference else {
+            return refuse("trustedCommandReference missing")
+        }
+        guard trustedCommandReference.isValid else { return refuse("trustedCommandReference invalid") }
+        guard trustedCommandReference.exitCode == actual else { return refuse("reference.exitCode") }
+        // The gate digested what the registry actually ran: the tool's CANONICAL view of the replay
+        // arguments (a sealed wrapper binds the frozen timeout, or the sealed command itself). The
+        // recipe stores the durable normalized form, so compare against the canonical view when the
+        // caller supplies it (0.17.63: this clause refused every host replay of a sealed verifier).
+        let gateSubject = canonicalArguments ?? replay.arguments
+        guard trustedCommandReference.gateArgumentsDigest == AuditLog.digest(gateSubject).1 else {
+            return refuse("gateArgumentsDigest≠digest(canonical replay arguments) keys=\(gateSubject.keys.sorted())")
+        }
         let executable = (replay.arguments["executable"] as? String)
             ?? (replay.arguments["command"] as? String) ?? ""
         guard !executable.isEmpty else { return nil }
@@ -228,7 +249,11 @@ extension PlanExecuteLoop {
                 tool: replay.tool, canonicalArgumentsJSON: canonicalArguments,
                 source: standardInputSource),
             expectedExitCode: 0, actualExitCode: actual,
-            outputDigest: secureDigest(stdout + "\u{0}" + stderr),
+            // Every consumer (ship pipeline, builder admission, accepted-run persistence) compares
+            // this to the trusted reference's fullStreamDigest — a composite over the stream digests
+            // and byte counts, never equal to a digest of the text itself. Bind to the reference
+            // (0.17.63: this mismatch refused every real final receipt after the loop minted it).
+            outputDigest: trustedCommandReference.fullStreamDigest,
             boundedRedactedOutputExcerpt: standardInputSource.kind == .none
                 ? boundedRedactedOutput(stdout + (stderr.isEmpty ? "" : "\n" + stderr))
                 : SecretMasker.marker + " stdin-bearing command output suppressed",
