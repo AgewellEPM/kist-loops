@@ -39,6 +39,12 @@ final class UXLayerTests: XCTestCase {
         let rateLimit = ErrorHumanizer.humanize("429 rate limit exceeded", provider: "gemini")
         XCTAssertTrue(rateLimit.lowercased().contains("rate-limited"), rateLimit)
         XCTAssertTrue(rateLimit.contains("Captain will try an eligible replacement model"), rateLimit)
+        let sealedMismatch = ErrorHumanizer.humanize(
+            #"The command arguments did not match the sealed verifier. Use exactly one of these argument objects: {"args":["-m","unittest"],"executable":"python3","timeout":5}. Omit cwd."#,
+            provider: "deepseek")
+        XCTAssertFalse(sealedMismatch.contains("timed out"),
+                       "a sealed-verifier mismatch carrying a \"timeout\" argument is not a network failure: \(sealedMismatch)")
+        XCTAssertTrue(sealedMismatch.contains("sealed verifier"), sealedMismatch)
         let toolsErr = ErrorHumanizer.humanize("model does not support tools", provider: "deepseek")
         XCTAssertTrue(toolsErr.contains("text protocol"))
         XCTAssertTrue(toolsErr.contains("Nothing was lost"))

@@ -27,8 +27,12 @@ enum ErrorHumanizer {
         if e.contains("tool") && (e.contains("not support") || e.contains("unsupported") || e.contains("no tool")) {
             return "\(who)'s native tool-calling isn't available here, so I switched it to the text protocol. Nothing was lost — retry the request."
         }
-        // Network.
-        if e.contains("timed out") || e.contains("timeout") || e.contains("network") || e.contains("connection") || e.contains("could not connect") {
+        // Network — but never for a tool-contract message that merely carries a `"timeout":N` argument
+        // (0.17.63: the sealed-verifier argument mismatch rendered as "The connection to the model timed
+        // out" on every build, sending operators after a phantom network problem).
+        let toolContractMessage = e.contains("sealed verifier") || e.contains("argument objects")
+        if !toolContractMessage,
+           e.contains("timed out") || e.contains("timeout") || e.contains("network") || e.contains("connection") || e.contains("could not connect") {
             return "The connection to \(who) timed out. Captain will try an eligible replacement model when replay is safe; otherwise check the network and retry."
         }
         // Generic bad-request / server.

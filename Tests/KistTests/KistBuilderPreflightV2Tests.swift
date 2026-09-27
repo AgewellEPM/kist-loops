@@ -599,6 +599,86 @@ final class KistBuilderPreflightV2Tests: XCTestCase {
         XCTAssertEqual(fleetCalls, 2)
     }
 
+    /// 0.17.63: partitions carry no authority outside the fleet graph, so a non-fleet plan that
+    /// grouped its (valid) operations is normalized to an empty partition list instead of killing
+    /// the build. Born live 2026-09-27: gemini-2.5-flash, substituted in for a drained OpenAI
+    /// planner, returned one all-covering partition for a planExecute route.
+    func testNonFleetPlanDropsHarmlessPartitionsInsteadOfRejecting() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let operations = #"[{"kind":"create","path":"A.swift"},{"kind":"create","path":"B.swift"}]"#
+        let grouped = #"[{"id":"all","paths":["A.swift","B.swift"]}]"#
+        for (label, adapter) in [("planExecute", KistRunner.BuilderCompatibilityAdapter.planExecute),
+                                 ("headless", .headless)] {
+            let plan = try KistRunner.builderParsePreflightPlan(
+                planJSON(adapter: adapter.rawValue, operations: operations, partitions: grouped),
+                adapter: adapter, projectRoot: root.path, maxPartitions: 1)
+            XCTAssertTrue(plan.partitions.isEmpty, "\(label): non-fleet partitions are dropped, not kept")
+            XCTAssertEqual(plan.operations.map(\.path), ["A.swift", "B.swift"], "\(label): operations untouched")
+        }
+        // The path check still fails closed: a partition naming an UNPLANNED path is not harmless.
+        XCTAssertThrowsError(try KistRunner.builderParsePreflightPlan(
+            planJSON(adapter: "planExecute", operations: operations,
+                     partitions: #"[{"id":"all","paths":["A.swift","C.swift"]}]"#),
+            adapter: .planExecute, projectRoot: root.path, maxPartitions: 1))
+    }
+
+    /// 0.17.63: `pytest` with no binary on PATH runs as `python3 -m pytest`; a resolvable
+    /// `pytest`, and every other runner, is sealed exactly as declared.
+    func testVerificationCommandUsesModuleFormWhenTheRunnerBinaryIsAbsent() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let commands = #"[{"executable":"pytest","arguments":["-q","tests"],"timeout_seconds":120}]"#
+        let create = #"[{"kind":"create","path":"hello.py"}]"#
+        let noBinary = try KistRunner.builderParsePreflightPlan(
+            planJSON(operations: create, commands: commands), adapter: .headless, projectRoot: root.path,
+            maxPartitions: 1, executableResolvable: { $0 == "python3" })
+        XCTAssertEqual(noBinary.verificationCommands.map(\.executable), ["python3"])
+        XCTAssertEqual(noBinary.verificationCommands.first?.arguments, ["-m", "pytest", "-q", "tests"])
+
+        let binaryPresent = try KistRunner.builderParsePreflightPlan(
+            planJSON(operations: create, commands: commands), adapter: .headless, projectRoot: root.path,
+            maxPartitions: 1, executableResolvable: { _ in true })
+        XCTAssertEqual(binaryPresent.verificationCommands.map(\.executable), ["pytest"])
+        XCTAssertEqual(binaryPresent.verificationCommands.first?.arguments, ["-q", "tests"])
+
+        // No interpreter either → the declared command stays and fails honestly at run time.
+        let nothing = try KistRunner.builderParsePreflightPlan(
+            planJSON(operations: create, commands: commands), adapter: .headless, projectRoot: root.path,
+            maxPartitions: 1, executableResolvable: { _ in false })
+        XCTAssertEqual(nothing.verificationCommands.map(\.executable), ["pytest"])
+
+        // Other allowlisted runners are never rewritten, resolvable or not.
+        let swift = try KistRunner.builderParsePreflightPlan(
+            planJSON(operations: create), adapter: .headless, projectRoot: root.path,
+            maxPartitions: 1, executableResolvable: { _ in false })
+        XCTAssertEqual(swift.verificationCommands.map(\.executable), ["swift"])
+    }
+
+    /// 0.17.63: reasoning models report thinking tokens in their usage; the sealed planning pass
+    /// must reserve for them or the only warm planner on a drained machine can never plan.
+    func testPreflightFramingAllowanceCoversCLIsAndReasoningModels() {
+        let registry = ProviderRegistry(providers: [])
+        XCTAssertEqual(KistRunner.builderPreflightFramingAllowance(providerID: "codex-cli", model: nil, registry: registry),
+                       KistRunner.builderPreflightReasoningAllowance)
+        XCTAssertEqual(KistRunner.builderPreflightFramingAllowance(providerID: "claude-cli", model: nil, registry: registry),
+                       KistRunner.builderPreflightReasoningAllowance)
+        XCTAssertEqual(KistRunner.builderPreflightFramingAllowance(providerID: "deepseek", model: "deepseek-v4-pro", registry: registry),
+                       KistRunner.builderPreflightReasoningAllowance)
+        XCTAssertEqual(KistRunner.builderPreflightFramingAllowance(providerID: "unknown-plain", model: "m", registry: registry), 0,
+                       "a non-reasoning API model keeps the tight reservation")
+    }
+
+    func testHostExecutableResolverHonorsPathAndToolchainFallbacks() {
+        XCTAssertTrue(KistRunner.hostVerificationExecutableResolvable(
+            "sh", environment: ["PATH": "/bin"]))
+        XCTAssertFalse(KistRunner.hostVerificationExecutableResolvable(
+            "definitely-not-a-real-binary-\(UUID().uuidString)", environment: ["PATH": "/bin"]))
+        XCTAssertFalse(KistRunner.hostVerificationExecutableResolvable(
+            "../bin/sh", environment: ["PATH": "/bin"]), "relative paths are not allowlist names")
+        XCTAssertTrue(KistRunner.hostVerificationExecutableResolvable("/bin/sh", environment: [:]))
+    }
+
     func testFleetPartitionsMustBeDisjointAndComplete() throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

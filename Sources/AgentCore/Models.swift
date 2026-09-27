@@ -211,7 +211,11 @@ public enum AIProviderError: Error, Sendable, Equatable, LocalizedError {
     public var isRetryable: Bool {
         switch self {
         case .rateLimited, .transport: return true
-        case .http(let status, _): return status == 429 || (500...599).contains(status)
+        case .http(let status, let body):
+            // A drained account (402, or 429 with a quota marker) never clears within the
+            // registry's retry delays; retrying it only burns time before fallback.
+            if status == 402 || (status == 429 && ProviderQuotaExhaustion.matches(body: body)) { return false }
+            return status == 429 || (500...599).contains(status)
         default: return false
         }
     }
@@ -227,6 +231,10 @@ public enum AIProviderError: Error, Sendable, Equatable, LocalizedError {
         case .invalidResponse(let detail):
             return "The provider returned an invalid response: \(Self.boundedContext(detail))"
         case .http(let status, let body):
+            if status == 402 || (status == 429 && ProviderQuotaExhaustion.matches(body: body)) {
+                return "The provider account is out of credits/quota (billing), not a transient rate limit "
+                    + "(HTTP \(status))."
+            }
             let bodyContext = body.isEmpty ? "no response body" : "response body omitted"
             return "The provider HTTP request failed with status \(status) (\(bodyContext))."
         case .transport(let detail):

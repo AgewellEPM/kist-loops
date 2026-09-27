@@ -42,7 +42,11 @@ extension KistREPL {
             "overloaded", "500", "502", "503", "server error", "internal error",
             "service unavailable"
         ]
-        if transientProviderFailures.contains(where: { lower.contains($0) }) {
+        // A drained account ("out of credits/quota", insufficient_quota, HTTP 402) is not
+        // transient for THIS provider, but it is exactly the case where another provider
+        // answers — substitute, and let the cooldown TTL below bench it for hours, not minutes.
+        if transientProviderFailures.contains(where: { lower.contains($0) })
+            || ProviderQuotaExhaustion.mentioned(in: lower) {
             return "provider/transient failure"
         }
 
@@ -107,6 +111,14 @@ extension KistREPL {
     static func transientProviderFailure(summary: String) -> Bool {
         let reason = modelSubstitutionReason(success: false, summary: summary)
         return reason == "provider/transient failure" || reason == "provider/connectivity failure"
+    }
+
+    /// How long a failed provider stays benched cross-process for THIS failure: hours for a
+    /// drained account (a balance does not refill on its own), the default minutes otherwise.
+    static func providerCooldownTTL(forFailureSummary summary: String) -> TimeInterval {
+        ProviderQuotaExhaustion.mentioned(in: summary)
+            ? ProviderQuotaExhaustion.cooldownTTL
+            : ProviderCooldownStore.defaultTTL
     }
 
     /// Media-turn provider pick: first vision candidate NOT in live cooldown; fail-open to the

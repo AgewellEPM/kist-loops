@@ -18,14 +18,32 @@ extension KistRunner {
         return configModel
     }
 
-    /// Explicit flag > config > strongest-or-cheapest available (per selection policy) > first local.
-    /// Nil after an error.
+    /// Explicit flag > config (unless benched) > strongest-or-cheapest available (per selection policy)
+    /// > first local. Nil after an error.
+    ///
+    /// `benched` is the live availability gate (cooldown ledger / health daemon). The `--provider`
+    /// flag is absolute. The CONFIGURED default is a standing preference, not a per-run order: when
+    /// it is known-benched and a warm eligible provider exists, the warm one leads this run, loudly
+    /// (0.17.63 — every one-shot run first walked into the drained OpenAI pinned in captain config,
+    /// failed, then substituted; same class of bug the build lane's role warming fixed).
     static func resolveProvider(_ opts: KistOptions, _ registry: ProviderRegistry, configProvider: String?,
                                         verdicts: [String: ModelVerdict] = [:],
-                                        policy: ProviderSelectionPolicy = .power) -> String? {
-        if let pid = opts.providerId ?? configProvider {
+                                        policy: ProviderSelectionPolicy = .power,
+                                        benched: ((String) -> Bool)? = nil) -> String? {
+        if let pid = opts.providerId {
             guard registry.provider(id: pid) != nil else { err("error: unknown provider '\(pid)'. Try --list-providers."); return nil }
             return pid   // explicit user choice always wins — the scorecard/policy never override it
+        }
+        let liveCooldowns = ProviderCooldownStore()
+        let liveHealth = ProviderHealthFileStore()
+        let configuredBenched: (String) -> Bool = benched
+            ?? { liveCooldowns.coolingDown($0) || liveHealth.down($0) }
+        if let pid = configProvider {
+            guard registry.provider(id: pid) != nil else { err("error: unknown provider '\(pid)'. Try --list-providers."); return nil }
+            if !configuredBenched(pid) { return pid }
+            note("router · configured default \(pid) is benched (live failures / health daemon says down) — "
+                 + "picking a warm provider for this run; pass --provider \(pid) to force it")
+            // fall through: the warm pick below; fail-open re-admits the pin when nothing is warm.
         }
         // Pick the STRONGEST AVAILABLE provider, not whatever sorts first in the catalog. Two kinds are
         // eligible for the single-model default (Luke 2026-08-06 — "strongest leads", team stays opt-in):
@@ -50,9 +68,7 @@ extension KistRunner {
         // previously written but NEVER read here, so a dead ollama became the session default and
         // every turn failed identically (routing audit 2026-08-25).
         // Fail-open: if EVERYTHING is benched, the full eligible set still competes.
-        let cooldowns = ProviderCooldownStore()
-        let health = ProviderHealthFileStore()
-        let benchedGate: (String) -> Bool = { cooldowns.coolingDown($0) || health.down($0) }
+        let benchedGate = configuredBenched
         let warm = eligible.filter { !benchedGate($0.id) }
         if warm.count < eligible.count {
             let benched = eligible.map(\.id).filter(benchedGate).sorted().joined(separator: ", ")

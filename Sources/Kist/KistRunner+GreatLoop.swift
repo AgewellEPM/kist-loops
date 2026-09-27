@@ -359,7 +359,8 @@ extension KistRunner {
                     let selection = producingIdentity.flatMap {
                         independentReviewerSelection(
                             preferred: roles.binding(for: .critic),
-                            producingIdentities: Set([$0]), registry: registry)
+                            producingIdentities: Set([$0]), registry: registry,
+                            benched: liveProviderBenched())
                     }
                     if let selection {
                         note("  ⎇ team review · \(selection.identity)")

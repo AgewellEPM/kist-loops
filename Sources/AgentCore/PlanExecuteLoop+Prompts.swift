@@ -281,11 +281,30 @@ extension PlanExecuteLoop {
             ?? exec.stepResults.last?.output
             ?? "plan validation failed before any executable step"
         let succeeded = exec.stepResults.filter { $0.success }.map { $0.stepId }.joined(separator: ", ")
-        return """
-        The previous plan FAILED at step \(failed): \(String(err.prefix(300))).
+        // 600 chars keeps the run_command output tail (the actual diagnosis) inside the steering.
+        var prompt = """
+        The previous plan FAILED at step \(failed): \(String(err.prefix(600))).
         Steps that already succeeded: \(succeeded.isEmpty ? "(none)" : succeeded).
         Produce a REVISED JSON plan (same format) that still accomplishes the original goal — \
         "\(goal)" — given what has already been done. Avoid repeating completed work that had side effects.
+        Never re-emit the identical failed step: change the step or the approach.
+        """
+        if let guidance = diagnosticExitCodeGuidance(failedOutput: err) { prompt += "\n" + guidance }
+        return prompt
+    }
+
+    /// A clean non-zero exit that the plan did not allow. When that command was a DIAGNOSTIC run —
+    /// tests executed to observe a failure before fixing it — the exit code is the observation, not
+    /// an error, and re-planning the same gate loops until replans are exhausted (live 2026-09-27:
+    /// three identical "run the unit tests to identify the failure" plans, allowed_exit_codes [0],
+    /// on a suite that was failing on purpose). Says so, with both ways out.
+    static func diagnosticExitCodeGuidance(failedOutput: String) -> String? {
+        guard failedOutput.contains("allowed exit codes") else { return nil }
+        return """
+        That step exited non-zero and the plan only allowed [0]. If it was a diagnostic run meant to \
+        OBSERVE a failure (for example running tests you expect to fail), that exit is the expected \
+        observation: either declare it in that step's allowed_exit_codes (e.g. [0, 1]) or skip the \
+        diagnostic run, make the fix first, and run the tests once at the end with allowed_exit_codes [0].
         """
     }
 

@@ -403,7 +403,8 @@ extension KistRunner {
         _ text: String,
         adapter: BuilderCompatibilityAdapter,
         projectRoot: String,
-        maxPartitions: Int
+        maxPartitions: Int,
+        executableResolvable: (String) -> Bool = { hostVerificationExecutableResolvable($0) }
     ) throws -> BuilderPreflightPlan {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.first == "{", trimmed.last == "}",
@@ -498,17 +499,25 @@ extension KistRunner {
         }
 
         let commands = try raw.verificationCommands.map { command -> BuilderPreflightCommand in
-            let executable = command.executable.trimmingCharacters(in: .whitespacesAndNewlines)
+            let declared = command.executable.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard builderPreflightAllowedExecutables.contains(declared) else {
+                throw BuilderPreflightError.invalid("unsafe or malformed verification command")
+            }
+            // Host toolchain reality (0.17.63): an allowlisted runner with no binary on PATH runs
+            // in its module form (`pytest` → `python3 -m pytest`). See KistRunner+VerificationToolchain.
+            let (executable, arguments) = normalizeVerificationCommand(
+                executable: declared, arguments: command.arguments,
+                executableResolvable: executableResolvable)
             guard builderPreflightAllowedExecutables.contains(executable),
                   (1...1_800).contains(command.timeoutSeconds),
-                  command.arguments.count <= 64,
-                  command.arguments.allSatisfy({ argument in
+                  arguments.count <= 64,
+                  arguments.allSatisfy({ argument in
                       argument.count <= 2_048
                           && !argument.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
                   }) else {
                 throw BuilderPreflightError.invalid("unsafe or malformed verification command")
             }
-            return .init(executable: executable, arguments: command.arguments,
+            return .init(executable: executable, arguments: arguments,
                          timeoutSeconds: command.timeoutSeconds)
         }
         guard commands.reduce(0, { $0 + $1.timeoutSeconds }) <= 1_800 else {
@@ -543,7 +552,14 @@ extension KistRunner {
                 throw BuilderPreflightError.invalid("fleet partitions must be disjoint and cover every operation")
             }
         } else if !partitions.isEmpty {
-            throw BuilderPreflightError.invalid("only fleet plans may contain partitions")
+            // Non-fleet routes have NO consumer for partitions (the fleet graph is the only reader),
+            // so a planner that grouped its operations anyway declared nothing the host acts on.
+            // Every partition path was already proven to name a planned operation above, so
+            // dropping the grouping removes zero authority. Rejecting here used to kill the whole
+            // build on a cosmetic schema slip by a weaker substitute planner (2026-09-27: gemini
+            // produced one all-covering partition for a planExecute route right after taking over
+            // from a drained OpenAI planner, and the run exited 2 with valid operations in hand).
+            partitions = []
         }
         return BuilderPreflightPlan(
             schemaVersion: BuilderPreflightPlan.currentSchemaVersion,
@@ -733,8 +749,8 @@ extension KistRunner {
         // Subscription CLIs prepend a fixed product system context that is not present in Kist's
         // prompt bytes but is included in their measured usage (including cache creation/read).
         // Reserve a finite worst-case framing allowance before launch; never waive measured usage.
-        let providerFramingTokens = ["claude-cli", "codex-cli"].contains(providerID)
-            ? 32_768 : 0
+        let providerFramingTokens = builderPreflightFramingAllowance(
+            providerID: providerID, model: model, registry: registry)
         let reservationSize = prompt.utf8.count + maxOutputTokens + providerFramingTokens
         let remainingSeconds = wallDeadlineEpoch - Date().timeIntervalSince1970
         guard remainingSeconds.isFinite, remainingSeconds > 0 else {

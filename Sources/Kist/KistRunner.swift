@@ -32,7 +32,13 @@ enum KistRunner {
             config: config, providers: ProviderCatalog.all + CustomProviderStore.load(),
             keyStore: DefaultKeyStore.make(),
             fallbackProviderIds: ModelRouter.defaultFallbackProviderIds,
-            providerUnavailable: { cooldowns.coolingDown($0) || health.down($0) })
+            providerUnavailable: { cooldowns.coolingDown($0) || health.down($0) },
+            // Any lane, any role: a provider that just failed live is benched for every lane with
+            // the failure's own TTL (hours for a drained account, minutes for a limiter/outage).
+            liveFailureObserver: { providerID, error in
+                guard let failure = buildLaneProviderFailure(error) else { return }
+                cooldowns.record(providerID, ttl: failure.cooldownTTL)
+            })
     }
 
     /// One construction seam for production and focused policy tests. Filtering the providers AND
@@ -44,7 +50,8 @@ enum KistRunner {
         keyStore: KeyStore,
         fallbackProviderIds: [String: [String]] = [:],
         retryDelaysNanoseconds: [UInt64] = [250_000_000, 750_000_000],
-        providerUnavailable: @escaping @Sendable (String) -> Bool = { _ in false }
+        providerUnavailable: @escaping @Sendable (String) -> Bool = { _ in false },
+        liveFailureObserver: (@Sendable (String, Error) -> Void)? = nil
     ) -> ProviderRegistry {
         let admitted = providers.filter { config.permitsProvider($0.id) }
         let admittedIDs = Set(admitted.map { $0.id.lowercased() })
@@ -57,7 +64,8 @@ enum KistRunner {
             providers: admitted, keyStore: keyStore,
             fallbackProviderIds: admittedFallbacks,
             retryDelaysNanoseconds: retryDelaysNanoseconds,
-            providerUnavailable: providerUnavailable)
+            providerUnavailable: providerUnavailable,
+            liveFailureObserver: liveFailureObserver)
     }
 
     /// Choose the semantic-memory embedder. `KIST_EMBEDDER=ollama` opts into LOCAL embeddings
@@ -841,7 +849,10 @@ enum KistRunner {
                 // is the COMBINED gate (cooldowns + health daemon) so substitution never lands on a
                 // provider the daemon already knows is down.
                 repl.providerCoolingDown = avoidProvider
-                repl.recordProviderCooldown = { liveCooldowns.record($0) }
+                repl.recordProviderCooldown = { providerId, summary in
+                    liveCooldowns.record(providerId,
+                                         ttl: KistREPL.providerCooldownTTL(forFailureSummary: summary))
+                }
                 // Files-API uploader for big/long media (video, >20MB), only when a Gemini key exists.
                 if let geminiKey = registry.apiKey(forProviderId: "gemini") {
                     let filesClient = GeminiFilesClient(apiKey: geminiKey)
@@ -1215,7 +1226,18 @@ enum KistRunner {
                         print("\u{001B}[31mforge failed:\u{001B}[0m \(e)")
                     }
                 }
-                let plannerBinding = roleSelection.bindings.binding(for: .planner)
+                let pinnedPlannerBinding = roleSelection.bindings.binding(for: .planner)
+                // The intent classifier runs on the planner binding — unless that provider is benched
+                // (0.17.63: the pinned OpenAI planner was drained, so every REPL turn paid a dead
+                // classifier call and degraded to deterministic intent). Then the warm session
+                // default classifies; `--planner` explicitly pins, so only the profile default moves.
+                let plannerBinding = avoidProvider(pinnedPlannerBinding.providerId)
+                        && opts.plannerSpec == nil && !avoidProvider(providerId)
+                    ? ProviderBinding(providerId: providerId, model: model)
+                    : pinnedPlannerBinding
+                if plannerBinding != pinnedPlannerBinding {
+                    note("router · intent classifier moved off benched \(pinnedPlannerBinding.providerId) → \(providerId)")
+                }
                 // A dead classifier provider must announce itself (routing audit 2026-08-25: it
                 // silently disabled every escalation route — plan/fleet/council/research were
                 // unreachable and the degrade was indistinguishable from "nothing to escalate").

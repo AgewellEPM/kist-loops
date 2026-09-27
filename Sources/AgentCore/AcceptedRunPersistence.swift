@@ -168,25 +168,37 @@ public final class AcceptedRunPersistence {
             throw AcceptedRunAuthorityError.invalid(
                 "final command evidence is not present in authenticated Builder telemetry")
         }
-        guard let planReceipt = verification.planFinalVerificationReceipt,
-              planReceipt.missionInstanceID == run.id,
-              planReceipt.contractID == final.contractID,
-              planReceipt.tool == "run_command",
-              planReceipt.hasValidEvidenceDigest,
-              planReceipt.freshAfterMutationFrontier,
-              planReceipt.expectedExitCode == 0, planReceipt.actualExitCode == 0,
-              planReceipt.governedWorkspaceDigest == digest,
-              let planReference = planReceipt.trustedCommandReference,
-              planReference.isValid,
-              planReference.exitCode == planReceipt.actualExitCode,
-              !planReference.timedOut, !planReference.wasSignalled,
-              planReceipt.outputDigest == planReference.fullStreamDigest,
-              authority.trustedTelemetry.contains(where: {
-                  $0.kind == .command && $0.id == planReference.observationID
-                      && $0.commandReference == planReference && $0.success
-              }) else {
+        guard let planReceipt = verification.planFinalVerificationReceipt else {
             throw AcceptedRunAuthorityError.invalid(
-                "PlanExecute final command receipt is missing, stale, or mismatched")
+                "PlanExecute final command receipt is missing (no host replay minted one)")
+        }
+        // Name the failing check (0.17.63): "missing, stale, or mismatched" hid which of a dozen
+        // bindings broke on a finished, council-approved build.
+        var receiptFaults: [String] = []
+        if planReceipt.missionInstanceID != run.id { receiptFaults.append("missionInstanceID") }
+        if planReceipt.contractID != final.contractID { receiptFaults.append("contractID") }
+        if planReceipt.tool != "run_command" { receiptFaults.append("tool") }
+        if !planReceipt.hasValidEvidenceDigest { receiptFaults.append("evidenceDigest") }
+        if !planReceipt.freshAfterMutationFrontier { receiptFaults.append("freshAfterMutationFrontier") }
+        if planReceipt.expectedExitCode != 0 || planReceipt.actualExitCode != 0 { receiptFaults.append("exitCode") }
+        if planReceipt.governedWorkspaceDigest != digest {
+            receiptFaults.append("governedWorkspaceDigest(receipt=\(planReceipt.governedWorkspaceDigest.prefix(12)) accepted=\(digest.prefix(12)))")
+        }
+        if let planReference = planReceipt.trustedCommandReference {
+            if !planReference.isValid { receiptFaults.append("reference.invalid") }
+            if planReference.exitCode != planReceipt.actualExitCode { receiptFaults.append("reference.exitCode") }
+            if planReference.timedOut || planReference.wasSignalled { receiptFaults.append("reference.exitState") }
+            if planReceipt.outputDigest != planReference.fullStreamDigest { receiptFaults.append("outputDigest≠fullStreamDigest") }
+            if !authority.trustedTelemetry.contains(where: {
+                $0.kind == .command && $0.id == planReference.observationID
+                    && $0.commandReference == planReference && $0.success
+            }) { receiptFaults.append("no matching successful command observation in trusted telemetry") }
+        } else {
+            receiptFaults.append("trustedCommandReference missing")
+        }
+        guard receiptFaults.isEmpty else {
+            throw AcceptedRunAuthorityError.invalid(
+                "PlanExecute final command receipt is stale or mismatched: " + receiptFaults.joined(separator: ", "))
         }
         guard !final.workers.isEmpty,
               final.workers.allSatisfy({

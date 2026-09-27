@@ -77,15 +77,129 @@ extension KistRunner {
                                  detail: "route and adapter are incompatible")
             return 2
         }
-        guard let roles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else {
+        guard let pinnedRoles = rolesOverride ?? resolveRoles(opts, registry, providerId: providerId, model: model) else {
             return 2
         }
-        guard let plannerBinding = builderPreflightBinding(roles: roles, registry: registry),
+        // BUILD-LANE PROVIDER RESILIENCE (2026-09-27): route pinned roles around providers the
+        // cooldown ledger / health daemon already know are dead, exactly as the chat lanes do.
+        // Before this the build lane ran the pinned planner no matter what and refused on its first
+        // failure, so a drained OpenAI account made every build turn exit 2 for weeks while chat
+        // kept working on other providers. See KistRunner+BuildLaneResilience.swift.
+        let liveCooldowns = ProviderCooldownStore()
+        let liveHealth = ProviderHealthFileStore()
+        let benchedProvider: (String) -> Bool = { liveCooldowns.coolingDown($0) || liveHealth.down($0) }
+        let warmed = warmRoleBindings(pinnedRoles, registry: registry,
+                                      cooldowns: liveCooldowns, health: liveHealth)
+        for substitution in warmed.substitutions {
+            note("build lane · \(substitution.role.rawValue) \(substitution.from.providerId) benched "
+                 + "(\(substitution.reason)) → \(substitution.to.providerId)")
+        }
+        for role in warmed.stranded {
+            note("build lane · \(role.rawValue) provider \(pinnedRoles.binding(for: role).providerId) is benched "
+                 + "but no warm substitute is configured — keeping the pin")
+        }
+        var teamRoles = warmed.roles
+        guard let plannerBinding = builderPreflightBinding(roles: teamRoles, registry: registry),
               let plannerProvider = registry.provider(id: plannerBinding.providerId) else {
             err("builder refused to start: planner provider could not be resolved")
             return 2
         }
-        let plannerModel = plannerProvider.resolvedModel(plannerBinding.model)
+        var plannerProviderID = plannerProvider.id
+        var plannerModel = plannerProvider.resolvedModel(plannerBinding.model)
+
+        // The sealed planning pass runs BEFORE producer identities and the independent reviewer are
+        // fixed: a planner substituted after a live failure is itself a producer identity, and the
+        // reviewer must be chosen distinct from the team that actually produced.
+        let completionMode = builderCompletionMode(for: goal)
+        let effectiveTokenBudget = max(1, opts.budgetTokens ?? 200_000)
+        let configuredBudget = budgetOverride ?? opts.makeBudget()
+        if let configuredBudget, await configuredBudget.remaining() == nil {
+            let reason = "Builder requires a finite per-run token cap; uncapped BudgetLedger authority is refused"
+            err("builder refused to start: \(reason)")
+            emitBuilderRunRecord(contractID: contractID,
+                                 missionInstanceID: planExecuteMissionID?.rawValue,
+                                 launch: launch, outcome: "rejected", detail: reason)
+            return 2
+        }
+        let sharedBudget: BudgetLedger? = configuredBudget
+            ?? BudgetLedger(maxTokens: effectiveTokenBudget)
+        let preflightEnvelope: BuilderPreflightEnvelope?
+        if completionMode == .build, launch.adapter != .cobolo {
+            guard launch.mutationIntent else {
+                let reason = "host intent did not authorize a mutation preflight"
+                err("builder refused unsafe compatibility mutation: \(reason)")
+                emitBuilderRunRecord(contractID: contractID,
+                                     missionInstanceID: planExecuteMissionID?.rawValue,
+                                     launch: launch, outcome: "rejected", detail: reason)
+                return 2
+            }
+            var generated: BuilderPreflightEnvelope?
+            // Bounded substitutions: the (possibly pre-warmed) planner, then at most two warm
+            // replacements — the first warm pick can itself be exhausted (live 2026-09-27: OpenAI
+            // API drained → codex subscription at its usage limit → third provider). Still bounded
+            // so a fleet-wide outage fails fast instead of walking every vendor.
+            var plannerSubstitutionsLeft = 2
+            while generated == nil {
+                do {
+                    generated = try await builderGeneratePreflightEnvelope(
+                        adapter: launch.adapter, projectRoot: root, goal: goal,
+                        contractID: contractID, registry: registry,
+                        providerID: plannerProviderID, model: plannerModel,
+                        budget: sharedBudget!, maxPartitions: max(1, opts.agents),
+                        allowsDelegatedRepairAuthority:
+                            launch.mutationIntent && (opts.auto || opts.yolo))
+                } catch {
+                    if let failure = buildLaneProviderFailure(error) {
+                        // Live provider failure: bench it cross-process (quota exhaustion for
+                        // hours, a limiter for minutes) so no lane re-picks it, then retry the
+                        // planning pass once on a warm planner instead of refusing the build.
+                        liveCooldowns.record(plannerProviderID, ttl: failure.cooldownTTL)
+                        if plannerSubstitutionsLeft > 0,
+                           let substitute = warmPlannerSubstitute(
+                               afterFailing: plannerProviderID, roles: teamRoles, registry: registry,
+                               cooldowns: liveCooldowns, health: liveHealth),
+                           let substituteProvider = registry.provider(id: substitute.providerId) {
+                            plannerSubstitutionsLeft -= 1
+                            note("build lane · planner \(plannerProviderID) failed (\(failure.summary)) "
+                                 + "→ retrying the sealed planning pass on \(substituteProvider.id)")
+                            teamRoles = teamRoles.binding(.planner, to: substitute)
+                            plannerProviderID = substituteProvider.id
+                            plannerModel = substituteProvider.resolvedModel(substitute.model)
+                            continue
+                        }
+                        let reason = "planner provider \(plannerProviderID) failed: \(failure.summary)"
+                            + (failure.quotaExhausted
+                                ? " — add credits or re-pin the planner role (/roles)"
+                                : " — no warm substitute planner is configured")
+                        err("builder could not start: \(reason)")
+                        emitBuilderRunRecord(contractID: contractID,
+                                             missionInstanceID: planExecuteMissionID?.rawValue,
+                                             launch: launch, outcome: "rejected", detail: reason)
+                        return 2
+                    }
+                    let reason = error.localizedDescription
+                    err("builder refused unsafe compatibility mutation: \(reason)")
+                    emitBuilderRunRecord(contractID: contractID,
+                                         missionInstanceID: planExecuteMissionID?.rawValue,
+                                         launch: launch, outcome: "rejected", detail: reason)
+                    return 2
+                }
+            }
+            preflightEnvelope = generated
+        } else {
+            preflightEnvelope = nil
+        }
+        // The planning pass may have benched a provider the up-front pass considered warm (live
+        // 2026-09-27: codex-cli was picked for planner AND critic, then hit its usage limit as
+        // planner). Re-warm so no other role is still bound to a provider that just failed.
+        let rewarmed = warmRoleBindings(teamRoles, registry: registry,
+                                        cooldowns: liveCooldowns, health: liveHealth)
+        for substitution in rewarmed.substitutions {
+            note("build lane · \(substitution.role.rawValue) \(substitution.from.providerId) benched "
+                 + "after the planning pass (\(substitution.reason)) → \(substitution.to.providerId)")
+        }
+        teamRoles = rewarmed.roles
+        let roles = teamRoles
         let builderBinding = roles.binding(for: .coder)
         let criticBinding = roles.binding(for: .critic)
         guard let builderProvider = registry.provider(id: builderBinding.providerId) else {
@@ -154,7 +268,8 @@ extension KistRunner {
             selectedIndependentReviewer = independentReviewerSelection(
                 preferred: criticBinding,
                 producingIdentities: configuredProducerIdentities,
-                registry: registry)
+                registry: registry,
+                benched: benchedProvider)
         }
         guard let selectedIndependentReviewer else {
             let reason = reviewPolicy.grade == .freshContextSameModel
@@ -193,48 +308,6 @@ extension KistRunner {
         // planner choose an implementation, but they cannot add done-when requirements.
         let canonicalFunctionalExecutionGoal = compatibilityGoals.canonicalFunctionalGoal
         let functionalExecutionGoal = compatibilityGoals.functionalExecutionGoal
-        let completionMode = builderCompletionMode(for: goal)
-        let effectiveTokenBudget = max(1, opts.budgetTokens ?? 200_000)
-        let configuredBudget = budgetOverride ?? opts.makeBudget()
-        if let configuredBudget, await configuredBudget.remaining() == nil {
-            let reason = "Builder requires a finite per-run token cap; uncapped BudgetLedger authority is refused"
-            err("builder refused to start: \(reason)")
-            emitBuilderRunRecord(contractID: contractID,
-                                 missionInstanceID: planExecuteMissionID?.rawValue,
-                                 launch: launch, outcome: "rejected", detail: reason)
-            return 2
-        }
-        let sharedBudget: BudgetLedger? = configuredBudget
-            ?? BudgetLedger(maxTokens: effectiveTokenBudget)
-        let preflightEnvelope: BuilderPreflightEnvelope?
-        if completionMode == .build, launch.adapter != .cobolo {
-            guard launch.mutationIntent else {
-                let reason = "host intent did not authorize a mutation preflight"
-                err("builder refused unsafe compatibility mutation: \(reason)")
-                emitBuilderRunRecord(contractID: contractID,
-                                     missionInstanceID: planExecuteMissionID?.rawValue,
-                                     launch: launch, outcome: "rejected", detail: reason)
-                return 2
-            }
-            do {
-                preflightEnvelope = try await builderGeneratePreflightEnvelope(
-                    adapter: launch.adapter, projectRoot: root, goal: goal,
-                    contractID: contractID, registry: registry,
-                    providerID: plannerProvider.id, model: plannerModel,
-                    budget: sharedBudget!, maxPartitions: max(1, opts.agents),
-                    allowsDelegatedRepairAuthority:
-                        launch.mutationIntent && (opts.auto || opts.yolo))
-            } catch {
-                let reason = error.localizedDescription
-                err("builder refused unsafe compatibility mutation: \(reason)")
-                emitBuilderRunRecord(contractID: contractID,
-                                     missionInstanceID: planExecuteMissionID?.rawValue,
-                                     launch: launch, outcome: "rejected", detail: reason)
-                return 2
-            }
-        } else {
-            preflightEnvelope = nil
-        }
         if reviewPolicy.grade == .freshContextSameModel {
             guard let plan = preflightEnvelope?.plan,
                   plan.operations.count == 1,

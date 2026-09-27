@@ -284,7 +284,7 @@ extension KistREPL {
             // is warm, retry the turn ONCE on it. R2a: never re-run a turn the user stopped.
             if !oc.success, !lastTurnInterrupted {
                 if Self.transientProviderFailure(summary: oc.summary) {
-                    recordProviderCooldown?(turnAuthor.providerId)
+                    recordProviderCooldown?(turnAuthor.providerId, oc.summary)
                 }
                 if let loopFactory,
                    let sub = Self.mediaSubstitutionDecision(success: oc.success, summary: oc.summary,
@@ -300,7 +300,7 @@ extension KistREPL {
                                                     rawRequest: text, resolvedIntent: mediaIntent,
                                                     authoredBy: turnAuthor)
                     if !oc.success, !lastTurnInterrupted, Self.transientProviderFailure(summary: oc.summary) {
-                        recordProviderCooldown?(turnAuthor.providerId)
+                        recordProviderCooldown?(turnAuthor.providerId, oc.summary)
                     }
                 }
             }

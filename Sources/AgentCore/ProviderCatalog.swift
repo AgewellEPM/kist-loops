@@ -272,6 +272,11 @@ public final class ProviderRegistry: Sendable {
     /// (cooldowns + health daemon) in `makeRegistry`. Never applied to the PRIMARY (explicit choice),
     /// and fails open when every fallback is benched.
     private let providerUnavailable: @Sendable (String) -> Bool
+    /// Called once per candidate whose attempts are exhausted or whose failure is terminal, with the
+    /// FAILED candidate's id and the error (never on cancellation). The host decides what counts as a
+    /// live failure and benches it cross-process (0.17.63: a planner that hit its quota INSIDE a
+    /// plan-execute mission was benched by nothing, so the next run walked into it again).
+    private let liveFailureObserver: (@Sendable (String, Error) -> Void)?
 
     public init(providers: [any ChatProvider] = ProviderCatalog.all,
                 keyStore: KeyStore = DefaultKeyStore.make(),
@@ -284,7 +289,8 @@ public final class ProviderRegistry: Sendable {
                 modelListFetch: @escaping @Sendable (String, String?) async -> Result<[String], Error> = {
                     url, key in await ProviderDoctor.liveFetch(modelsURL: url, apiKey: key)
                 },
-                providerUnavailable: @escaping @Sendable (String) -> Bool = { _ in false }) {
+                providerUnavailable: @escaping @Sendable (String) -> Bool = { _ in false },
+                liveFailureObserver: (@Sendable (String, Error) -> Void)? = nil) {
         self.providers = providers
         self.keyStore = keyStore
         self.retryDelaysNanoseconds = retryDelaysNanoseconds
@@ -292,6 +298,12 @@ public final class ProviderRegistry: Sendable {
         self.fallbackProviderIds = fallbackProviderIds
         self.modelListFetch = modelListFetch
         self.providerUnavailable = providerUnavailable
+        self.liveFailureObserver = liveFailureObserver
+    }
+
+    /// One candidate is done failing (terminal error, or retries exhausted). Fire-and-forget.
+    private func noteCandidateFailure(_ providerID: String, _ error: Error) {
+        liveFailureObserver?(providerID, error)
     }
 
     /// Resolve a valid model id on the SAME provider after a model-not-found error (Layer B). Returns the
@@ -612,10 +624,14 @@ public final class ProviderRegistry: Sendable {
                         continue   // retry SAME provider with a valid model
                     }
                     guard Self.shouldRetry(error) else {
+                        noteCandidateFailure(candidate.provider.id, error)
                         if candidateIndex < candidates.count - 1, Self.shouldFallback(error) { break }
                         throw lastError ?? error
                     }
-                    guard attempt < delays.count else { break }
+                    guard attempt < delays.count else {
+                        noteCandidateFailure(candidate.provider.id, error)
+                        break
+                    }
                     let delay = delays[attempt]
                     attempt += 1
                     retryTally.record(candidate.provider.id)   // flakiness signal (counts even if it recovers)
@@ -900,17 +916,22 @@ public final class ProviderRegistry: Sendable {
                             // stream's events to what the consumer already received (duplicate/interleaved
                             // output). After any emission, surface the error outward.
                             if yieldedAny {
+                                self.noteCandidateFailure(candidate.provider.id, error)
                                 continuation.finish(throwing: lastError ?? error)
                                 return
                             }
                             guard Self.shouldRetry(error) else {
+                                self.noteCandidateFailure(candidate.provider.id, error)
                                 if candidateIndex < candidates.count - 1, Self.shouldFallback(error) {
                                     break
                                 }
                                 continuation.finish(throwing: lastError ?? error)
                                 return
                             }
-                            guard attempt < delays.count else { break }
+                            guard attempt < delays.count else {
+                                self.noteCandidateFailure(candidate.provider.id, error)
+                                break
+                            }
                             let delay = delays[attempt]
                             attempt += 1
                             self.retryTally.record(candidate.provider.id)   // flakiness signal (counts even if it recovers)

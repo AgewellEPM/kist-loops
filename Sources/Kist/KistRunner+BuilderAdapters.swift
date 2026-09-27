@@ -996,9 +996,13 @@ extension KistRunner {
                     case .planExecute:
                         let planExecuteTools = builderScopedPlanExecuteTools(
                             from: routeTools, sealedPlan: preflightEnvelope?.plan)
+                        // The worker sees the host-frozen contract (allowed paths + exact verifier)
+                        // instead of discovering it from failures (KistRunner+SealedContractPrompt).
+                        let sealedGoal = builderGoalWithSealedContract(
+                            boundedExecutionGoal, plan: preflightEnvelope?.plan)
                         let invokePlanExecute: @Sendable () async -> Int32 = {
                             await runPlanExecute(
-                                opts, goal: boundedExecutionGoal, registry: registry,
+                                opts, goal: sealedGoal, registry: registry,
                                 root: adapterRoot, tools: planExecuteTools, context: adapterContext,
                                 providerId: providerId, model: model,
                                 rolesOverride: roles, budgetOverride: sharedBudget,
@@ -1006,7 +1010,11 @@ extension KistRunner {
                                 freshMissionInstanceID: planExecuteMissionID,
                                 riskObjective: riskObjective ?? goal,
                                 checkpointGoal: goal, hostOwnedFinalReview: true,
-                                functionalObjective: functionalExecutionGoal,
+                                // The planner's first message IS the functional objective (not the
+                                // goal), so the sealed contract rides here; the canonical objective
+                                // and its fingerprint stay untouched.
+                                functionalObjective: builderGoalWithSealedContract(
+                                    functionalExecutionGoal, plan: preflightEnvelope?.plan),
                                 canonicalFunctionalObjective: canonicalFunctionalExecutionGoal,
                                 hostContractID: finalizedContract.id,
                                 memoryRoot: root, auditRoot: root,
@@ -1201,6 +1209,16 @@ extension KistRunner {
                             contractFingerprint: objectiveFingerprint,
                             subjectDigest: subjectDigest)
                         : nil
+                    if launch.adapter == .planExecute, planFinalReplay == nil {
+                        // Name the reason (0.17.63): a minted receipt that fails admission here used to
+                        // surface only as "final command receipt is missing".
+                        note("build lane · final replay receipt not admitted: "
+                             + builderFinalReplayRejectionReasons(
+                                 receipt: observedPlanOutcome?.finalVerificationReceipt,
+                                 missionInstanceID: planExecuteMissionID?.rawValue ?? "",
+                                 contractID: finalizedContract.id,
+                                 subjectDigest: subjectDigest).joined(separator: ", "))
+                    }
                     let planMissionBound = launch.adapter != .planExecute
                         || (observedPlanMission != nil
                             && observedPlanMission == finalizedContract.checkpointIdentity)
@@ -1413,6 +1431,11 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
 
     func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
         let effectiveArguments = canonicalizeToolArguments(arguments)
+        var sealedSubstitutionNote: String?
+        if name == "run_command", let substitute = sealedSubstitutionApplied(raw: arguments) {
+            sealedSubstitutionNote = "[sealed verifier substituted for the requested arguments: "
+                + substitute.canonicalStatement + "]\n"
+        }
         let path = effectiveArguments["path"] as? String
         let revisingCreatedFile: Bool
         if name == "edit_file", let path, authority[path] == .create, let createdFiles {
@@ -1429,13 +1452,44 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
             return .failure("builder execution contract denied an undeclared mutation. "
                 + "Use the advertised file tool for a sealed path; run_command permits only the exact sealed verifier, including during repair.")
         }
-        let result = try await base.execute(arguments: effectiveArguments, context: context)
+        var result = try await base.execute(arguments: effectiveArguments, context: context)
+        if let sealedSubstitutionNote {
+            result = result.prefixingOutput(sealedSubstitutionNote)
+        }
         if result.success, let path, authority[path] == .create,
            name == "write_file" || name == "edit_file" {
             await createdFiles?.record(path: path, context: context)
         }
         guard name == "run_command", result.success else { return result }
         return result.authorizingBuilderContractVerification(arguments: effectiveArguments)
+    }
+
+    /// The sealed command a raw request canonicalizes to, or nil when the request is already exact
+    /// (no substitution) or is not a repairable near miss.
+    func sealedSubstitutionApplied(raw arguments: [String: Any]) -> KistRunner.BuilderPreflightCommand? {
+        guard name == "run_command", !authorized(arguments) else { return nil }
+        return sealedSubstitute(for: arguments)
+    }
+
+    /// The one sealed command this request can only have meant: same executable, no shell/stdin/
+    /// background/cwd escape, default exit codes — and exactly ONE sealed command for that
+    /// executable, so the substitution is unambiguous. Nil keeps the exact-match refusal.
+    func sealedSubstitute(for arguments: [String: Any]) -> KistRunner.BuilderPreflightCommand? {
+        guard name == "run_command",
+              let executable = arguments["executable"] as? String,
+              arguments["command"] == nil, arguments["shell"] == nil,
+              arguments["stdin"] == nil, arguments["stdin_path"] == nil,
+              arguments["background"] == nil,
+              arguments["cwd"] == nil || (arguments["cwd"] as? String) == ".",
+              exactZeroExitCodes(arguments["allowed_exit_codes"]) else { return nil }
+        let candidates = verificationCommands.filter { $0.executable == executable }
+        guard candidates.count == 1, let sealed = candidates.first else { return nil }
+        // Explicit timeouts are never repaired (same rule as contractBoundArguments): only an omitted
+        // timeout, or exactly the sealed one, may ride along with substituted arguments.
+        if arguments["timeout"] != nil, exactInteger(arguments["timeout"]) != sealed.timeoutSeconds {
+            return nil
+        }
+        return sealed
     }
 
     /// `run_command` defaults an omitted timeout to 120 seconds, which could exceed the frozen
@@ -1447,6 +1501,16 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
         var arguments = arguments
         if name == "run_command", arguments["cwd"] as? String == "" {
             arguments.removeValue(forKey: "cwd")
+        }
+        // A same-executable near miss on the sealed verifier canonicalizes TO the sealed command
+        // (different test selection, an extra -v, a discover subcommand): the contract permits only
+        // that command, so this is what will actually run. Doing it here, not in execute, means the
+        // executor records, durable receipts, replay recipes, and the gate digest all describe the
+        // sealed invocation (2026-09-27: substituting at execution time left the recipe holding the
+        // near miss and no final receipt could ever be minted).
+        if let substitute = sealedSubstitutionApplied(raw: arguments) {
+            return ["executable": substitute.executable, "args": substitute.arguments,
+                    "timeout": substitute.timeoutSeconds]
         }
         guard name == "run_command", arguments["timeout"] == nil,
               let executable = arguments["executable"] as? String else { return arguments }

@@ -137,7 +137,9 @@ final class KistREPL {
     var providerCoolingDown: ((String) -> Bool)? = nil
     /// Bench a provider cross-process after a live transient failure so one-shot lanes and future
     /// sessions don't walk into the same wall. nil = no-op (tests / minimal wiring).
-    var recordProviderCooldown: ((String) -> Void)? = nil
+    /// (providerId, failure summary) → bench cross-process; the summary picks the TTL
+    /// (hours for a drained account, minutes for a limiter/outage).
+    var recordProviderCooldown: ((String, String) -> Void)? = nil
     /// Autopilot may send clipboard media without a per-paste prompt. Normal REPL still asks once.
     var autoApproveClipboardVision = false
     /// R2b: pin the input bar to the bottom via a scroll region (default on for TTYs; --no-pinned-bar off).
@@ -915,7 +917,7 @@ final class KistREPL {
             // even when no substitute exists — one-shot lanes and future sessions must not walk
             // into the same wall (parity with KistRunner+OneShotResilience, 2026-08-14).
             if !oc.success, !lastTurnInterrupted, Self.transientProviderFailure(summary: oc.summary) {
-                recordProviderCooldown?(activeBinding.providerId)
+                recordProviderCooldown?(activeBinding.providerId, oc.summary)
             }
             if let loopFactory,
                !lastTurnInterrupted,   // R2a: never re-run a turn the USER stopped (their queued instruction runs next)
@@ -945,7 +947,7 @@ final class KistREPL {
                                                 delegationGrant: turnDelegationGrant,
                                                 authoredBy: turnAuthor)
                 if !oc.success, !lastTurnInterrupted, Self.transientProviderFailure(summary: oc.summary) {
-                    recordProviderCooldown?(turnAuthor.providerId)
+                    recordProviderCooldown?(turnAuthor.providerId, oc.summary)
                 }
             }
             rememberModelTurn(user: messageText, assistantSummary: oc.summary,

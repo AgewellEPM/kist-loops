@@ -30,6 +30,14 @@ extension PlanExecuteLoop {
             ])
     }
 
+    /// A pending plan is still valid when the workspace is exactly where the planner saw it — OR
+    /// when every change since then is one of THIS plan's own recorded actions. Before 0.17.63 the
+    /// second case was rejected: the plan's first `write_file` advanced the lifecycle head, its
+    /// next step was refused as "generated under an obsolete workspace manifest", and every
+    /// multi-step mutation plan burned a replan per file (live 2026-09-27: hello.py, then
+    /// test_hello.py, then the test run, three plans for three steps, replans exhausted before
+    /// the model could repair its own test command). A change the plan did NOT author — another
+    /// plan's receipt, or a head with no receipt at all — still forces the replan.
     static func snapshotMatchesWorkspace(_ snapshot: DurableExecutablePlanSnapshot,
                                          control: ReasoningControlState) -> Bool {
         guard let snapshotPolicy = snapshot.workspaceManifestPolicyFingerprint,
@@ -38,9 +46,34 @@ extension PlanExecuteLoop {
               let currentPolicy = control.workspaceManifestPolicyFingerprint,
               let currentRevision = control.workspaceManifestRevision,
               let currentHead = control.workspaceManifestDigest else { return false }
-        return snapshotPolicy == currentPolicy
-            && snapshotHead == currentHead
-            && snapshotRevision <= currentRevision
+        guard snapshotPolicy == currentPolicy, snapshotRevision <= currentRevision else { return false }
+        if snapshotHead == currentHead { return true }
+        return workspaceHeadReachedByOwnActions(
+            of: snapshot, from: snapshotHead, to: currentHead,
+            receipts: control.workspaceActionReceipts ?? [])
+    }
+
+    /// True when an unbroken SUFFIX of the durable receipt chain — every link authored by this
+    /// plan (same plan id), every link's pre-head equal to the previous post-head, every receipt
+    /// digest valid — walks from `snapshotHead` to `currentHead`. Any foreign receipt in that
+    /// suffix, or a current head no receipt accounts for, is an outside change: not reachable.
+    static func workspaceHeadReachedByOwnActions(
+        of snapshot: DurableExecutablePlanSnapshot,
+        from snapshotHead: String,
+        to currentHead: String,
+        receipts: [DurableWorkspaceActionCompletionReceipt]
+    ) -> Bool {
+        guard let start = receipts.lastIndex(where: {
+            $0.intent.planID == snapshot.id && $0.intent.preWorkspaceManifestDigest == snapshotHead
+        }) else { return false }
+        var head = snapshotHead
+        for receipt in receipts[start...] {
+            guard receipt.intent.planID == snapshot.id,
+                  receipt.intent.preWorkspaceManifestDigest == head,
+                  receipt.hasValidReceiptDigest else { return false }
+            head = receipt.postWorkspaceManifestDigest
+        }
+        return head == currentHead
     }
 
     static func workspaceManifestPrompt(_ manifest: WorkspaceNameManifest) -> String {
@@ -659,7 +692,27 @@ extension PlanExecuteLoop {
               (workspaceActionReceiptDigests.isEmpty
                 || finalReceipt.workspaceActionReceiptDigest.map(
                     workspaceActionReceiptDigests.contains) == true) else {
-            return .failure(.invalid("final deterministic replay receipt is missing or unbound"))
+            // Say WHICH binding failed (0.17.63): a finished build rejected here used to read the
+            // same as one whose host replay never ran.
+            guard let finalReceipt else {
+                return .failure(.invalid("final deterministic replay receipt is missing (no host replay minted one)"))
+            }
+            var reasons = finalReceipt.bindingMismatchReasons(
+                missionInstanceID: missionInstanceID, contractID: contractID,
+                completionContractFingerprint: completionContractFingerprint,
+                obligationsFingerprint: obligationsFingerprint,
+                executionPolicyFingerprint: executionPolicyFingerprint,
+                workspaceManifestDigest: workspaceManifestDigest,
+                governedWorkspaceDigest: governedWorkspaceDigest,
+                canonicalFunctionalObjectiveFingerprint: canonicalFunctionalObjectiveFingerprint,
+                workspaceManifestPolicyFingerprint: workspaceManifestPolicyFingerprint,
+                workspaceManifestRevision: workspaceManifestRevision)
+            if !workspaceActionReceiptDigests.isEmpty,
+               finalReceipt.workspaceActionReceiptDigest.map(workspaceActionReceiptDigests.contains) != true {
+                reasons.append("workspaceActionReceiptDigest not in the durable receipt chain")
+            }
+            return .failure(.invalid("final deterministic replay receipt is unbound: "
+                + (reasons.isEmpty ? "unknown" : reasons.joined(separator: ", "))))
         }
 
         let requiredIDs = Set(obligationIDs)

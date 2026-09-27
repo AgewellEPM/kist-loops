@@ -281,7 +281,8 @@ extension KistRunner {
                         : independentReviewerSelection(
                             preferred: criticBinding,
                             producingIdentities: producingIdentities,
-                            registry: registry)
+                            registry: registry,
+                            benched: liveProviderBenched())
                     guard workerIdentities.count == request.workers.count,
                           let selection else {
                         let reason = reviewPolicy.grade == .freshContextSameModel

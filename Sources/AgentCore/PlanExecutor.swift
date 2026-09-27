@@ -200,7 +200,9 @@ public struct PlanExecutor: Sendable {
                 var preempted: [(Int, String, String, StepResult)] = []
                 for step in ready {
                     let idx = (orderIndex[step.id] ?? 0) + 1
-                    let args = ExecutablePlan.resolveArguments(step.argumentsJSON, outputs: outputSnapshot)
+                    let args = tools.canonicalArguments(
+                        name: step.tool,
+                        arguments: ExecutablePlan.resolveArguments(step.argumentsJSON, outputs: outputSnapshot))
                     // GATE: a dangerous step (unconfined MCP mutation, escaping write, run_command)
                     // is approved SERIALLY before launch — the DAG can't be an approval bypass.
                     if let approve = approveDangerous,
@@ -279,7 +281,9 @@ public struct PlanExecutor: Sendable {
                 stepRepairsUsed += 1
                 // The repairer diagnoses the RESOLVED args that actually ran (same pre-wave
                 // snapshot the launch used), not the ${id} template.
-                let ranArgs = ExecutablePlan.resolveArguments(step.argumentsJSON, outputs: outputSnapshot)
+                let ranArgs = tools.canonicalArguments(
+                    name: step.tool,
+                    arguments: ExecutablePlan.resolveArguments(step.argumentsJSON, outputs: outputSnapshot))
                 guard let fixedArgs = await repairStep(step, ranArgs, stepResult) else { continue }
                 if Task.isCancelled { continue }   // ESC landed during the repair model call
                 let idx = (orderIndex[stepId] ?? 0) + 1

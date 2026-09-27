@@ -162,7 +162,7 @@ final class RateLimitLaneCooldownTests: XCTestCase {
 
     func testSiteREPLTextTurnLaneConsultsAndFeedsCooldowns() throws {
         let src = try source("Sources/Kist/KistREPL.swift")
-        XCTAssertTrue(src.contains("recordProviderCooldown?(activeBinding.providerId)"),
+        XCTAssertTrue(src.contains("recordProviderCooldown?(activeBinding.providerId, oc.summary)"),
                       "REPL text-turn lane must bench a transiently-failing provider cross-process")
         XCTAssertTrue(src.contains("providerCoolingDown?(pid) != true"),
                       "REPL text-turn substitution must never pick a cooling provider")
@@ -172,7 +172,7 @@ final class RateLimitLaneCooldownTests: XCTestCase {
         let src = try source("Sources/Kist/KistREPL+Turn.swift")
         XCTAssertTrue(src.contains("mediaSubstitutionDecision"),
                       "media lane must retry a failed media turn on a warm vision candidate")
-        XCTAssertTrue(src.contains("recordProviderCooldown?(turnAuthor.providerId)"),
+        XCTAssertTrue(src.contains("recordProviderCooldown?(turnAuthor.providerId, oc.summary)"),
                       "media lane must bench the failed vision provider even when no substitute exists")
         XCTAssertTrue(src.contains("chooseVisionProvider"),
                       "media lane must pick its vision provider cooldown-aware, not statically")

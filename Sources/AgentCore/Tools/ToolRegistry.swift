@@ -247,8 +247,7 @@ public struct ToolRegistry: Sendable {
             return await traced(.failure("unknown tool: \(name)"),
                                 argumentKeys: rawArgKeys, argumentsDigest: rawArgsDigest)
         }
-        let callerArguments = (tool as? any ToolArgumentCanonicalizing)?
-            .canonicalizeToolArguments(arguments) ?? arguments
+        let callerArguments = canonicalArguments(name: name, arguments: arguments)
         var effectiveArguments = callerArguments
         for (key, value) in hostArguments { effectiveArguments[key] = value }
         let (effectiveArgKeys, argsDigest) = AuditLog.digest(effectiveArguments)
@@ -269,6 +268,16 @@ public struct ToolRegistry: Sendable {
             workspaceRootIdentity: try? BuilderWorkspaceRootIdentity.capture(
                 rootPath: context.projectRoot))
         return await traced(result, argumentKeys: effectiveArgKeys, argumentsDigest: argsDigest)
+    }
+
+    /// The arguments a tool will ACTUALLY run for `arguments` (its `ToolArgumentCanonicalizing`
+    /// view, else the input unchanged). Executors record these so fingerprints, durable receipts,
+    /// replay recipes, and the gate digest all describe the same invocation (0.17.63: a sealed
+    /// verifier substituted at execution time left the recipe holding the model's near miss, so the
+    /// host replay's gate digest never matched and no final receipt could be minted).
+    public func canonicalArguments(name: String, arguments: [String: Any]) -> [String: Any] {
+        guard let tool = tool(named: name) as? any ToolArgumentCanonicalizing else { return arguments }
+        return tool.canonicalizeToolArguments(arguments)
     }
 
     /// Epoch seconds without `Date()` ambiguity (kept simple + Sendable).

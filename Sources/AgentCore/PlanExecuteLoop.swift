@@ -999,9 +999,19 @@ public struct PlanExecuteLoop: Sendable {
                             && (completionContract.kind != .verificationOnly
                                 || (missionDigestAvailable && !governedDigestDepartureObserved
                                     && workspaceAtGate == missionWorkspaceDigest))
-                        if case .needsVerification = completionVerdict,
+                        // Host-owned final review needs a host-authenticated receipt even when the
+                        // plan's own last step was the passing sealed check (0.17.63): with no later
+                        // mutation nothing is "invalidated", so the replay branch never opened and a
+                        // finished, council-approved build was rejected as unreceipted. Serve that
+                        // case through the same bounded replay (see CompletionVerifier+HostReceipt).
+                        let hostReceiptRequired = hostOwnedFinalReview && finalVerificationReceipt == nil
+                            && completionVerdict.isAccept
+                        let replayRequest = completionVerifier.invalidatedVerification(in: verificationHistory)
+                            ?? (hostReceiptRequired
+                                ? completionVerifier.hostReceiptReplayRequest(in: verificationHistory) : nil)
+                        if !completionVerdict.isAccept || hostReceiptRequired,
                            replayAllowedByContract,
-                           let invalidated = completionVerifier.invalidatedVerification(in: verificationHistory),
+                           let invalidated = replayRequest,
                            let replay = retainedVerificationReplays.reversed().first(where: {
                                $0.tool == invalidated.lastPassedTool
                                    && $0.fingerprint == invalidated.lastPassedFingerprint

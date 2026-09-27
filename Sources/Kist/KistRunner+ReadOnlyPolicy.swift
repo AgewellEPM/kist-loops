@@ -134,7 +134,10 @@ extension KistRunner {
                 trajectory: recorder.snapshot(),
                 current: ProviderBinding(providerId: providerId, model: model),
                 roles: roles, registry: registry, cooldowns: cooldowns) {
-                if sub.shouldCooldown { cooldowns.record(providerId) }
+                if sub.shouldCooldown {
+                    cooldowns.record(providerId,
+                                     ttl: KistREPL.providerCooldownTTL(forFailureSummary: outcome.summary))
+                }
                 note("↳ model substitution · \(providerId) benched for \(sub.decision.reason); "
                      + "retrying once on \(sub.decision.replacement.providerId)")
                 let retryLoop = makeLoop(

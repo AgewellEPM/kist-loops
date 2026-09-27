@@ -483,7 +483,13 @@ final class PlanExecuteLoopTests: XCTestCase {
             || changed.message.contains("canonical functional objective"), changed.message)
     }
 
-    func testRecordedMutationAdvancesManifestAndForcesFreshPlan() async throws {
+    /// CONTRACT CHANGE (0.17.63): a plan's OWN recorded mutation advances the workspace manifest
+    /// but no longer forces a fresh plan. Until now the dependent read was refused as "generated
+    /// under an obsolete workspace manifest" and a replacement plan re-read the file — one replan
+    /// per file for every multi-step mutation plan, which exhausted replans on real builds before
+    /// the model could repair anything (live 2026-09-27). Foreign changes still force the replan
+    /// (PlanSnapshotOwnActionsTests + testExternalWorkspaceDriftBlocksResumeBeforePlanning).
+    func testRecordedMutationAdvancesManifestAndOwnDependentStepsStillRun() async throws {
         let firstPlan = #"{"steps":[{"id":"E1","intent":"create artifact","tool":"write_file","arguments":{"path":"generated.txt","content":"recorded\n"}},{"id":"E2","intent":"read artifact","tool":"read_file","arguments":{"path":"generated.txt"},"dependsOn":["E1"]}]}"#
         let replacementPlan = #"{"steps":[{"id":"R1","intent":"read recorded artifact","tool":"read_file","arguments":{"path":"generated.txt"}}]}"#
         let provider = PlanScriptedProvider([firstPlan, replacementPlan])
@@ -500,19 +506,23 @@ final class PlanExecuteLoopTests: XCTestCase {
         ).run(goal: "Create generated.txt and read it back.")
 
         XCTAssertTrue(outcome.success, outcome.message)
-        XCTAssertEqual(outcome.replansUsed, 1)
+        XCTAssertEqual(outcome.replansUsed, 0, "the plan's own write must not force a fresh plan")
         XCTAssertEqual(try String(contentsOfFile: root + "/generated.txt"), "recorded\n")
         let runID = try XCTUnwrap(outcome.checkpointId)
         let loadedState = try await store.load(runID: runID)
         let state = try XCTUnwrap(loadedState)
         let receipts = state.workspaceActionReceipts ?? []
-        XCTAssertEqual(receipts.count, 2, "obsolete pending read must not execute")
+        XCTAssertEqual(receipts.count, 2, "write and its dependent read both ran, both receipted")
         XCTAssertTrue(receipts.allSatisfy(\.hasValidReceiptDigest))
+        XCTAssertEqual(Set(receipts.map(\.intent.planID)).count, 1, "both receipts belong to the one plan")
         XCTAssertEqual(state.workspaceManifestRevision, 2)
         XCTAssertEqual(state.lastAcknowledgedGovernedWorkspaceDigest,
                        PlanExecuteLoop.governedWorkspaceDigest(projectRoot: root))
-        XCTAssertEqual(state.executablePlanSnapshots?.last?.workspaceManifestDigest,
-                       state.workspaceManifestDigest)
+        let snapshot = try XCTUnwrap(state.executablePlanSnapshots?.last)
+        XCTAssertNotEqual(snapshot.workspaceManifestDigest, state.workspaceManifestDigest,
+                          "the snapshot keeps its generation-time head")
+        XCTAssertTrue(PlanExecuteLoop.snapshotMatchesWorkspace(snapshot, control: state),
+                      "the current head is reachable through the plan's own receipt chain")
         XCTAssertNil(state.activeWorkspaceAction)
     }
 

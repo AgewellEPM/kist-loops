@@ -414,7 +414,12 @@ public struct RunCommandTool: AgentTool {
                 + "(e.g. `which`/`grep`/`test` when nothing matched or a file was absent), not necessarily an error."
         }
         else if cleanExit {
+            // Carry the diagnosis IN the error string: the plan executor's replan steering and the
+            // sealed verification failure only relay `error`, so a planner that saw just
+            // "exit code 1" regenerated correct files instead of fixing its runner (live
+            // 2026-09-27: `python3 -m pytest` printed "No module named pytest" and nobody saw it).
             failError = "exit code \(outcome.exitCode); allowed exit codes: \(allowedExitCodes.sorted())"
+                + " — output tail: " + Self.outputTail(combined)
         }
         else { failError = "command failed with exit code \(outcome.exitCode)" }
         var metadata = [
@@ -557,6 +562,14 @@ public struct RunCommandTool: AgentTool {
         }
         lines.append("exec \"$@\"")
         return ("/bin/sh", ["-c", lines.joined(separator: "\n"), "agentcore-resource-limits", launchPath] + launchArgs)
+    }
+
+    /// The last `maxBytes` of a command's combined output, single-line, for embedding in an error
+    /// string. Bounded so a chatty failure cannot flood a replan prompt or a receipt.
+    static func outputTail(_ combined: String, maxBytes: Int = 600) -> String {
+        let flat = combined.split(whereSeparator: \.isNewline).joined(separator: " ⏎ ")
+        guard flat.utf8.count > maxBytes else { return flat }
+        return "…" + String(decoding: Array(flat.utf8.suffix(maxBytes)), as: UTF8.self)
     }
 
     /// Resolve an executable name to an absolute, canonicalized, executable path.

@@ -339,10 +339,11 @@ public struct OpenAICompatibleProvider: ChatProvider {
                     let (bytes, response) = try await session.bytes(for: request)
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                         if http.statusCode == 401 { throw AIProviderError.invalidAPIKey }
-                        if http.statusCode == 429 { throw AIProviderError.rateLimited }
                         var body = ""
                         for try await line in bytes.lines { body += line; if body.count > 600 { break } }
-                        throw AIProviderError.http(status: http.statusCode, body: body)
+                        // 429 is read AFTER the body: an exhausted balance shares the status code
+                        // with a per-minute limiter and must not be retried or benched briefly.
+                        throw ProviderQuotaExhaustion.classify(status: http.statusCode, body: body)
                     }
                     for try await line in bytes.lines where line.hasPrefix("data:") {
                         var payload = String(line.dropFirst(5))
@@ -390,10 +391,11 @@ public struct OpenAICompatibleProvider: ChatProvider {
                     let (bytes, response) = try await session.bytes(for: request)
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                         if http.statusCode == 401 { throw AIProviderError.invalidAPIKey }
-                        if http.statusCode == 429 { throw AIProviderError.rateLimited }
                         var body = ""
                         for try await line in bytes.lines { body += line; if body.count > 600 { break } }
-                        throw AIProviderError.http(status: http.statusCode, body: body)
+                        // 429 is read AFTER the body: an exhausted balance shares the status code
+                        // with a per-minute limiter and must not be retried or benched briefly.
+                        throw ProviderQuotaExhaustion.classify(status: http.statusCode, body: body)
                     }
                     for try await line in bytes.lines where line.hasPrefix("data:") {
                         var payload = String(line.dropFirst(5))

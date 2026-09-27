@@ -522,10 +522,10 @@ public struct GeminiProvider: ChatProvider {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                         if http.statusCode == 401 || http.statusCode == 403 { throw AIProviderError.invalidAPIKey }
-                        if http.statusCode == 429 { throw AIProviderError.rateLimited }
                         var body = ""
                         for try await line in bytes.lines { body += line; if body.count > 600 { break } }
-                        throw AIProviderError.http(status: http.statusCode, body: body)
+                        // 429 is read AFTER the body: quota exhaustion vs a transient limiter.
+                        throw ProviderQuotaExhaustion.classify(status: http.statusCode, body: body)
                     }
                     for try await line in bytes.lines where line.hasPrefix("data:") {
                         var payload = String(line.dropFirst(5))
@@ -566,10 +566,10 @@ public struct GeminiProvider: ChatProvider {
                     if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                         // 401/403 (auth/permission/billing/allowlist) → invalidAPIKey.
                         if http.statusCode == 401 || http.statusCode == 403 { throw AIProviderError.invalidAPIKey }
-                        if http.statusCode == 429 { throw AIProviderError.rateLimited }
                         var body = ""
                         for try await line in bytes.lines { body += line; if body.count > 600 { break } }
-                        throw AIProviderError.http(status: http.statusCode, body: body)
+                        // 429 is read AFTER the body: quota exhaustion vs a transient limiter.
+                        throw ProviderQuotaExhaustion.classify(status: http.statusCode, body: body)
                     }
                     for try await line in bytes.lines where line.hasPrefix("data:") {
                         var payload = String(line.dropFirst(5))

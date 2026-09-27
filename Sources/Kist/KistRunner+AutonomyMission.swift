@@ -89,10 +89,15 @@ extension KistRunner {
 
     /// Prefer the configured critic, then deterministically choose the strongest available configured
     /// provider default. Every candidate is resolved to a concrete model before identity comparison.
+    /// `benched` is the live availability gate (cooldown ledger / health daemon). Benched
+    /// candidates are RANKED after warm ones, never removed: a reviewer must still exist when
+    /// every distinct provider is cooling (fail-open), but a known-dead provider is no longer the
+    /// first pick just because it is the pinned critic (build-lane resilience, 2026-09-27).
     static func independentReviewerSelection(
         preferred: ProviderBinding,
         producingIdentities: Set<String>,
-        registry: ProviderRegistry
+        registry: ProviderRegistry,
+        benched: (String) -> Bool = { _ in false }
     ) -> IndependentReviewerSelection? {
         let workers = Set(producingIdentities.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -108,7 +113,9 @@ extension KistRunner {
                 return $0.id.lowercased() < $1.id.lowercased()
             }
             .map { ProviderBinding(providerId: $0.id, model: $0.defaultModel) }
-        var candidates = [preferred] + alternates
+        let ordered = [preferred] + alternates
+        // Stable partition: warm candidates keep their order ahead of benched ones.
+        var candidates = ordered.filter { !benched($0.providerId) } + ordered.filter { benched($0.providerId) }
         var seen = Set<String>()
         candidates = candidates.filter { binding in
             guard let provider = registry.provider(id: binding.providerId), registry.hasKey(for: provider),
@@ -134,14 +141,16 @@ extension KistRunner {
     static func independentReviewerSelection(
         preferred: ProviderBinding,
         workers: [BuilderWorkerReceipt],
-        registry: ProviderRegistry
+        registry: ProviderRegistry,
+        benched: (String) -> Bool = { _ in false }
     ) -> IndependentReviewerSelection? {
         let identities = workers.compactMap {
             providerModelIdentity(provider: $0.provider, model: $0.model)
         }
         guard identities.count == workers.count else { return nil }
         return independentReviewerSelection(
-            preferred: preferred, producingIdentities: Set(identities), registry: registry)
+            preferred: preferred, producingIdentities: Set(identities), registry: registry,
+            benched: benched)
     }
 
     /// Exact same-model selection is never inferred or used as fallback. The caller must already hold
