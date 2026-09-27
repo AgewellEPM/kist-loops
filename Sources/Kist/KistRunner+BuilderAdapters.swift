@@ -436,7 +436,8 @@ extension KistRunner {
             guard tool.name == "run_command" else { return tool }
             return BuilderContractScopedMutationTool(
                 base: tool, authority: [:],
-                verificationCommands: sealedPlan.verificationCommands)
+                verificationCommands: sealedPlan.verificationCommands,
+                substitutesNearMisses: true)
         }
         return ToolRegistry(selected)
     }
@@ -1386,6 +1387,10 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
     let authority: [String: BuilderMutationKind]
     let verificationCommands: [KistRunner.BuilderPreflightCommand]
     var createdFiles: BuilderCreatedFileAuthority? = nil
+    /// Plan-execute only: its coordinated actions get no in-step repair, so a same-executable near
+    /// miss on the sealed verifier canonicalizes to the sealed command. The lean headless lane keeps
+    /// exact-match denial — its own repair loop reads the denial and retries.
+    var substitutesNearMisses: Bool = false
 
     var name: String { base.name }
     var description: String {
@@ -1467,7 +1472,7 @@ struct BuilderContractScopedMutationTool: AgentTool, ToolArgumentCanonicalizing 
     /// The sealed command a raw request canonicalizes to, or nil when the request is already exact
     /// (no substitution) or is not a repairable near miss.
     func sealedSubstitutionApplied(raw arguments: [String: Any]) -> KistRunner.BuilderPreflightCommand? {
-        guard name == "run_command", !authorized(arguments) else { return nil }
+        guard substitutesNearMisses, name == "run_command", !authorized(arguments) else { return nil }
         return sealedSubstitute(for: arguments)
     }
 

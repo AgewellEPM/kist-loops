@@ -92,7 +92,8 @@ final class KistBuilderPlanExecuteVerificationWiringTests: XCTestCase {
         let tool = BuilderContractScopedMutationTool(
             base: PlanExecuteCommandStub(capture: capture), authority: [:],
             verificationCommands: [.init(
-                executable: "python3", arguments: ["-m", "unittest"], timeoutSeconds: 60)])
+                executable: "python3", arguments: ["-m", "unittest"], timeoutSeconds: 60)],
+            substitutesNearMisses: true)
         // Through the registry the near miss is canonicalized BEFORE the wrapper runs, so the
         // sealed command executes with no note (the recorded arguments are the sealed ones).
         let result = await ToolRegistry([tool]).execute(
@@ -117,7 +118,7 @@ final class KistBuilderPlanExecuteVerificationWiringTests: XCTestCase {
             verificationCommands: [
                 .init(executable: "python3", arguments: ["-m", "unittest"], timeoutSeconds: 60),
                 .init(executable: "python3", arguments: ["-m", "pytest"], timeoutSeconds: 60),
-            ])
+            ], substitutesNearMisses: true)
         let context = ToolContext(projectRoot: NSTemporaryDirectory())
         let twoSeals = try await ambiguous.execute(
             arguments: ["executable": "python3", "args": ["-m", "unittest", "-v"]], context: context)
@@ -125,7 +126,8 @@ final class KistBuilderPlanExecuteVerificationWiringTests: XCTestCase {
 
         let single = BuilderContractScopedMutationTool(
             base: PlanExecuteCommandStub(capture: capture), authority: [:],
-            verificationCommands: [.init(executable: "python3", arguments: ["-m", "unittest"], timeoutSeconds: 60)])
+            verificationCommands: [.init(executable: "python3", arguments: ["-m", "unittest"], timeoutSeconds: 60)],
+            substitutesNearMisses: true)
         let otherExecutable = try await single.execute(
             arguments: ["executable": "pytest", "args": ["-q"]], context: context)
         XCTAssertFalse(otherExecutable.success, "a different executable is not a near miss")
@@ -149,7 +151,8 @@ final class KistBuilderPlanExecuteVerificationWiringTests: XCTestCase {
     func testCanonicalizationReturnsTheSealedCommandForANearMiss() {
         let tool = BuilderContractScopedMutationTool(
             base: PlanExecuteCommandStub(capture: PlanExecuteCommandCapture()), authority: [:],
-            verificationCommands: [.init(executable: "python3", arguments: ["-m", "unittest"], timeoutSeconds: 60)])
+            verificationCommands: [.init(executable: "python3", arguments: ["-m", "unittest"], timeoutSeconds: 60)],
+            substitutesNearMisses: true)
         let canonical = tool.canonicalizeToolArguments(
             ["executable": "python3", "args": ["-m", "unittest", "discover", "-v"], "cwd": "."])
         XCTAssertEqual(canonical["executable"] as? String, "python3")
