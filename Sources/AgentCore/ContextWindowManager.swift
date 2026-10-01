@@ -23,9 +23,18 @@ public struct ContextWindowManager: Sendable {
     /// default so small windows do not get overrun.
     public static func forModel(capabilities: ModelCapabilities) -> ContextWindowManager {
         guard let tokens = capabilities.contextWindowTokens, tokens > 0 else { return .default }
-        let usableCharacters = max(80_000, Int(Double(tokens) * 4.0 * 0.80))
-        let tail = tokens >= 200_000 ? 256 : 48
+        let usableCharacters = max(1_000, Int(Double(tokens) * 4.0 * 0.80))
+        let tail = tokens >= 200_000 ? 256 : (tokens <= 32_768 ? 4 : 48)
         return ContextWindowManager(maxCharacters: usableCharacters, keepFirst: 1, keepLast: tail)
+    }
+
+    /// History shares the model window with instructions, tool schemas and generated output.
+    /// Four characters/token is an estimate; forModel leaves 20% headroom for tokenization and
+    /// templates. Never grant the full window independently to history and to output.
+    public func reservingRequest(settings: ModelSettings, tools: [ToolSpec] = []) -> ContextWindowManager {
+        let fixed = HeadlessAgentLoop.promptCharacters(messages: [], settings: settings, tools: tools)
+        return ContextWindowManager(maxCharacters: max(1_000, maxCharacters - fixed
+            - max(0, settings.maxTokens) * 4 - 512), keepFirst: keepFirst, keepLast: keepLast)
     }
 
     /// True when the transcript exceeds the outbound budget — the trigger for compaction.

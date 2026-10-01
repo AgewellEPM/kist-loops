@@ -201,7 +201,10 @@ final class SolBuilderAssuranceRegressionTests: XCTestCase {
         let builderSurfaces = [
             "Sources/Kist/KistRunner+Builder.swift",
             "Sources/Kist/KistRunner+BuilderAdapters.swift",
+            "Sources/Kist/KistRunner+BuilderRouting.swift",
+            "Sources/Kist/BuilderContractScopedMutationTool.swift",
             "Sources/Kist/KistRunner+BuilderPreflightV2.swift",
+            "Sources/Kist/KistRunner+BuilderPlanning.swift",
             "Sources/Kist/KistRunner+BuilderPipelineV2.swift",
             "Sources/Kist/KistRunner+BuilderVerificationV2.swift",
             "Sources/Kist/KistRunner+BuilderReview.swift",

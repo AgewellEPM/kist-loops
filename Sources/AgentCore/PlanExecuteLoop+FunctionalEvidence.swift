@@ -520,16 +520,27 @@ extension PlanExecuteLoop {
         return "\(input).\(requirement.validity.rawValue).exit-\(requirement.expectedExitCode)"
     }
 
+    static func permitsDataArtifactEvidence(contract: PlanExecuteCompletionContract,
+                                             effects: [ToolEffectObservation]) -> Bool {
+        contract.requiresMutation
+            && effects.contains { $0.mutation == .nonSource && $0.confirmsMutation }
+            && !effects.contains { $0.requiresBuildVerification }
+    }
+
     static func satisfiedSupportingObligationIDs(
         capture: PlanCommandExecutionCapture,
         requirements: [FunctionalEvidenceRequirement],
         requiredObligations: [PlanSupportingObligation],
-        projectRoot: String
+        projectRoot: String,
+        allowsDataValidation: Bool = false
     ) -> [String] {
         guard capture.success else { return [] }
         var satisfied = Set<String>()
         if capture.verificationEligible, capture.actualExitCode == 0,
-           capture.effectObservation.verification == .buildOrTest {
+           (capture.effectObservation.verification == .buildOrTest
+            || (allowsDataValidation && capture.effectObservation.verification == .dataValidation)) {
+            // The legacy obligation ID covers clean execution. Data validation satisfies it only
+            // for an observed non-source artifact; its typed effect remains dataValidation.
             satisfied.insert("build.clean-exit")
         }
         var arguments: [String: Any] = [
@@ -589,7 +600,8 @@ extension PlanExecuteLoop {
         planID: String = "legacy",
         planRevision: Int = 0,
         workspaceActionReceipt: DurableWorkspaceActionCompletionReceipt? = nil,
-        projectRoot: String
+        projectRoot: String,
+        allowsDataValidation: Bool = false
     ) -> PlanSupportingCommandReceipt {
         var receipt = PlanSupportingCommandReceipt(
             missionInstanceID: missionInstanceID,
@@ -623,7 +635,8 @@ extension PlanExecuteLoop {
                     ?? capture.governedWorkspaceDigest,
             satisfiedObligationIDs: satisfiedSupportingObligationIDs(
                 capture: capture, requirements: requirements,
-                requiredObligations: requiredObligations, projectRoot: projectRoot),
+                requiredObligations: requiredObligations, projectRoot: projectRoot,
+                allowsDataValidation: allowsDataValidation),
             canonicalFunctionalObjectiveFingerprint:
                 canonicalFunctionalObjectiveFingerprint,
             workspaceManifestPolicyFingerprint:

@@ -137,11 +137,12 @@ extension HeadlessAgentLoop {
 
 
         AGENT SKILLS — reusable expert procedures available this session. BEFORE you begin the
-        task, scan the skill descriptions below. If ANY skill's description matches what you are
-        about to do, you MUST read its <location> with read_file FIRST and follow its instructions —
-        a matching skill's procedure overrides your default approach. Each entry is only a MENU ITEM
+        task, consider whether a skill's procedure will help. Read explicitly requested skills first.
+        For an optional skill, load it only when needed; a simple named-file task or a review of complete
+        supplied evidence need not start with skill discovery. User instructions take precedence.
+        Each entry is only a MENU ITEM
         (name + description + location), NOT the full instructions; the real procedure is in the
-        file at <location>, loaded on demand. Skip a skill only when none are relevant.
+        file at <location>, loaded on demand.
 
         \(skillsXML)
         """
@@ -175,7 +176,7 @@ extension HeadlessAgentLoop {
         Valid tool names are EXACTLY: \(validToolNames). If none can do the job, answer plainly with
         the blocker instead of inventing a tool name.\(planBanner)
 
-        \(ToolContractBook.render(tools: tools, disabled: ToolContractBook.disabledMap(shellEnabled: shellEnabled)))\(skillsSection(skillsXML))
+        \(ToolContractBook.render(tools: tools, disabled: ToolContractBook.disabledMap(shellEnabled: shellEnabled), nativeSchemasProvided: true))\(skillsSection(skillsXML))
         """
     }
 
@@ -349,9 +350,9 @@ extension HeadlessAgentLoop {
 
     /// When to force synthesis: after `threshold` gathering calls without new observations, and at most
     /// one nudge per threshold-window (so a model that keeps reading gets re-nudged, not spammed).
-    /// Pure → unit-tested. `threshold = max(4, maxIterations/2)`.
+    /// Nudge within six stalled calls even when the turn has a large request budget.
     static func shouldForceSynthesis(consecutiveGathering: Int, iteration: Int, lastNudge: Int, maxIterations: Int) -> Bool {
-        let threshold = max(4, maxIterations / 2)
+        let threshold = max(4, min(6, maxIterations / 2))
         return consecutiveGathering >= threshold && (iteration - lastNudge) >= threshold
     }
 

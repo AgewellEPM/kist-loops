@@ -103,7 +103,7 @@ public struct PlanStore: Sendable {
     public func startNext() -> PlanTask? {
         withLock {
             var plan = load()
-            guard let next = plan.next,
+            guard let next = plan.nextActionable ?? plan.next,
                   let index = plan.tasks.firstIndex(where: { $0.id == next.id }) else {
                 return nil
             }

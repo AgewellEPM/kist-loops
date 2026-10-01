@@ -41,6 +41,24 @@ enum LocalModelScout {
         let wantsTiny = containsAny(lower, ["tiny", "small", "fast", "cheap", "low latency", "offline"])
 
         var candidates: [LocalModelScoutCandidate] = []
+        if !wantsRetrieval || wantsCode || wantsReasoning {
+            candidates.append(candidate(
+                id: "qwen35-9b-ollama", modelID: "qwen3.5:9b-q4_K_M", provider: "ollama",
+                source: "https://huggingface.co/Qwen/Qwen3.5-9B · GGUF runtime: https://ollama.com/library/qwen3.5:9b-q4_K_M",
+                taskFit: ["code", "tool calling", "general assistant"], estimatedDiskGB: 7,
+                estimatedMemoryGB: 10, quantization: "Q4_K_M; 16K runtime context",
+                score: wantsTiny ? 78 : 95,
+                why: "Native tools and a bounded coding fix passed on the 16 GB M4; difficult planning can still need cloud fallback. Prefer at least 16 GB host RAM.",
+                objective: objective))
+            candidates.append(candidate(
+                id: "qwen35-4b-ollama", modelID: "qwen3.5:4b-q4_K_M", provider: "ollama",
+                source: "https://huggingface.co/Qwen/Qwen3.5-4B · GGUF runtime: https://ollama.com/library/qwen3.5:4b-q4_K_M",
+                taskFit: ["fast utility", "summary", "small assistant"], estimatedDiskGB: 4,
+                estimatedMemoryGB: 6, quantization: "Q4_K_M",
+                score: wantsTiny ? 92 : 83,
+                why: "Smaller current-family candidate for tight memory and latency. Not yet qualified as the production coding model; onboard and benchmark first.",
+                objective: objective))
+        }
         if wantsCode {
             candidates.append(qwenCoderMLX(memoryGB: hardwareMemoryGB, objective: objective))
             candidates.append(qwenCoderOllama(memoryGB: hardwareMemoryGB, objective: objective))

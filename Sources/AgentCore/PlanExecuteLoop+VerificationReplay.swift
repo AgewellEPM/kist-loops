@@ -322,6 +322,10 @@ extension PlanExecuteLoop {
                   (result.effectObservation?.requiresBuildVerification ?? false) else { return nil }
             return phase
         })
+        let allMutatingPhases = Set(exec.attemptResults.compactMap { result -> Int? in
+            guard (result.effectObservation?.mutation ?? .unknownTarget) != .none else { return nil }
+            return result.executionPhase
+        })
         return exec.attemptResults.map { r in
             let resolved: [String: Any] = stepById[r.stepId]
                 .map { ExecutablePlan.resolveArguments($0.argumentsJSON, outputs: exec.outputs) } ?? [:]
@@ -331,8 +335,9 @@ extension PlanExecuteLoop {
             let observed = r.effectObservation
                 ?? ToolEffectCatalog.observe(tool: r.tool, arguments: resolved, outcomeMetadata: r.metadata)
             let effect: ToolEffectObservation
-            if let phase = r.executionPhase, mutatingPhases.contains(phase),
-               observed.verification == .buildOrTest {
+            if let phase = r.executionPhase,
+               (mutatingPhases.contains(phase) && observed.verification == .buildOrTest)
+                || (allMutatingPhases.contains(phase) && observed.verification == .dataValidation) {
                 effect = ToolEffectObservation(mutation: observed.mutation,
                                                verification: .nonVerifyingCommand,
                                                progress: observed.progress,
@@ -575,7 +580,7 @@ extension PlanExecuteLoop {
         let stepById = Dictionary(plan.steps.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for index in exec.attemptResults.indices.reversed() {
             let record = records[index]
-            guard record.success, record.observedEffects.verification == .buildOrTest,
+            guard record.success, CompletionVerifier.isFinalVerification(record, in: records),
                   record.observedEffects.mutation == .none,
                   let step = stepById[exec.attemptResults[index].stepId] else { continue }
             let attempt = exec.attemptResults[index]
@@ -672,7 +677,7 @@ extension PlanExecuteLoop {
         let lastMutation = trajectory.lastIndex { $0.observedEffects.mutation != .none } ?? -1
         let verified = trajectory.indices.last { index in
             index > lastMutation && trajectory[index].success
-                && trajectory[index].observedEffects.verification == .buildOrTest
+                && CompletionVerifier.isFinalVerification(trajectory[index], in: trajectory)
                 && trajectory[index].observedEffects.mutation == .none
         }
         let receipt = verified.map { index in

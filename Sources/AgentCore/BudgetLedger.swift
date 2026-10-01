@@ -9,6 +9,11 @@ import Foundation
 /// is a separate, clearly-labeled derivation. An actor so it accounts correctly across the parallel
 /// workers Phase 5 will add.
 public actor BudgetLedger {
+    /// Terminal host summaries only; do not classify arbitrary tool output as a budget stop.
+    public nonisolated static func isBudgetStop(_ summary: String) -> Bool {
+        ["token budget exceeded", "cost budget exceeded", "budget would be exceeded by the next model call"]
+            .contains { summary.hasPrefix($0) }
+    }
     /// nil = no token cap. Otherwise the run halts once `spent >= maxTokens`.
     public let maxTokens: Int?
     /// nil = no dollar cap (Sprint 3 / C1). The DOLLAR ceiling is what serious cost governance needs —
@@ -31,6 +36,19 @@ public actor BudgetLedger {
     /// a mismatched figure at commit. No current caller double-commits; this makes the contract safe.
     private var nextReservationID = 0
     private var outstanding: [Int: (tokens: Int, usd: Double)] = [:]
+    private var measuredPromptOverhead: [String: Int] = [:]
+
+    /// Subscription backends add product instructions outside Kist's prompt. Start conservatively,
+    /// then calibrate from reported input usage. Track each route separately and retain its high-water mark.
+    public func promptOverhead(for route: String, subscriptionCLI: Bool) -> Int {
+        measuredPromptOverhead[route] ?? (subscriptionCLI ? 32_768 : 0)
+    }
+
+    public func observePromptUsage(route: String, promptCharacters: Int, measuredTokens: Int) {
+        guard measuredTokens > 0 else { return }
+        let overhead = max(0, measuredTokens - max(0, promptCharacters) / 4) + 1024
+        measuredPromptOverhead[route] = max(measuredPromptOverhead[route] ?? 0, overhead)
+    }
 
     public init(maxTokens: Int? = nil, maxUSD: Double? = nil) {
         self.maxTokens = maxTokens

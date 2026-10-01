@@ -1837,7 +1837,7 @@ final class OrganizationalLearningStoreTests: XCTestCase {
     func testLocalModelScoutRanksCandidatesAndAppliesHardwareFit() {
         let codePlan = LocalModelScout.plan(objective: "Swift code refactor worker", hardwareMemoryGB: 16)
 
-        XCTAssertEqual(codePlan.first?.modelID, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        XCTAssertEqual(codePlan.first?.modelID, "qwen3.5:9b-q4_K_M")
         XCTAssertTrue(codePlan.contains { $0.provider == "ollama" })
         XCTAssertTrue(codePlan.allSatisfy { !$0.onboardingSteps.contains { $0.hasPrefix("curl ") } })
         XCTAssertTrue(codePlan.allSatisfy { !$0.onboardingSteps.contains { $0.contains("huggingface-cli download") } })

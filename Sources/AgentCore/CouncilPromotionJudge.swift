@@ -122,6 +122,14 @@ public struct CouncilPromotionJudge: Sendable {
     /// 3 of the 4 lenses (with the zero-veto rule on top). The per-mind LLM call is live (not unit-tested,
     /// like `AICouncil.run`); the tally that decides ship/hold is pure and pinned.
     public func judge(_ ctx: PromotionContext, threshold: Int = 3) async -> CouncilPromotionVerdict {
+        // A local daemon queues inference against one shared-memory model. Starting all deadlines
+        // together makes later lenses expire in the queue. Keep four fresh calls and the same
+        // quorum/veto policy, but start each local lens's deadline when its call can run.
+        if Self.lenses.allSatisfy({ roles.binding(for: $0.role).providerId == "ollama" }) {
+            var votes: [PromotionMindVote] = []
+            for lens in Self.lenses { votes.append(await ask(lens, ctx)) }
+            return CouncilPromotionVerdict.tally(votes, threshold: threshold)
+        }
         let indexedVotes = await withTaskGroup(of: IndexedPromotionVote.self) { group in
             for (index, lens) in Self.lenses.enumerated() {
                 group.addTask {

@@ -33,6 +33,9 @@ extension KistREPL {
         // A provider change never turns a refusal or denied permission into execution
         // authority. Check before transport/protocol wording: wrappers can include both.
         guard !looksLikeRefusalOrPermissionStop(lower) else { return nil }
+        if lower.contains("local context capacity estimate exceeded:") {
+            return "local context capacity exceeded"
+        }
 
         // "ratelimited" (one word) is how AIProviderError.rateLimited renders in a turn summary
         // ("provider 'gemini' error: rateLimited") — without it the EXACT live failure string was

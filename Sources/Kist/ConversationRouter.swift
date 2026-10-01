@@ -191,7 +191,8 @@ struct ConversationRouter {
         ]
         let raw: String
         do {
-            raw = try await providers.complete(providerId: binding.providerId, model: binding.model, messages: messages)
+            raw = try await providers.complete(providerId: binding.providerId, model: binding.model, messages: messages,
+                settings: .init(temperature: 0, maxTokens: 384, disableThinking: true, geminiBuiltins: false))
         } catch {
             // A user-cancelled turn (ESC mid-classification) surfaces here as a transport error —
             // that is an intentional interruption, not a dead provider; announcing it would report

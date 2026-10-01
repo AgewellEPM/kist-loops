@@ -1186,7 +1186,7 @@ if closure_version==4:
     evaluation_args += [resource_destination(os.path.join(home,"bin"),alias)
                         for alias in RESOURCE_FILES]
 evaluation = subprocess.run(evaluation_args,
-                            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=30,check=True)
+                            stdout=subprocess.PIPE,timeout=30,check=True)
 if len(evaluation.stdout)>65536: raise SystemExit(1)
 computed={}
 for line in evaluation.stdout.decode().splitlines():

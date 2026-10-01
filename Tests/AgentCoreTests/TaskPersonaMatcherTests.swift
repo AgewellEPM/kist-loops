@@ -2,6 +2,22 @@ import XCTest
 @testable import AgentCore
 
 final class TaskPersonaMatcherTests: XCTestCase {
+    func testConnectorWordsDoNotSelectSpecialists() {
+        XCTAssertTrue(TaskPersonaMatcher(registry: nil).matches(for: "and the for with this that").isEmpty)
+        let matches = TaskPersonaMatcher(registry: nil).matches(for: "Read evidence.txt and report its contents")
+        XCTAssertFalse(matches.contains { $0.specialist.name == "bug-bounty-pentester" })
+        XCTAssertFalse(matches.contains { $0.specialist.name == "medical-researcher" })
+    }
+
+    func testProgrammingValidityDoesNotSelectLegalResearch() {
+        for request in ["Review the rule card: false is not legal for enemy_in_view",
+                        "Explain which API calls are legal in this test case"] {
+            XCTAssertFalse(TaskPersonaMatcher(registry: nil).matches(for: request)
+                .contains { $0.specialist.name == "legal-research-analyst" })
+        }
+        XCTAssertTrue(TaskPersonaMatcher(registry: nil).matches(for: "Help with a legal question")
+            .contains { $0.specialist.name == "legal-research-analyst" })
+    }
 
     private var root: String!
     private var userDir: String!

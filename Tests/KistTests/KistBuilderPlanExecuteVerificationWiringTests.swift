@@ -41,10 +41,9 @@ final class KistBuilderPlanExecuteVerificationWiringTests: XCTestCase {
     }
 
     func testPlanExecuteUsesFrozenVerificationOnlyRegistry() throws {
-        let source = try String(
-            contentsOf: repositoryRoot
-                .appendingPathComponent("Sources/Kist/KistRunner+BuilderAdapters.swift"),
-            encoding: .utf8)
+        let source = try ["KistRunner+BuilderRouting.swift", "KistRunner+BuilderAdapters.swift"].map {
+            try String(contentsOf: repositoryRoot.appendingPathComponent("Sources/Kist/" + $0), encoding: .utf8)
+        }.joined(separator: "\n")
 
         XCTAssertTrue(source.contains("static func builderScopedPlanExecuteTools("))
         XCTAssertTrue(source.contains("guard tool.name == \"run_command\" else { return tool }"))

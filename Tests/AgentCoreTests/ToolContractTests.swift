@@ -2,6 +2,17 @@ import XCTest
 @testable import AgentCore
 
 final class ToolContractTests: XCTestCase {
+    func testNativePromptAvoidsDuplicateSchemasButPreservesActionLimits() {
+        let tools = ToolRegistry([ReadFilesTool(), ComputerControlTool(), RunCommandTool()])
+        let full = ToolContractBook.render(tools: tools, disabled: ToolContractBook.disabledMap(shellEnabled: false))
+        let compact = ToolContractBook.render(tools: tools, disabled: ToolContractBook.disabledMap(shellEnabled: false),
+                                               nativeSchemasProvided: true)
+        XCTAssertLessThan(compact.count, full.count)
+        XCTAssertFalse(compact.contains(ReadFilesTool().description))
+        XCTAssertTrue(compact.contains("NOT supported"))
+        XCTAssertTrue(compact.contains("UNAVAILABLE this session"))
+        XCTAssertTrue(full.contains("start_line"), "text models need the batched-read argument schema")
+    }
 
     func testContractListsSupportedAndUnsupportedActions() {
         let reg = ToolRegistry([ComputerControlTool()])

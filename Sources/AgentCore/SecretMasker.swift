@@ -50,12 +50,14 @@ public enum SecretMasker {
     }
 
     public static func mask(_ result: ToolResult) -> ToolResult {
-        ToolResult(success: result.success,
+        var masked = ToolResult(success: result.success,
                    output: mask(result.output),
                    error: result.error.map(mask),
                    metadata: result.metadata.mapValues(mask),
                    attachments: result.attachments,
                    trustedCommandReference: result.trustedCommandReference)
+        masked.hostPathScopeDenied = result.hostPathScopeDenied
+        return masked
     }
 
     private static func replacement(for pattern: NSRegularExpression) -> String {

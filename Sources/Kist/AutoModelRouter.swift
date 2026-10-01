@@ -124,9 +124,9 @@ struct AutoModelRouter: Equatable {
     /// then the configured provider is only the STARTING model and the Captain keeps choosing per
     /// turn. Before this existed the config flag was ignored entirely, so setting any default
     /// provider silently disabled the Captain.
-    static func routingEnabled(pickedInteractively: Bool, cliProvider: Bool,
+    static func routingEnabled(pickedInteractively: Bool, cliProvider: Bool, cliModel: Bool = false,
                                configProvider: Bool, configAutoRouting: Bool?) -> Bool {
-        if pickedInteractively || cliProvider { return false }
+        if pickedInteractively || cliProvider || cliModel { return false }
         return configAutoRouting ?? !configProvider
     }
 

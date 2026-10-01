@@ -54,7 +54,8 @@ public enum ToolContractBook {
 
     /// Render the contract for a live registry. `disabled` maps a tool name → the reason it's currently
     /// UNAVAILABLE (e.g. run_command when shell is off), so the model plans around it instead of retrying.
-    public static func render(tools: ToolRegistry, disabled: [String: String] = [:]) -> String {
+    public static func render(tools: ToolRegistry, disabled: [String: String] = [:],
+                              nativeSchemasProvided: Bool = false) -> String {
         let effectiveDisabled = RegisteredVMLifecycleRouting.applying(tools: tools, to: disabled)
         var out = """
         \(CapabilityRegistry.render(tools: tools, disabled: effectiveDisabled))
@@ -69,15 +70,28 @@ public enum ToolContractBook {
         external privileges or global installs, say so and ask.
 
         """
+        if tools.names.contains("decide") {
+            out += "\nUse decide for compact batched choices, boolean probabilities, and rubric scores. "
+                + "Include a no-match option when appropriate. Decisions are advisory: verify facts and outcomes with real tools.\n"
+        }
+        if tools.names.contains("decision_tool") {
+            out += "Use decision_tool to design and save reusable decision questions, then run them on new evidence.\n"
+        }
         for tool in tools.all().sorted(by: { $0.name < $1.name }) {
             let safeName = safeInline(tool.name)
             out += "\n## \(safeName)"
             if let reason = effectiveDisabled[tool.name] {
                 out += "  ⚠ UNAVAILABLE this session — \(safeInline(reason)). Do NOT call it."
             }
-            out += "\n" + safeBlock(tool.description.trimmingCharacters(in: .whitespacesAndNewlines)) + "\n"
+            out += "\n"
+            if !nativeSchemasProvided {
+                out += safeBlock(tool.description.trimmingCharacters(in: .whitespacesAndNewlines)) + "\n"
+            }
             let params = tool.parameters.map { "\(safeInline($0.name)): \(safeInline($0.type))\($0.required ? "" : "?")" }.joined(separator: ", ")
-            if !params.isEmpty { out += "params: \(params)\n" }
+            if !nativeSchemasProvided && !params.isEmpty { out += "params: \(params)\n" }
+            if !nativeSchemasProvided && ["read_files", "decide", "decision_tool"].contains(tool.name) {
+                for p in tool.parameters { out += "\(safeInline(p.name)): \(safeBlock(p.description))\n" }
+            }
             if !tool.supportedActions.isEmpty {
                 out += "actions (the ONLY valid `action` values): " + tool.supportedActions.map(safeInline).joined(separator: ", ") + "\n"
             }
@@ -85,7 +99,9 @@ public enum ToolContractBook {
                 out += "NOT supported (these do NOT exist — never call them): " + tool.unsupportedActions.map(safeInline).joined(separator: ", ") + "\n"
             }
             if let note = tool.capabilityNote { out += "note: " + safeBlock(note) + "\n" }
-            for ex in tool.usageExamples { out += "example: " + safeBlock(ex) + "\n" }
+            if !nativeSchemasProvided {
+                for ex in tool.usageExamples { out += "example: " + safeBlock(ex) + "\n" }
+            }
         }
         return out
     }
@@ -117,7 +133,8 @@ public enum CapabilityRegistry {
         ("Context/RAG", ["context_brain", "search_code", "read_file", "remember", "recall"]),
         ("Code Search", ["search_code"]),
         ("Shell/Git", ["run_command"]),
-        ("Tool Forge", ["custom_tool"]),
+        ("Tool Forge", ["custom_tool", "decision_tool"]),
+        ("Typed Decisions", ["decide", "decision_tool"]),
         ("Research/Web", ["research_run", "web_search", "fetch_url", "browse", "grounded_answer"]),
         ("Computer/Browser", ["computer_control", "browse"]),
         ("Visual Verification", ["visual_verify", "view_image", "browse", "edit_file", "write_file"]),

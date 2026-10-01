@@ -2,6 +2,16 @@ import XCTest
 @testable import AgentCore
 
 final class PromptCompilerTests: XCTestCase {
+    func testLocalCodingBriefSpendsEffortOnCodeAndVerification() {
+        let brief = PromptCompiler.compile("Fix the off-by-one in parser.py and run test_parser.py")
+        XCTAssertEqual(brief.intent, .build)
+        XCTAssertFalse(brief.prompt.contains("Never build before researching"))
+        XCTAssertFalse(brief.prompt.contains("Current understanding estimate"))
+        XCTAssertTrue(brief.prompt.contains("read_files"))
+        XCTAssertTrue(brief.prompt.contains("run the relevant checks"))
+        XCTAssertLessThan(brief.captainStrategyGuidance.joined().count, 800)
+        XCTAssertEqual(brief.originalRequest, "Fix the off-by-one in parser.py and run test_parser.py")
+    }
     func testLocalKistQueueRepairWinsOverPastedResearchLabels() {
         let request = "findout why the Kist Build Queue is hardcoded; Research: prior art; then fix it"
 

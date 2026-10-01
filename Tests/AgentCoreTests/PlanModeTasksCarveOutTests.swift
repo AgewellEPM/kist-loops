@@ -9,7 +9,7 @@ import XCTest
 final class PlanModeTasksCarveOutTests: XCTestCase {
 
     func testReadOnlyTasksActionsAllowedInPlanMode() {
-        for action in ["list", "validate", "check"] {
+        for action in ["list", "map", "validate", "check"] {
             XCTAssertTrue(HeadlessAgentLoop.isReadOnlyTasksCall(tool: "tasks", args: ["action": action]),
                           "tasks \(action) is a pure read — must be allowed in plan mode")
         }

@@ -78,7 +78,7 @@ public struct OllamaEmbeddingClient: EmbeddingProviding {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: ["model": model, "input": texts])
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["model": model, "input": texts, "keep_alive": 0])
         let (body, response) = try await transport.send(req)
         guard (200..<300).contains(response.statusCode) else {
             let t = String(data: body, encoding: .utf8) ?? ""

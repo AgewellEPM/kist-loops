@@ -40,6 +40,8 @@ extension KistREPL {
           /hooks            list lifecycle hooks (.kist/hooks.json)
           /permissions      current permission tier + which tools still prompt  [alias /perms]
           /goals            show the shared goal/action/test board  [aliases /goal /tasks /todo]
+          /goalmap [id]      local overview: next work, blockers, stale tasks, and missing proof; no model call
+                            also /goals map; an ID inspects one task without starting it
           1                 run task [1] from the board through plan→execute
           /action <step>    add an ACTION step to the shared board
           /test <step>      add a TEST step to the shared board

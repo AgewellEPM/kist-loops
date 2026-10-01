@@ -68,7 +68,18 @@ public struct SelfHealHandoff: Codable, Equatable, Sendable {
     }
 
     /// A handoff is only actionable when it names a concrete fix. A blocked or specless handoff is not.
-    public var isActionable: Bool { !blocked && !repairSpec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    public var isActionable: Bool {
+        !blocked && Self.isConcrete(rootCause) && Self.isConcrete(repairSpec)
+            && !targetFiles.isEmpty && targetFiles.allSatisfy(Self.isConcrete)
+            && reproductionCommand.map(Self.isConcrete) == true
+            && !verificationCommands.isEmpty && verificationCommands.allSatisfy(Self.isConcrete)
+    }
+
+    private static func isConcrete(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.hasPrefix("<") else { return false }
+        return !["unknown", "tbd", "todo", "n/a", "..."].contains(value.lowercased())
+    }
 
     /// Extract the handoff JSON from a researcher's free-text summary. Accepts a ```handoff or ```json
     /// (or bare ```) fenced block containing a JSON object; returns the first that decodes. nil = the

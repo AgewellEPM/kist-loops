@@ -83,7 +83,7 @@ final class RuntimeCapabilityProofTests: XCTestCase {
                                      text: "unverified — no successful test"))
         repl.proofStore?.record(.init(kind: .turnFinalized, tool: nil, success: false, text: "result=failed"))
 
-        for command in ["/logs", "/usage", "/tasks", "/summary", "/summary", "/status"] {
+        for command in ["/logs", "/usage", "/tasks", "/goal", "/todo", "/goalmap", "/goal-map 2", "/goals map", "/summary", "/summary", "/status"] {
             repl.prepareTurnEvidence(for: command)
             let report = repl.renderSubmittedTurnSummary()
             XCTAssertEqual(repl.turnEvidenceSnapshot().count, 2, command)

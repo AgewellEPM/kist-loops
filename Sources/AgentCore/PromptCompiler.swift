@@ -502,7 +502,11 @@ public enum PromptCompiler {
             successCriteria: successCriteria(for: intent, mode: mode, role: role),
             constraints: constraints,
             toolHints: toolHints(for: intent, lower: lower, mode: mode),
-            captainStrategyGuidance: CaptainStrategist.promptGuidance(objective: original),
+            captainStrategyGuidance: (intent == .research || mode == .fleet || mode == .planExecute || risk == .high)
+                ? CaptainStrategist.promptGuidance(objective: original)
+                : ["Start with the supplied evidence and named paths. Batch independent file reads with read_files; search only for missing locations.",
+                   "For coding work, inspect the relevant code, make the smallest in-scope change, then run the relevant checks. A diagnosis alone does not complete an authorized repair.",
+                   "Keep effort proportional to the task. Do not add research, specialist calls, or task-board bookkeeping for a simple local task. Report actual verification and remaining blockers."],
             researchGuidance: researchGuidance(for: intent, lower: lower),
             reviewGuidance: review,
             conversationContext: normalizedOptional(conversationContext),
@@ -713,6 +717,7 @@ public enum PromptCompiler {
         case .fleet where !explicitlyReadOnly: return .fleet
         case .planExecute, .fleet, .inline, .delegated: break
         }
+        if !explicitlyReadOnly, LegacySessionIntent.isLaunch(lower) { return .desktop }
         // LEGACY/VM RUNTIME contract (dogfood 2026-08-06): "create and run X in the Win98 VM / DOS
         // environment and capture proof" is EXTERNAL-ACTION work — the deliverable is observable
         // behavior in the guest, proven by vm evidence; no host build/test can verify it. Must precede
@@ -739,7 +744,7 @@ public enum PromptCompiler {
         if isDelegationDirective(lower) {
             return .delegate
         }
-        if !explicitlyReadOnly, AgentMetadataRequest.matches(lower) { return .build }
+        if !explicitlyReadOnly, AgentMetadataRequest.matches(lower) || DecisionToolRequest.matches(lower) { return .build }
         if !explicitlyReadOnly, isBuildDirective(lower) { return .build }
         // Multi-clause repair requests often orient first ("inspect/diagnose") and place the explicit
         // mutation second. Keep this deliberately phrase-bound instead of treating any occurrence of
@@ -921,7 +926,7 @@ public enum PromptCompiler {
             items.append("For destructive, security-sensitive, branch/merge, or large-scope actions, verify current state before acting.")
         }
         if intent == .desktop {
-            items.append("Local computer control is user-visible and sensitive; prefer the typed computer_control tool over raw shell GUI automation.")
+            items.append("Local computer control is user-visible and sensitive; use the registered lifecycle and control tools for the requested target, preserving their consent gates.")
         }
         if mode == .plan {
             items.append("Plan mode is read-only: do not edit files or run mutating commands.")
@@ -944,7 +949,11 @@ public enum PromptCompiler {
         case .research:
             items.append("Use repo search/read tools for in-repository research, web_search for source discovery, and fetch_url for specific URLs.")
         case .desktop:
-            items.append("Use computer_control for open_app, open_url, youtube_search, and clean_desktop.")
+            if LegacySessionIntent.isLaunch(lower) {
+                items += LegacySessionIntent.toolHints
+            } else {
+                items.append("Use computer_control for open_app, open_url, youtube_search, and clean_desktop.")
+            }
         }
         if intent == .build {
             items.append("Use write_file/edit_file for changes and run_command for focused verification when shell is available.")

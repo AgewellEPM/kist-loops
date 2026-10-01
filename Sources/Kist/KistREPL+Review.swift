@@ -307,6 +307,7 @@ extension KistREPL {
                 && copilot.automaticBuildReview
                 && Copilot.shouldReview(trajectory: turnEvidenceSnapshot())
                 && !AgentMetadataRequest.isRegistrationOnly(turnEvidenceSnapshot())
+                && !DecisionToolRequest.isDefinitionOnly(turnEvidenceSnapshot())
             guard copilot.enabled || advisory || automaticBuild else {
                 proofStore?.record(.init(kind: .reviewAssessment, tool: nil, success: nil,
                                          text: "not requested"))

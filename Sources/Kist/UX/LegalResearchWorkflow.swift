@@ -188,14 +188,17 @@ struct LegalResearchWorkflow: Sendable {
             "analyze this contract legally", "legal document"
         ]
         if exactSignals.contains(where: { lower.contains($0) }) { return true }
+        // Bare "legal", "case" and "contract" are also ordinary programming vocabulary.
+        // Implicit routing needs a legal-domain term, matched as words (not "release" -> "lease").
         let legalSignals = [
-            "legal", "law", "statute", "regulation", "court", "attorney", "lawsuit",
+            "statute", "regulation", "court", "attorney", "lawsuit",
             "litigation", "foreclosure", "eviction", "lease", "deed", "mortgage",
-            "contract", "plaintiff", "defendant", "jurisdiction"
+            "plaintiff", "defendant", "jurisdiction"
         ]
         let workSignals = ["research", "analyze", "review", "memo", "case", "document", "question", "help"]
-        return legalSignals.contains { lower.contains($0) }
-            && workSignals.contains { lower.contains($0) }
+        let words = Set(lower.split { !$0.isLetter }.map(String.init))
+        return legalSignals.contains { words.contains($0) }
+            && workSignals.contains { words.contains($0) }
     }
 
     static func shouldAutoRunResearch(_ raw: String) -> Bool {

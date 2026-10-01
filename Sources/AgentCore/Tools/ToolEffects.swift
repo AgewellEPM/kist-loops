@@ -19,6 +19,8 @@ public struct ToolEffectObservation: Sendable, Equatable, Codable {
         /// A command ran, but it was not a build/test/typecheck/lint command.
         case nonVerifyingCommand
         case buildOrTest
+        /// A read-only syntax check for a data artifact. Never verifies source or unknown mutations.
+        case dataValidation
     }
 
     /// Whether a mutation was actually observed or is only possible from the invocation. Shell and opaque
@@ -119,7 +121,7 @@ public enum ToolEffectCatalog {
     /// `run_command` and `custom_tool` depend on the invocation's arguments.
     public static let knownMutationTools: Set<String> = [
         "write_file", "edit_file", "apply_patch", "notebook_edit", "move_file",
-        "make_dir", "create_directory", "ast_grep_apply", "custom_tool", "create_agent",
+        "make_dir", "create_directory", "ast_grep_apply", "custom_tool", "create_agent", "decision_tool",
         "generate_image", "edit_image", "generate_audio", "generate_video", "extract_clip",
         "translate_document", "watch_video", "live_screen_watch",
     ]
@@ -252,6 +254,14 @@ public enum ToolEffectCatalog {
             // reports an actual changed-file set, this remains possible rather than confirmed.
             let observed = mutationObservation(paths: stringValues(["path"], in: arguments))
             return ToolEffectObservation(mutation: observed.mutation, mutationEvidence: .mayMutate)
+        case "decision_tool":
+            guard (arguments["action"] as? String)?.lowercased() == "create" else { return .none }
+            // A host-validated question manifest is declarative data, not generated code.
+            // Only a completed write plus read-back establishes that the requested save occurred.
+            let confirmed = outcomeMetadata?["written"] == "true"
+                && outcomeMetadata?["decision_definition_validated"] == "true"
+            return ToolEffectObservation(mutation: .nonSource, progress: .artifact,
+                                         mutationEvidence: confirmed ? .confirmed : .mayMutate)
         case "custom_tool":
             switch (arguments["action"] as? String)?.lowercased() {
             case "create": return ToolEffectObservation(mutation: .source, mutationEvidence: .mayMutate)
@@ -314,8 +324,9 @@ public enum ToolEffectCatalog {
             return outcomeMetadata?["delegation_status"] == "completed"
                 ? ToolEffectObservation(progress: .delegation) : .none
         case "tasks":
-            let action = ((arguments["action"] as? String) ?? "list").lowercased()
-            return ["list", "validate", "check"].contains(action)
+            let action = ((arguments["action"] as? String) ?? "list")
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ["list", "map", "validate", "check"].contains(action)
                 ? .none : ToolEffectObservation(progress: .taskBoard)
         case "cortex":
             return (arguments["action"] as? String)?.lowercased() == "recall"

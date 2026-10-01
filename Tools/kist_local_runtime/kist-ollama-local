@@ -1,0 +1,41 @@
+#!/bin/zsh
+set -euo pipefail
+
+if [[ -f "$HOME/.kist/local-ai-disabled" ]]; then
+  print -u2 "Local AI is off. Use kist-local-ai on to enable it explicitly."
+  exit 78
+fi
+
+model_root="/Volumes/PRO-G40/kist-local-models/ollama/models"
+ollama_bin="/opt/homebrew/opt/ollama/bin/ollama"
+
+# Avoid an access(2) writeability probe here. On current macOS that probe can
+# block a background LaunchAgent indefinitely behind removable-volume privacy
+# adjudication even when the mounted directory and existing models are fully
+# readable. Ollama is offline-only below, so serving its installed models needs
+# only a present model directory; any genuine read failure still fails closed.
+if [[ ! -d "$model_root" ]]; then
+  print -u2 "kist-ollama-local: model volume unavailable: $model_root"
+  exit 78
+fi
+if [[ ! -x "$ollama_bin" ]]; then
+  print -u2 "kist-ollama-local: Ollama executable unavailable: $ollama_bin"
+  exit 69
+fi
+
+export OLLAMA_HOST="127.0.0.1:11434"
+export OLLAMA_MODELS="$model_root"
+export OLLAMA_NO_CLOUD="1"
+export OLLAMA_FLASH_ATTENTION="1"
+export OLLAMA_KV_CACHE_TYPE="q8_0"
+export OLLAMA_CONTEXT_LENGTH="4096"
+export OLLAMA_MAX_LOADED_MODELS="1"
+export OLLAMA_NUM_PARALLEL="1"
+export OLLAMA_KEEP_ALIVE="0"
+export OLLAMA_MAX_QUEUE="1"
+
+# This Ollama build emits very high-volume per-token timing logs even without
+# debug mode. Runtime health is monitored through its loopback API and LIST's
+# processor heartbeat, so discard the model server's noisy stream after the
+# wrapper's actionable preflight errors above have had a chance to surface.
+exec "$ollama_bin" serve >/dev/null 2>&1

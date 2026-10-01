@@ -27,6 +27,9 @@ struct KistConfig {
     /// default (the provider is then only the STARTING model). Absent = legacy behaviour, where
     /// a configured provider pins the session.
     var autoRouting: Bool? = nil
+    /// Opt-in hybrid policy: ordinary turns return to the configured Ollama model; difficult
+    /// turns may use a configured, warm cloud provider. Explicit model pins still win.
+    var localFirst: Bool = false
     /// How the DEFAULT model is chosen when nothing is pinned: "power" (strongest) or "cost" (cheapest).
     /// Absent = power. Set by `/cost` · `/power` in the REPL or `--by-cost` · `--by-power`.
     var selectBy: ProviderSelectionPolicy? = nil
@@ -238,6 +241,7 @@ struct KistConfig {
         return KistConfig(provider: obj["provider"] as? String,
                    model: obj["model"] as? String,
                    autoRouting: obj["autoRouting"] as? Bool,
+                   localFirst: obj["localFirst"] as? Bool ?? false,
                    selectBy: (obj["selectBy"] as? String).flatMap(ProviderSelectionPolicy.init(loose:)),
                    allowedProviders: allowedProviders,
                    providerPolicyError: providerPolicyError,

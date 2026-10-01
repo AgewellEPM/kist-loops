@@ -3,6 +3,18 @@ import AgentCore
 @testable import Kist
 
 final class LegalResearchWorkflowTests: XCTestCase {
+    func testProgrammingVocabularyDoesNotStartLegalResearch() {
+        for request in ["Review the rule card; false is not legal, the vocabulary accepts yes or no.",
+                        "Analyze the release build and verify the API contract.",
+                        "Review this test case and its lawful state transitions.",
+                        "Help diagnose GoldenEye: invalid rule parameters fail to create a card."] {
+            XCTAssertFalse(LegalResearchWorkflow.isLegalResearchIntent(request), request)
+        }
+        for request in ["Review this lease and explain the eviction deadlines", "Help analyze the court notice",
+                        "I need legal research on this contract"] {
+            XCTAssertTrue(LegalResearchWorkflow.isLegalResearchIntent(request), request)
+        }
+    }
     private func tempRoot() -> String {
         let root = NSTemporaryDirectory() + "kist_legal_research_\(UUID().uuidString)"
         try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)

@@ -1,0 +1,180 @@
+#!/usr/bin/python3
+"""Control local AI: auto loads small models on demand; off stops all local workers."""
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+DOMAIN = f"gui/{os.getuid()}"
+LABELS = ("com.kist.local-ai-runtime", "com.kist.ollama-local", "sh.brew.ollama")
+PLIST = Path.home() / "Library/LaunchAgents/com.kist.local-ai-runtime.plist"
+VOLUME = Path("/Volumes/PRO-G40")
+MODELS = VOLUME / "kist-local-models/ollama/models"
+DISABLED = Path.home() / ".kist/local-ai-disabled"
+
+
+def launchctl(*args, check=True):
+    result = subprocess.run(["/bin/launchctl", *args], capture_output=True,
+                            text=True, timeout=15)
+    if check and result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"launchctl {args[0]} failed")
+    return result
+
+
+def listening():
+    with socket.socket() as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", 11434)) == 0
+
+
+def processes():
+    result = subprocess.run(["/bin/ps", "-axo", "uid,pid,comm"],
+                            capture_output=True, text=True, timeout=5, check=True)
+    matches = {}
+    for line in result.stdout.splitlines()[1:]:
+        fields = line.split(None, 2)
+        if len(fields) != 3 or fields[0] != str(os.getuid()):
+            continue
+        executable = fields[2]
+        if ((executable == "/opt/homebrew/bin/ollama" or
+             executable.startswith("/opt/homebrew/Cellar/ollama/") or
+             executable.startswith("/opt/homebrew/opt/ollama/")) and
+                Path(executable).name in ("ollama", "llama-server")):
+            matches[int(fields[1])] = executable
+    return matches
+
+
+def off():
+    DISABLED.parent.mkdir(exist_ok=True)
+    DISABLED.write_text("Local AI is off at Luke's request. Do not restart models automatically.\n"
+                        "Use kist-local-ai auto only when local inference is wanted.\n")
+    for label in LABELS:
+        target = f"{DOMAIN}/{label}"
+        launchctl("disable", target)
+        if launchctl("print", target, check=False).returncode == 0:
+            launchctl("bootout", target)
+    # A manually started server is not owned by either LaunchAgent. Stop only
+    # this user's exact Homebrew Ollama executables, never their parent apps.
+    targets = processes()
+    for pid, executable in targets.items():
+        if processes().get(pid) == executable:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 8
+    force_after = time.monotonic() + 3
+    while listening() or processes():
+        if time.monotonic() >= force_after:
+            for pid, executable in targets.items():
+                if processes().get(pid) == executable:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Startup disabled, but another app restarted a server. "
+                               "Local AI is not fully off; stop that app's local inference.")
+        time.sleep(0.2)
+    print("OFF — local model processes stopped; automatic startup disabled. "
+          "Model files remain on PRO-G40.")
+
+
+def status():
+    if not listening():
+        remaining = processes()
+        if remaining:
+            raise RuntimeError(f"Port closed, but Ollama processes still exist: {remaining}")
+        print("OFF — no local Ollama model processes running.")
+        return
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open("http://127.0.0.1:11434/_kist/status", timeout=3) as response:
+            state = json.load(response)
+        print("AUTO — " + (f"running {state['active_model']}" if state.get("busy") else
+                           "idle; no managed model worker running") + "; small-model limits active.")
+        unmanaged = []
+        for pid in processes():
+            try:
+                if os.getpgid(pid) != state.get("worker_pid"):
+                    unmanaged.append(pid)
+            except ProcessLookupError:
+                pass
+        if unmanaged:
+            print(f"Ollama is also running outside this controller (PIDs {unmanaged}). "
+                  "Use 'kist-local-ai off' to stop those workers too.")
+    except urllib.error.HTTPError:
+        with opener.open("http://127.0.0.1:11434/api/ps", timeout=3) as response:
+            models = json.load(response).get("models", [])
+        print("UNMANAGED — " + (", ".join(m["name"] for m in models) if models else "no model loaded"))
+
+
+def on():
+    if listening() or processes():
+        status()
+        return
+    if not VOLUME.is_mount() or not MODELS.is_dir():
+        raise RuntimeError("PRO-G40 model storage is unavailable; no internal-disk fallback.")
+    pressure = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                              capture_output=True, text=True, timeout=3, check=True)
+    if pressure.stdout.strip() != "1":
+        raise RuntimeError("Mac memory is under pressure. Leave local AI off and use cloud models.")
+    runtime = Path.home() / ".kist/local-runtime/runtime.py"
+    spec = importlib.util.spec_from_file_location("kist_runtime_catalog", runtime)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    catalog = module.scan_inventory()
+    if not catalog or module.INVENTORY_ERROR:
+        raise RuntimeError("Cannot read the external model catalog from this user session: "
+                           + str(module.INVENTORY_ERROR or "empty library"))
+    catalog_file = runtime.parent / "catalog.json"
+    temporary = catalog_file.with_suffix(".tmp")
+    temporary.write_text(json.dumps(catalog) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(catalog_file)
+    # Only the lightweight gateway is enabled. It never preloads a model.
+    target = f"{DOMAIN}/{LABELS[0]}"
+    for label in LABELS[1:]:
+        launchctl("disable", f"{DOMAIN}/{label}")
+    DISABLED.unlink(missing_ok=True)
+    launchctl("enable", target)
+    try:
+        if launchctl("print", target, check=False).returncode != 0:
+            launchctl("bootstrap", DOMAIN, str(PLIST))
+        launchctl("kickstart", target)
+        deadline = time.monotonic() + 10
+        while not listening():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Local Ollama did not start within 10 seconds.")
+            time.sleep(0.2)
+        status()
+        print("Models load only for a request and stop afterward. Heavy requests are refused. "
+              "Use 'kist-local-ai off' for the master kill switch.")
+    except BaseException:
+        off()
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", nargs="?", default="status",
+                        choices=("status", "auto", "on", "off", "toggle", "kill", "freeze"))
+    action = parser.parse_args().action
+    if action == "toggle":
+        action = "off" if listening() or processes() else "on"
+    {"on": on, "auto": on, "status": status}.get(action, off)()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+        print(f"kist-local-ai: {error}", file=sys.stderr)
+        sys.exit(1)

@@ -244,7 +244,7 @@ final class BuildLaneResilienceTests: XCTestCase {
 
     func testSiteBuilderLaunchWarmsRolesBeforePreflightAndReviewerSelection() throws {
         let src = try source("Sources/Kist/KistRunner+Builder.swift")
-        let warm = try XCTUnwrap(src.range(of: "warmRoleBindings(pinnedRoles"))
+        let warm = try XCTUnwrap(src.range(of: "warmRoleBindings(localTeam.roles"))
         let preflight = try XCTUnwrap(src.range(of: "builderGeneratePreflightEnvelope("))
         let producers = try XCTUnwrap(src.range(of: "configuredProducerIdentities(\n            roles: roles"))
         XCTAssertLessThan(warm.lowerBound, preflight.lowerBound, "roles are warmed before the sealed planning pass")

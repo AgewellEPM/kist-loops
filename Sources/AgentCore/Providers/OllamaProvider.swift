@@ -17,6 +17,23 @@ public struct OllamaProvider: ChatProvider {
     public let keyAccount = "ollama_api_key"
     public let defaultModel: String
     public let availableModels: [AIModel]
+    public let automaticAcquisition: Bool
+    public var supportsNativeTools: Bool { id == "ollama" }
+
+    /// Only templates with a known Ollama tool contract opt into native calls. Custom models
+    /// retain the text protocol; --tools native remains an explicit way to probe them.
+    public func capabilities(forModel model: String) -> ModelCapabilities {
+        let family = model.lowercased().split(separator: ":", maxSplits: 1).first.map(String.init) ?? ""
+        let meta = availableModels.first { $0.id == model || $0.name == model }
+        // qwen2.5-coder:7b advertises tools in /api/show but our live Ollama 0.32.3 canary
+        // returned the call as content, not message.tool_calls. Keep it on the text path.
+        let known = id == "ollama" && ["qwen3-vl", "qwen3.5"].contains(family)
+        return ModelCapabilities(nativeTools: known,
+                                 vision: id == "ollama" && (known || meta?.isVision == true),
+                                 reasoning: known && family == "qwen3.5",
+                                 contextWindowTokens: meta?.contextWindowTokens ?? (known ? 16_384 : nil),
+                                 structuredOutput: known || (id == "ollama" && family == "qwen2.5-coder"))
+    }
 
     /// Default construction is the generic local Ollama provider (id "ollama"). The identity is
     /// parameterizable so a SPECIALIST local model can be a first-class provider over the same
@@ -26,14 +43,17 @@ public struct OllamaProvider: ChatProvider {
                 name: String = "Ollama (local)",
                 defaultModel: String = "llama3.1",
                 availableModels: [AIModel] = [
+                    AIModel(id: "qwen3.5:9b-q4_K_M", displayName: "Qwen3.5 9B Q4 · local", isVision: true, isLocal: true, contextWindowTokens: 16_384),
+                    AIModel(id: "qwen3-vl:4b-instruct", displayName: "Qwen3-VL 4B · local", isVision: true, isLocal: true, contextWindowTokens: 16_384),
                     AIModel(id: "llama3.1", name: "Llama 3.1", displayName: "Llama 3.1", isLocal: true),
                     AIModel(id: "deepseek-coder:6.7b", name: "DeepSeek Coder 6.7B", displayName: "DeepSeek Coder 6.7B", isLocal: true),
                     AIModel(id: "qwen2.5-coder", name: "Qwen2.5 Coder", displayName: "Qwen2.5 Coder", isLocal: true),
-                ]) {
+                ], automaticAcquisition: Bool = false) {
         self.id = id
         self.name = name
         self.defaultModel = defaultModel
         self.availableModels = availableModels
+        self.automaticAcquisition = automaticAcquisition
     }
 
     /// The offline COBOL specialist: the locally fine-tuned `cobol-jeeves` model served by Ollama.
@@ -56,7 +76,7 @@ public struct OllamaProvider: ChatProvider {
     /// (e.g. `OLLAMA_HOST=http://192.168.1.5:11434`).
     public var endpoint: String {
         if let host = ProcessInfo.processInfo.environment["OLLAMA_HOST"], !host.isEmpty {
-            return "\(host)/api/chat"
+            return "\(host.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/api/chat"
         }
         // The COBOL specialist is contractually loopback-only. Keep other Ollama providers'
         // legacy default unchanged, but make the specialist's unset-host route numeric so its
@@ -76,56 +96,86 @@ public struct OllamaProvider: ChatProvider {
         if !settings.systemPrompt.isEmpty {
             apiMessages.append(["role": "system", "content": settings.systemPrompt])
         }
-        for m in messages where m.role != .system {
-            apiMessages.append(["role": m.role == .assistant ? "assistant" : "user", "content": m.content])
+        for m in messages where m.role != .system || settings.systemPrompt.isEmpty {
+            let role = m.role == .assistant ? "assistant" : (m.role == .system ? "system" : "user")
+            var message: [String: Any] = ["role": role, "content": m.content]
+            if m.role == .user, capabilities(forModel: model).vision {
+                let images = m.allAttachments.filter { $0.kind == .image }.compactMap { $0.inlineData?.base64EncodedString() }
+                if !images.isEmpty { message["images"] = images }
+            }
+            apiMessages.append(message)
         }
         var options: [String: Any] = [
             "temperature": settings.temperature,
             "top_p": settings.topP,
             "num_predict": settings.maxTokens,   // honor the caller's token cap
         ]
+        // This is the runtime allocation, not the publisher's maximum context. Keep the host's
+        // capsule budget and Ollama's KV-cache allocation in agreement on a 16 GB machine.
+        if let context = capabilities(forModel: model).contextWindowTokens, context > 0 {
+            options["num_ctx"] = context
+        }
         // Forward caller-supplied stop sequences (a local model's turn-end tokens) so generation halts
         // at the real turn boundary instead of running on.
         if !settings.stopSequences.isEmpty { options["stop"] = settings.stopSequences }
-        return [
+        if let seed = settings.seed { options["seed"] = seed }
+        if let topK = settings.topK { options["top_k"] = topK }
+        var body: [String: Any] = [
             "model": model,
             "messages": apiMessages,
             "stream": true,
+            // A daemon can stay available without keeping model weights resident. Ollama
+            // loads on demand and releases this request's model when inference finishes.
+            // The scheduler owns concurrent users; never kill or unload another client's work.
+            "keep_alive": 0,
             "options": options,
         ]
+        if let schema = settings.decodedJSONSchema() { body["format"] = schema }
+        else if settings.jsonOutput { body["format"] = "json" }
+        // Unknown/custom models may reject `think`; only send it for the proven switchable family.
+        if capabilities(forModel: model).reasoning, settings.disableThinking { body["think"] = false }
+        return body
     }
 
     /// Parse one NDJSON line (a complete JSON object) into stream events.
     /// `message.content` -> `.delta`; `done:true` -> `.finish` (+ `.usage` if
     /// `prompt_eval_count`/`eval_count` are present). No `data:` prefix to strip.
     public static func events(fromLine jsonString: String) -> [StreamEvent] {
-        let trimmed = jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let data = trimmed.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
-        var out: [StreamEvent] = []
-        if let message = json["message"] as? [String: Any],
-           let content = message["content"] as? String, !content.isEmpty {
-            out.append(.delta(content))
+        var decoder = OllamaStreamDecoder()
+        return (try? decoder.consume(jsonString)) ?? []
+    }
+
+    /// Disk preparation is separate from an inference deadline; a first download can take
+    /// minutes without loading any weights onto the GPU. Its own acquisition limit applies.
+    public func prepareModel(_ model: String) async throws {
+        if automaticAcquisition {
+            try await OllamaModelAcquisition.shared.ensure(model: model, endpoint: endpoint)
         }
-        if let done = json["done"] as? Bool, done {
-            if json["prompt_eval_count"] != nil || json["eval_count"] != nil {
-                out.append(.usage(promptTokens: json["prompt_eval_count"] as? Int ?? 0,
-                                  completionTokens: json["eval_count"] as? Int ?? 0))
-            }
-            out.append(.finish(reason: nil))
-        }
-        return out
     }
 
     public func stream(messages: [ChatMessage], model: String, settings: ModelSettings, apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        try validateMedia(messages: messages, model: model)
+        return try await streamBody(makeBody(messages: messages, model: model, settings: settings))
+    }
+
+    public func streamTools(messages: [ChatMessage], model: String, settings: ModelSettings,
+                            apiKey: String?, tools: [ToolSpec]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        try validateMedia(messages: messages, model: model)
+        return try await streamBody(makeBodyTools(messages: messages, model: model, settings: settings, tools: tools))
+    }
+
+    private func streamBody(_ body: [String: Any]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        try validateContextEstimate(body)
+        if let model = body["model"] as? String {
+            try await prepareModel(model)
+        }
         // apiKey intentionally ignored — local server, no auth header.
         guard let url = URL(string: endpoint) else { throw AIProviderError.configuration("bad endpoint \(endpoint)") }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: makeBody(messages: messages, model: model, settings: settings))
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -137,9 +187,13 @@ public struct OllamaProvider: ChatProvider {
                         for try await line in bytes.lines { body += line; if body.count > 600 { break } }
                         throw AIProviderError.http(status: http.statusCode, body: body)
                     }
+                    var decoder = OllamaStreamDecoder()
                     for try await line in bytes.lines {
-                        for event in Self.events(fromLine: line) { continuation.yield(event) }
+                        try Task.checkCancellation()
+                        for event in try decoder.consume(line) { continuation.yield(event) }
+                        if decoder.finished { break }
                     }
+                    try decoder.validateCompletion()
                     continuation.finish()
                 } catch is CancellationError {
                     // Consumer stopped — end cleanly.

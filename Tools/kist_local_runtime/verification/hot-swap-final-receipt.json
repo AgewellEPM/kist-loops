@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "response": "Hello! How can I help you today",
+  "elapsed_seconds": 7.98,
+  "state": {
+    "mode": "auto",
+    "inventory_error": null,
+    "busy": false,
+    "active_model": null,
+    "worker_pid": null,
+    "last_result": "HTTP 200",
+    "completed": 2,
+    "max_model_bytes": 2147483648,
+    "context_limit": 4096,
+    "idle_workers": 0
+  },
+  "sha256": {
+    "/Users/lukekist/bin/kist-local-ai": "52a595d85b0722205769361ace2859d53e9d1706c056644a1babe432aa5c2afa",
+    "/Users/lukekist/.kist/local-runtime/runtime.py": "fd4e9ffee1df78b829e08eb78c4ceeb2be7a3b6a4db6e93b739bc5e9b0b16532"
+  }
+}

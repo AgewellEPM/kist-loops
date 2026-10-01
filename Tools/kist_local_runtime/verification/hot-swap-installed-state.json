@@ -1,0 +1,32 @@
+{
+  "time": "2026-10-01T00:57:47",
+  "runtime": {
+    "mode": "auto",
+    "inventory_error": null,
+    "busy": false,
+    "active_model": null,
+    "worker_pid": null,
+    "last_result": "idle",
+    "completed": 0,
+    "max_model_bytes": 2147483648,
+    "context_limit": 4096,
+    "idle_workers": 0
+  },
+  "api_ps": {
+    "models": []
+  },
+  "ollama_processes": [],
+  "memory_pressure": "1",
+  "sha256": {
+    "/Users/lukekist/bin/kist-local-ai": "52a595d85b0722205769361ace2859d53e9d1706c056644a1babe432aa5c2afa",
+    "/Users/lukekist/.kist/local-runtime/runtime.py": "d11a5e2903447309f6ba834caa2f2d3418f798cea33530c1ce11db985de24a07",
+    "/Users/lukekist/.kist/local-runtime/config.json": "6b5e5571bc04a61102e187d5fd0c11a522e0a08a97bd8d4fe992a90fd6ec4121",
+    "/Users/lukekist/Library/LaunchAgents/com.kist.local-ai-runtime.plist": "068d729b94f2333ea1ab7d854b07491b12df913014c5cea608283c1206d52cec"
+  },
+  "validation": [
+    "hot-swap-receipt.json",
+    "hot-swap-cancellation-receipt.json",
+    "hot-swap-final-receipt.json"
+  ],
+  "ollama_cli_list_passed": true
+}

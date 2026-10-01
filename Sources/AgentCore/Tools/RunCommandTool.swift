@@ -617,7 +617,7 @@ public struct RunCommandTool: AgentTool {
     /// parser and recreates raw-shell injection. Block those shapes before the ordinary substring policy.
     /// `env` is blocked entirely because it is an indirect executable launcher that would otherwise make
     /// the resolved-binary allowlist describe `/usr/bin/env`, not the program that actually runs.
-    static func interpreterRefusalReason(resolvedPath: String, args: [String]) -> String? {
+    public static func interpreterRefusalReason(resolvedPath: String, args: [String]) -> String? {
         let base = (resolvedPath as NSString).lastPathComponent.lowercased()
         if base == "env" {
             return "the env command launcher is not permitted in structured execution; invoke the resolved executable directly"

@@ -354,6 +354,9 @@ extension KistREPL {
                     if let pic = FleetCockpitLoader.latestPicture() { print(pic.render()) }
                     else { print("\u{001B}[37mno fleet runs found — run /fleet <goal> first\u{001B}[0m") }
                     return .handled
+                case "goalmap", "goal-map":
+                    print(Self.handleGoalMap(args, projectRoot: projectRoot, sessionStartedAt: sessionStart))
+                    return .handled
                 case "tasks", "task", "plan-tasks", "todo", "goals", "goal":
                     // The native runbook: the shared task list at <project>/.kist/plan.json. Both you and
                     // the agent (via the `tasks` tool) read/update it. `/tasks` shows it; subcommands edit.
@@ -948,7 +951,7 @@ extension KistREPL {
                                             rememberInConversation: true) {
                             await invokePlanExecute(authorityGoal: authorityGoal,
                                                     priorResultContext: outcome.priorResultContext,
-                                                    roles: roleSelection.bindings)
+                                                    roles: roleSelection.bindings, forcePlanned: true)
                         }
                     }
                     return .handled
@@ -984,7 +987,7 @@ extension KistREPL {
                         buildRequest, mode: .planExecute, previous: lastOutcomeContract)
                     let authorityGoal = outcome.executionRequest(currentRequest: buildRequest)
                     let priorContext = outcome.priorResultContext ?? fallbackPlanContext
-                    print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · firing plan→execute worker (real code + build/tests)\u{001B}[0m")
+                    print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · starting Builder (edits, verification and review)\u{001B}[0m")
                     await runHeavyRoute(goal: buildRequest, intent: .build, mode: .planExecute,
                                         execution: "build", startProof: true,
                                         outcomeContract: outcome,

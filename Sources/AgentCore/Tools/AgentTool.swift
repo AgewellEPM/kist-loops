@@ -18,6 +18,9 @@ import Glibc
 
 /// Result of executing a tool. Sendable so it can cross actor/task boundaries.
 public struct ToolResult: Sendable, Equatable {
+    /// Set only when the host tool gate catches a typed filesystem confinement refusal.
+    /// Tool output and model-authored metadata cannot create this signal.
+    var hostPathScopeDenied = false
     public let success: Bool
     public let output: String
     public let error: String?

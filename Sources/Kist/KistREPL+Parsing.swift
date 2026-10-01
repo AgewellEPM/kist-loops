@@ -54,11 +54,17 @@ extension KistREPL {
     /// parsed as `/Users…` → "unknown command", blocking the message entirely.
     static func isSlashCommand(_ input: String) -> Bool {
         guard input.hasPrefix("/") else { return false }
-        let name = input.dropFirst().prefix { $0 != " " }
+        let name = input.dropFirst().prefix { !$0.isWhitespace }
         guard !name.isEmpty else { return false }   // a bare "/" is not a command
         return name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
     }
 
+
+    static func splitSlashCommand(_ input: String) -> (name: String, args: String) {
+        let fields = input.dropFirst().split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        return (fields.first.map(String.init) ?? "",
+                fields.count > 1 ? String(fields[1]).trimmingCharacters(in: .whitespacesAndNewlines) : "")
+    }
 
     /// The adversarial brief each fleet hunter runs for `/bughunt` — RUN the target for real, then try to
     /// BREAK it, and report only REPRODUCED failure points with proof. Each hunter is in its own isolated

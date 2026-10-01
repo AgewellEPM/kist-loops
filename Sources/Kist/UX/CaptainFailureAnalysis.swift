@@ -30,6 +30,7 @@ struct CaptainFailureCapsule: Codable, Equatable, Sendable {
         case staleVerification = "stale-verification"
         case plannerExecution = "planner-execution"
         case providerRequestBudget = "provider-request-budget"
+        case spendingBudget = "spending-budget"
         case unknown = "unknown"
     }
 
@@ -735,6 +736,19 @@ struct CaptainFailureAnalysis: Sendable {
 
         if let typed = typedClassification(verdict: typedVerdict, evidence: evidence) {
             return typed
+        }
+
+        if failedTools.isEmpty, BudgetLedger.isBudgetStop(summary) {
+            return Classification(
+                layer: .spendingBudget, confidence: 100,
+                observed: "The configured token or cost ceiling stopped the turn before completion.",
+                evidence: evidence,
+                hypotheses: [.init(rank: 1, title: "Insufficient remaining spending budget", confidence: 100,
+                    reason: summary.singleLineCapped(220), inspect: ["/usage", "model request sizes and repeated context"])],
+                researchTasks: [],
+                repairPlan: ["Reduce repeated context and unnecessary calls, or split the remaining work. Preserve the configured cap; do not spawn repair agents for a budget stop."],
+                verificationPlan: ["Replay the bounded task and compare requests, measured tokens and verified output."],
+                teachCandidate: "A spending-limit stop is not a code failure or permission to start a new repair budget.")
         }
 
         // Provider-request-budget exhaustion. The loop's own terminal signal is

@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// Agent tool: the native Plan/Action/Test/Review board. The agent uses this to break a big job into
 /// a persisted runbook with acceptance criteria, verification, evidence, and owners — visible to the
@@ -11,16 +12,16 @@ public struct ManageTasksTool: AgentTool {
     task should carry kind, acceptance, verification, evidence, and owner. Use PLAN/RESEARCH items \
     to digest and decide, ACTION items to build, TEST items to prove behavior, REVIEW items to audit, \
     and HANDOFF items when another role/model must take over. Before marking work done, add evidence \
-    such as a test command, file path, review artifact, URL, screenshot, or log. Actions: list | add | \
+    such as a test command, file path, review artifact, URL, screenshot, or log. Actions: list | map | add | \
     start | done | block | update | evidence | validate | clear. Example: {"action":"add","kind":"action",\
     "title":"Build model router","acceptance":"Grok 404 falls back automatically",\
     "verification":"swift test --filter ProviderHealthTests","owner":"coder"}.
     """
     public let parameters = [
-        ToolParameter(name: "action", type: "string", description: "list | add | start | done | block | update | evidence | validate | clear"),
+        ToolParameter(name: "action", type: "string", description: "list | map | add | start | done | block | update | evidence | validate | clear"),
         ToolParameter(name: "title", type: "string", description: "Task title (for add).", required: false),
         ToolParameter(name: "detail", type: "string", description: "Detail / reason (add, block, update).", required: false),
-        ToolParameter(name: "id", type: "number", description: "Task id (start/done/block/update).", required: false),
+        ToolParameter(name: "id", type: "number", description: "Positive whole task id (map/start/done/block/update/evidence). Omit for start-next or map overview.", required: false),
         ToolParameter(name: "owner", type: "string", description: "Who owns it, e.g. planner / coder / critic / researcher / luke.", required: false),
         ToolParameter(name: "kind", type: "string", description: "plan | action | test | review | research | decision | handoff.", required: false),
         ToolParameter(name: "acceptance", type: "string", description: "What must be true before this task can be done.", required: false),
@@ -37,12 +38,22 @@ public struct ManageTasksTool: AgentTool {
         do { planPath = try context.resolvedPath(".kist/plan.json", mustExist: false) }
         catch { return .failure("refused: .kist/plan.json escapes the project root (\(error))") }
         let store = PlanStore(path: planPath)
-        let action = (arguments["action"] as? String ?? "list").lowercased()
-        let id = optionalInt("id", from: arguments)
+        let action = (arguments["action"] as? String ?? "list")
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let id = Self.taskID(arguments["id"])
+        if arguments.keys.contains("id") && id == nil {
+            return .failure("id must be a positive whole task number — nothing changed")
+        }
 
         switch action {
         case "list":
             return ToolResult(success: true, output: store.load().render())
+        case "map":
+            do {
+                let plan = try PlanGoalMap.load(projectRoot: context.projectRoot)
+                return ToolResult(success: true, output: PlanGoalMap.render(
+                    plan, projectRoot: context.projectRoot, taskID: id))
+            } catch { return .failure("Goal map unavailable: \(error). The board was not changed.") }
         case "validate", "check":
             return ToolResult(success: true, output: PlanContractValidator.render(PlanContractValidator.validate(store.load())))
         case "add":
@@ -58,7 +69,9 @@ public struct ManageTasksTool: AgentTool {
                               evidence: evidenceStrings(from: arguments["evidence"]))
             return ToolResult(success: true, output: "added [\(t.id)] \(t.title)\n\n" + store.load().render())
         case "start":
-            let task = id.flatMap { store.update(id: $0, status: .inProgress) } ?? store.startNext()
+            let task: PlanTask?
+            if let id { task = store.update(id: id, status: .inProgress) }
+            else { task = store.startNext() }
             guard let task else { return .failure(id == nil ? "no todo tasks to start" : "no task with id \(id!)") }
             return ToolResult(success: true, output: "started [\(task.id)] \(task.title)\n\n" + store.load().render())
         case "done", "complete":
@@ -110,8 +123,19 @@ public struct ManageTasksTool: AgentTool {
             store.clear()
             return ToolResult(success: true, output: "plan cleared")
         default:
-            return .failure("unknown action '\(action)' — use list|add|start|done|block|update|evidence|validate|clear")
+            return .failure("unknown action '\(action)' — use list|map|add|start|done|block|update|evidence|validate|clear")
         }
+    }
+
+    /// JSON booleans, fractional/overflowing numbers, and malformed explicit IDs must never
+    /// be converted to a different task or mistaken for an omitted "start next" request.
+    private static func taskID(_ raw: Any?) -> Int? {
+        let id: Int?
+        if let text = raw as? String { id = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        else if let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            id = Int(number.stringValue) ?? Int(exactly: number.doubleValue)
+        } else { id = nil }
+        return id.flatMap { $0 > 0 ? $0 : nil }
     }
 
     private func parseKind(_ raw: String?) -> PlanTask.Kind? {

@@ -53,7 +53,9 @@ enum KistRunner {
         providerUnavailable: @escaping @Sendable (String) -> Bool = { _ in false },
         liveFailureObserver: (@Sendable (String, Error) -> Void)? = nil
     ) -> ProviderRegistry {
-        let admitted = providers.filter { config.permitsProvider($0.id) }
+        let admitted = providers.filter { config.permitsProvider($0.id) }.map {
+            configuredLocalProvider($0, config: config)
+        }
         let admittedIDs = Set(admitted.map { $0.id.lowercased() })
         let admittedFallbacks = fallbackProviderIds.reduce(into: [String: [String]]()) { result, entry in
             let primary = entry.key.lowercased()
@@ -438,6 +440,7 @@ enum KistRunner {
                 // it's only the starting model and the Captain keeps choosing per turn.
                 let autoRouting = AutoModelRouter.routingEnabled(
                     pickedInteractively: pick != nil, cliProvider: opts.providerId != nil,
+                    cliModel: opts.model != nil,
                     configProvider: config.provider != nil, configAutoRouting: config.autoRouting)
                 // Cross-process live-failure ledger (~/.kist/runtime/provider-cooldowns.json), shared by
                 // every REPL lane that picks a provider: auto-router tiers, Captain assignments, the media
@@ -454,23 +457,8 @@ enum KistRunner {
                 let avoidProvider: @Sendable (String) -> Bool = {
                     liveCooldowns.coolingDown($0) || providerHealth.down($0)
                 }
-                // Candidate models for the heuristic router: every configured/local provider's default
-                // model, tagged with capabilities. Vision engine (gemini) ordered first for the vision tier.
-                let preferredVision = registry.provider(id: "gemini").flatMap { registry.hasKey(for: $0) ? "gemini" : nil }
-                let routeCandidates: [AutoModelRouter.Candidate] = registry.providers
-                    .filter { !$0.requiresAPIKey || registry.hasKey(for: $0) }
-                    .map { p in
-                        let mid = p.defaultModel
-                        let caps = registry.capabilities(providerId: p.id, model: mid)
-                        let ctx = caps.contextWindowTokens ?? 0
-                        return AutoModelRouter.Candidate(
-                            binding: ProviderBinding(providerId: p.id, model: mid.isEmpty ? nil : mid),
-                            vision: caps.vision, reasoning: caps.reasoning, contextTokens: ctx,
-                            fast: AutoModelRouter.isFastModel(mid, contextTokens: ctx))
-                    }
-                    .sorted { a, _ in a.binding.providerId == preferredVision }
-                let autoRouter = AutoModelRouter(candidates: routeCandidates,
-                                                 fallback: ProviderBinding(providerId: providerId, model: model))
+                let autoRouter = modelRouter(registry: registry,
+                    fallback: ProviderBinding(providerId: providerId, model: model))
                 // Autopilot must be UNMISSABLE: a bold red banner so you always know guards-off mode is armed.
                 let autoTag = opts.auto ? "  \u{001B}[1;41;97m ⚠ AUTOPILOT — sandboxed, no prompts \u{001B}[0m"
                                         : (opts.yolo ? " · yolo" : "")
@@ -593,36 +581,9 @@ enum KistRunner {
                 repl.initialPermissionMode = opts.yolo ? .bypass : (opts.planMode ? .plan : .normal)
                 repl.roleSelection = roleSelection
                 repl.autoRouting = autoRouting
-                // Captain-driven interactive routing: when auto-routing, capture a bounded project snapshot
-                // + the learned-outcome context ONCE, so each escalation turn picks the best model from
-                // PROJECT DATA (the same scoring the fleet uses per subtask) instead of a keyword heuristic.
-                // Ordinary turns still STAY on the current model (the stability guard) — no churn, and the
-                // streamed "thinking" display is preserved (the dogfooding "everything flips to gemini" guard).
-                if autoRouting {
-                    let snapshot = ProjectSnapshot.capture(repo: root, registry: registry)
-                    // Respect --no-memory: no learned-outcome retrieval when cross-run memory is disabled
-                    // (mirrors the fleet's gate). Snapshot + learning captured ONCE (not per turn).
-                    let learning = opts.noMemory ? nil : CaptainLearningStore(projectRoot: root).assignmentContext()
-                    repl.autoRoute = { text, _, current in
-                        // No keyed providers to reason over ⇒ the standalone heuristic (one-provider setups).
-                        guard !snapshot.providers.isEmpty else {
-                            return autoRouter.route(text, hasMedia: false, current: current,
-                                                    avoid: avoidProvider)
-                        }
-                        // Fall back to the CURRENT model (not the startup default): "stay" must mean stay on
-                        // whatever we're on now, or a no-signal turn route-flips back after any switch (Codex HIGH).
-                        let a = ModelAssignmentEngine.assignInteractive(turn: text, snapshot: snapshot,
-                                                                        fallback: current, learning: learning,
-                                                                        unavailable: avoidProvider)
-                        return AutoModelRouter.captainDecision(a, fallback: current,
-                                                               avoid: avoidProvider)
-                    }
-                } else {
-                    repl.autoRoute = { text, hasMedia, current in
-                        autoRouter.route(text, hasMedia: hasMedia, current: current,
-                                         avoid: avoidProvider)
-                    }
-                }
+                repl.autoRoute = interactiveAutoRoute(autoRouting: autoRouting, config: config,
+                    noMemory: opts.noMemory, root: root, registry: registry,
+                    autoRouter: autoRouter, avoidProvider: avoidProvider)
                 // Model onboarding constructs a temporary registry around an unsaved draft. Keep
                 // that intentionally broad setup surface unreachable while an allowlist is active;
                 // widening the catalog requires an explicit config edit + restart.
@@ -725,7 +686,10 @@ enum KistRunner {
                         budget: replBudget, childToolsFactory: selectedTeam,
                         additionalToolNames: offered.names, checkpoints: checkpoints,
                         delegationDepthRemaining: max(0, opts.delegationDepth) + 1)
-                    return await spawner.run(specialist: def, task: task, approvalTools: approval, planMode: planMode).summary
+                    let result = await spawner.run(specialist: def, task: task, approvalTools: approval, planMode: planMode)
+                    // A failed child is not evidence for the next repair stage. Its failure has already
+                    // been rendered by the child sink; stop the chain instead of reviewing an empty fix.
+                    return result.success ? result.summary : nil
                 }
                 // R2a: the drain chain — approval-deferred prompts first, then messages the user
                 // TYPED while a turn was running (TurnInputQueue). Each drained line goes through
@@ -937,46 +901,18 @@ enum KistRunner {
                     return RoleBindings(default: ProviderBinding(providerId: strong))
                 }
                 func runPlanExecuteRoute(_ missionID: PlanExecuteMissionID?, _ g: String,
-                                         _ roles: RoleBindings,
+                                         _ roles: RoleBindings, forcePlanned: Bool = true,
                                          riskObjective: String? = nil,
                                          priorResultContext: PriorResultContext? = nil) async -> HeavyRouteResult {
-                    var o = opts; o.goal = g; o.planExecute = true
-                    o.planExecuteResumeID = missionID
-                    // R1: ESC works on the plan-execute plane too — previously this plane was a
-                    // dead zone (no watcher, no cancellation checks), exactly where big requests
-                    // auto-escalate. The watcher cancels the runner task; PlanExecuteLoop and
-                    // PlanExecutor stop cooperatively at phase/wave boundaries. Sequential with
-                    // the chat turn's watcher (single-watcher invariant preserved).
-                    TurnInputQueue.shared.begin()
-                    defer { TurnInputQueue.shared.end() }
-                    let interrupted = MutableBox<InterruptibleTurn.InterruptReason?>(nil)
-                    let exitCode = await InterruptibleTurn.run(onInterrupt: { reason in
-                        interrupted.value = reason
-                        if reason == .cancel { TurnInputQueue.shared.clearAll() }
-                        else { TurnInputQueue.shared.commitPending() }
-                        print("\n\u{001B}[33m" + (reason == .cancel ? "⎋⎋ cancelled" : "⎋ interrupted")
-                              + " — plan run stopped\u{001B}[0m")
-                    }) {
-                        await runBuilderCompatibility(o, goal: g, registry: registry, root: root,
-                                                      tools: tools, context: context, checkpoints: checkpoints,
-                                                      toolMode: toolMode, providerId: providerId, model: model,
-                                                      rolesOverride: roles,
-                                                      riskObjective: riskObjective,
-                                                      advisoryContext: priorResultContext)
-                    }
-                    let verification: HeavyRouteResult.Verification
-                    if interrupted.value != nil {
-                        verification = .unavailable("plan verification did not finish after interruption")
-                    } else if exitCode == 0 {
-                        verification = .passed("the plan executor's deterministic mutation gate and critic verification completed")
-                    } else if exitCode == 1 {
-                        verification = .failed("the plan executor did not pass its required critic verification")
-                    } else {
-                        verification = .unavailable("plan execution was rejected before its verifier ran")
-                    }
-                    return HeavyRouteResult(exitCode: exitCode, interruption: interrupted.value,
-                                            review: .handledInternally("plan→execute owns its planner/coder/critic loop"),
-                                            verification: verification)
+                    await runInteractiveBuild(opts, missionID: missionID, goal: g, roles: roles,
+                        forcePlanned: forcePlanned, registry: registry, root: root, tools: tools,
+                        context: context, checkpoints: checkpoints, toolMode: toolMode,
+                        providerId: providerId, model: model, riskObjective: riskObjective,
+                        priorResultContext: priorResultContext)
+                }
+                repl.automaticBuild = { goal, context, roles in
+                    await runPlanExecuteRoute(nil, goal, roles, forcePlanned: false,
+                        riskObjective: goal, priorResultContext: context)
                 }
                 repl.planExecute = { g, roles in
                     await runPlanExecuteRoute(nil, g, roles)

@@ -2,6 +2,13 @@ import Foundation
 import XCTest
 
 extension DeploymentProvenanceTests {
+    func testFailedPromotionPreservesEvaluatorReasonAndRollsBack() throws {
+        let fixture = repositoryRoot.appendingPathComponent("scripts/tests/kist-deployment-diagnostics.sh")
+        let result = try run(URL(fileURLWithPath: "/bin/bash"), arguments: [fixture.path])
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("PASS kist deployment diagnostics"), result.stdout)
+    }
+
     func testInstalledResourceBuildArchiveRollbackAndTrustBoundaries() throws {
         let fixture = repositoryRoot.appendingPathComponent("scripts/tests/kist-resource-deployment.sh")
         let result = try run(fixture)

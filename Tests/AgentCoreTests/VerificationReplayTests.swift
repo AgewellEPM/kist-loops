@@ -74,14 +74,15 @@ final class VerificationReplayTests: XCTestCase {
     func testBothDoneSitesConsultReplay() throws {
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let src = try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/HeadlessAgentLoop.swift"),
-                             encoding: .utf8)
+        for file in ["HeadlessAgentLoop.swift", "HeadlessAgentLoop+TextDrive.swift"] {
+        let src = try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/" + file), encoding: .utf8)
         let replayGates = src.components(separatedBy: "if case .nudge = doneDecision, let replay = lastVerify").count - 1
-        XCTAssertGreaterThanOrEqual(replayGates, 2,
+        XCTAssertGreaterThanOrEqual(replayGates, 1,
             "both done sites (text + native) must attempt the deterministic replay before nudging")
         let captures = src.components(separatedBy: "Self.replayCandidate(").count - 1
-        XCTAssertGreaterThanOrEqual(captures, 2,
+        XCTAssertGreaterThanOrEqual(captures, 1,
             "both execution sites (text + native) must capture the replay candidate")
+        }
     }
 }
 

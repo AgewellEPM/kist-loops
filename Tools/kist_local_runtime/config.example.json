@@ -1,0 +1,10 @@
+{
+  "model_root": "/Volumes/PRO-G40/kist-local-models/ollama/models",
+  "ollama_bin": "/opt/homebrew/bin/ollama",
+  "max_model_bytes": 2147483648,
+  "context_tokens": 4096,
+  "default_context_tokens": 2048,
+  "max_output_tokens": 1024,
+  "request_timeout_seconds": 90,
+  "listen_port": 11434
+}

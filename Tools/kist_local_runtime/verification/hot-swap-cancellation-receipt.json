@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "cleanup_seconds": 0.42,
+  "state": {
+    "mode": "auto",
+    "inventory_error": null,
+    "busy": false,
+    "active_model": null,
+    "worker_pid": null,
+    "last_result": "stopped: client disconnected",
+    "completed": 1,
+    "max_model_bytes": 2147483648,
+    "context_limit": 4096,
+    "idle_workers": 0
+  },
+  "memory_pressure": "1",
+  "sha256": {
+    "/Users/lukekist/bin/kist-local-ai": "c66d00266538cf1a215f302df551cc8f5f43b8d78b9703549b60f1ed5c5e39eb",
+    "/Users/lukekist/.kist/local-runtime/runtime.py": "fd4e9ffee1df78b829e08eb78c4ceeb2be7a3b6a4db6e93b739bc5e9b0b16532"
+  }
+}

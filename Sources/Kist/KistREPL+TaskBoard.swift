@@ -100,11 +100,11 @@ extension KistREPL {
     static func handleTasks(_ args: String, projectRoot: String,
                             sessionStartedAt: Date? = nil) -> String {
         let store = PlanStore(projectRoot: projectRoot)
-        let parts = args.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
+        let parts = args.split(maxSplits: 1, omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace }).map(String.init)
         guard let sub = parts.first?.lowercased() else {
             return store.load().render(sessionStartedAt: sessionStartedAt)
         }
-        let rest = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+        let rest = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
         switch sub {
         case "add":
             guard !rest.isEmpty else { return "usage: /tasks add <title>" }
@@ -115,9 +115,20 @@ extension KistREPL {
                               verification: contract.verification,
                               evidence: contract.evidence)
             return "added [\(t.id)] \(t.title)\n" + store.load().render()
+        case "map":
+            return handleGoalMap(rest, projectRoot: projectRoot, sessionStartedAt: sessionStartedAt)
         case "start":
-            let task = Int(rest).flatMap { store.update(id: $0, status: .inProgress) } ?? store.startNext()
-            return task.map { "started [\($0.id)] \($0.title)\n" } ?? "no task to start\n" + store.load().render()
+            let task: PlanTask?
+            if rest.isEmpty { task = store.startNext() }
+            else {
+                guard let id = Int(rest), id > 0 else { return "usage: /tasks start [task-id]" }
+                guard let selected = store.update(id: id, status: .inProgress) else {
+                    return "no task with id \(id) — nothing started"
+                }
+                task = selected
+            }
+            return (task.map { "started [\($0.id)] \($0.title)\n" } ?? "no task to start\n")
+                + store.load().render(sessionStartedAt: sessionStartedAt)
         case "done", "complete":
             guard let id = Int(rest) else { return "usage: /tasks done <id>" }
             let (completed, nowActive, didAdvance) = store.completeAndAdvance(
@@ -155,9 +166,12 @@ extension KistREPL {
         case "validate", "check":
             return PlanContractValidator.render(PlanContractValidator.validate(store.load()))
         case "clear":
+            guard rest.isEmpty else { return "usage: /tasks clear — clears the whole board" }
             store.clear(); return "plan cleared"
+        case "list", "show":
+            return store.load().render(sessionStartedAt: sessionStartedAt)
         default:
-            return store.load().render()
+            return "unknown task action '\(sub)' — use list|map|add|start|done|block|evidence|validate|clear"
         }
     }
 
@@ -182,10 +196,7 @@ extension KistREPL {
         // bare research todo — so a stuck .inProgress research task cannot hijack 'next' while build work
         // remains, and `active` still wins for real in-flight multi-turn work.
         if nextPhrases.contains(lower) {
-            let active = sessionStartedAt.flatMap { started in
-                plan.active(since: started)
-            } ?? (sessionStartedAt == nil ? plan.active : nil)
-            return active ?? plan.nextActionable ?? plan.next
+            return plan.nextForExecution(since: sessionStartedAt)
         }
         return nil
     }
@@ -212,10 +223,7 @@ extension KistREPL {
             .filter { !boardReferenceGlue.contains($0) }
         guard meaningful.isEmpty else { return trimmed }
         let plan = PlanStore(projectRoot: projectRoot).load()
-        let liveActive = sessionStartedAt.flatMap { started in
-            plan.active(since: started)
-        } ?? (sessionStartedAt == nil ? plan.active : nil)
-        guard let task = liveActive ?? plan.nextActionable ?? plan.next else { return trimmed }
+        guard let task = plan.nextForExecution(since: sessionStartedAt) else { return trimmed }
         _ = PlanStore(projectRoot: projectRoot).update(id: task.id, status: .inProgress)
         return executionBrief(for: task, userInput: trimmed)
     }

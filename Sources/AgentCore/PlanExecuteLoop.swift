@@ -208,8 +208,11 @@ public struct PlanExecuteLoop: Sendable {
         let eventSink: RuntimeEventSink = context.agentMemory.map {
             AgentHistoryEventSink(downstream: downstream, access: $0, health: AgentHistoryHealth()) as RuntimeEventSink
         } ?? downstream
-        self.tools = ToolRegistry(tools.all() + [GenerateTool(providers: providers, binding: roles.binding(for: .coder),
-                                                              recorder: recorder, budget: budget, sink: eventSink)])
+        let decisionEngine = DecisionEngine.configured(providers: providers, binding: roles.binding(for: .worker),
+                                                   budget: budget, sink: eventSink, recorder: recorder)
+        self.tools = ToolRegistry(tools.all() + [DecideTool(engine: decisionEngine), DecisionTool(engine: decisionEngine),
+                                               GenerateTool(providers: providers, binding: roles.binding(for: .coder),
+                                                            recorder: recorder, budget: budget, sink: eventSink)])
         self.context = context; self.sink = eventSink
         self.interactor = interactor; self.requireApproval = requireApproval
         self.maxPlanRepairs = maxPlanRepairs; self.maxReplans = maxReplans; self.verifyGoal = verifyGoal
@@ -229,7 +232,7 @@ public struct PlanExecuteLoop: Sendable {
 
     /// A role-bound completion that RECORDS a span + METERS tokens (estimate fallback when the
     /// provider omits usage). The single choke point for planner/critic model calls.
-    private func meteredComplete(role: AgentRole, messages: [ChatMessage], settings: ModelSettings) async throws -> String {
+    func meteredComplete(role: AgentRole, messages: [ChatMessage], settings: ModelSettings) async throws -> String {
         if let access = context.agentMemory {
             if let error = (sink as? AgentHistoryEventSink)?.health.error {
                 throw ToolError.execution("agent history durability failed: \(error)")
@@ -1467,7 +1470,14 @@ public struct PlanExecuteLoop: Sendable {
                             workspaceManifestPolicyFingerprint,
                         planID: planID, planRevision: planRevision,
                         workspaceActionReceipt: actionReceipt,
-                        projectRoot: context.projectRoot)
+                        projectRoot: context.projectRoot,
+                        allowsDataValidation: Self.permitsDataArtifactEvidence(
+                            contract: completionContract,
+                            effects: request.control.planNodes.values.flatMap {
+                                ($0.invocationReceipts ?? []).map(\.effectObservation)
+                            } + execution.attemptResults.map {
+                                $0.effectObservation ?? ToolEffectObservation(mutation: .unknownTarget)
+                            }))
                 }
                 return invocation
             }
@@ -1804,28 +1814,4 @@ public struct PlanExecuteLoop: Sendable {
         return .invalid
     }
 
-    // MARK: - Verify gate
-
-    private func verifyGoalMet(goal: String, execution: PlanExecution,
-                               verificationBinding: ReviewVerificationBinding?,
-                               functionalEvidenceSection: FunctionalEvidenceReviewSection? = nil)
-        async -> (done: Bool, reason: String) {
-        let stepSummary = execution.stepResults
-            .map { "- \($0.stepId) (\($0.tool)): \(String($0.output.prefix(200)).replacingOccurrences(of: "\n", with: " "))" }
-            .joined(separator: "\n")
-        let messages = [ChatMessage(role: .user, content: Self.verifyPrompt(
-            goal: goal, stepSummary: stepSummary, verificationBinding: verificationBinding,
-            functionalEvidenceSection: functionalEvidenceSection))]
-        let settings = ModelSettings(temperature: 0, maxTokens: 512)
-        // The CRITIC verifies — can be a DIFFERENT vendor than the planner (clean-context reviewer,
-        // the research's highest-confidence cross-vendor win). Metered + traced like every model call.
-        guard let text = try? await meteredComplete(role: .critic, messages: messages, settings: settings),
-              let verdict = Self.parseVerdict(text) else {
-            return (done: false, reason: "verification unavailable or unparseable")
-        }
-        return verdict
-    }
-
-    /// Parse a `{"done":bool,"reason":string}` verdict, falling back to a DONE/NOT_DONE keyword scan.
-    /// Returns nil only when neither is present (caller fails closed).
 }

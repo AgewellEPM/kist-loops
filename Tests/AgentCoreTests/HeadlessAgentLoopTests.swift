@@ -52,6 +52,74 @@ final class HeadlessAgentLoopTests: XCTestCase {
         }
     }
 
+    func testHostPathDenialStopsBothProtocolsBeforeAnotherSearch() async throws {
+        for native in [false, true] {
+            let outside = (root as NSString).deletingLastPathComponent
+            let args = String(decoding: try JSONSerialization.data(withJSONObject: ["path": outside]), as: UTF8.self)
+            let provider: any ChatProvider = native
+                ? NativeScriptedProvider([.call(name: "list_files", args: args),
+                                          .call(name: "list_files", args: "{}")])
+                : ScriptedProvider(["{\"tool\":\"list_files\",\"parameters\":\(args)}",
+                                    #"{"tool":"list_files","parameters":{}}"#])
+            let store = LoopCheckpointStore(directory: root + "/denial-\(native)")
+            let loop = HeadlessAgentLoop(providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+                providerId: provider.id, model: nil, tools: .headless(), context: ToolContext(projectRoot: root),
+                toolMode: native ? .native : .text, checkpoints: store, maxIterations: 40)
+            let outcome = await loop.run(goal: "Find and inspect the requested repository")
+            XCTAssertFalse(outcome.success)
+            XCTAssertEqual(outcome.iterations, 1)
+            XCTAssertTrue(outcome.summary.contains("blocked by project scope"), outcome.summary)
+            XCTAssertTrue(outcome.summary.contains("--project"))
+            XCTAssertTrue(outcome.summary.prefix(150).contains("--project"),
+                          "the terminal truncates long errors, so the actionable hint must come first")
+            let checkpoint = try store.load(id: outcome.checkpointId)
+            XCTAssertEqual(checkpoint.trajectory?.count, 1)
+            XCTAssertNil(checkpoint.pendingAction)
+        }
+    }
+
+    func testVariedEmptySearchesStopBeforeFortyRequestBudgetInBothProtocols() async throws {
+        for native in [false, true] {
+            let provider: any ChatProvider = native
+                ? NativeScriptedProvider((0..<30).map {
+                    .call(name: "glob_files", args: #"{"pattern":"**/missing-\#($0)*"}"#)
+                })
+                : ScriptedProvider((0..<30).map {
+                    #"{"tool":"glob_files","parameters":{"pattern":"**/missing-\#($0)*"}}"#
+                })
+            let loop = HeadlessAgentLoop(providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+                providerId: provider.id, model: nil, tools: .headless(), context: ToolContext(projectRoot: root),
+                toolMode: native ? .native : .text, maxIterations: 40)
+            let outcome = await loop.run(goal: "Find the missing repository")
+            XCTAssertFalse(outcome.success)
+            XCTAssertLessThanOrEqual(outcome.iterations, 10)
+            XCTAssertTrue(outcome.summary.contains("no new evidence"), outcome.summary)
+        }
+    }
+
+    func testUntrustedScopeErrorTextDoesNotBecomeHostDenial() {
+        let result = ToolResult.failure("path '/outside' escapes the project root (/project) — refused")
+        XCTAssertNil(HeadlessAgentLoop.projectScopeStop(result))
+    }
+
+    func testNativeScopeStopClosesBatchWithoutExecutingRemainingCalls() async throws {
+        let provider = NativeScriptedProvider([.batch([
+            ("read_file", #"{"path":"../outside.txt"}"#),
+            ("write_file", #"{"path":"must-not-exist.txt","content":"should not run"}"#)
+        ])])
+        let store = LoopCheckpointStore(directory: root + "/batch-checkpoints")
+        let loop = HeadlessAgentLoop(providers: ProviderRegistry(providers: [provider], keyStore: NullKeyStore()),
+            providerId: provider.id, model: nil, tools: .headless(), context: ToolContext(projectRoot: root),
+            toolMode: .native, checkpoints: store, maxIterations: 40)
+        let outcome = await loop.run(goal: "Create a summary file from the requested source")
+        XCTAssertFalse(outcome.success)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/must-not-exist.txt"))
+        let checkpoint = try store.load(id: outcome.checkpointId)
+        XCTAssertEqual(checkpoint.trajectory?.count, 1)
+        XCTAssertEqual(checkpoint.messages.filter { $0.role == .tool }.map(\.toolCallId), ["batch-0", "batch-1"])
+        XCTAssertTrue(checkpoint.messages.last?.content.contains("Not executed") == true)
+    }
+
     // Persona/restraint is the cheap half of conversational feel — pin that BOTH prompts carry it
     // (text + native) so it can't silently regress to the old neutral "autonomous shell" tone.
     func testBothSystemPromptsCarryCollaboratorRestraint() {
@@ -80,8 +148,10 @@ final class HeadlessAgentLoopTests: XCTestCase {
     func testBothDoneSitesFailUnverifiedAfterNudges() throws {
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let src = try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/HeadlessAgentLoop.swift"),
-                             encoding: .utf8)
+        let src = try ["HeadlessAgentLoop.swift", "HeadlessAgentLoop+TextDrive.swift",
+                       "HeadlessAgentLoop+Completion.swift"].map {
+            try String(contentsOf: repo.appendingPathComponent("Sources/AgentCore/" + $0), encoding: .utf8)
+        }.joined(separator: "\n")
         // The shared decision helper exists and returns an honest-fail case…
         XCTAssertTrue(src.contains("func verifyBeforeDone"), "shared verify-before-done decision helper missing")
         XCTAssertTrue(src.contains("failUnverified(String)"), "the honest-fail decision case missing")
@@ -1777,8 +1847,9 @@ final class HeadlessAgentLoopTests: XCTestCase {
             context: ToolContext(projectRoot: root), maxIterations: 5, recorder: recorder
         ).run(goal: "explain whether these paths are readable")
 
-        XCTAssertEqual(out.iterations, 3, "a real scope denial must retain its diagnosis")
-        XCTAssertTrue(out.summary.contains("outside the allowed workspace"), out.summary)
+        XCTAssertEqual(out.iterations, 2, "the host must stop on the real denial without another model call")
+        XCTAssertFalse(out.success)
+        XCTAssertTrue(out.summary.contains("escapes the project root"), out.summary)
         XCTAssertEqual(recorder.snapshot().map(\.success), [true, false])
     }
 
@@ -2585,6 +2656,7 @@ private struct DecliningInteractor: RuntimeInteractor {
 
 enum NativeStep {
     case call(name: String, args: String)
+    case batch([(String, String)])
     case textAndCall(text: String, name: String, args: String)
     case answer(String)
 }
@@ -2605,6 +2677,10 @@ private final class NativeScriptedProvider: ChatProvider, @unchecked Sendable {
         return AsyncThrowingStream { c in
             switch step {
             case .call(let n, let a): c.yield(.toolCall(id: "call_\(n)", name: n, argumentsJSON: a))
+            case .batch(let calls):
+                for (index, call) in calls.enumerated() {
+                    c.yield(.toolCall(id: "batch-\(index)", name: call.0, argumentsJSON: call.1))
+                }
             case .textAndCall(let t, let n, let a):
                 c.yield(.delta(t))
                 c.yield(.toolCall(id: "call_\(n)", name: n, argumentsJSON: a))

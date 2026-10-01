@@ -7,6 +7,17 @@ import XCTest
 /// live signal didn't earn.
 final class ModelLoopProbeTests: XCTestCase {
 
+    func testEchoProbeUsesVisibleOutputWithoutHiddenThinking() {
+        XCTAssertTrue(ModelLoopProbe.probeSettings.disableThinking)
+        XCTAssertFalse(ModelLoopProbe.probeSettings.geminiBuiltins)
+        XCTAssertEqual(ModelLoopProbe.probeSettings.maxTokens, 256)
+        XCTAssertEqual(ModelLoopProbe.timeoutSeconds, 45, "keep the hard probe deadline")
+        XCTAssertEqual(ModelLoopProbe.probeTimeout(provider: OllamaProvider(), requested: nil), 120)
+        XCTAssertEqual(ModelLoopProbe.probeTimeout(provider: nil, requested: nil), 45)
+        XCTAssertEqual(ModelLoopProbe.probeTimeout(provider: OllamaProvider(), requested: 0.1), 0.1,
+                       "an explicit caller deadline must not be raised")
+    }
+
     func testReadyRequiresBothPathAndRoundTripOK() {
         XCTAssertEqual(ModelLoopProbe.readiness(path: .ok("p"), roundTrip: .ok("rt")), .ready)
     }

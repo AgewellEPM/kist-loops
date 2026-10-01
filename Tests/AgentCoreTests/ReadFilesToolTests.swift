@@ -82,4 +82,22 @@ final class ReadFilesToolTests: XCTestCase {
             XCTFail("overflowing ranges must be rejected before reading")
         } catch ToolError.invalidParameter { } catch { XCTFail("unexpected error: \(error)") }
     }
+
+    func testStructuredPlannerArrayUsesSameReadAndConfinementChecks() async throws {
+        try "visible".write(to: root.appendingPathComponent("safe.txt"), atomically: true, encoding: .utf8)
+        let result = try await ReadFilesTool().execute(arguments: ["requests": [
+            ["path": "safe.txt"], ["path": "../escape"]
+        ]], context: ToolContext(projectRoot: root.path))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.output.utf8)) as? [String: Any])
+        let files = try XCTUnwrap(json["files"] as? [[String: Any]])
+        XCTAssertEqual(files[0]["numberedLines"] as? String, "1│ visible\n")
+        XCTAssertNotNil(files[1]["error"])
+        XCTAssertNil(files[1]["sourceSHA256"])
+        XCTAssertFalse(result.success)
+        do {
+            _ = try await ReadFilesTool().execute(arguments: ["requests": Array(repeating: ["path": "safe.txt"], count: 9)],
+                context: ToolContext(projectRoot: root.path))
+            XCTFail("The direct array must retain the eight-window bound")
+        } catch ToolError.invalidParameter { }
+    }
 }

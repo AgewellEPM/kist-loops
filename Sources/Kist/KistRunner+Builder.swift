@@ -88,7 +88,12 @@ extension KistRunner {
         let liveCooldowns = ProviderCooldownStore()
         let liveHealth = ProviderHealthFileStore()
         let benchedProvider: (String) -> Bool = { liveCooldowns.coolingDown($0) || liveHealth.down($0) }
-        let warmed = warmRoleBindings(pinnedRoles, registry: registry,
+        let config = KistConfig.load()
+        let localTeam = localFirstBuildRoles(pinnedRoles, opts: opts, goal: goal, config: config,
+            router: modelRouter(registry: registry, fallback: pinnedRoles.binding(for: .planner)),
+            avoid: benchedProvider)
+        if let reason = localTeam.reason { note("build lane · \(reason)") }
+        let warmed = warmRoleBindings(localTeam.roles, registry: registry,
                                       cooldowns: liveCooldowns, health: liveHealth)
         for substitution in warmed.substitutions {
             note("build lane · \(substitution.role.rawValue) \(substitution.from.providerId) benched "
@@ -99,6 +104,19 @@ extension KistRunner {
                  + "but no warm substitute is configured — keeping the pin")
         }
         var teamRoles = warmed.roles
+        // A known impossible review configuration must not consume a planning call first.
+        // Recheck actual producer identities below after any live planner substitution.
+        if (opts.reviewGrade ?? .independent) == .independent,
+           let producers = configuredProducerIdentities(roles: teamRoles, registry: registry),
+           independentReviewerSelection(preferred: teamRoles.binding(for: .critic),
+               producingIdentities: producers, registry: registry, benched: benchedProvider) == nil {
+            let reason = "no available configured provider:model is distinct from the producer team; configure a distinct critic before building"
+            err("builder refused to start before spending tokens: \(reason)")
+            emitBuilderRunRecord(contractID: contractID,
+                                 missionInstanceID: planExecuteMissionID?.rawValue,
+                                 launch: launch, outcome: "rejected", detail: reason)
+            return 2
+        }
         guard let plannerBinding = builderPreflightBinding(roles: teamRoles, registry: registry),
               let plannerProvider = registry.provider(id: plannerBinding.providerId) else {
             err("builder refused to start: planner provider could not be resolved")
@@ -139,6 +157,7 @@ extension KistRunner {
             // API drained → codex subscription at its usage limit → third provider). Still bounded
             // so a fleet-wide outage fails fast instead of walking every vendor.
             var plannerSubstitutionsLeft = 2
+            var localQualityFallbackUsed = false
             while generated == nil {
                 do {
                     generated = try await builderGeneratePreflightEnvelope(
@@ -149,6 +168,29 @@ extension KistRunner {
                         allowsDelegatedRepairAuthority:
                             launch.mutationIntent && (opts.auto || opts.yolo))
                 } catch {
+                    // One fresh plan from the original operator goal, before any mutation or seal.
+                    // This is not authority-changing schema repair and never retries a denied tool.
+                    if !localQualityFallbackUsed, plannerSubstitutionsLeft > 0,
+                       opts.providerId == nil, opts.model == nil, opts.plannerSpec == nil,
+                       opts.workerSpec == nil, opts.coderSpec == nil,
+                       let local = config.localFirstBinding, plannerProviderID == local.providerId,
+                       [AgentRole.planner, .worker, .coder].allSatisfy({ teamRoles.binding(for: $0) == local }),
+                       localPlanningCanEscalate(error),
+                       let substitute = modelRouter(registry: registry, fallback: local)
+                        .cloudFallback(avoid: benchedProvider),
+                       let substituteProvider = registry.provider(id: substitute.providerId) {
+                        localQualityFallbackUsed = true
+                        plannerSubstitutionsLeft -= 1
+                        note("build lane · local planner could not produce a valid bounded plan → one cloud planning fallback on \(substitute.providerId); \(error.localizedDescription)")
+                        // The rejected local plan is never an execution input. Move this build's
+                        // producer team together; keep the independent reviewer outside that team.
+                        teamRoles = [AgentRole.planner, .worker, .coder].reduce(teamRoles) {
+                            $0.binding($1, to: substitute)
+                        }
+                        plannerProviderID = substituteProvider.id
+                        plannerModel = substituteProvider.resolvedModel(substitute.model)
+                        continue
+                    }
                     if let failure = buildLaneProviderFailure(error) {
                         // Live provider failure: bench it cross-process (quota exhaustion for
                         // hours, a limiter for minutes) so no lane re-picks it, then retry the
@@ -199,6 +241,7 @@ extension KistRunner {
                  + "after the planning pass (\(substitution.reason)) → \(substitution.to.providerId)")
         }
         teamRoles = rewarmed.roles
+        let preferredOuterCritic = teamRoles.binding(for: .critic)
         let aligned = alignInnerCriticWithProducers(teamRoles, criticPinnedExplicitly: opts.criticSpec != nil)
         if aligned.moved {
             note("build lane · inner critic \(teamRoles.binding(for: .critic).providerId) is not a declared producer "
@@ -272,7 +315,7 @@ extension KistRunner {
         } else {
             reviewPolicy = .independent
             selectedIndependentReviewer = independentReviewerSelection(
-                preferred: criticBinding,
+                preferred: preferredOuterCritic,
                 producingIdentities: configuredProducerIdentities,
                 registry: registry,
                 benched: benchedProvider)
@@ -482,8 +525,8 @@ extension KistRunner {
                     executionNodeIDs: builderPlannedExecutionNodeIDs(
                         for: launch.adapter, plan: preflightEnvelope?.plan),
                     captainDecisionDigest: captainDecisionReceipt.digest,
-                    producerIdentities: configuredProducerIdentities.sorted(),
-                    reviewerIdentity: selectedIndependentReviewer.identity,
+                    producerIdentities: builderWireProducers(roles, registry: registry),
+                    reviewerIdentity: builderWireIdentity(selectedIndependentReviewer.binding, registry: registry),
                     reviewGrade: reviewPolicy.grade,
                     maxTokens: effectiveTokenBudget, budget: sharedBudget!,
                     requiresMissionLineage:

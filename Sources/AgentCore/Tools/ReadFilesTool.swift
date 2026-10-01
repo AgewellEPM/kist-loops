@@ -7,7 +7,7 @@ public struct ReadFilesTool: ReadOnlyAgentTool {
     public let name = "read_files"
     public let description = "Read up to 8 known file windows together. Returns bounded JSON with original-byte digests, numbered lines and explicit continuations. Load skills separately with read_file."
     public let parameters = [ToolParameter(name: "requests", type: "string",
-        description: "JSON array of objects: [{\"path\":\"TASK.md\"},{\"path\":\"src/file.swift\",\"start_line\":1,\"end_line\":120}]. Ranges are inclusive; default first 400 lines.")]
+        description: "JSON-encoded array of objects: [{\"path\":\"TASK.md\"},{\"path\":\"src/file.swift\",\"start_line\":1,\"end_line\":120}]. A direct JSON array is also accepted. Ranges are inclusive; default first 400 lines.")]
     public init() {}
 
     static let maximumBytes = 7_000
@@ -40,9 +40,20 @@ public struct ReadFilesTool: ReadOnlyAgentTool {
     }
 
     public func execute(arguments: [String: Any], context: ToolContext) async throws -> ToolResult {
-        let raw = try requireString("requests", from: arguments)
-        guard raw.utf8.count <= 16_000,
-              let requests = try? JSONDecoder().decode([Request].self, from: Data(raw.utf8)),
+        let data: Data
+        if let raw = arguments["requests"] as? String {
+            guard raw.utf8.count <= 16_000 else { throw ToolError.invalidParameter("requests exceeds 16000 bytes") }
+            data = Data(raw.utf8)
+        } else if let array = arguments["requests"] as? [[String: Any]],
+                  !array.isEmpty, array.count <= 8, JSONSerialization.isValidJSONObject(array) {
+            // Structured planners already decoded JSON. Requiring them to double-encode this
+            // one field caused an avoidable retry; both forms enter the identical bounded decoder.
+            data = try JSONSerialization.data(withJSONObject: array)
+        } else {
+            throw ToolError.invalidParameter("requests must be a JSON array of 1–8 file windows, or its JSON string")
+        }
+        guard data.count <= 16_000,
+              let requests = try? JSONDecoder().decode([Request].self, from: data),
               !requests.isEmpty, requests.count <= 8 else {
             throw ToolError.invalidParameter("requests must be a JSON array of 1–8 file windows")
         }

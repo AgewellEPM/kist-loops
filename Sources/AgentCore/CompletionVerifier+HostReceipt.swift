@@ -14,12 +14,20 @@ import Foundation
 /// serve it unchanged: replay the LAST passed check once under host custody, bind the receipt to
 /// the current workspace, and let the usual attempt limit / seen-state rules apply.
 extension CompletionVerifier {
+    /// Data parsing may bind a non-source artifact's replay receipt, but can never stand in
+    /// for a build/test after source edits, opaque commands, or an unbound resume boundary.
+    static func isFinalVerification(_ record: ActionRecord, in trajectory: [ActionRecord]) -> Bool {
+        if record.observedEffects.verification == .buildOrTest { return true }
+        return record.observedEffects.verification == .dataValidation
+            && !trajectory.contains { $0.observedEffects.requiresBuildVerification }
+    }
+
     /// The last passed build/test in `trajectory`, expressed as a replay request, or nil when the
     /// trajectory holds no passed check to replay (then nothing can be authenticated and the
     /// caller falls through to the existing "needs verification" outcome).
     public func hostReceiptReplayRequest(in trajectory: [ActionRecord]) -> InvalidatedVerification? {
         guard let lastPassed = trajectory.lastIndex(where: {
-            $0.success && $0.observedEffects.verification == .buildOrTest
+            $0.success && Self.isFinalVerification($0, in: trajectory)
         }) else { return nil }
         let check = trajectory[lastPassed]
         let fingerprint = check.argsFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)

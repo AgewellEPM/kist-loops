@@ -1,0 +1,31 @@
+{
+  "scope": "Kist loop recovery, symbolic adapter, local provider candidates, and installed lightweight host runtime",
+  "swift_candidate_full_run": {
+    "tests": 5979,
+    "skipped": 6,
+    "assertion_failures": 22,
+    "failing_cases": [
+      "DeploymentProvenanceTests.testDeploymentProtocolFixtureCoversBoundV3OldV3AndLegacyRecovery",
+      "KistBuilderRouteBehaviorV2Tests.testImplicitHeadlessBuildGetsOnlyItsSealedCreateCapability",
+      "KistSMLRuntimeExportTests.testRuntimeExportAndREPLDispatchBeforeProviderRegistryStartup"
+    ],
+    "note": "Prior full run. Provenance output was subsequently fixed and standalone deployment fixture passed; full suite has not been rerun. Swift candidate remains unpromoted."
+  },
+  "local_runtime": "Live inference/unload, large-model refusal, concurrency refusal, kill switch, cancellation and Ollama CLI inventory passed. See sibling receipts.",
+  "current_policy": "Cloud Kist defaults unchanged. Host gateway allows only installed small models and rejects 9B; prior 9B local-first activation superseded.",
+  "commit_checks": {
+    "focused_swift": {
+      "command": "swift test --jobs 2 --disable-swift-testing --enable-xctest --filter ManagedLocalModelTests|OllamaIdleLifecycleTests|ModelLoopProbeTests",
+      "tests": 20,
+      "failures": 0,
+      "note": "Latest candidate source, cached checkout; no inference/model download."
+    },
+    "symbols_adapter": {
+      "tests": 22,
+      "failures": 0
+    },
+    "runtime_source": "Python AST, plist, zsh syntax and exact installed receipt hashes passed.",
+    "git_diff_check": "passed",
+    "secret_scan": "No matching private-key, GitHub-token, long API-token or AWS access-key signatures in selected files."
+  }
+}

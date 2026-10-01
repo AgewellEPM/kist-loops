@@ -32,12 +32,13 @@ if [ ! -r "$CAPTAIN_CONFIG_ROOT/kist/config.json" ] || [ ! -r "$CAPTAIN_CONFIG_R
 fi
 XDG_CONFIG_HOME="$CAPTAIN_CONFIG_ROOT"
 export XDG_CONFIG_HOME
-has_computer=0; has_shell=0; has_read=0; has_roles=0; has_project=0
+has_computer=0; has_shell=0; has_read=0; has_roles=0; has_project=0; has_model_pin=0
 for arg in "$@"; do
   [ "$arg" = "--enable-computer-use" ] && has_computer=1
   [ "$arg" = "--allow-shell" ] && has_shell=1
   [ "$arg" = "--allow-read" ] && has_read=1
   [ "$arg" = "--roles" ] && has_roles=1
+  case "$arg" in --provider|--provider=*|-p|--model|--model=*|-m) has_model_pin=1 ;; esac
   case "$arg" in --project|--project=*|-C) has_project=1 ;; esac
 done
 # Never run with the account HOME as project root: a home-rooted session reads ~/.kist directly
@@ -51,7 +52,8 @@ fi
 [ "$has_computer" -eq 1 ] || set -- --enable-computer-use "$@"
 [ "$has_shell" -eq 1 ] || set -- --allow-shell "$@"
 [ "$has_read" -eq 1 ] || set -- --allow-read /Volumes "$@"
-[ "$has_roles" -eq 1 ] || set -- --roles truth-team "$@"
+# An explicit model selection owns its build roles too; an implicit saved team must not override it.
+[ "$has_roles" -eq 1 ] || [ "$has_model_pin" -eq 1 ] || set -- --roles truth-team "$@"
 # --sticky-turns is OPT-IN ONLY (project CLAUDE.md contract). The wrapper forced it on 2026-08-02;
 # result: during-turn stdout capture bleached the whole UI white (isatty=0 → no ANSI) and the
 # DECSTBM scroll region corrupted the screen on window resize (2026-08-03 regression). Never

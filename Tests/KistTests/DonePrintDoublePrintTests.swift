@@ -71,6 +71,7 @@ final class DonePrintDoublePrintTests: XCTestCase {
     /// full-text finish paths must emit `.tokenDelta(<full text>)` before `.completed`. Pinned per-site.
     func testStreamingFinishPathsStreamBeforeCompleting() throws {
         let s = try source("Sources/AgentCore/HeadlessAgentLoop.swift")
+            + source("Sources/AgentCore/HeadlessAgentLoop+Completion.swift")
         // Site B — driveNative no-tool-call: the answer text is streamed as one tokenDelta before finish.
         XCTAssertTrue(s.contains("if !text.isEmpty { sink.emit(.tokenDelta(text)) }"),
                       "driveNative no-tool-call path must stream the answer via tokenDelta before .completed, or the done-tail guard can't suppress the reprint")

@@ -4,6 +4,20 @@ import XCTest
 @testable import AgentCore
 
 final class CouncilPromotionConcurrencyTests: XCTestCase {
+    func testLocalLensesRunSeriallyWithoutChangingQuorumOrVeto() async {
+        let probe = CouncilReviewProbe()
+        let provider = ControlledCouncilProvider(probe: probe, behaviors: [
+            "Security": .hold(delay: 1_000_000)
+        ], id: "ollama")
+        let verdict = await judge(provider: provider, deadline: 1)
+        let maximumActive = await probe.maximumActive
+        XCTAssertEqual(maximumActive, 1)
+        XCTAssertEqual(verdict.votes.count, 4)
+        XCTAssertEqual(verdict.votes.filter { $0.shipWorthy }.count, 3)
+        XCTAssertFalse(verdict.isShipWorthy, "A security HOLD must still veto three local SHIP votes")
+        XCTAssertEqual(Set(verdict.votes.compactMap(\.invocationID)).count, 4)
+    }
+
     func testLensesRunConcurrentlyAndReturnInCanonicalOrder() async {
         let probe = CouncilReviewProbe()
         let provider = ControlledCouncilProvider(probe: probe, behaviors: [
@@ -135,7 +149,7 @@ private actor CouncilReviewProbe {
 }
 
 private final class ControlledCouncilProvider: ChatProvider, @unchecked Sendable {
-    let id = "controlled-council"
+    let id: String
     let name = "controlled-council"
     let iconName = "person.3"
     let requiresAPIKey = false
@@ -151,7 +165,8 @@ private final class ControlledCouncilProvider: ChatProvider, @unchecked Sendable
 
     init(probe: CouncilReviewProbe,
          behaviors: [String: ControlledCouncilBehavior] = [:],
-         defaultBehavior: ControlledCouncilBehavior = .ship(delay: 0)) {
+         defaultBehavior: ControlledCouncilBehavior = .ship(delay: 0), id: String = "controlled-council") {
+        self.id = id
         self.probe = probe
         self.behaviors = behaviors
         self.defaultBehavior = defaultBehavior

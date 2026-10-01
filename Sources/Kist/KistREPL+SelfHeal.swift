@@ -174,9 +174,11 @@ extension KistREPL {
                         }
                     } else {
                         print("\u{001B}[31mself-heal evidence capture failed for \(assignment.specialistName)\u{001B}[0m")
+                        break
                     }
                 } else {
                     print("\u{001B}[31mself-heal agent unavailable: \(assignment.specialistName)\u{001B}[0m")
+                    break
                 }
             }
         }
@@ -185,15 +187,26 @@ extension KistREPL {
         func openFailureAnalysis(goal: String,
                                  summary: String,
                                  automaticRepair: Bool) async -> CaptainFailureAnalysisReport {
+            let evo = SelfEvolutionEngine.decide(
+                signals: FailureSignals.from(turnEvidenceSnapshot()),
+                availableTools: loop.toolNames,
+                ledgerHistory: SelfEvolutionLedger(projectRoot: projectRoot).load(),
+                now: Date().timeIntervalSince1970)
+            let deferred = Self.automaticRepairDeferral(summary: summary, decision: evo)
             let failure = CaptainFailureAnalysis(projectRoot: projectRoot)
                 .analyze(goal: goal,
                          summary: summary,
                          trajectory: turnEvidenceSnapshot(),
-                         proofEntries: proofStore?.lastEntries() ?? [])
+                         proofEntries: proofStore?.lastEntries() ?? [],
+                         seedTasks: deferred == nil)
             let persisted = failure.writeSucceeded
                 ? failure.path
                 : "write failed: \(failure.writeError ?? "unknown error")"
             print("\u{001B}[33mCaptain failure analysis\u{001B}[0m · \(failure.capsule.likelyLayer.rawValue) · confidence \(failure.capsule.confidence)% · \(persisted) · seeded \(failure.seededTasks) task(s)")
+            if let deferred {
+                print("\u{001B}[33mCaptain self-heal deferred: \(deferred)\u{001B}[0m")
+                return failure
+            }
             guard automaticRepair,
                   failure.writeSucceeded,
                   Self.shouldAutoSuperviseFailure(goal: goal)
@@ -205,11 +218,6 @@ extension KistREPL {
             // no file to repair). knowledgeGap → discover+retry; toolLimit → extend (kist auto / foreign spec,
             // never blend repos); blocked → surface authority; taskBug → repair. The loop-guard (ledger) stops
             // a self-evolution from repeating or churning the binary.
-            let evo = SelfEvolutionEngine.decide(
-                signals: FailureSignals.from(turnEvidenceSnapshot()),
-                availableTools: loop.toolNames,
-                ledgerHistory: SelfEvolutionLedger(projectRoot: projectRoot).load(),
-                now: Date().timeIntervalSince1970)
             let culprit = evo.culpritTool.map { " · \($0)" } ?? ""
             let skip = evo.skipped.map { " · \u{001B}[33mSKIPPED: \($0)\u{001B}[0m" } ?? ""
             print("\u{001B}[36mself-evolution\u{001B}[0m · \(evo.category.rawValue) → \(evo.kind.rawValue)\(culprit)\(skip)")
@@ -227,6 +235,22 @@ extension KistREPL {
             print("\u{001B}[33mCaptain supervisor opened repair mission\u{001B}[0m · \(mission) · seeded \(report.seededTasks) task(s)")
             await dispatchSelfHealAgents(report: report, objective: objective, automatic: true)
             return failure
+        }
+
+        static func automaticRepairDeferral(summary: String, decision: SelfEvolutionDecision) -> String? {
+            if BudgetLedger.isBudgetStop(summary) {
+                return "the spending limit stopped this turn; no repair tasks or agents were started. " + summary
+            }
+            if summary.hasPrefix("blocked by project scope") { return summary }
+            if decision.kind == .surfaceBlocked { return decision.brief }
+            if let skipped = decision.skipped { return skipped }
+            if summary.hasPrefix("provider error:") || summary.hasPrefix("provider request limit reached") {
+                return "provider unavailable or request budget exhausted; no repair agents were started. \(summary)"
+            }
+            if summary.hasPrefix("stopped early —") {
+                return "the turn reached an enforced stop; no repair agents were started. \(summary)"
+            }
+            return nil
         }
 
         func printTurnSummary(outcomeSummary: String? = nil, success: Bool = true) async {

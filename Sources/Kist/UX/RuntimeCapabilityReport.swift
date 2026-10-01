@@ -87,7 +87,8 @@ extension KistREPL {
         let command = input.split(whereSeparator: { $0.isWhitespace }).first?.lowercased() ?? ""
         let inspectors: Set<String> = [
             "/summary", "/status", "/logs", "/details", "/proof", "/replay",
-            "/usage", "/cost", "/tokens", "/tasks", "/goals", "/confidence", "/why",
+            "/usage", "/cost", "/tokens", "/tasks", "/task", "/plan-tasks", "/todo",
+            "/goals", "/goal", "/goalmap", "/goal-map", "/confidence", "/why",
             "/tools", "/capabilities", "/contract", "/health", "/providers", "/permissions",
         ]
         if !inspectors.contains(command) { resetTurnEvidence() }

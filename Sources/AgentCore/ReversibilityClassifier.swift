@@ -251,6 +251,9 @@ public enum ReversibilityClassifier {
                 combined = ([exe] + argv).joined(separator: " ") + " " + shellCmd
             }
             return commandRisk(combined)
+        case "decision_tool":
+            if ["list", "get"].contains((args["action"] as? String)?.lowercased() ?? "") { return .safe }
+            return .mutating
         case "custom_tool":
             // Listing generated tools is read-only. Creating/running a generated helper changes state or
             // runs code, so it stays in the normal approval/sandbox lane.
@@ -264,8 +267,9 @@ public enum ReversibilityClassifier {
         case "tasks":
             // Listing/checking the shared board is read-only. Adding, starting, completing, blocking,
             // clearing, or attaching evidence mutates `.kist/plan.json`.
-            let action = (args["action"] as? String ?? "list").lowercased()
-            if action == "list" || action == "validate" || action == "check" { return .safe }
+            let action = (args["action"] as? String ?? "list")
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["list", "map", "validate", "check"].contains(action) { return .safe }
             return .mutating
         case "visual_verify":
             // Writes screenshots/reports under .kist/visual-runs and may launch a browser capture.

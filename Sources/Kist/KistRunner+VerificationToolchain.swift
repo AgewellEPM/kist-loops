@@ -66,6 +66,10 @@ extension KistRunner {
     static func builderPreflightFramingAllowance(
         providerID: String, model: String?, registry: ProviderRegistry
     ) -> Int {
+        // This pass always requests disableThinking. Ollama honors think:false for Qwen3.5;
+        // it has no hidden subscription prompt or unbounded reasoning outside num_predict.
+        // Reserving the cloud reasoning allowance made even a one-file local plan unaffordable.
+        if providerID.lowercased() == "ollama" { return 0 }
         if ["claude-cli", "codex-cli"].contains(providerID) { return builderPreflightReasoningAllowance }
         if builderPreflightReasoningProviderIDs.contains(providerID.lowercased()) {
             return builderPreflightReasoningAllowance

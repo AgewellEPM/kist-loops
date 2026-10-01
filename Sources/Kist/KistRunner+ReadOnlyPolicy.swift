@@ -26,7 +26,7 @@ extension KistRunner {
         if opts.headless || opts.mission || opts.fleet || opts.greatLoop || opts.ship
             || opts.planExecute { return true }
         if opts.planMode { return false }
-        if intent == .build && AgentMetadataRequest.matches(goal) { return false }
+        if intent == .build && (AgentMetadataRequest.matches(goal) || DecisionToolRequest.matches(goal)) { return false }
         if builderCompletionMode(for: goal) == .verificationOnly { return true }
 
         switch intent {
@@ -62,7 +62,7 @@ extension KistRunner {
         }
         let mode: PromptCompiler.Mode = opts.planMode ? .plan : .inline
         let intent = PromptCompiler.inferIntent(goal, mode: mode)
-        let agentMetadataOnly = intent == .build && AgentMetadataRequest.matches(goal)
+        let agentMetadataOnly = intent == .build && (AgentMetadataRequest.matches(goal) || DecisionToolRequest.matches(goal))
         guard !intent.expectsMutation || agentMetadataOnly else {
             err("read-only route refused mutation intent")
             return 2

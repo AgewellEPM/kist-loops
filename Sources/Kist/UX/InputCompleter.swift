@@ -11,7 +11,7 @@ enum InputCompleter {
     }
 
     static let builtInCommands = [
-        "/help", "/model", "/m", "/paste", "/v", "/media", "/preview", "/imgcat", "/reasoning", "/plan", "/goals", "/goal",
+        "/help", "/model", "/m", "/paste", "/v", "/media", "/preview", "/imgcat", "/reasoning", "/plan", "/goals", "/goal", "/goalmap", "/goal-map",
         "/tasks", "/todo", "/action", "/test", "/plan-execute", "/pe", "/research", "/council", "/consult",
         "/fleet-status", "/cockpit", "/fleet", "/team", "/roles", "/agent", "/agents",
         "/persona", "/personality", "/specialist", "/specialists", "/providers", "/health",
@@ -50,7 +50,7 @@ enum InputCompleter {
     ]
 
     static let subcommands = [
-        "add", "start", "done", "complete", "block", "clear", "save", "load", "delete",
+        "map", "add", "start", "done", "complete", "block", "clear", "save", "load", "delete",
         "profiles", "reset", "on", "off", "execute", "build", "new", "forge", "create", "show", "scout",
         "vet", "verify", "metadata", "allow", "gate"
     ]

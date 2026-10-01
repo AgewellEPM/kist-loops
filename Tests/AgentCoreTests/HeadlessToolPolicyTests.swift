@@ -16,7 +16,8 @@ final class HeadlessToolPolicyTests: XCTestCase {
     func testReadOnlyAllowlistIsExactlyTheSafeTools() {
         // Pin the allowlist so a new mutating tool isn't accidentally treated as read-only.
         // ast_grep is read-only (search + preview); ast_grep_apply (mutating) is intentionally absent.
-        XCTAssertEqual(HeadlessAgentLoop.readOnlyTools, ["read_file", "read_files", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search", "list_agents", "shared_memory"])
+        XCTAssertEqual(HeadlessAgentLoop.readOnlyTools, ["read_file", "read_files", "list_files", "glob_files", "search_code", "ast_grep", "git", "symbols", "context_brain", "fetch_url", "web_search", "list_agents", "shared_memory", "decide"])
+        XCTAssertFalse(HeadlessAgentLoop.readOnlyTools.contains("decision_tool"), "creation requires per-action mutation authority")
         XCTAssertFalse(HeadlessAgentLoop.readOnlyTools.contains("ast_grep_apply"), "the mutating rewrite must never be read-only")
         XCTAssertFalse(HeadlessAgentLoop.readOnlyTools.contains("create_agent"), "persistent creation requires mutation authority")
     }

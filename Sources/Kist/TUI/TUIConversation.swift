@@ -129,9 +129,7 @@ struct TUIConversation {
     }
 
     private func split(_ input: String) -> (String, String) {
-        let body = input.dropFirst()
-        guard let sp = body.firstIndex(of: " ") else { return (String(body), "") }
-        return (String(body[..<sp]), String(body[body.index(after: sp)...]).trimmingCharacters(in: .whitespaces))
+        KistREPL.splitSlashCommand(input)
     }
 
     private func banner() {

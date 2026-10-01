@@ -16,6 +16,9 @@ final class KistREPL {
     var fleet: ((_ goal: String, _ agents: Int, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Escalate to PLAN→EXECUTE (a typed DAG built by the team) from inside the conversation.
     var planExecute: ((_ goal: String, _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
+    /// Ordinary builds use the existing typed Builder policy; explicit /pe remains planned.
+    var automaticBuild: ((_ goal: String, _ context: PriorResultContext?,
+                          _ roles: RoleBindings) async -> HeavyRouteResult)? = nil
     /// Context-aware sibling used for referential builds. The canonical operator goal and the bounded
     /// prior-result context travel as different typed arguments so safety gates never classify prose.
     var planExecuteWithContext: ((_ authorityGoal: String, _ context: PriorResultContext,
@@ -185,7 +188,7 @@ final class KistREPL {
     /// copilot review unavailable. Distinct from `bountyComplete`, which is pinned to the session model.
     var modelComplete: (@Sendable (_ providerId: String, _ model: String?, _ system: String, _ user: String) async -> String?)? = nil
     /// Explicit specialist run seam (`/agents run <name> <task>`). Hard-spawns the named specialist and
-    /// returns its summary, or nil if no such agent. The caller passes the PARENT's live approval set +
+    /// returns its successful summary, or nil if unavailable or failed. The caller passes the PARENT's live approval set +
     /// plan flag so a file-controlled `permissionMode` can only make the child MORE restrictive, never less
     /// (a malicious `.claude/agents` bypass can't escalate a guarded session).
     var runSpecialist: (@Sendable (_ name: String, _ task: String,
@@ -412,11 +415,7 @@ final class KistREPL {
             // Only a command-shaped leading "/" counts — a dragged-in path falls through
             // to the agent as a normal message (see isSlashCommand).
             if slashCommand {
-                let body = input.dropFirst()
-                let name: String, args: String
-                if let sp = body.firstIndex(of: " ") {
-                    name = String(body[..<sp]); args = String(body[body.index(after: sp)...]).trimmingCharacters(in: .whitespaces)
-                } else { name = String(body); args = "" }
+                let (name, args) = Self.splitSlashCommand(input)
 
                 switch await handleSlashCommand(name: name, args: args, input: input) {
                 case .handled: continue
@@ -449,7 +448,7 @@ final class KistREPL {
                     let outcome = PromptCompiler.resolveOutcome(
                         taskPrompt, mode: .planExecute, previous: lastOutcomeContract)
                     let executionGoal = outcome.executionRequest(currentRequest: taskPrompt)
-                    print("\u{001B}[37m↳ running task [\(task.id)] through plan→execute · \(roleSelection.summary)\u{001B}[0m")
+                    print("\u{001B}[37m↳ running task [\(task.id)] through Builder · \(roleSelection.summary)\u{001B}[0m")
                     await runHeavyRoute(goal: taskPrompt, intent: .build, mode: .planExecute,
                                         execution: "task-plan-execute", startProof: true,
                                         outcomeContract: outcome,
@@ -720,7 +719,8 @@ final class KistREPL {
                     messageText, mode: turnMode, previous: lastOutcomeContract)
             let routingWasInterrupted = MutableBox(false)
             var routeProposal: ConversationRouter.Proposal?
-            if let router, !lineFromQueue, !armedTeamThisTurn {
+            let fixedDecisionRequest = turnOutcome.intent == .build && DecisionToolRequest.matches(messageText)
+            if let router, !lineFromQueue, !armedTeamThisTurn, !fixedDecisionRequest {
                 let conversationContext = PromptCompiler.conversationContext(from: humanTranscript)
                 let resolution = await InterruptibleTurn.run(onInterrupt: { reason in
                     routingWasInterrupted.value = true
@@ -739,7 +739,7 @@ final class KistREPL {
             }
             if routingWasInterrupted.value { continue }
             let turnIntent = turnOutcome.intent
-            let agentMetadataOnly = turnIntent == .build && AgentMetadataRequest.matches(messageText)
+            let agentMetadataOnly = turnIntent == .build && (AgentMetadataRequest.matches(messageText) || DecisionToolRequest.matches(messageText))
             if agentMetadataOnly { routeProposal = nil }
 
             // AUTO-ROUTE (Increment B): for a plain message, the router may PROPOSE an escalation to a
@@ -772,7 +772,7 @@ final class KistREPL {
                planExecute != nil || planExecuteWithContext != nil {
                 let executionOutcome = turnOutcome.inMode(.planExecute)
                 let executionGoal = executionOutcome.executionRequest(currentRequest: messageText)
-                print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · action-first: firing the plan→execute worker (edits still ask; /plan for read-only)\u{001B}[0m")
+                print("\u{001B}[36;1m🔨 build\u{001B}[0m\u{001B}[2m · starting Builder (edits still ask; /plan for read-only)\u{001B}[0m")
                 await runHeavyRoute(goal: messageText, intent: .build, mode: .planExecute,
                                     execution: "build", startProof: false,
                                     outcomeContract: executionOutcome,

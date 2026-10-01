@@ -114,6 +114,15 @@ public struct Plan: Sendable, Codable, Equatable {
 
     public var done: Int { tasks.filter { $0.status == .done }.count }
 
+    /// One selection rule for the visible board and a user's unqualified "next".
+    /// Stale work stays on disk, but only explicitly resumed work owns this session.
+    public func nextForExecution(since sessionStart: Date? = nil) -> PlanTask? {
+        let current: PlanTask?
+        if let sessionStart { current = active(since: sessionStart) }
+        else { current = active }
+        return current ?? nextActionable ?? next
+    }
+
     /// The lowest-id task that's still actionable (todo) — what "the next task" resolves to.
     public var next: PlanTask? { tasks.filter { $0.status == .todo }.min { $0.id < $1.id } }
     public var active: PlanTask? { tasks.filter { $0.status == .inProgress }.min { $0.id < $1.id } }
@@ -140,6 +149,7 @@ public struct Plan: Sendable, Codable, Equatable {
 
     public func render(sessionStartedAt: Date? = nil) -> String {
         guard !tasks.isEmpty else { return "\(title): (no tasks yet — add one with `tasks add`)" }
+        let executionNext = nextForExecution(since: sessionStartedAt)
         var s = "\(title) · \(done)/\(tasks.count) done\n"
         s += "current goal: \(title)\n"
         let renderedActive: String
@@ -152,7 +162,7 @@ public struct Plan: Sendable, Codable, Equatable {
         }
         s += "active task: " + renderedActive + "\n"
         s += "completed: \(done)/\(tasks.count)\n"
-        s += "next step: " + (next.map { "[\($0.id)] \($0.title)" } ?? "none") + "\n"
+        s += "next step: " + (executionNext.map { "[\($0.id)] \($0.title)" } ?? "none") + "\n"
         if testPlan.isEmpty {
             s += "test plan: none\n"
         } else {
@@ -167,7 +177,7 @@ public struct Plan: Sendable, Codable, Equatable {
             if !t.verificationText.isEmpty { s += "      verify: \(t.verificationText)\n" }
             if !t.evidence.isEmpty { s += "      evidence: \(t.evidence.joined(separator: "; "))\n" }
         }
-        if let n = next { s += "→ next: [\(n.id)] \(n.title)\n" }
+        if let n = executionNext { s += "→ next: [\(n.id)] \(n.title)\n" }
         return s
     }
 }

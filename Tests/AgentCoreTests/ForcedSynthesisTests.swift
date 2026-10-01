@@ -5,6 +5,33 @@ import XCTest
 /// now nudges the model to stop gathering and write findings. These pin the decision logic.
 final class ForcedSynthesisTests: XCTestCase {
 
+    func testEquivalentSearchesStayStalledAcrossNudges() {
+        var progress = HeadlessGatheringProgress()
+        for index in 0..<10 {
+            progress.observe(tool: "glob_files", args: ["pattern": "**/missing-\(index)*", "limit": index + 1],
+                result: ToolResult(success: true, output: ""), visibleBody: "", readOnly: true)
+            if index == 6 { progress.didNudge() }
+        }
+        XCTAssertTrue(progress.exhausted, "changing an empty glob or sending a nudge is not progress")
+        progress.observe(tool: "read_file", args: ["path": "found.swift"],
+            result: ToolResult(success: true, output: "source"), visibleBody: "source", readOnly: true)
+        XCTAssertFalse(progress.exhausted)
+    }
+
+    func testLargeBudgetsStillNudgeWithinSixStalledCalls() {
+        XCTAssertTrue(HeadlessAgentLoop.shouldForceSynthesis(
+            consecutiveGathering: 6, iteration: 9, lastNudge: -100, maxIterations: 100))
+    }
+
+    func testDistinctDirectoriesWithSameEntriesRemainNewEvidence() {
+        var progress = HeadlessGatheringProgress()
+        for index in 0..<20 {
+            progress.observe(tool: "list_files", args: ["path": "project-\(index)"],
+                result: ToolResult(success: true, output: "README.md"), visibleBody: "README.md", readOnly: true)
+            XCTAssertEqual(progress.callsWithoutProgress, 0)
+        }
+    }
+
     func testOnlyRepeatedOrFailedObservationsCountAsStalledGathering() {
         var progress = HeadlessGatheringProgress()
         let result = ToolResult(success: true, output: "same contents")

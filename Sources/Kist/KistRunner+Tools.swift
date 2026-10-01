@@ -180,9 +180,13 @@ extension KistRunner {
         let terminalSink: RuntimeEventSink = sinkOverride ?? TerminalEventSink(showReasoning: showReasoning)
         // Named and generic agents share a lazy, bounded factory. The normal sensitive-tool floor
         // persists through all descendants of a specialist, including a later generic delegation.
+        let decisionEngine = DecisionEngine.configured(providers: registry,
+            binding: ProviderBinding(providerId: providerId, model: model), budget: budget, sink: terminalSink,
+            recorder: traceRecorder)
+        let reasoningTools = tools.adding(DecideTool(engine: decisionEngine)).adding(DecisionTool(engine: decisionEngine))
         let mainTools = AgentTeamTools.make(
             providers: registry, binding: ProviderBinding(providerId: providerId, model: model),
-            roles: roles, baseTools: tools, context: context, sink: terminalSink,
+            roles: roles, baseTools: reasoningTools, context: context, sink: terminalSink,
             interactor: interactor, approvalTools: approvalTools,
             specialistApprovalTools: Self.sensitiveTools, maxIterations: maxIterations,
             spawnLevels: max(0, delegationDepth) + 1, extendedThinking: extendedThinking,

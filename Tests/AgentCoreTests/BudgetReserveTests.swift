@@ -9,6 +9,21 @@ import Foundation
 /// `reserve` now returns a RESERVATION ID (nil = denied) and `commit(reservation:)` consumes that
 /// specific id — so a double-commit can't corrupt the ledger even with multiple live reservations.
 final class BudgetReserveTests: XCTestCase {
+    func testSubscriptionPromptFramingCalibratesWithoutChangingTheCap() async {
+        let budget = BudgetLedger(maxTokens: 50000)
+        let cold = await budget.promptOverhead(for: "codex-cli:model", subscriptionCLI: true)
+        XCTAssertEqual(cold, 32768)
+        await budget.observePromptUsage(route: "codex-cli:model", promptCharacters: 16000, measuredTokens: 14000)
+        let warm = await budget.promptOverhead(for: "codex-cli:model", subscriptionCLI: true)
+        XCTAssertEqual(warm, 11024)
+        await budget.observePromptUsage(route: "codex-cli:model", promptCharacters: 16000, measuredTokens: 10000)
+        let retained = await budget.promptOverhead(for: "codex-cli:model", subscriptionCLI: true)
+        XCTAssertEqual(retained, warm)
+        let other = await budget.promptOverhead(for: "codex-cli:other", subscriptionCLI: true)
+        XCTAssertEqual(other, cold)
+        let remaining = await budget.remaining()
+        XCTAssertEqual(remaining, 50000)
+    }
 
     // The core guarantee: a second reservation that would breach the cap is DENIED even though
     // nothing has been spent/committed yet (the parallel-overspend window is closed).

@@ -66,12 +66,35 @@ public enum ModelLoopProbe {
     /// Hard wall-clock ceiling for the whole probe — a hung/stalled provider must not block the CLI
     /// (or CI / onboarding) forever. Two round-trip turns over a slow link should finish well under this.
     public static let timeoutSeconds: Double = 45
+    public static let localTimeoutSeconds: Double = 120
+
+    static func probeTimeout(provider: (any ChatProvider)?, requested: Double?) -> Double {
+        requested ?? (provider is OllamaProvider ? localTimeoutSeconds : timeoutSeconds)
+    }
+
+    // Probe the transport and tool protocol, not a model's deliberation budget. In a
+    // 256-token echo canary, hidden thinking can consume the entire visible answer.
+    static var probeSettings: ModelSettings {
+        ModelSettings(temperature: 0, maxTokens: 256, disableThinking: true, geminiBuiltins: false)
+    }
 
     /// Live probe — drives the model through its real path, bounded by a timeout so an unresponsive
     /// provider fails the probe instead of hanging.
     public static func probe(registry: ProviderRegistry, providerId: String, model: String?,
-                             timeout: Double = timeoutSeconds) async -> Report {
+                             timeout requestedTimeout: Double? = nil) async -> Report {
         let usesNative = registry.usesNativeTools(providerId: providerId, model: model, mode: .auto)
+        let provider = registry.provider(id: providerId)
+        let timeout = probeTimeout(provider: provider, requested: requestedTimeout)
+        // A first artifact download has its own bounded acquisition phase. Keep cold model
+        // loading and both inference turns inside the local deadline, preserving all checks.
+        if let local = provider as? OllamaProvider {
+            do { try await local.prepareModel(local.resolvedModel(model)) }
+            catch {
+                return Report(providerId: providerId, model: model ?? "", usesNative: usesNative,
+                    path: .failed("local model preparation failed: \(String(describing: error).prefix(200))"),
+                    roundTrip: .skipped("model unavailable"), readiness: .broken)
+            }
+        }
         let outcome: (Outcome, Outcome)
         do {
             outcome = try await withProbeTimeout(seconds: timeout) {
@@ -110,7 +133,7 @@ public enum ModelLoopProbe {
         var truncated = false
         do {
             let stream = try await registry.streamTools(providerId: providerId, model: model,
-                                                        messages: ask, settings: ModelSettings(maxTokens: 256),
+                                                        messages: ask, settings: probeSettings,
                                                         tools: [echoTool], allowFallback: false)
             for try await event in stream {
                 switch event {
@@ -141,7 +164,7 @@ public enum ModelLoopProbe {
         do {
             let stream = try await registry.streamTools(providerId: providerId, model: model,
                                                         messages: ask + [assistant, result],
-                                                        settings: ModelSettings(maxTokens: 256),
+                                                        settings: probeSettings,
                                                         tools: [echoTool], allowFallback: false)
             for try await event in stream {
                 switch event {
@@ -179,7 +202,7 @@ public enum ModelLoopProbe {
         let raw: String
         do {
             raw = try await registry.completeWithUsage(providerId: providerId, model: model, messages: ask,
-                                                       settings: ModelSettings(maxTokens: 256), allowFallback: false).text
+                                                       settings: probeSettings, allowFallback: false).text
         } catch {
             return (.failed("text-protocol call errored: \("\(error)".prefix(100))"), .skipped("path failed"))
         }
@@ -199,7 +222,7 @@ public enum ModelLoopProbe {
         let finalRaw: String
         do {
             finalRaw = try await registry.completeWithUsage(providerId: providerId, model: model, messages: followUp,
-                                                            settings: ModelSettings(maxTokens: 256), allowFallback: false).text
+                                                            settings: probeSettings, allowFallback: false).text
         } catch {
             return (.ok("emitted a parseable `echo` tool action"), .failed("feeding a text-protocol observation back errored: \("\(error)".prefix(80))"))
         }

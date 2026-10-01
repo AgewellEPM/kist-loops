@@ -213,12 +213,12 @@ final class KistREPLTests: XCTestCase {
     }
 
     func testMainTurnActionFirstFiresBuilderOnBuildIntent() {
-        // Action-first: a clear build intent must fire the plan→execute worker instead of an inline
+        // Action-first: a clear build intent must fire the governed Builder instead of an inline
         // chat/analysis turn (the "researches forever, never builds" disease).
         let repl = kistREPLFamilySource()
         XCTAssertTrue(repl.contains("if turnOutcome.allowsMutation, turnIntent == .build, turnMode != .plan,"),
-                      "a build-intent turn (not plan mode) must route to the plan→execute worker")
-        XCTAssertTrue(repl.contains("action-first: firing the plan→execute worker"),
+                      "a build-intent turn (not plan mode) must route to the governed Builder")
+        XCTAssertTrue(repl.contains("starting Builder (edits still ask; /plan for read-only)"),
                       "the action-first build routing must be disclosed to the user")
         XCTAssertTrue(repl.contains("await invokePlanExecute(authorityGoal: executionGoal,"),
                       "the worker must receive the host-owned goal plus follow-up, not the literal follow-up alone")

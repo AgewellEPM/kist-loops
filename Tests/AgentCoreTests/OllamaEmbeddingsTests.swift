@@ -31,6 +31,7 @@ final class OllamaEmbeddingsTests: XCTestCase {
         let sentBody = try JSONSerialization.jsonObject(with: req.httpBody ?? Data()) as? [String: Any]
         XCTAssertEqual(sentBody?["model"] as? String, "nomic-embed-text")
         XCTAssertEqual(sentBody?["input"] as? [String], ["a", "b"], "must send a BATCH input array")
+        XCTAssertEqual(sentBody?["keep_alive"] as? Int, 0, "embedding weights must not remain resident while idle")
     }
 
     func testEmptyInputShortCircuits() async throws {

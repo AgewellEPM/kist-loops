@@ -331,7 +331,14 @@ print("artifact-closure-sha256="+closure.hexdigest())
 print("deployment-assurance="+(fields.get("deployment-assurance") or "legacy-schema-3"))
 PY
  )" || die 'deployment provenance validation failed'
-if [[ "$EVALUATE" -eq 1 ]]; then printf '%s\n' "$PROVENANCE_OUTPUT"; exit 0; fi
+if [[ "$EVALUATE" -eq 1 ]]; then
+  # Bash's builtin printf can fail with EINTR while a caller captures the projection.
+  # Python retries interrupted writes and flushes before success; all validation above
+  # remains mandatory, and a failed output write must remain a failed evaluation.
+  python_clean -c 'import sys; sys.stdout.write(sys.argv[1] + "\n"); sys.stdout.flush()' \
+    "$PROVENANCE_OUTPUT" || die 'cannot emit validated deployment provenance'
+  exit 0
+fi
 if [[ "${KIST_REBUILD_TESTING-}" == 1 \
       && "${KIST_DASHBOARD_TEST_CLOSE_DEPLOYMENT_LEASE_AFTER_VALIDATION-}" == 1 ]]; then
   [[ "$INSTALL_HOME" != /Users/lukekist ]] \
@@ -360,4 +367,3 @@ CLOSURE_SHA=$(projection_value "$PROVENANCE_OUTPUT" artifact-closure-sha256) \
    && "$CORTEX_COUNT" =~ ^(0|[1-9][0-9]*)$ && "$CLOSURE_VERSION" =~ ^[234]$ \
    && "$CLOSURE_SHA" =~ ^[a-f0-9]{64}$ ]] \
   || die 'validated provenance returned a malformed operational projection'
-

@@ -46,7 +46,8 @@ final class FailureObservationTests: XCTestCase {
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let surfaces: [(label: String, file: String, minRawSites: Int)] = [
-            ("loops", "Sources/AgentCore/HeadlessAgentLoop.swift", 2),          // text + native observation
+            ("native", "Sources/AgentCore/HeadlessAgentLoop.swift", 1),
+            ("text", "Sources/AgentCore/HeadlessAgentLoop+TextDrive.swift", 1),
             ("replay", "Sources/AgentCore/HeadlessAgentLoop+VerificationReplay.swift", 1),
         ]
         for s in surfaces {

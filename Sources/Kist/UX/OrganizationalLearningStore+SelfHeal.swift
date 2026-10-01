@@ -74,8 +74,11 @@ extension OrganizationalLearningStore {
 
         let instant = OrganizationalMemoryTemporal.canonicalInstant(now())
         let timestamp = Int(instant.timeIntervalSince1970)
+        // Objectives can contain the complete failed prompt. Bound each filename in bytes and bind
+        // it to the full objective so long or Unicode prompts neither exceed NAME_MAX nor collide.
+        let identity = AuditLog.digest(["objective": objective, "specialist": assignment.specialistName]).digest
         let path = selfHealRoot + "/specialists/"
-            + "\(timestamp)-\(Self.slug(objective))-\(Self.slug(assignment.specialistName)).md"
+            + "\(timestamp)-\(identity)-\(Self.slug(assignment.specialistName).prefix(32)).md"
         let relativePath = Self.projectRelative(path, root: projectRoot)
         let text = [
             "# Self-Heal Specialist Output",

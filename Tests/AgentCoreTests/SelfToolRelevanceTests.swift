@@ -72,11 +72,18 @@ final class SelfToolRelevanceTests: XCTestCase {
     // regression (r3/r5/r6 shape) would silently trim one protocol or starve CapabilityDiscovery.
     func testLoopWiresFilterAtBothSeamsAndKeepsToolNamesFull() throws {
         let src = try String(contentsOfFile: Self.loopSourcePath, encoding: .utf8)
-        let authoritySeams = src.components(separatedBy: "let authorizedTools = Self.conversationalToolset").count - 1
-        let relevanceSeams = src.components(separatedBy: "surfaceRelevantSelfTools(authorizedTools").count - 1
-        XCTAssertEqual(authoritySeams, 2, "authority filtering must run at BOTH seams (text + native)")
-        XCTAssertEqual(relevanceSeams, 2, "relevance filtering must consume the authorized registry at BOTH seams")
-        XCTAssertTrue(src.contains("public var toolNames: [String] { tools.all().map { $0.name } }"),
+        let textPath = URL(fileURLWithPath: Self.loopSourcePath).deletingLastPathComponent()
+            .appendingPathComponent("HeadlessAgentLoop+TextDrive.swift")
+        let text = try String(contentsOf: textPath, encoding: .utf8)
+        for seam in [src, text] {
+            XCTAssertEqual(seam.components(separatedBy: "let authorizedTools = Self.conversationalToolset").count - 1, 1,
+                           "authority filtering must run at each protocol seam")
+            XCTAssertEqual(seam.components(separatedBy: "surfaceRelevantSelfTools(authorizedTools").count - 1, 1,
+                           "relevance filtering must consume each authorized registry")
+        }
+        let providerCalls = try String(contentsOf: textPath.deletingLastPathComponent()
+            .appendingPathComponent("HeadlessAgentLoop+ProviderCalls.swift"), encoding: .utf8)
+        XCTAssertTrue(providerCalls.contains("public var toolNames: [String] { tools.all().map { $0.name } }"),
                       "toolNames must stay on the FULL registry — self-evolution/CapabilityDiscovery must see every self__ tool")
     }
 

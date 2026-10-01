@@ -85,8 +85,9 @@ public struct ScopeDecision: Sendable, Codable, Equatable {
         if passiveTools.contains(tool) { return true }
         if tool == "custom_tool", (arguments["action"] as? String)?.lowercased() == "list" { return true }
         if tool == "tasks" {
-            let action = (arguments["action"] as? String ?? "list").lowercased()
-            return action == "list" || action == "validate" || action == "check"
+            let action = (arguments["action"] as? String ?? "list")
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ["list", "map", "validate", "check"].contains(action)
         }
         return false
     }

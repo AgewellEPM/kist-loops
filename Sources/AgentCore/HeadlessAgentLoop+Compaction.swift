@@ -7,14 +7,20 @@ extension HeadlessAgentLoop {
     /// The only transcript preparation path used before a provider call. It performs at most one
     /// model-aware compaction, persists any durable history change, reasserts this turn's raw objective,
     /// and returns a bounded message-history projection. Native tool-call/result exchanges stay atomic
-    /// inside ConversationWindowPreparer. System prompts, tool schemas, and requested output tokens are
-    /// governed by their request/provider layers, not by this transcript character allowance.
+    /// inside ConversationWindowPreparer. Reserve instructions, schemas and output before bounding
+    /// history; the durable checkpoint remains complete when a one-call projection is trimmed.
     func prepareForProviderCall(_ cp: inout LoopCheckpoint,
                                         mode: ConversationTranscriptMode,
+                                        settings: ModelSettings? = nil,
+                                        tools: [ToolSpec] = [],
                                         reassertObjective: Bool = true,
                                         requestBudget: ProviderRequestBudget? = nil) async -> [ChatMessage] {
         let objective = reassertObjective ? Self.compactionObjective(for: cp) : nil
-        let prepared = await conversationWindow.prepare(
+        let window = settings.map {
+            ConversationWindowPreparer(contextWindow: conversationWindow.contextWindow
+                .reservingRequest(settings: $0, tools: tools), compactor: conversationWindow.compactor)
+        } ?? conversationWindow
+        let prepared = await window.prepare(
             cp.messages,
             mode: mode,
             currentObjective: objective
@@ -81,7 +87,7 @@ extension HeadlessAgentLoop {
         let started = Date()
         do {
             let completion = try await providers.completeWithUsage(providerId: providerId, model: model, messages: messages,
-                                                    settings: ModelSettings(temperature: 0.0, maxTokens: 700),
+                                                    settings: ModelSettings(temperature: 0.0, maxTokens: 700, disableThinking: true),
                                                     routePolicy: routePolicy,
                                                     requestBudget: requestBudget)
             await recordLLMSpan(usage: completion.usage, promptChars: promptChars, completionChars: completion.text.count,

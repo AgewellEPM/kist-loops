@@ -349,7 +349,11 @@ extension KistREPL {
 
         func invokePlanExecute(authorityGoal: String,
                                priorResultContext: PriorResultContext?,
-                               roles: RoleBindings) async -> HeavyRouteResult {
+                               roles: RoleBindings,
+                               forcePlanned: Bool = false) async -> HeavyRouteResult {
+            if !forcePlanned, let automaticBuild {
+                return await automaticBuild(authorityGoal, priorResultContext, roles)
+            }
             if let priorResultContext, !priorResultContext.isEmpty,
                let planExecuteWithContext {
                 return await planExecuteWithContext(authorityGoal, priorResultContext, roles)
@@ -517,6 +521,8 @@ extension KistREPL {
             if expected == .mutation {
                 if AgentMetadataRequest.isRegistrationOnly(trajectory) {
                     print("Agent registration: \(finalSuccess ? "completed" : "failed")")
+                } else if DecisionToolRequest.isDefinitionOnly(trajectory) {
+                    print("Decision tool: \(finalSuccess ? "completed" : "failed")")
                 } else {
                     let status = BuildStatusReport(
                         trajectory: trajectory, finalSuccess: finalSuccess)

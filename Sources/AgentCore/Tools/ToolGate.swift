@@ -81,7 +81,9 @@ public enum ToolGate {
             return result
         } catch let error as ToolError {
             await audit("error", false)
-            return SecretMasker.mask(.failure(error.description))
+            var result = SecretMasker.mask(.failure(error.description))
+            if case .pathEscape = error { result.hostPathScopeDenied = true }
+            return result
         } catch {
             await audit("error", false)
             return SecretMasker.mask(.failure(error.localizedDescription))

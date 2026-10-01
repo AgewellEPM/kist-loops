@@ -227,10 +227,21 @@ public struct TaskPersonaMatcher: Sendable {
         }
 
         return entries.compactMap { entry -> PersonaMatch? in
-            let hay = Self.tokens(entry.definition.name + " " + entry.definition.description)
-                .union(entry.keywords)
+            let hay = entry.keywords
             let overlap = requestTokens.intersection(hay)
             let phraseScore = Self.phraseScore(request.lowercased(), for: entry.definition.name)
+            if entry.definition.source == "builtin",
+               entry.definition.name == "legal-research-analyst", phraseScore == 0 {
+                // "case", "deadline" and "legal" also describe code. Require domain evidence
+                // before injecting legal research instructions into a programming task.
+                let domain: Set<String> = ["law", "statute", "regulation", "court", "litigation",
+                    "jurisdiction", "attorney", "plaintiff", "defendant"]
+                let codeWords: Set<String> = ["api", "parser", "schema", "syntax", "boolean", "compiler"]
+                let codeContext = !requestTokens.isDisjoint(with: codeWords)
+                    || Self.containsAny(request.lowercased(), ["rule card", "test case"])
+                guard !requestTokens.isDisjoint(with: domain)
+                    || (requestTokens.contains("legal") && !codeContext) else { return nil }
+            }
             let score = overlap.count + phraseScore
             guard score > 0 else { return nil }
             let reasons = overlap.sorted().prefix(5).map { "matched '\($0)'" }
@@ -308,7 +319,11 @@ public struct TaskPersonaMatcher: Sendable {
     }
 
     fileprivate static func tokens(_ text: String) -> Set<String> {
-        Set(text.lowercased().split { !$0.isLetter && !$0.isNumber }
+        let stopWords: Set<String> = ["and", "the", "for", "with", "this", "that", "from", "into",
+            "not", "only", "when", "what", "how", "why", "you", "your", "use", "using", "can",
+            "should", "must", "before", "after", "without", "then", "their", "them", "its"]
+        return Set(text.lowercased().split { !$0.isLetter && !$0.isNumber }
+            .filter { !stopWords.contains(String($0)) }
             .map { normalizeToken(String($0)) }
             .filter { $0.count > 2 })
     }

@@ -55,6 +55,19 @@ final class SelfHealHandoffTests: XCTestCase {
         let s = "Result: {\"root_cause\":\"race\",\"repair_spec\":\"add lock\",\"confidence\":0.8,\"target_files\":[\"a.swift\"]}"
         let h = SelfHealHandoff.parse(from: s)
         XCTAssertEqual(h?.repairSpec, "add lock")
-        XCTAssertTrue(h?.isActionable ?? false)
+        XCTAssertFalse(h?.isActionable ?? true, "a parsed proposal without reproduction and verification is not actionable")
+    }
+
+    func testTranscriptPlaceholderHandoffCannotStartBuilder() {
+        let h = SelfHealHandoff(rootCause: "Path escapes the project root", confidence: 0.95,
+            targetFiles: ["<unknown, requires code investigation>"], repairSpec: "Modify path generation",
+            reproductionCommand: "<The original command was not provided>",
+            verificationCommands: ["<Run the original command>", "git diff --check"])
+        XCTAssertFalse(h.isActionable)
+        var concrete = h
+        concrete.targetFiles = ["Sources/Paths.swift"]
+        concrete.reproductionCommand = "swift test --filter PathsTests"
+        concrete.verificationCommands = ["swift test --filter PathsTests"]
+        XCTAssertTrue(concrete.isActionable)
     }
 }

@@ -1,0 +1,107 @@
+{
+  "tests": [
+    {
+      "name": "idle inventory reads load no model",
+      "passed": true,
+      "state": {
+        "mode": "auto",
+        "inventory_error": null,
+        "busy": false,
+        "active_model": null,
+        "worker_pid": null,
+        "last_result": "idle",
+        "completed": 0,
+        "max_model_bytes": 2147483648,
+        "context_limit": 4096,
+        "idle_workers": 0
+      }
+    },
+    {
+      "name": "9B rejected without loading",
+      "passed": true,
+      "response": {
+        "error": "Model exceeds this Mac's 2 GiB local weight limit. Use cloud inference."
+      },
+      "state": {
+        "mode": "auto",
+        "inventory_error": null,
+        "busy": false,
+        "active_model": null,
+        "worker_pid": null,
+        "last_result": "idle",
+        "completed": 0,
+        "max_model_bytes": 2147483648,
+        "context_limit": 4096,
+        "idle_workers": 0
+      }
+    },
+    {
+      "name": "cold start, native response, unload qwen2.5:0.5b",
+      "passed": true,
+      "seconds": 13.64,
+      "gpu": {
+        "name": "qwen2.5:0.5b",
+        "size_vram": 435033209
+      },
+      "parallel_request_rejected": true,
+      "response": "Hello! How can I assist you today?",
+      "state": {
+        "mode": "auto",
+        "inventory_error": null,
+        "busy": false,
+        "active_model": null,
+        "worker_pid": null,
+        "last_result": "HTTP 200",
+        "completed": 1,
+        "max_model_bytes": 2147483648,
+        "context_limit": 4096,
+        "idle_workers": 0
+      }
+    },
+    {
+      "name": "cold start, native response, unload llama3.2:1b",
+      "passed": true,
+      "seconds": 4.94,
+      "gpu": {
+        "name": "llama3.2:1b",
+        "size_vram": 1395077939
+      },
+      "parallel_request_rejected": true,
+      "response": "Hello.",
+      "state": {
+        "mode": "auto",
+        "inventory_error": null,
+        "busy": false,
+        "active_model": null,
+        "worker_pid": null,
+        "last_result": "HTTP 200",
+        "completed": 2,
+        "max_model_bytes": 2147483648,
+        "context_limit": 4096,
+        "idle_workers": 0
+      }
+    },
+    {
+      "name": "off interrupts active inference and removes workers",
+      "passed": true,
+      "output": "OFF \u2014 local model processes stopped; automatic startup disabled. Model files remain on PRO-G40."
+    },
+    {
+      "name": "auto re-enabled without preloading",
+      "passed": true,
+      "state": {
+        "mode": "auto",
+        "inventory_error": null,
+        "busy": false,
+        "active_model": null,
+        "worker_pid": null,
+        "last_result": "idle",
+        "completed": 0,
+        "max_model_bytes": 2147483648,
+        "context_limit": 4096,
+        "idle_workers": 0
+      }
+    }
+  ],
+  "passed": true
+}
