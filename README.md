@@ -24,6 +24,13 @@ keys, the data path, and the code.
 
 ## Quick start
 
+The [terminal setup candidate](Tools/kist_local_runtime/DISTRIBUTION.md) reuses Kist's
+existing model picker on first launch: choose a model, complete setup, and enter the
+REPL in your current repository. The packaged launcher can prepare a small local
+model automatically and unload it after requests. macOS packaging is under local
+verification; Linux/WSL require their own build and execution checks. This is not
+yet a published cross-platform release.
+
 ```bash
 # Build the CLI (Swift 5.9+, macOS or Linux)
 swift build -c release            # produces .build/release/kist
@@ -59,8 +66,9 @@ for the import, human-admission, credential, and durable-run procedure.
 
 **No telemetry. No phone-home.** Mythos sends your prompts and code only to the AI provider *you*
 configured, using *your* key — and nowhere else. There's no analytics, no usage beacon, no crash
-reporter; nothing is sent to the maintainers. The only outbound calls are to the provider endpoint you
-chose and the (SSRF-guarded) `fetch_url` tool.
+reporter; nothing is sent to the maintainers. Provider calls go to your selected
+endpoint; `fetch_url` uses its SSRF guard. Packaged local setup also downloads the
+selected weights from Ollama and, when needed, the private runtime from GitHub.
 
 **A dev tool, not an exploit tool.** Mythos ships no scanners and no attack tooling — it's a general
 coding agent (read / write / edit / search / generate / run). Use it only on systems you own or are

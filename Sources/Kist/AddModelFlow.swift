@@ -92,7 +92,7 @@ enum AddModelFlow {
     }
 
     /// Read a secret without echoing it. Falls back to a visible readLine if no TTY.
-    private static func readHiddenKey(_ promptText: String) -> String {
+    static func readHiddenKey(_ promptText: String) -> String {
         if let c = getpass(promptText) {
             return String(cString: c).trimmingCharacters(in: .whitespacesAndNewlines)
         }

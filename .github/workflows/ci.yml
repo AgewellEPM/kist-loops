@@ -41,6 +41,12 @@ jobs:
       - name: Test
         run: swift test -c release
 
+      - name: Test portable model setup and lifecycle
+        run: python3 -m unittest discover -s Tools/kist_local_runtime -p 'test_*.py' -v
+
+      - name: Assemble host-specific candidate bundle
+        run: python3 Tools/kist_local_runtime/package.py --binary .build/release/kist --output .build/kist-candidate
+
       - name: Verify Linux bubblewrap enforcement
         if: runner.os == 'Linux'
         run: scripts/linux-sandbox-test.sh

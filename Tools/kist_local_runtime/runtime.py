@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Small Ollama gateway: serialize inference, enforce limits, reap every worker."""
 import hashlib
+import fcntl
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -11,23 +12,29 @@ import select
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 
-ROOT = Path(__file__).resolve().parent
-CONFIG = json.loads((ROOT / "config.json").read_text())
+CONFIG_PATH = Path(os.environ.get("KIST_LOCAL_RUNTIME_CONFIG", Path(__file__).resolve().parent / "config.json"))
+ROOT = CONFIG_PATH.parent
+CONFIG = json.loads(CONFIG_PATH.read_text())
 MODELS = Path(CONFIG["model_root"])
-DISABLED = Path.home() / ".kist/local-ai-disabled"
+DISABLED = Path(CONFIG.get("disabled_file", Path.home() / ".kist/local-ai-disabled"))
 INFERENCE = {"/api/chat", "/api/generate", "/api/embed", "/api/embeddings"}
 INVENTORY_ERROR = None
 
 
-class Rejected(Exception):
+class Rejected(RuntimeError):
     pass
 
 
 def pressure():
     try:
+        if sys.platform.startswith("linux"):
+            memory = {line.split(":", 1)[0]: int(line.split()[1]) * 1024
+                      for line in Path("/proc/meminfo").read_text().splitlines()}
+            return 1 if memory["MemAvailable"] >= max(1_073_741_824, memory["MemTotal"] // 5) else 2
         result = subprocess.run(["/usr/sbin/sysctl", "-n",
                                  "kern.memorystatus_vm_pressure_level"],
                                 capture_output=True, text=True, timeout=2, check=True)
@@ -37,7 +44,10 @@ def pressure():
 
 
 def storage_ready():
-    return Path("/Volumes/PRO-G40").is_mount() and MODELS.is_dir()
+    volume = CONFIG.get("model_volume")
+    if volume is None and str(MODELS).startswith("/Volumes/"):
+        volume = str(Path(*MODELS.parts[:3]))
+    return (volume is None or Path(volume).is_mount()) and MODELS.is_dir()
 
 
 def scan_inventory():
@@ -47,6 +57,8 @@ def scan_inventory():
         return []
     base = MODELS / "manifests/registry.ollama.ai/library"
     models = []
+    if not base.exists():
+        return models
     try:
         paths = [path for parent in base.iterdir() if parent.is_dir() for path in parent.iterdir()]
     except OSError as error:
@@ -94,7 +106,7 @@ def prepare(body):
     if DISABLED.exists():
         raise Rejected("Local AI is switched off. Use cloud inference.")
     if not storage_ready():
-        raise Rejected("PRO-G40 model storage is unavailable; no internal fallback.")
+        raise Rejected("Configured model storage is unavailable; no fallback directory.")
     model = body.get("model", "")
     if not isinstance(model, str):
         raise Rejected("A model name is required.")
@@ -102,11 +114,11 @@ def prepare(body):
         model += ":latest"
     entry = next((item for item in inventory() if item["name"] == model), None)
     if entry is None:
-        raise Rejected("Model is not installed in the external local library. Use cloud inference.")
+        raise Rejected("Model is not installed in the configured local library. Run kist --setup.")
     if entry["size"] > CONFIG["max_model_bytes"]:
-        raise Rejected("Model exceeds this Mac's 2 GiB local weight limit. Use cloud inference.")
+        raise Rejected(f"Model exceeds the {CONFIG['max_model_bytes'] // 1_073_741_824} GiB local weight limit. Use another model.")
     if pressure() != 1:
-        raise Rejected("Mac memory is under pressure. Local inference refused; use cloud inference.")
+        raise Rejected("Computer memory is under pressure. Local inference refused.")
     options = body.get("options") or {}
     if not isinstance(options, dict):
         raise Rejected("options must be an object.")
@@ -114,12 +126,12 @@ def prepare(body):
     context = options.get("num_ctx", CONFIG["default_context_tokens"])
     output = options.get("num_predict", 512)
     if type(context) is not int or not 256 <= context <= CONFIG["context_tokens"]:
-        raise Rejected("Local context must be 256–4096 tokens. Use cloud for larger requests.")
+        raise Rejected(f"Local context must be 256–{CONFIG['context_tokens']} tokens.")
     if type(output) is not int or not 1 <= output <= CONFIG["max_output_tokens"]:
-        raise Rejected("Local output must be capped at 1–1024 tokens.")
+        raise Rejected(f"Local output must be capped at 1–{CONFIG['max_output_tokens']} tokens.")
     if body.get("images") or any(isinstance(m, dict) and m.get("images")
                                  for m in body.get("messages", []) if isinstance(m, dict)):
-        raise Rejected("Local vision is disabled in the lightweight Mac profile. Use cloud vision.")
+        raise Rejected("Local vision is disabled in the lightweight local profile.")
     # Bound tool schemas and history as well as ordinary prompt text; never silently trim them.
     prompt_bytes = len(json.dumps({k: v for k, v in body.items()
                                  if k in ("messages", "prompt", "system", "input", "tools", "suffix")}))
@@ -144,6 +156,7 @@ class Runtime:
         self.last_result = "idle"
         self.completed = 0
         self.shutting_down = threading.Event()
+        self.worker_lock = None
 
     def snapshot(self):
         return {"mode": "off" if DISABLED.exists() else "auto",
@@ -159,6 +172,7 @@ class Runtime:
             child, self.child = self.child, None
             self.port = None
             if child is None:
+                self.release_worker_lock()
                 return
             # Each backend owns a new session; never signal the gateway's or another app's group.
             try:
@@ -174,8 +188,19 @@ class Runtime:
             except ProcessLookupError:
                 pass
             child.wait(timeout=3)
+            self.release_worker_lock()
+
+    def release_worker_lock(self):
+        if self.worker_lock is not None:
+            self.worker_lock.close()
+            self.worker_lock = None
 
     def start(self):
+        # Setup can install the private binary after this controller has started.
+        # Reload only its path; resource limits stay fixed for this session.
+        executable = json.loads(CONFIG_PATH.read_text())["ollama_bin"]
+        if not Path(executable).is_absolute() or not os.access(executable, os.X_OK):
+            raise Rejected("Local runtime is not installed. Run kist --setup.")
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
@@ -188,9 +213,20 @@ class Runtime:
         with self.process_lock:
             if self.shutting_down.is_set() or DISABLED.exists():
                 raise Rejected("Local runtime is stopping.")
-            self.child = subprocess.Popen([CONFIG["ollama_bin"], "serve"], env=env,
-                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.DEVNULL, start_new_session=True)
+            if CONFIG.get("worker_lock"):
+                self.worker_lock = open(CONFIG["worker_lock"], "a")
+                try:
+                    fcntl.flock(self.worker_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    self.release_worker_lock()
+                    raise Rejected("Another Kist session is using local AI. Retry when it finishes.")
+            try:
+                self.child = subprocess.Popen([executable, "serve"], env=env,
+                                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                self.release_worker_lock()
+                raise
             self.port = port
             child = self.child
         deadline = time.monotonic() + 10
@@ -272,8 +308,14 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
         elif self.path == "/api/version":
-            version = Path(CONFIG["ollama_bin"]).resolve().parts
-            self.reply(200, {"version": version[version.index("ollama") + 1]})
+            version = CONFIG.get("ollama_version")
+            if version is None:
+                parts = Path(CONFIG["ollama_bin"]).resolve().parts
+                try:
+                    version = parts[parts.index("ollama") + 1]
+                except (ValueError, IndexError):
+                    version = "0.0.0"
+            self.reply(200, {"version": version})
         else:
             self.reply(404, {"error": "Use the native Ollama API on this managed endpoint."})
 
@@ -376,8 +418,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    if DISABLED.exists():
-        raise SystemExit("Local AI is switched off; use kist-local-ai auto to enable it.")
     server = ThreadingHTTPServer(("127.0.0.1", CONFIG["listen_port"]), Handler)
     server.daemon_threads = True
     def stop(_signal, _frame):

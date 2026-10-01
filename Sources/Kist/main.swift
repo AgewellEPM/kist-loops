@@ -29,10 +29,12 @@ setvbuf(stdout, nil, _IONBF, 0)
 // color decisions made mid-capture must reflect the real terminal (2026-08-03 white-out fix).
 TerminalCapabilities.prime()
 
-let opts = KistOptions.parse(kistRawArguments)
+let setupRequested = kistRawArguments == ["--setup"]
+let opts = KistOptions.parse(setupRequested ? [] : kistRawArguments)
 
 if opts.showHelp {
     print(KistOptions.helpText)
+    print("  --setup                 Choose a model, finish setup, then open the terminal session")
     exit(0)
 }
 
@@ -41,6 +43,18 @@ guard opts.optionErrors.isEmpty else {
         FileHandle.standardError.write(Data("error: \(error)\n".utf8))
     }
     exit(2)
+}
+
+if kistRawArguments.isEmpty || setupRequested {
+    let startupConfig = KistConfig.load()
+    if FirstLaunchSetup.shouldRun(arguments: kistRawArguments, isTTY: KistRunner.stdinIsTTY(),
+                                 nested: ProcessInfo.processInfo.environment["KIST_ACTIVE"] == "1",
+                                 config: startupConfig) {
+        guard await FirstLaunchSetup.run(config: startupConfig) else { exit(2) }
+    } else if setupRequested {
+        FileHandle.standardError.write(Data("Setup requires an interactive terminal outside an agent child process.\n".utf8))
+        exit(2)
+    }
 }
 
 // Mark this process so any CHILD kist (an agent's run_command → `kist …`) detects nesting and refuses

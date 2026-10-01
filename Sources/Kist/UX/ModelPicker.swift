@@ -15,9 +15,11 @@ struct ModelPickerState: Equatable {
         let providerId: String
         let model: String?
         let hasKey: Bool          // true ⇒ an API key is configured (renders green) · false ⇒ needs one (red)
-        var label: String { providerId + (model.map { " · \($0)" } ?? "") }
-        init(providerId: String, model: String?, hasKey: Bool = true) {
+        let detail: String?
+        var label: String { providerId + (model.map { " · \($0)" } ?? "") + (detail.map { " · \($0)" } ?? "") }
+        init(providerId: String, model: String?, hasKey: Bool = true, detail: String? = nil) {
             self.providerId = providerId; self.model = model; self.hasKey = hasKey
+            self.detail = detail
         }
     }
 

@@ -343,7 +343,10 @@ final class KistBuilderRouteBehaviorV2Tests: XCTestCase {
         XCTAssertEqual(launch.adapter, .headless)
         XCTAssertTrue(launch.mutationIntent)
 
-        let raw = #"{"schema_version":1,"adapter":"headless","operations":[{"kind":"create","path":"RESULT.txt"}],"verification_commands":[{"executable":"python3","arguments":["-c","from pathlib import Path; assert Path('RESULT.txt').read_text() == 'HEADLESS_OK\\n'"],"timeout_seconds":30}],"partitions":[]}"#
+        let inline = #"{"schema_version":1,"adapter":"headless","operations":[{"kind":"create","path":"RESULT.txt"}],"verification_commands":[{"executable":"python3","arguments":["-c","print('not an admitted verifier')"],"timeout_seconds":30}],"partitions":[]}"#
+        XCTAssertThrowsError(try KistRunner.builderParsePreflightPlan(
+            inline, adapter: .headless, projectRoot: fixture.project.path, maxPartitions: 1))
+        let raw = #"{"schema_version":1,"adapter":"headless","operations":[{"kind":"create","path":"RESULT.txt"}],"verification_commands":[{"executable":"python3","arguments":["-m","unittest","discover"],"timeout_seconds":30}],"partitions":[]}"#
         let plan = try KistRunner.builderParsePreflightPlan(
             raw, adapter: .headless, projectRoot: fixture.project.path, maxPartitions: 1)
         let envelope = try KistRunner.BuilderPreflightEnvelope(
@@ -390,7 +393,7 @@ final class KistBuilderRouteBehaviorV2Tests: XCTestCase {
             name: "run_command",
             arguments: [
                 "executable": "python3",
-                "args": ["-c", "from pathlib import Path; assert Path('RESULT.txt').read_text() == 'HEADLESS_OK\\n'"],
+                "args": ["-m", "unittest", "discover"],
                 "cwd": ".", "timeout": 30, "allowed_exit_codes": [0],
             ],
             context: context)
@@ -398,7 +401,7 @@ final class KistBuilderRouteBehaviorV2Tests: XCTestCase {
         let emptyCWD = await scoped.execute(
             name: "run_command", arguments: [
                 "executable": "python3",
-                "args": ["-c", "from pathlib import Path; assert Path('RESULT.txt').read_text() == 'HEADLESS_OK\\n'"],
+                "args": ["-m", "unittest", "discover"],
                 "cwd": "", "timeout": 30,
             ], context: context)
         XCTAssertTrue(emptyCWD.success, emptyCWD.error ?? emptyCWD.output)

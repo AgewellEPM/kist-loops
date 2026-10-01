@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+# Resolve the installed symlink without changing the repository's working directory.
+command -v python3 >/dev/null 2>&1 || { echo 'Kist needs Python 3.9 or newer.' >&2; exit 2; }
+exec python3 -c 'import os,sys; from pathlib import Path; p=Path(sys.argv[1]).resolve().parent; os.execv(sys.executable,[sys.executable,str(p/"runtime/portable.py"),"run","--binary",str(p/"bin/kist"),"--",*sys.argv[2:]])' "$0" "$@"

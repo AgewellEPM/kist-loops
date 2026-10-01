@@ -18,6 +18,8 @@ public struct OllamaProvider: ChatProvider {
     public let defaultModel: String
     public let availableModels: [AIModel]
     public let automaticAcquisition: Bool
+    /// The packaged launcher owns a smaller allocation than the publisher's maximum.
+    public let runtimeContextTokens: Int?
     public var supportsNativeTools: Bool { id == "ollama" }
 
     /// Only templates with a known Ollama tool contract opt into native calls. Custom models
@@ -28,10 +30,12 @@ public struct OllamaProvider: ChatProvider {
         // qwen2.5-coder:7b advertises tools in /api/show but our live Ollama 0.32.3 canary
         // returned the call as content, not message.tool_calls. Keep it on the text path.
         let known = id == "ollama" && ["qwen3-vl", "qwen3.5"].contains(family)
+        let publishedContext = meta?.contextWindowTokens ?? (known ? 16_384 : nil)
+        let context = runtimeContextTokens.map { min($0, publishedContext ?? $0) } ?? publishedContext
         return ModelCapabilities(nativeTools: known,
                                  vision: id == "ollama" && (known || meta?.isVision == true),
                                  reasoning: known && family == "qwen3.5",
-                                 contextWindowTokens: meta?.contextWindowTokens ?? (known ? 16_384 : nil),
+                                 contextWindowTokens: context,
                                  structuredOutput: known || (id == "ollama" && family == "qwen2.5-coder"))
     }
 
@@ -48,12 +52,14 @@ public struct OllamaProvider: ChatProvider {
                     AIModel(id: "llama3.1", name: "Llama 3.1", displayName: "Llama 3.1", isLocal: true),
                     AIModel(id: "deepseek-coder:6.7b", name: "DeepSeek Coder 6.7B", displayName: "DeepSeek Coder 6.7B", isLocal: true),
                     AIModel(id: "qwen2.5-coder", name: "Qwen2.5 Coder", displayName: "Qwen2.5 Coder", isLocal: true),
-                ], automaticAcquisition: Bool = false) {
+                ], automaticAcquisition: Bool = false,
+                runtimeContextTokens: Int? = ProcessInfo.processInfo.environment["KIST_LOCAL_CONTEXT_TOKENS"].flatMap(Int.init)) {
         self.id = id
         self.name = name
         self.defaultModel = defaultModel
         self.availableModels = availableModels
         self.automaticAcquisition = automaticAcquisition
+        self.runtimeContextTokens = runtimeContextTokens.flatMap { (256...131_072).contains($0) ? $0 : nil }
     }
 
     /// The offline COBOL specialist: the locally fine-tuned `cobol-jeeves` model served by Ollama.

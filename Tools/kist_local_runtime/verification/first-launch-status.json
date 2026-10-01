@@ -1,0 +1,100 @@
+{
+  "recorded_at": "2026-10-01T06:22:46.267356+00:00",
+  "status": "candidate-not-promoted-or-published",
+  "source_parent": "9c0b6c8785515224768ea851aeb415b4624fb4b7",
+  "candidate": {
+    "target": "darwin-arm64",
+    "binary_sha256": "adeae638d63d68f83bab0050c8179c2113059aba5b8f8f1dbb76a8f95ad4e784",
+    "archive_sha256": "8fbf0e1f4223dfb7f3e34546f544f408e63a7ec2dc1318310b43f9af1bbebd7b"
+  },
+  "checks": {
+    "final_affected_swift": {
+      "tests": 209,
+      "failures": 0
+    },
+    "python_runtime_and_installer": {
+      "tests": 14,
+      "failures": 0
+    },
+    "installed_candidate_cli_smoke": {
+      "checks": [
+        {
+          "args": [
+            "--version"
+          ],
+          "exit": 0,
+          "output": "kist 0.17.63"
+        },
+        {
+          "args": [
+            "--help"
+          ],
+          "exit": 0,
+          "output": "nai\",\"model\":\"gpt-5.5\"}.\nPrecedence: flags > config > built-in defaults.\n  --setup                 Choose a model, finish setup, then open the terminal session"
+        },
+        {
+          "args": [
+            "--setup"
+          ],
+          "exit": 2,
+          "output": "Setup requires an interactive terminal outside an agent child process."
+        },
+        {
+          "args": [
+            "local-ai",
+            "freeze"
+          ],
+          "exit": 0,
+          "output": "Local AI: off"
+        },
+        {
+          "args": [
+            "local-ai",
+            "status"
+          ],
+          "exit": 0,
+          "output": "Local AI: off"
+        },
+        {
+          "args": [
+            "local-ai",
+            "auto"
+          ],
+          "exit": 0,
+          "output": "Local AI: auto \u00b7 loads only when called"
+        }
+      ],
+      "noninteractive_setup_saved_config": false,
+      "remaining_session_directories": 0,
+      "duplicate_install_refused": true
+    },
+    "full_swift_before_fixture_corrections": {
+      "tests": 5985,
+      "skipped": 6,
+      "failed_test_cases": 2,
+      "assertion_failures": 20,
+      "cases": [
+        "KistBuilderRouteBehaviorV2Tests.testImplicitHeadlessBuildGetsOnlyItsSealedCreateCapability",
+        "KistSMLRuntimeExportTests.testRuntimeExportAndREPLDispatchBeforeProviderRegistryStartup"
+      ]
+    },
+    "corrected_fixtures": "Both pass in the final affected-suite run. The entire suite was not rerun after the corrections.",
+    "canonical_source_matches_build_checkout": {
+      "source_and_package_files_compared": 789,
+      "differences": 0
+    }
+  },
+  "not_verified": [
+    "Interactive first-run UI: an existing QEMU guest prevented a second isolated session.",
+    "Fresh vendor runtime/model download and real inference through this portable candidate.",
+    "Linux and Windows/WSL execution; Linux Swift shared-library packaging remains incomplete.",
+    "Public release licensing, signing, publication and fresh full release gate."
+  ],
+  "host_changes": {
+    "installed_kist_replaced": false,
+    "installed_local_runtime_replaced": false,
+    "new_model_weights_downloaded": false,
+    "new_vm_or_isolated_session_started": false,
+    "autonomy_enabled": false
+  }
+}

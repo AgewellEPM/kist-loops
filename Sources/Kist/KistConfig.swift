@@ -48,6 +48,26 @@ struct KistConfig {
         return base + "/kist/config.json"
     }
 
+    /// Local-only setup narrows every provider-backed lane, including review and embeddings.
+    /// Existing administrator/user allowlists are never widened by setup.
+    static func writeStartupSelection(provider: String, model: String, localOnly: Bool,
+                                      atPath path: String = path()) -> Bool {
+        guard !model.isEmpty, !localOnly || provider == "ollama" else { return false }
+        var selected = false
+        let written = writeMergedConfig(atPath: path) { obj in
+            selected = false
+            let current = parse(obj)
+            guard current.providerPolicyError == nil, current.permitsProvider(provider) else { return }
+            obj["provider"] = provider
+            obj["model"] = model
+            obj["autoRouting"] = false
+            obj["localFirst"] = false
+            if localOnly { obj["allowedProviders"] = ["ollama"] }
+            selected = true
+        }
+        return written && selected
+    }
+
     /// Persist ONLY the selection policy, merging into the existing config JSON so hand-set fields
     /// (provider/model/hosts) are preserved. Used by the `/cost` · `/power` REPL toggles so the choice
     /// sticks across launches. Returns false (never throws) if the file can't be written.
