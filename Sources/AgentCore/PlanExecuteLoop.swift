@@ -134,6 +134,7 @@ public struct PlanExecuteLoop: Sendable {
     private let sink: RuntimeEventSink
     private let interactor: RuntimeInteractor
     private let requireApproval: Bool
+    private let planSearch: PlanSearchPolicy
     private let maxPlanRepairs: Int
     private let maxReplans: Int
     private let verifyGoal: Bool
@@ -157,6 +158,7 @@ public struct PlanExecuteLoop: Sendable {
                 interactor: RuntimeInteractor = AutoApproveInteractor(),
                 requireApproval: Bool = true, maxPlanRepairs: Int = 2,
                 maxReplans: Int = 2, verifyGoal: Bool = true,
+                planSearch: PlanSearchPolicy = .single,
                 recorder: TraceRecorder? = nil, budget: BudgetLedger? = nil, memory: ProjectMemory? = nil,
                 launchMode: PlanExecuteLaunchMode = .fresh,
                 freshMissionInstanceID: PlanExecuteMissionID? = nil,
@@ -171,7 +173,7 @@ public struct PlanExecuteLoop: Sendable {
                   roles: RoleBindings(default: ProviderBinding(providerId: providerId, model: model)),
                   tools: tools, context: context, sink: sink, interactor: interactor,
                   requireApproval: requireApproval, maxPlanRepairs: maxPlanRepairs,
-                  maxReplans: maxReplans, verifyGoal: verifyGoal, recorder: recorder, budget: budget,
+                  maxReplans: maxReplans, verifyGoal: verifyGoal, planSearch: planSearch, recorder: recorder, budget: budget,
                   memory: memory, launchMode: launchMode,
                   freshMissionInstanceID: freshMissionInstanceID,
                   completionContract: completionContract,
@@ -189,6 +191,7 @@ public struct PlanExecuteLoop: Sendable {
                 interactor: RuntimeInteractor = AutoApproveInteractor(),
                 requireApproval: Bool = true, maxPlanRepairs: Int = 2,
                 maxReplans: Int = 2, verifyGoal: Bool = true,
+                planSearch: PlanSearchPolicy = .single,
                 recorder: TraceRecorder? = nil, budget: BudgetLedger? = nil, memory: ProjectMemory? = nil,
                 launchMode: PlanExecuteLaunchMode = .fresh,
                 freshMissionInstanceID: PlanExecuteMissionID? = nil,
@@ -212,9 +215,11 @@ public struct PlanExecuteLoop: Sendable {
                                                    budget: budget, sink: eventSink, recorder: recorder)
         self.tools = ToolRegistry(tools.all() + [DecideTool(engine: decisionEngine), DecisionTool(engine: decisionEngine),
                                                GenerateTool(providers: providers, binding: roles.binding(for: .coder),
+                                                            disableThinking: planSearch.candidateLimit > 1,
                                                             recorder: recorder, budget: budget, sink: eventSink)])
         self.context = context; self.sink = eventSink
         self.interactor = interactor; self.requireApproval = requireApproval
+        self.planSearch = planSearch
         self.maxPlanRepairs = maxPlanRepairs; self.maxReplans = maxReplans; self.verifyGoal = verifyGoal
         self.launchMode = launchMode
         switch launchMode {
@@ -250,7 +255,7 @@ public struct PlanExecuteLoop: Sendable {
         let started = Date()
         // Atomic reserve BEFORE the call (C2): under a shared fleet ledger, parallel workers can't both
         // pass and both overspend. Denied ⇒ throw so this worker stops without spending.
-        let promptChars = messages.reduce(0) { $0 + $1.content.count }
+        let promptChars = messages.reduce(settings.systemPrompt.count) { $0 + $1.content.count }
         let estPrompt = promptChars / 4, estCompletion = settings.maxTokens
         let estUSD = CompetitiveBenchmark.priceUSD(vendor: binding.providerId,
                                                    promptTokens: estPrompt, completionTokens: estCompletion) ?? 0
@@ -266,11 +271,34 @@ public struct PlanExecuteLoop: Sendable {
             throw CancellationError()
         }
         let text: String, usage: TokenUsage
+        // Search width is bounded at the host. Do not hide extra network requests or
+        // a larger reasoning allowance inside the provider's empty-response recovery.
+        let requestLimit = role == .planner && planSearch.candidateLimit > 1
+            ? ProviderRequestBudget(limit: 1) : nil
         do {
             (text, usage) = try await providers.completeWithUsage(providerId: binding.providerId, model: binding.model,
-                                                                  messages: messages, settings: settings)
+                                                                  messages: messages, settings: settings,
+                                                                  routePolicy: requestLimit == nil ? nil : .exact,
+                                                                  requestBudget: requestLimit)
         } catch {
-            if let id = reservationID { await budget?.commit(reservation: id, actualTokens: 0, actualUSD: 0) }   // release on failure
+            // A sent, failed request may still be billed. Retain its conservative reservation
+            // when usage is unavailable; never make failed reasoning free in the shared ledger.
+            let sent = await requestLimit?.consumedCount() ?? 0
+            if let id = reservationID {
+                await budget?.commit(reservation: id,
+                    actualTokens: sent > 0 ? estPrompt + estCompletion : 0,
+                    actualUSD: sent > 0 ? estUSD : 0)
+            }
+            if sent > 0 {
+                sink.emit(.usage(promptTokens: estPrompt, completionTokens: estCompletion, estimated: true))
+                if let recorder {
+                    await recorder.record(AgentSpan(id: TraceID.make(), traceId: recorder.traceId, kind: .llmCall,
+                        role: role.rawValue, vendor: binding.providerId, model: binding.model,
+                        promptTokens: estPrompt, completionTokens: estCompletion,
+                        finishReason: "failed request; reserved usage estimate",
+                        startedAt: started, endedAt: Date(), status: .error))
+                }
+            }
             throw error
         }
         let measured = usage.isZero
@@ -745,7 +773,8 @@ public struct PlanExecuteLoop: Sendable {
                     : .decompositionExhausted(snapshot.plan, findings: resumedLint)
                 resumeSnapshot = nil
             } else {
-                planResult = await obtainPlan(&messages, context: scopedContext)
+                planResult = await obtainPlan(&messages, context: scopedContext,
+                    excluding: (control.executablePlanSnapshots ?? []).map(\.plan))
             }
             switch planResult {
             case .providerError(let e):
@@ -1756,62 +1785,15 @@ public struct PlanExecuteLoop: Sendable {
         return String(format: "%016llx", hash)
     }
 
-    // MARK: - Planning (propose + repair)
+    private typealias PlanResult = PlanProposalEngine.Result
 
-    private enum PlanResult {
-        /// `lintWarnings` remains in the shape for durable legacy snapshots, but newly accepted plans
-        /// always carry an empty list. A plan that violates the singular-step contract never executes.
-        case ok(ExecutablePlan, lintWarnings: [String])
-        case decompositionExhausted(ExecutablePlan, findings: [String])
-        case invalid, providerError(String), budgetExceeded(Int)
-    }
-
-    /// Stream a plan from the current message context and validate it, re-prompting to repair an
-    /// invalid/unparseable plan up to `maxPlanRepairs` times. Appends the conversation in place.
-    private func obtainPlan(_ messages: inout [ChatMessage], context: ToolContext) async -> PlanResult {
-        let settings = ModelSettings(temperature: 0.2, maxTokens: 4096,
-                                     systemPrompt: Self.plannerSystemPrompt(tools: tools,
-                                                                            projectRoot: context.projectRoot,
-                                                                            shellEnabled: context.shell.enabled,
-                                                                            hostOwnedFinalReview:
-                                                                                hostOwnedFinalReview))
-        var lastLintRejected: (plan: ExecutablePlan, findings: [String])?
-        for _ in 0...maxPlanRepairs {
-            if let budget, await budget.isExceeded() {
-                return .budgetExceeded(await budget.spentTokens())
-            }
-            let text: String
-            do { text = try await meteredComplete(role: .planner, messages: messages, settings: settings) }
-            catch is PlanBudgetDenied { return .budgetExceeded(await budget?.spentTokens() ?? 0) }
-            catch { return .providerError("\(error)") }
-            messages.append(ChatMessage(role: .assistant, content: text))
-
-            guard let parsed = PlanParser.parse(text) else {
-                messages.append(ChatMessage(role: .user, content:
-                    "That was not a parseable plan. Respond with ONLY the JSON plan object described above."))
-                continue
-            }
-            let errors = parsed.validate(hostOwnedFinalReview: hostOwnedFinalReview)
-            if errors.isEmpty {
-                // R3: a lumpy plan is re-split before it executes — violations feed a bounded repair
-                // loop. Exhaustion is fail-closed below; no rejected lump can become executable proof.
-                let lint = PlanLint.findings(for: parsed)
-                if lint.isEmpty { return .ok(parsed, lintWarnings: []) }
-                lastLintRejected = (parsed, lint)
-                messages.append(ChatMessage(role: .user, content:
-                    "Your plan violates the SINGULAR-STEP contract:\n- " + lint.joined(separator: "\n- ")
-                    + "\nOutput a corrected JSON plan (same format) where each step does exactly ONE thing."))
-                continue
-            }
-            messages.append(ChatMessage(role: .user, content:
-                "Your plan has these problems:\n\(Self.describe(errors))\nOutput a corrected JSON plan (same format)."))
+    private func obtainPlan(_ messages: inout [ChatMessage], context: ToolContext,
+                            excluding plans: [ExecutablePlan]) async -> PlanResult {
+        let engine = PlanProposalEngine(tools: tools, maxPlanRepairs: maxPlanRepairs,
+                                        hostOwnedFinalReview: hostOwnedFinalReview, budget: budget) {
+            try await meteredComplete(role: .planner, messages: $0, settings: $1)
         }
-        // Repairs exhausted. Preserve the rejected plan/findings as diagnostic context, but do not
-        // execute it. A later bounded re-plan can shrink the work without laundering this rejection.
-        if let last = lastLintRejected {
-            return .decompositionExhausted(last.plan, findings: last.findings)
-        }
-        return .invalid
+        return await engine.obtainPlan(&messages, context: context, policy: planSearch,
+                                       excluding: plans, sink: sink)
     }
-
 }

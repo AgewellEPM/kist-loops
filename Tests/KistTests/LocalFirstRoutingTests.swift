@@ -58,8 +58,9 @@ final class LocalFirstRoutingTests: XCTestCase {
         }
         XCTAssertEqual(route("create card.json", opts, roles), roles)
         let hard = route("refactor concurrent scheduler", opts, roles)
-        for role in [AgentRole.planner, .worker, .coder] {
-            XCTAssertEqual(hard.binding(for: role), cloud)
+        XCTAssertEqual(hard.binding(for: .planner), cloud)
+        for role in [AgentRole.worker, .coder] {
+            XCTAssertEqual(hard.binding(for: role), local)
         }
         XCTAssertEqual(hard.binding(for: .critic), local)
         var pinned = opts
@@ -68,8 +69,20 @@ final class LocalFirstRoutingTests: XCTestCase {
         pinned = opts
         pinned.coderSpec = "ollama:qwen3.5:9b-q4_K_M"
         XCTAssertEqual(route("refactor concurrent scheduler", pinned, roles), roles)
+        pinned = opts
+        pinned.roleProfile = "user-team"
+        XCTAssertEqual(route("refactor concurrent scheduler", pinned, roles), roles)
         let custom = roles.binding(.coder, to: cloud)
         XCTAssertEqual(route("refactor concurrent scheduler", opts, custom), custom)
+    }
+
+    func testUnavailableLocalRuntimeDoesNotRetainLocalWorkers() {
+        let result = KistRunner.localFirstBuildRoles(RoleBindings(default: local),
+            opts: KistOptions(project: "/unused"), goal: "refactor concurrent scheduler",
+            config: config, router: router, avoid: { $0 == "ollama" })
+        for role in [AgentRole.planner, .worker, .coder] {
+            XCTAssertEqual(result.roles.binding(for: role), cloud)
+        }
     }
 
     func testCapacityFallbackCannotTurnDenialIntoAuthority() {

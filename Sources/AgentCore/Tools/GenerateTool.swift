@@ -22,15 +22,18 @@ public struct GenerateTool: AgentTool {
     private let providers: ProviderRegistry
     private let binding: ProviderBinding
     private let maxTokens: Int
+    private let disableThinking: Bool
     private let recorder: TraceRecorder?     // record a coder LLM-call span
     private let budget: BudgetLedger?        // meter tokens + refuse when over the cap
     private let sink: RuntimeEventSink?      // surface usage live (R0.4 sibling — see execute)
 
     public init(providers: ProviderRegistry, binding: ProviderBinding, maxTokens: Int = 2048,
+                disableThinking: Bool = false,
                 recorder: TraceRecorder? = nil, budget: BudgetLedger? = nil,
                 sink: RuntimeEventSink? = nil) {
         self.providers = providers; self.binding = binding; self.maxTokens = maxTokens
         self.recorder = recorder; self.budget = budget; self.sink = sink
+        self.disableThinking = disableThinking
     }
 
     /// Extract the real code from a model reply meant to be a file's content. Handles the three
@@ -77,7 +80,8 @@ public struct GenerateTool: AgentTool {
 
     private func executeCore(messages: [ChatMessage]) async -> ToolResult {
         let prompt = messages.map(\.content).joined(separator: "\n")
-        let settings = ModelSettings(temperature: 0.3, maxTokens: maxTokens)
+        let settings = ModelSettings(temperature: 0.3, maxTokens: maxTokens,
+                                     disableThinking: disableThinking)
         // Atomic reserve BEFORE the call (Codex C2 #3): account-after let two parallel fleet workers
         // both pass and both overspend on coder calls. Reserve the estimate; denied ⇒ refuse.
         let estPrompt = prompt.count / 4, estCompletion = maxTokens

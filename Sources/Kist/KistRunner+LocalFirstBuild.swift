@@ -27,16 +27,19 @@ extension KistRunner {
     static func localFirstBuildRoles(_ roles: RoleBindings, opts: KistOptions, goal: String,
                                      config: KistConfig, router: AutoModelRouter,
                                      avoid: (String) -> Bool) -> (roles: RoleBindings, reason: String?) {
-        guard opts.providerId == nil, opts.model == nil,
+        guard opts.providerId == nil, opts.model == nil, opts.roleProfile == nil,
               opts.plannerSpec == nil, opts.workerSpec == nil, opts.coderSpec == nil,
               let local = config.localFirstBinding,
               [AgentRole.planner, .worker, .coder].allSatisfy({ roles.binding(for: $0) == local })
         else { return (roles, nil) }
         let decision = router.localFirstDecision(goal, hasMedia: false, local: local, avoid: avoid)
         guard decision.binding != local else { return (roles, nil) }
-        let next = [AgentRole.planner, .worker, .coder].reduce(roles) {
-            $0.binding($1, to: decision.binding)
-        }
-        return (next, decision.reason)
+        // Difficulty escalates the architect only. Keep bounded generation and research on
+        // the user's small local model; a benched local runtime is the exception.
+        let escalatedRoles: [AgentRole] = avoid(local.providerId)
+            ? [.planner, .worker, .coder] : [.planner]
+        let next = escalatedRoles.reduce(roles) { $0.binding($1, to: decision.binding) }
+        return (next, decision.reason + (escalatedRoles.count == 1
+            ? " · planner only; local workers retained" : " · local runtime unavailable"))
     }
 }

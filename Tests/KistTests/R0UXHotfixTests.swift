@@ -79,7 +79,10 @@ final class R0UXHotfixTests: XCTestCase {
         guard let mcRange = loop.range(of: "func meteredComplete") else {
             return XCTFail("meteredComplete not found — update this pin")
         }
-        let mcBody = String(loop[mcRange.lowerBound...].prefix(3500))
+        guard let mcEnd = loop.range(of: "struct PlanBudgetDenied", range: mcRange.upperBound..<loop.endIndex) else {
+            return XCTFail("meteredComplete boundary not found — update this pin")
+        }
+        let mcBody = String(loop[mcRange.lowerBound..<mcEnd.lowerBound])
         XCTAssertTrue(mcBody.contains("sink.emit(.usage"),
                       "meteredComplete no longer emits usage — planning shows ~0 tok for its whole window")
 
