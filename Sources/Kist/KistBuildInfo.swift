@@ -5,7 +5,7 @@ import Foundation
 /// Keep this value as an honest Semantic Version: `kist-rebuild` binds the exact
 /// release binary and its reported version into the deployment manifest.
 enum KistBuildInfo {
-    static let productVersion = "0.17.63"
+    static let productVersion = "0.17.64"
     static let versionText = "kist \(productVersion)"
     static let startupLabel = "v\(productVersion)"
 
@@ -13,6 +13,10 @@ enum KistBuildInfo {
     /// `--version` must remain a metadata fast path wherever it appears.
     static func isVersionRequest(_ arguments: [String]) -> Bool {
         arguments.contains("--version")
+    }
+
+    static func isReleaseNotesRequest(_ arguments: [String]) -> Bool {
+        arguments.contains("--whats-new")
     }
 
     /// The real build identity of THIS binary, read at runtime from the deployment manifest that
@@ -23,6 +27,15 @@ enum KistBuildInfo {
         let branch: String?
         let sourceDirty: Bool?    // was the tree dirty at build time
         let builtAt: Date?        // manifest file mtime = install time
+        let sourceRoot: String?
+
+        init(commit: String?, branch: String?, sourceDirty: Bool?, builtAt: Date?, sourceRoot: String? = nil) {
+            self.commit = commit
+            self.branch = branch
+            self.sourceDirty = sourceDirty
+            self.builtAt = builtAt
+            self.sourceRoot = sourceRoot
+        }
 
         var shortCommit: String? { commit.map { String($0.prefix(12)) } }
     }
@@ -38,11 +51,16 @@ enum KistBuildInfo {
             let value = raw[raw.index(after: colon)...].trimmingCharacters(in: .whitespaces)
             if !key.isEmpty { fields[key] = value }
         }
+        // Never attribute another binary's release notes or source identity to this executable.
+        guard fields["product-version"] == productVersion else {
+            return Provenance(commit: nil, branch: nil, sourceDirty: nil, builtAt: nil)
+        }
         let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         return Provenance(commit: nonEmpty(fields["commit"]),
                           branch: nonEmpty(fields["branch"]),
                           sourceDirty: fields["source-dirty"].map { $0 == "yes" },
-                          builtAt: mtime)
+                          builtAt: mtime,
+                          sourceRoot: nonEmpty(fields["worktree"]).flatMap { $0.hasPrefix("/") ? $0 : nil })
     }
 
     private static func nonEmpty(_ s: String?) -> String? {
@@ -51,15 +69,15 @@ enum KistBuildInfo {
     }
 
     /// `kist-rebuild` installs `<executable>.manifest`. Resolve the running executable's path (through
-    /// any symlink) and look for its sibling manifest; fall back to the canonical install location.
+    /// any symlink) and look only for its sibling manifest. Unmanaged builds have no stamp.
     private static func manifestPath() -> String? {
         let fm = FileManager.default
         if let exe = CommandLine.arguments.first, !exe.isEmpty {
             let resolved = (exe as NSString).resolvingSymlinksInPath
             let candidate = resolved + ".manifest"
             if fm.fileExists(atPath: candidate) { return candidate }
+            return nil // an unmanaged/test build must not borrow the installed build's stamp
         }
-        let fallback = fm.homeDirectoryForCurrentUser.appendingPathComponent("bin/kist-current.manifest").path
-        return fm.fileExists(atPath: fallback) ? fallback : nil
+        return nil
     }
 }

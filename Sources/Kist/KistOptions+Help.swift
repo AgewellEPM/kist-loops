@@ -20,6 +20,7 @@ extension KistOptions {
       kist --mission "<goal>"       Autonomous gated mission: research/council → measured simulation
                                     and trials → verified execution → independent review.
       kist --health                 Show provider/model/router health without spending tokens.
+      kist --whats-new              Show this build's release notes offline; /version works in the REPL.
       kist --local-model-plan <model>  Check single-host memory and sharding limits without loading weights.
       kist --probe-providers        Full live probe of configured providers; may take 1-2 minutes.
       kist --model-vet hf:<repo>    Fetch live model metadata and hard-reject unsafe downloads.

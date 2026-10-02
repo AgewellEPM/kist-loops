@@ -20,6 +20,11 @@ if KistBuildInfo.isVersionRequest(kistRawArguments) {
     exit(0)
 }
 
+if KistBuildInfo.isReleaseNotesRequest(kistRawArguments) {
+    print(KistChangelog.modelContext())
+    exit(0)
+}
+
 // Mythos / kist entry point. One static binary, no external deps.
 // Unbuffer stdout so the event sink's writes and the REPL's prompts stay in order
 // (we mix print() with raw FileHandle writes for the inline prompt + token stream).

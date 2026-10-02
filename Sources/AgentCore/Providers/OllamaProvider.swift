@@ -179,7 +179,7 @@ public struct OllamaProvider: ChatProvider {
                 || candidate.map({ UInt64($0.maximumDownloadBytes) >= memory.requestBudgetBytes }) == true {
                 throw LocalModelAdmission.blocked(model: body["model"] as? String ?? "",
                     memory: memory, context: runtimeContextTokens ?? 4096,
-                    reason: "host memory pressure or acquisition size exceeds the current memory budget").providerError
+                    reason: memory.admissionBlocker ?? "acquisition size exceeds the current memory budget").providerError
             }
         }
         if let model = body["model"] as? String {

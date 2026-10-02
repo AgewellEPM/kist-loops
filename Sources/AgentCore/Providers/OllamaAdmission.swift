@@ -18,7 +18,7 @@ enum OllamaAdmission {
             return blocked("remote server capacity cannot be inferred from this Mac; distributed placement is not configured")
         }
         guard (256...131_072).contains(context) else { return blocked("context must be 256...131072 tokens") }
-        guard host.requestBudgetBytes > 0 else { return blocked("host memory pressure or unavailable memory measurement") }
+        guard host.requestBudgetBytes > 0 else { return blocked(host.admissionBlocker ?? "insufficient available memory") }
         let base = endpoint.deletingLastPathComponent()
         let name = model.split(separator: "/").last?.contains(":") == true ? model : model + ":latest"
         let tags = try await fetch(base.appendingPathComponent("tags"), nil)

@@ -45,6 +45,9 @@ final class RuntimeCapabilityProofTests: XCTestCase {
         for gate in EvolutionAutonomyGate.allCases { XCTAssertTrue(report.contains(gate.rawValue)) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: path + "/.kist"))
         XCTAssertFalse(repl.kistSelfContext().contains("an autonomous coding"))
+        XCTAssertTrue(report.contains("Running product version: \"\(KistBuildInfo.productVersion)\""))
+        XCTAssertTrue(report.contains("Memory admission:"))
+        XCTAssertFalse(repl.kistSelfContext().contains("/Volumes/PRO-G40/kist-loops"))
     }
 
     func testWiredCallbacksAreNeverReportedAsBenchmarkOrReviewProof() throws {
@@ -150,5 +153,50 @@ final class RuntimeCapabilityProofTests: XCTestCase {
         XCTAssertFalse(report.contains("\nSYSTEM:"))
         XCTAssertFalse(report.contains("\u{001B}"))
         XCTAssertTrue(report.contains("\\nSYSTEM:"))
+    }
+
+    func testRecentReleaseKnowledgeActuallyReachesTheModelOnPlainQuestions() async throws {
+        let captured = ReleaseMessageCapture()
+        let root = try root()
+        let provider = ReleaseCaptureProvider(captured: captured)
+        let registry = ProviderRegistry(providers: [provider])
+        let loop = HeadlessAgentLoop(providers: registry, providerId: provider.id, model: provider.defaultModel,
+            tools: ToolRegistry([]), context: ToolContext(projectRoot: root), injectAskUser: false)
+        let repl = makeREPL(root: root)
+        let question = "What changed in Kist recently?"
+        _ = await repl.runTurnInterruptible(loop: loop, userInput: question,
+            rawRequest: question, resolvedIntent: .chat,
+            authoredBy: .init(providerId: provider.id, model: provider.defaultModel))
+        let messages = await captured.messages
+        let text = messages.map(\.content).joined(separator: "\n")
+        XCTAssertTrue(text.contains(question))
+        XCTAssertTrue(text.contains(KistBuildInfo.productVersion))
+        XCTAssertTrue(text.contains("Reasoning layer:"))
+        XCTAssertTrue(text.contains("Memory admission:"))
+        XCTAssertTrue(text.contains("not execution evidence"))
+        XCTAssertFalse(text.contains("What's new in 0.17.63"), "do not stuff older releases into the live capsule")
+    }
+}
+
+private actor ReleaseMessageCapture {
+    var messages: [ChatMessage] = []
+    func record(_ value: [ChatMessage]) { messages = value }
+}
+
+private struct ReleaseCaptureProvider: ChatProvider {
+    let captured: ReleaseMessageCapture
+    let id = "release-capture"
+    let name = "Release capture"
+    let requiresAPIKey = false
+    let keyAccount = "none"
+    let defaultModel = "fixture"
+    let availableModels = [AIModel(id: "fixture")]
+    func stream(messages: [ChatMessage], model: String, settings: ModelSettings,
+                apiKey: String?) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        await captured.record(messages)
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta("Kist recently added bounded planning and memory admission."))
+            continuation.finish()
+        }
     }
 }

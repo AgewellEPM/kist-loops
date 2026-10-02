@@ -40,6 +40,7 @@ struct RuntimeCapabilityReport {
             let command = RunReplayStore.isValidRunID(replayRunID) ? "/replay \(replayRunID)" : "/replay"
             lines.append("Run: \(Self.literal(replayRunID)) · \(command)")
         }
+        lines.append(KistChangelog.modelContext())
         lines.append("Evidence: /logs · cost: /usage · board: /tasks · /summary. A trace, task marked done, or model answer alone does not verify completion.")
         return lines.joined(separator: "\n")
     }

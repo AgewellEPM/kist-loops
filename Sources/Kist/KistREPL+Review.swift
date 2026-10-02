@@ -30,7 +30,7 @@ extension KistREPL {
         // (AGENTS.md/CLAUDE.md/facts). Without this the reviewer answers "I've never heard of this system,
         // can't verify the claims" instead of actually reviewing — the brain-dead second opinion.
         func reviewerGrounding() -> String {
-            var parts = [kistSelfContext()]
+            var parts = [kistSelfContext(), KistChangelog.modelContext()]
             let facts = ProjectMemory(root: projectRoot).facts()
             if !facts.isEmpty { parts.append("[PROJECT MEMORY]\n" + facts) }
             return parts.joined(separator: "\n\n")

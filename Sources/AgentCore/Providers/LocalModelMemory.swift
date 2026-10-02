@@ -60,6 +60,13 @@ public struct LocalModelMemory: Codable, Equatable, Sendable {
         guard pressure == 1, physicalBytes >= 4 * Self.gib, availableBytes > Self.gib else { return 0 }
         return min(physicalBytes / 2, availableBytes - Self.gib)
     }
+
+    public var admissionBlocker: String? {
+        if pressure != 1 { return "host memory pressure is elevated or its measurement is unavailable" }
+        if physicalBytes < 4 * Self.gib { return "physical RAM is below the local runtime minimum" }
+        if availableBytes <= Self.gib { return "insufficient available memory after reserving desktop headroom" }
+        return nil
+    }
 }
 
 /// Estimates are admission evidence, not a guarantee of throughput or a measured peak RSS.
@@ -110,7 +117,7 @@ public struct LocalModelAdmission: Encodable, Equatable, Sendable {
         guard (256...131_072).contains(context), weights > 0, weights <= 1024 * LocalModelMemory.gib else {
             return no("invalid context or total model size")
         }
-        guard memory.requestBudgetBytes > 0 else { return no("host memory pressure or unavailable memory measurement") }
+        guard memory.requestBudgetBytes > 0 else { return no(memory.admissionBlocker ?? "insufficient available memory") }
         guard weights < memory.requestBudgetBytes else { return no("total model weights exceed the current single-host memory budget") }
         // Hybrid/recurrent/MLA and multimodal caches need their own measured estimator. Do not
         // pretend the ordinary GQA formula works for every model, or estimate from its name.

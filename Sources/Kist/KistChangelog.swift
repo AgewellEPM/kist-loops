@@ -1,4 +1,5 @@
 import Foundation
+import AgentCore
 
 /// The human changelog behind `/version` — so typing `/version` in the terminal shows the version,
 /// WHAT we worked on in it, and WHEN it shipped (build stamp from the deployment manifest). Curated
@@ -13,6 +14,18 @@ enum KistChangelog {
     }
 
     static let releases: [Release] = [
+        Release(version: "0.17.64", date: "2026-10-02",
+                headline: "Bounded planning, local model lifecycle and memory admission, with runtime release awareness",
+                changes: [
+                    "Loop recovery: bounded context capsules and tool results, repeated-failure stops, clearer build routing and goal maps; filesystem and tool authority gates still apply.",
+                    "Symbolic systems: Symbols MCP adapter and floor integration added. Live availability depends on the configured MCP service; integration is not proof of a learned rule.",
+                    "Local model setup: picker-driven setup and portable runtime packaging added. Public release and Linux/WSL execution checks remain pending; native Windows is not implemented.",
+                    "Hot swapping: managed local inference loads only when called, serializes workers and unloads afterward. Freeze/off/kill reject new managed calls and stop active work.",
+                    "Reasoning layer: planner proposes two bounded candidates by default (one to four configurable), validates them before execution and replans from real failures under shared token/request budgets.",
+                    "Local-first routing: difficult tasks can escalate the planner while retaining local workers. Saved profiles, explicit model pins and provider allowlists remain authoritative.",
+                    "Memory admission: local Ollama calls check available RAM, pressure, total weights, f16 context-cache estimate and workspace before loading. Unsupported architectures require fallback; single-Mac file sharding adds no RAM.",
+                    "Release awareness: /version and /whatsnew show this release; every REPL model attempt receives these bounded notes. --whats-new prints them offline. Source paths come from deployment metadata when available.",
+                ]),
         Release(version: "0.17.63", date: "2026-09-27",
                 headline: "Build lane routes around dead providers: the 'researches fine, can't code' failure was a drained OpenAI account pinned as planner+critic with no fallback",
                 changes: [
@@ -525,9 +538,34 @@ enum KistChangelog {
                 ]),
     ]
 
-    /// The release matching the running binary's version, else the newest known.
+    /// Only the release matching the running binary; unknown versions must not borrow newer notes.
     static func current(version: String = KistBuildInfo.productVersion) -> Release? {
-        releases.first { $0.version == version } ?? releases.first
+        releases.first { $0.version == version }
+    }
+
+    /// A small, compiled release capsule that travels with each model attempt. This is descriptive
+    /// metadata, never a benchmark, deployment receipt, permission grant or active routing setting.
+    static func modelContext(version: String = KistBuildInfo.productVersion,
+                             provenance: KistBuildInfo.Provenance = KistBuildInfo.provenance()) -> String {
+        var lines = ["[KIST RELEASE CONTEXT — descriptive metadata, not execution evidence]",
+                     "Running product version: \(literal(version))."]
+        if let commit = provenance.shortCommit { lines.append("Deployment commit: \(literal(commit)).") }
+        if let source = provenance.sourceRoot { lines.append("Deployed source checkout: \(literal(source)).") }
+        if let release = current(version: version) {
+            lines.append("Release date: \(release.date). \(release.headline).")
+            lines += release.changes.prefix(8).map { "- " + String($0.prefix(340)) }
+        } else {
+            lines.append("No compiled release notes for this version. Do not infer updates from another version.")
+        }
+        lines.append("Use these notes when asked what changed recently. Current session configuration and host evidence govern what is available or verified. /version gives the full release view.")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func literal(_ text: String) -> String {
+        let value = SecretScanner.redactSecrets(in: String(text.prefix(256)))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "\"unavailable\""
     }
 
     /// Render the `/version` panel as a bordered CARD (like Codex's `/status`): version + headline in

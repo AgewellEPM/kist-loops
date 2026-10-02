@@ -16,6 +16,14 @@ final class LocalModelAdmissionTests: XCTestCase {
         XCTAssertEqual(LocalModelMemory.reclaimablePages(free: 100, inactive: 500, anonymous: 300), 300)
     }
 
+    func testLowHeadroomIsNotMisreportedAsPressureOrMissingMeasurement() {
+        let memory = LocalModelMemory(physicalBytes: 16 * gib, availableBytes: gib / 2, pressure: 1)
+        XCTAssertEqual(memory.requestBudgetBytes, 0)
+        XCTAssertTrue(memory.admissionBlocker?.contains("insufficient available memory") == true)
+        XCTAssertFalse(memory.admissionBlocker?.contains("pressure") == true)
+        XCTAssertNil(healthy.admissionBlocker)
+    }
+
     func testOneAndHalfBModelUsesArchitectureCacheAndWorkspaceNotParameterMultiplier() {
         let result = LocalModelAdmission.evaluate(model: "qwen2.5-coder:1.5b", weights: 986_062_089,
             info: info, context: 16_384, memory: healthy)
