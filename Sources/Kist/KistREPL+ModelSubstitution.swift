@@ -33,6 +33,9 @@ extension KistREPL {
         // A provider change never turns a refusal or denied permission into execution
         // authority. Check before transport/protocol wording: wrappers can include both.
         guard !looksLikeRefusalOrPermissionStop(lower) else { return nil }
+        if lower.contains("local model capacity unavailable:") {
+            return "local model exceeds current memory capacity"
+        }
         if lower.contains("local context capacity estimate exceeded:") {
             return "local context capacity exceeded"
         }

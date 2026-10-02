@@ -57,6 +57,47 @@ The selected download variants have Apache-2.0 model cards:
 The 3B variant is excluded from automatic downloads because its model card lists
 [Qwen Research](https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct), a different license.
 
+## Memory admission and single-Mac sharding
+
+`kist --local-model-plan qwen2.5-coder:1.5b` reports the same memory decision used
+before local chat and tool calls. It reads metadata only; it does not download,
+load weights, start a cluster or spend API tokens. Exit 0 means the estimate fits;
+exit 2 means fallback is needed or metadata is unavailable. A diagnostic decision
+is temporary: inference takes another host snapshot before loading.
+
+Kist counts the installed model's **total** size, estimates its K/V cache from
+layer count, KV heads, attention dimensions and requested context, and reserves
+workspace of at least 1 GiB or 20% of weights. Cache estimates use f16 even if the
+backend requests quantized caching, so unsupported cache compression earns no
+memory credit. One request may use at most half of physical RAM and must leave
+at least 1 GiB of current available memory. Warning/critical or unknown pressure
+blocks loading. macOS observations conservatively exclude anonymous inactive and
+compressed pages, so the policy can choose fallback before all RAM is exhausted.
+It is a protective estimate, not a guarantee of performance or peak allocation.
+
+The initial estimator supports ordinary text attention in llama, qwen2, qwen3,
+gemma, gemma2, gemma3, phi2 and phi3. Hybrid/recurrent/MLA, multimodal, missing or
+malformed metadata fail closed until their allocation has a supported estimator.
+Explicit context is never silently shortened. Small models retain the existing
+picker, external storage and unload-after-request lifecycle. Allowed cloud
+fallback can continue after a capacity failure without repeating local retries;
+local-only settings and explicit route policies still apply.
+
+This is a **single-host** policy. Apple Silicon CPU and GPU share RAM; disk and
+swap are not extra inference capacity. GGUF file shards are storage pieces of
+one model and their sizes must be counted together. Splitting a 70B model does
+not make it fit a 16 GiB Mac. Kist does not automatically split weights, discover
+peers, install Exo or claim a distributed backend exists. Multi-machine placement
+requires a separately configured cluster and is not implemented in this layer.
+Explicit remote Ollama endpoints retain their server's admission policy; this
+Mac's RAM must not be applied to a remote machine.
+
+Primary references: [Ollama memory/concurrency and unloading](https://docs.ollama.com/faq),
+[Ollama model metadata](https://github.com/ollama/ollama/blob/main/docs/api.md),
+[GGUF file splitting](https://github.com/ggml-org/llama.cpp/tree/master/tools/gguf-split),
+[Apple Mach memory counters](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/vm_statistics.h),
+and [Exo distributed inference](https://github.com/exo-explore/exo).
+
 ## Release status
 
 This is a candidate packaging path. macOS, Linux and WSL need separate compatible

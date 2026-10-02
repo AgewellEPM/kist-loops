@@ -146,6 +146,26 @@ final class ProviderRetryTests: XCTestCase {
         XCTAssertEqual(fallbackCount, 1)
     }
 
+    func testLocalMemoryAdmissionSkipsRetriesAndHonorsFallbackPermission() async throws {
+        for allowed in [false, true] {
+            let primary = AttemptCounter(), backup = AttemptCounter()
+            let registry = ProviderRegistry(providers: [
+                FlakyProvider(id: "ollama", attempts: primary,
+                              failure: .configuration("local model capacity unavailable: memory pressure"), failAttempts: 10),
+                SuccessProvider(id: "backup", attempts: backup, text: "ok")],
+                keyStore: RetryNullKeys(), fallbackProviderIds: ["ollama": ["backup"]], retryDelaysNanoseconds: [0, 0])
+            do {
+                let text = try await registry.complete(providerId: "ollama",
+                    messages: [.init(role: .user, content: "hi")], allowFallback: allowed)
+                XCTAssertTrue(allowed)
+                XCTAssertEqual(text, "ok")
+            } catch { XCTAssertFalse(allowed) }
+            let first = await primary.count(), second = await backup.count()
+            XCTAssertEqual(first, 1)
+            XCTAssertEqual(second, allowed ? 1 : 0)
+        }
+    }
+
     func testFailsOverToFallbackProviderForStaleModel404() async throws {
         let primaryAttempts = AttemptCounter()
         let fallbackAttempts = AttemptCounter()

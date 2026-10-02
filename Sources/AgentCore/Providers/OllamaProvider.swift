@@ -172,9 +172,20 @@ public struct OllamaProvider: ChatProvider {
 
     private func streamBody(_ body: [String: Any]) async throws -> AsyncThrowingStream<StreamEvent, Error> {
         try validateContextEstimate(body)
+        if let url = URL(string: endpoint), ManagedLocalModel.isLoopback(url) {
+            let memory = LocalModelMemory.current()
+            let candidate = automaticAcquisition ? ManagedLocalModel.lookup(body["model"] as? String ?? "") : nil
+            if memory.requestBudgetBytes == 0
+                || candidate.map({ UInt64($0.maximumDownloadBytes) >= memory.requestBudgetBytes }) == true {
+                throw LocalModelAdmission.blocked(model: body["model"] as? String ?? "",
+                    memory: memory, context: runtimeContextTokens ?? 4096,
+                    reason: "host memory pressure or acquisition size exceeds the current memory budget").providerError
+            }
+        }
         if let model = body["model"] as? String {
             try await prepareModel(model)
         }
+        let body = try await admittedBody(body)
         // apiKey intentionally ignored — local server, no auth header.
         guard let url = URL(string: endpoint) else { throw AIProviderError.configuration("bad endpoint \(endpoint)") }
 

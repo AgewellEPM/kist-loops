@@ -205,7 +205,11 @@ extension KistRunner {
                 return BuildLaneProviderFailure(summary: "API key missing or rejected",
                                                 cooldownTTL: ProviderQuotaExhaustion.cooldownTTL,
                                                 quotaExhausted: false)
-            case .invalidResponse, .configuration:
+            case .configuration(let detail):
+                guard detail.hasPrefix("local model capacity unavailable:") else { return nil }
+                return BuildLaneProviderFailure(summary: "local memory capacity unavailable",
+                                                cooldownTTL: 60, quotaExhausted: false)
+            case .invalidResponse:
                 return nil
             }
         }

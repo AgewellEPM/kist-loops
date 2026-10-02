@@ -35,6 +35,7 @@ struct KistOptions {
     var extendedThinking = false    // --think: let the model REASON before each action (surfaced + replayed)
     var headless = false            // --headless: explicitly select the governed direct Builder adapter
     var planCandidates = 2          // bounded alternatives per planner call (1 disables search)
+    var localModelPlan: String?     // metadata-only memory/sharding admission, no inference
     var planExecute = false         // plan→execute: planner emits a typed DAG, approve, then build it
     var planExecuteResumeID: PlanExecuteMissionID? // exact PlanExecute mission; distinct from Headless --resume
     var mission = false             // autonomous doctrine: research → simulation/trials → execute/verify → review
@@ -243,6 +244,9 @@ struct KistOptions {
             case "--gemini-test":           o.geminiTest = true
             case "--probe-model":           if let v = next() { o.probeModel = v }
             case "--inspect-model":         if let v = next() { o.inspectModel = v }
+            case "--local-model-plan":
+                if let v = next(), !v.isEmpty, !v.hasPrefix("-") { o.localModelPlan = v }
+                else { o.optionErrors.append("--local-model-plan requires an installed model name") }
             case "--onboard":               if let v = next() { o.onboardModel = v }
             case "--onboard-doc":           if let v = next() { o.onboardDoc = v }
             case let flag where ["--model-vet", "--vet-model"].contains(flag):

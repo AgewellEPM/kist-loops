@@ -7,6 +7,7 @@ extension KistRunner {
     static func localPlanningCanEscalate(_ error: Error) -> Bool {
         if let providerError = error as? AIProviderError, case .configuration(let reason) = providerError {
             return reason.hasPrefix("local context capacity estimate exceeded:")
+                || reason.hasPrefix("local model capacity unavailable:")
         }
         guard let preflight = error as? BuilderPreflightError, case .invalid(let reason) = preflight else { return false }
         let lower = reason.lowercased()

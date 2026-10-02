@@ -132,6 +132,7 @@ enum KistRunner {
 
     /// Returns a process exit code (0 success, non-zero failure).
     static func run(_ opts: KistOptions) async -> Int32 {
+        if let model = opts.localModelPlan { return await runLocalModelPlan(model) }
         if opts.operatorAction {
             return await runOperatorAction(opts)
         }
